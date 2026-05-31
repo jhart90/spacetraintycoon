@@ -10540,11 +10540,11 @@ function drawStarRegistry(){
 
 function drawOptionsPopup(){
   if(activePopup!=='options') return;
-  // Options is now intentionally minimal: just Fog of War + Autosave. The four
-  // gameplay-shortcut buttons (Add Credits, Flower Planet, Colony Planet, Rival)
-  // were moved into a hidden Cheats popup accessed by pressing 'C' while the
-  // Options popup is open.
-  const pw=300, ph=220;
+  // Options is now intentionally minimal: Autosave + Mission Objectives
+  // Tracker. The four gameplay-shortcut buttons (Add Credits, Flower Planet,
+  // Colony Planet, Rival) AND the Fog of War toggle all live in the hidden
+  // Cheats popup accessed by pressing 'C' while Options is open.
+  const pw=300, ph=180;
   const [px,py]=drawPopupBase(pw,ph,'rgba(80,160,255,0.7)');
   ctx.save();
   ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
@@ -10568,29 +10568,15 @@ function drawOptionsPopup(){
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
   ctx.fillStyle='#fff'; ctx.fillText(autosaveEnabled?'ON':'OFF',asTX+asTW/2,asTT+asTH/2+4);
   popupState.autosaveToggleBounds={x:asTX,y:asTT,w:asTW,h:asTH};
-  // Divider before Fog of War
-  ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.moveTo(px,py+95); ctx.lineTo(px+pw,py+95); ctx.stroke();
-  // Fog of War row
-  const ry6=py+125;
-  ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
-  ctx.fillStyle='rgba(160,200,255,0.9)'; ctx.fillText('Fog of War',px+18,ry6);
-  ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,130,180,0.5)';
-  ctx.fillText('Hides unexplored regions',px+18,ry6+16);
-  const tw=48,th=22,tx=px+pw-18-tw,tt=ry6-16;
-  const _fogHov=!!popupState.fogToggleHover;
-  ctx.fillStyle=fogEnabled?(_fogHov?'rgba(45,200,90,0.97)':'rgba(30,160,70,0.85)'):(_fogHov?'rgba(70,70,105,0.90)':'rgba(50,50,75,0.75)');
-  ctx.fillRect(tx,tt,tw,th);
-  ctx.strokeStyle=fogEnabled?(_fogHov?'rgba(80,240,110,0.85)':'rgba(50,220,90,0.7)'):(_fogHov?'rgba(100,100,145,0.70)':'rgba(70,70,100,0.5)'); ctx.lineWidth=1;
-  ctx.strokeRect(tx,tt,tw,th);
-  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
-  ctx.fillStyle='#fff'; ctx.fillText(fogEnabled?'ON':'OFF',tx+tw/2,tt+th/2+4);
-  popupState.fogToggleBounds={x:tx,y:tt,w:tw,h:th};
   // Divider before Mission Objectives Tracker
   ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.moveTo(px,py+155); ctx.lineTo(px+pw,py+155); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(px,py+95); ctx.lineTo(px+pw,py+95); ctx.stroke();
+  // Fog toggle has moved to the Cheats popup — clear its bounds so the
+  // Options-popup click branch can't hit a stale rectangle from a previous
+  // frame's render.
+  popupState.fogToggleBounds=null;
   // Mission Objectives Tracker row
-  const ry7=py+185;
+  const ry7=py+125;
   ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
   ctx.fillStyle='rgba(160,200,255,0.9)'; ctx.fillText('Mission Objectives Tracker',px+18,ry7);
   ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,130,180,0.5)';
@@ -10616,7 +10602,9 @@ function drawCheatsPopup(){
   if(activePopup!=='cheats') return;
   // Hidden popup reachable only by pressing 'C' while the Options popup is
   // open. Amber palette to visually distinguish from the cool-blue Options.
-  const pw=300, ph=270;
+  // Houses the four planet-shortcut cheats AND the Fog of War toggle so the
+  // standard Options popup stays free of "viewing-mode" debug toggles.
+  const pw=300, ph=312;
   const [px,py]=drawPopupBase(pw,ph,'rgba(255,170,60,0.7)');
   ctx.save();
   ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
@@ -10689,6 +10677,26 @@ function drawCheatsPopup(){
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
   ctx.fillStyle=_rivAvail?'#ffd8c8':'rgba(105,85,80,0.6)'; ctx.fillText('FIND →',rvX+rvW/2,rvT+rvH/2+4);
   popupState.rivalBtnBounds=_rivAvail?{x:rvX,y:rvT,w:rvW,h:rvH}:null;
+  // Divider before Fog of War
+  ctx.strokeStyle='rgba(180,90,40,0.35)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(px,py+235); ctx.lineTo(px+pw,py+235); ctx.stroke();
+  // Fog of War row (moved from the Options popup so the standard options menu
+  // stays free of debug-style toggles; the same green ON/OFF pill style is
+  // preserved so muscle memory still works).
+  const ry6=py+265;
+  ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
+  ctx.fillStyle='rgba(255,210,150,0.92)'; ctx.fillText('Fog of War',px+18,ry6);
+  ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(200,150,90,0.55)';
+  ctx.fillText('Hides unexplored regions',px+18,ry6+16);
+  const fwW=48,fwH=22,fwX=px+pw-18-fwW,fwT=ry6-16;
+  const _fogHov=!!popupState.fogToggleHover;
+  ctx.fillStyle=fogEnabled?(_fogHov?'rgba(45,200,90,0.97)':'rgba(30,160,70,0.85)'):(_fogHov?'rgba(70,70,105,0.90)':'rgba(50,50,75,0.75)');
+  ctx.fillRect(fwX,fwT,fwW,fwH);
+  ctx.strokeStyle=fogEnabled?(_fogHov?'rgba(80,240,110,0.85)':'rgba(50,220,90,0.7)'):(_fogHov?'rgba(100,100,145,0.70)':'rgba(70,70,100,0.5)'); ctx.lineWidth=1;
+  ctx.strokeRect(fwX,fwT,fwW,fwH);
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='#fff'; ctx.fillText(fogEnabled?'ON':'OFF',fwX+fwW/2,fwT+fwH/2+4);
+  popupState.fogToggleBounds={x:fwX,y:fwT,w:fwW,h:fwH};
   ctx.restore();
 }
 
@@ -16559,8 +16567,8 @@ canvas.addEventListener('mouseup',e=>{
         if(quitConfirmNoBounds){const b=quitConfirmNoBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ activePopup=null; popupState={}; return; }}
         return; // eat any other click on the popup
       }
-      // Options fog toggle
-      if(activePopup==='options'&&popupState.fogToggleBounds){
+      // Fog of War toggle — lives in the Cheats popup now.
+      if(activePopup==='cheats'&&popupState.fogToggleBounds){
         const b=popupState.fogToggleBounds;
         if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ fogEnabled=!fogEnabled; return; }
       }

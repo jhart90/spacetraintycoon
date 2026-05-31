@@ -121,7 +121,12 @@
       "Bash(curl -sI http://127.0.0.1:62108/index.html)",
       "Bash(netstat -ano)",
       "Bash(taskkill //PID 21972 //F)",
-      "Bash(curl -sI http://127.0.0.1:8765/index.html)"
+      "Bash(curl -sI http://127.0.0.1:8765/index.html)",
+      "Bash(git stash *)",
+      "Read(//c/Users/jackh/Desktop/Claude/Train Game/**)",
+      "Bash(powershell -Command \"\\(Get-Item index.html\\).length\")",
+      "Bash(cd \"C:/Users/jackh/Desktop/Claude/Train Game\" && git checkout HEAD -- .claude/settings.local.json && git stash pop && python build_game.py 2>&1 | head -1 *)",
+      "Bash(curl -sI http://127.0.0.1:9876/index.html)"
     ]
   },
   "hooks": {
