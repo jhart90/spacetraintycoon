@@ -1,0 +1,212 @@
+[
+  {
+    "stardate": 880,
+    "credits": 9316,
+    "totalRevenue": 78316,
+    "totalCosts": 569000,
+    "netProfit": -490684,
+    "trains": 6,
+    "stations": 10,
+    "foundries": 3,
+    "trainAssetVal": 363000,
+    "stationAsset": 500000,
+    "netWorth": 872316,
+    "discovStars": 15,
+    "phase": "late",
+    "engineTypes": {
+      "engine_galaxy": 6
+    },
+    "corpName": "Omnivore Logistics",
+    "run": 1,
+    "elapsed_s": 281.9
+  },
+  {
+    "stardate": 880,
+    "credits": 39441,
+    "totalRevenue": 124441,
+    "totalCosts": 585000,
+    "netProfit": -460559,
+    "trains": 8,
+    "stations": 8,
+    "foundries": 2,
+    "trainAssetVal": 489000,
+    "stationAsset": 400000,
+    "netWorth": 928441,
+    "discovStars": 16,
+    "phase": "late",
+    "engineTypes": {
+      "engine_galaxy": 8
+    },
+    "corpName": "Omnivore Logistics",
+    "run": 2,
+    "elapsed_s": 271.9
+  },
+  {
+    "stardate": 880,
+    "credits": 19386,
+    "totalRevenue": 194386,
+    "totalCosts": 675000,
+    "netProfit": -480614,
+    "trains": 8,
+    "stations": 8,
+    "foundries": 1,
+    "trainAssetVal": 489000,
+    "stationAsset": 400000,
+    "netWorth": 908386,
+    "discovStars": 15,
+    "phase": "late",
+    "engineTypes": {
+      "engine_galaxy": 8
+    },
+    "corpName": "Omnivore Logistics",
+    "run": 3,
+    "elapsed_s": 189.7
+  },
+  {
+    "stardate": 880,
+    "credits": 20078,
+    "totalRevenue": 29078,
+    "totalCosts": 509000,
+    "netProfit": -479922,
+    "trains": 6,
+    "stations": 8,
+    "foundries": 2,
+    "trainAssetVal": 363000,
+    "stationAsset": 400000,
+    "netWorth": 783078,
+    "discovStars": 16,
+    "phase": "late",
+    "engineTypes": {
+      "engine_galaxy": 6
+    },
+    "corpName": "Omnivore Logistics",
+    "run": 4,
+    "elapsed_s": 181.3
+  },
+  {
+    "stardate": 880,
+    "credits": 26140,
+    "totalRevenue": 25140,
+    "totalCosts": 499000,
+    "netProfit": -473860,
+    "trains": 6,
+    "stations": 9,
+    "foundries": 1,
+    "trainAssetVal": 363000,
+    "stationAsset": 450000,
+    "netWorth": 839140,
+    "discovStars": 15,
+    "phase": "late",
+    "engineTypes": {
+      "engine_galaxy": 6
+    },
+    "corpName": "Omnivore Logistics",
+    "run": 5,
+    "elapsed_s": 257.7
+  },
+  {
+    "stardate": 880,
+    "credits": 26223,
+    "totalRevenue": 365223,
+    "totalCosts": 839000,
+    "netProfit": -473777,
+    "trains": 6,
+    "stations": 15,
+    "foundries": 5,
+    "trainAssetVal": 363000,
+    "stationAsset": 750000,
+    "netWorth": 1139223,
+    "discovStars": 21,
+    "phase": "late",
+    "engineTypes": {
+      "engine_galaxy": 6
+    },
+    "corpName": "Omnivore Logistics",
+    "run": 6,
+    "elapsed_s": 320.7
+  },
+  {
+    "stardate": 880,
+    "credits": 19672,
+    "totalRevenue": 248672,
+    "totalCosts": 729000,
+    "netProfit": -480328,
+    "trains": 6,
+    "stations": 13,
+    "foundries": 4,
+    "trainAssetVal": 363000,
+    "stationAsset": 650000,
+    "netWorth": 1032672,
+    "discovStars": 19,
+    "phase": "late",
+    "engineTypes": {
+      "engine_galaxy": 6
+    },
+    "corpName": "Omnivore Logistics",
+    "run": 7,
+    "elapsed_s": 199.9
+  },
+  {
+    "stardate": 880,
+    "credits": 49128,
+    "totalRevenue": 8128,
+    "totalCosts": 459000,
+    "netProfit": -450872,
+    "trains": 6,
+    "stations": 8,
+    "foundries": 2,
+    "trainAssetVal": 363000,
+    "stationAsset": 400000,
+    "netWorth": 812128,
+    "discovStars": 15,
+    "phase": "late",
+    "engineTypes": {
+      "engine_galaxy": 6
+    },
+    "corpName": "Omnivore Logistics",
+    "run": 8,
+    "elapsed_s": 320.7
+  },
+  {
+    "stardate": 880,
+    "credits": 19889,
+    "totalRevenue": 108889,
+    "totalCosts": 589000,
+    "netProfit": -480111,
+    "trains": 6,
+    "stations": 10,
+    "foundries": 5,
+    "trainAssetVal": 363000,
+    "stationAsset": 500000,
+    "netWorth": 882889,
+    "discovStars": 18,
+    "phase": "late",
+    "engineTypes": {
+      "engine_galaxy": 6
+    },
+    "corpName": "Omnivore Logistics",
+    "run": 9,
+    "elapsed_s": 376.5
+  },
+  {
+    "stardate": 880,
+    "credits": 19177,
+    "totalRevenue": 277177,
+    "totalCosts": 758000,
+    "netProfit": -480823,
+    "trains": 9,
+    "stations": 10,
+    "foundries": 3,
+    "trainAssetVal": 552000,
+    "stationAsset": 500000,
+    "netWorth": 1071177,
+    "discovStars": 15,
+    "phase": "late",
+    "engineTypes": {
+      "engine_galaxy": 9
+    },
+    "corpName": "Omnivore Logistics",
+    "run": 10,
+    "elapsed_s": 401.2
+  }
+]
