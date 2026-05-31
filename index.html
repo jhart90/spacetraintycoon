@@ -1003,8 +1003,11 @@ let gStars=[];
 let starPan={x:0,y:0}, dragStarPan={x:0,y:0};
 
 // ── game speed ───────────────────────────────────────────────
-const SPEED_OPTS=[1,2,5,10];
-let gameSpeedIdx=0;
+// Index 0 = paused (multiplier 0), index 1 = 0.5×, index 2 = 1× (default),
+// then 2×, 5×, 10×. Left/right arrow buttons (and ←/→ keys) walk the index.
+const SPEED_OPTS=[0,0.5,1,2,5,10];
+const SPEED_DEFAULT_IDX=2; // 1× — every fresh game / popup-induced slow-down lands here
+let gameSpeedIdx=SPEED_DEFAULT_IDX;
 let speedLeftBounds=null, speedRightBounds=null;
 
 // ─── newspaper system ────────────────────────────────────────────────────────
@@ -7713,8 +7716,14 @@ function drawSpeedIndicator(){
   speedLeftBounds={x:leftBx,y:rowY-btnH/2,w:btnW,h:btnH};
   speedRightBounds={x:rightBx,y:rowY-btnH/2,w:btnW,h:btnH};
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
-  ctx.fillStyle=spd>1?'rgba(255,220,60,0.95)':'rgba(140,190,255,0.8)';
-  ctx.fillText(spd+'X',selX+btnW+valW/2+2,rowY+3.5);
+  // Label + color depend on band: paused / slow / 1× / fast
+  let _spdLbl, _spdCol;
+  if(gameSpeedIdx===0){ _spdLbl='P';    _spdCol='rgba(200,210,225,0.85)'; }
+  else if(spd<1)      { _spdLbl='0.5X'; _spdCol='rgba(180,225,255,0.85)'; }
+  else if(spd>1)      { _spdLbl=spd+'X';_spdCol='rgba(255,220,60,0.95)';  }
+  else                { _spdLbl='1X';   _spdCol='rgba(140,190,255,0.85)'; }
+  ctx.fillStyle=_spdCol;
+  ctx.fillText(_spdLbl,selX+btnW+valW/2+2,rowY+3.5);
 
   // Zoom bar — to the left of speed selector, with ZOOM label
   const zoomBarW=60, zoomBarH=5;
@@ -8173,9 +8182,21 @@ function drawRivalFoundedPopup(){
   ctx.restore();
 }
 
+// Shared paused-state banner. Drawn translucent grey on Orbitron at the
+// supplied screen y (cx defaults to W/2). Used by the quit-confirm popup
+// and by the global gameSpeedIdx===0 (player-paused) render hook.
+function _drawPausedBanner(yCenter,cx){
+  ctx.save();
+  ctx.font='bold 42px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.shadowColor='rgba(0,0,0,0.75)'; ctx.shadowBlur=12;
+  ctx.fillStyle='rgba(200,210,225,0.42)';
+  ctx.fillText('[ GAME PAUSED ]', cx==null?W/2:cx, yCenter);
+  ctx.restore();
+}
 function drawQuitConfirmPopup(){
   if(activePopup!=='quitconfirm') return;
   const pw=390, ph=110;
+  _drawPausedBanner((H-ph)/2 - 60);
   const [px,py]=drawPopupBase(pw,ph,'rgba(255,100,100,0.6)');
   ctx.save();
   ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
@@ -12520,42 +12541,108 @@ function drawPlanetDetailPopup(){
       }
     }
   } else {
-    // Stats tab — train visits
+    // Stats tab — planet activity grid above + top-5 train visits below
     popupState.buildStationBtnBounds=null;
     popupState.buildStationOverlayBounds=null;
+
+    // ── Section 1: PLANET ACTIVITY stat grid ───────────────────
     ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
-    ctx.fillStyle='rgba(100,160,255,0.7)'; ctx.fillText('TRAIN VISITS',px+14,tcY+14);
+    ctx.fillStyle='rgba(100,160,255,0.7)'; ctx.fillText('PLANET ACTIVITY',px+14,tcY+14);
+
+    // Pre-compute aggregates from orbit counts + devLog + planet fields.
     const poc=planetOrbitCounts[p.id]||{};
     const pocE=Object.entries(poc).sort((a,b)=>b[1]-a[1]);
-    const visitROW=17, visitListY=tcY+20, visitListH=tcH-26;
-    const visibleRows=Math.floor(visitListH/visitROW);
-    const visitScroll=Math.floor(popupState.visitScroll||0);
+    const _totalOrb=pocE.reduce((s,e)=>s+(e[1]||0),0);
+    const _uniqTrains=pocE.length;
+    const _devLog=p.devLog||[];
+    const _devPts=_devLog.reduce((s,e)=>s+(e.value||0),0);
+    const _firstSd=_devLog.length?_devLog[0].sd:null;
+    const _lastSd=_devLog.length?_devLog[_devLog.length-1].sd:null;
+    // Top cargo: highest-count cargo type across all deliveries
+    const _cargoCounts={};
+    for(const _e of _devLog){ if(_e.cargo) _cargoCounts[_e.cargo]=(_cargoCounts[_e.cargo]||0)+1; }
+    const _topCargoPair=Object.entries(_cargoCounts).sort((a,b)=>b[1]-a[1])[0];
+    // Last cargo: most recent entry's cargo type
+    const _lastCargoType=(()=>{ for(let _i=_devLog.length-1;_i>=0;_i--){ if(_devLog[_i].cargo) return _devLog[_i].cargo; } return null; })();
+    const _popDelta=(p.population||0)-(p.populationBase||0);
+    const _dlGrowth=(p.devLevel||0)-(p.devLevelBase||0);
+    // Format helpers
+    const _fmtSd=sd=>'SD '+sd.toFixed(2);
+    const _fmtDelta=n=>(n>0?'+':'')+n.toLocaleString();
+    const _topCargoLbl=_topCargoPair?((CARGO_LABEL[_topCargoPair[0]]||_topCargoPair[0])+' ('+_topCargoPair[1]+')'):'—';
+    const _lastCargoLbl=_lastCargoType?(CARGO_LABEL[_lastCargoType]||_lastCargoType):'—';
+
+    // Two-column layout: 5 rows × 2 cols = 10 stats
+    const _statLines=[
+      ['ORBITS',      _totalOrb.toLocaleString()],
+      ['TRAINS',      _uniqTrains+''],
+      ['DELIVERIES',  _devLog.length.toLocaleString()],
+      ['DEV PTS',     Math.round(_devPts).toLocaleString()],
+      ['POP Δ',  _fmtDelta(_popDelta)],
+      ['DEV LVL Δ', _fmtDelta(_dlGrowth)],
+      ['TOP CARGO',   _topCargoLbl],
+      ['LAST CARGO',  _lastCargoLbl],
+      ['FIRST',       _firstSd!=null?_fmtSd(_firstSd):'—'],
+      ['LAST',        _lastSd!=null?_fmtSd(_lastSd):'—'],
+    ];
+    const _statY0=tcY+30, _statRowH=13;
+    const _statColX=[px+14, px+14+(pw-28)/2];
+    const _statColW=(pw-28)/2 - 6;
+    ctx.font='9px "Exo 2",sans-serif';
+    for(let _si=0;_si<_statLines.length;_si++){
+      const [_lbl,_val]=_statLines[_si];
+      const _row=_si%5;
+      const _col=_si<5?0:1;
+      const _sy=_statY0+_row*_statRowH;
+      const _sx=_statColX[_col];
+      ctx.fillStyle='rgba(100,145,215,0.55)';
+      ctx.fillText(_lbl+':',_sx,_sy);
+      const _lblW=ctx.measureText(_lbl+':').width;
+      // Truncate the value if it would overflow the column
+      let _valTxt=_val+'';
+      const _maxVW=_statColW-_lblW-4;
+      while(ctx.measureText(_valTxt).width>_maxVW&&_valTxt.length>3) _valTxt=_valTxt.slice(0,-1);
+      if(_valTxt!==(_val+'')) _valTxt=_valTxt.slice(0,-1)+'…';
+      ctx.fillStyle='rgba(180,220,255,0.92)';
+      ctx.fillText('  '+_valTxt,_sx+_lblW,_sy);
+    }
+
+    // Faint divider between sections
+    const _divY=_statY0+5*_statRowH+6;
+    ctx.strokeStyle='rgba(40,90,180,0.28)'; ctx.lineWidth=0.5;
+    ctx.beginPath(); ctx.moveTo(px+14,_divY); ctx.lineTo(px+pw-14,_divY); ctx.stroke();
+
+    // ── Section 2: TRAIN VISITS (TOP 5) ────────────────────────
+    const _tvHdrY=_divY+12;
+    ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
+    ctx.fillStyle='rgba(100,160,255,0.7)';
+    ctx.fillText('TRAIN VISITS — TOP 5',px+14,_tvHdrY);
+
+    const visitROW=13, visitListY=_tvHdrY+6;
     if(pocE.length===0){
-      ctx.font='12px “Exo 2”,sans-serif'; ctx.fillStyle='rgba(70,90,130,0.6)';
-      ctx.fillText('No trains have orbited this planet yet.',px+14,visitListY+14);
+      ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(70,90,130,0.6)';
+      ctx.fillText('No trains have orbited this planet yet.',px+14,visitListY+11);
     } else {
-      ctx.save(); ctx.beginPath(); ctx.rect(px+1,visitListY,pw-2,visitListH); ctx.clip();
-      ctx.font='12px “Exo 2”,sans-serif';
-      for(let ei=0;ei<pocE.length;ei++){
-        const ey=visitListY+ei*visitROW-visitScroll+13;
-        if(ey<visitListY||ey>visitListY+visitListH+visitROW) continue;
+      ctx.font='10px "Exo 2",sans-serif';
+      const _maxRows=5;
+      const _shown=Math.min(pocE.length,_maxRows);
+      for(let ei=0;ei<_shown;ei++){
+        const ey=visitListY+ei*visitROW+9;
         const [ti,cnt]=pocE[ei];
         const tr=trains[ti];
         const tc=tr?.color||'#4af';
-        ctx.fillStyle=tc; ctx.fillRect(px+14,ey-10,9,9);
-        ctx.strokeStyle='rgba(255,255,255,0.15)'; ctx.lineWidth=0.5; ctx.strokeRect(px+14,ey-10,9,9);
-        ctx.fillStyle='rgba(160,200,255,0.8)'; ctx.textAlign='left';
+        ctx.fillStyle=tc; ctx.fillRect(px+14,ey-7,7,7);
+        ctx.strokeStyle='rgba(255,255,255,0.15)'; ctx.lineWidth=0.5; ctx.strokeRect(px+14,ey-7,7,7);
+        ctx.fillStyle='rgba(160,200,255,0.85)'; ctx.textAlign='left';
         let tname=(tr?tr.name:'Train '+ti);
-        ctx.fillText(tname+'  \xb7  '+cnt+' orbit'+(cnt!==1?'s':''),px+26,ey);
+        // Truncate train name to fit; reserve ~80px for the orbit count suffix
+        const _nameMaxW=pw-28-80;
+        while(ctx.measureText(tname).width>_nameMaxW&&tname.length>3) tname=tname.slice(0,-1);
+        ctx.fillText(tname+'  \xb7  '+cnt+' orbit'+(cnt!==1?'s':''),px+24,ey);
       }
-      ctx.restore();
-      if(pocE.length>visibleRows){
-        const totalH=pocE.length*visitROW;
-        const sbH=Math.max(14,visitListH*(visitListH/totalH));
-        const sbY=visitListY+(visitScroll/totalH)*visitListH;
-        ctx.fillStyle='rgba(40,70,140,0.4)'; ctx.fillRect(px+pw-6,visitListY,3,visitListH);
-        ctx.fillStyle='rgba(80,140,255,0.6)'; ctx.fillRect(px+pw-6,sbY,3,sbH);
-        _regScrollbar({x:px+pw-6,y:visitListY,w:3,h:visitListH,thumbY:sbY,thumbH:sbH,maxScroll:Math.max(0,totalH-visitListH),setScroll:(v)=>{popupState.visitScroll=v;}});
+      if(pocE.length>_maxRows){
+        ctx.font='italic 9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(110,145,200,0.55)';
+        ctx.fillText('… and '+(pocE.length-_maxRows)+' more train'+(pocE.length-_maxRows!==1?'s':''),px+24,visitListY+_maxRows*visitROW+8);
       }
     }
   }
@@ -13092,8 +13179,10 @@ function drawTrainsPopup(){
     ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='right';
     let stxt=st.text; while(ctx.measureText(stxt).width>130&&stxt.length>4) stxt=stxt.slice(0,-1);
     ctx.fillStyle=st.color; ctx.fillText(stxt,px+pw-10,ry+20);
-    // Large car strip
-    const SY=ry+26, SH=50, SW=pw-20;
+    // Large car strip. SY is shifted up 4px from the legacy ry+26 so the
+    // sprites visually centre in the gap between the train-name row (baseline
+    // at ry+20) and the orbit-location row (top at ry+73).
+    const SY=ry+22, SH=50, SW=pw-20;
     const sc=SH/CAR_H, cpw2=CAR_W*sc;
     ctx.save(); ctx.beginPath(); ctx.rect(px+10,SY,SW,SH); ctx.clip();
     {let _scx2=px+10; for(let ci=0;ci<train.cars.length;ci++){
@@ -14521,6 +14610,11 @@ function drawGalaxy(ts,dt){
   }
 
   drawSpeedIndicator();
+  // Player-paused banner: when gameSpeedIdx is the literal-zero "P" tier (and
+  // we're not already showing the quit-confirm popup, which draws its own
+  // banner above the popup window), render the [GAME PAUSED] watermark in
+  // the centre of the canvas.
+  if(gameSpeedIdx===0 && activePopup!=='quitconfirm') _drawPausedBanner(H/2);
   // Blue callout bubbles — drawn after all game-canvas UI so they appear above it,
   // and before popup windows so any open popup renders on top.
   _drawMissionTip();
@@ -16870,7 +16964,7 @@ document.addEventListener('keydown',e=>{
       _newspaperViewIdx=_newspaperArchive.length-1;
       _newspaper=_newspaperArchive[_newspaperViewIdx];
       _newspaperPrevSpeed=gameSpeedIdx;
-      gameSpeedIdx=0;
+      gameSpeedIdx=SPEED_DEFAULT_IDX;
       return;
     }
     if(e.key==='Escape'){ _fireEsc(); return; }
@@ -17037,7 +17131,9 @@ function _buildSaveObject(){
     return null;
   })();
   return {
-    version:1,
+    // version 2 introduces the expanded SPEED_OPTS [0,0.5,1,2,5,10] (was [1,2,5,10]).
+    // Loader accepts both v1 and v2 and migrates gameSpeedIdx accordingly.
+    version:2,
     stardate, credits, corpName, gameSpeedIdx,
     cam:{x:cam.x,y:cam.y,scale:cam.scale},
     sel:_savedSel, tracking, trackingOffset:{x:trackingOffset.x,y:trackingOffset.y},
@@ -17073,7 +17169,7 @@ function _buildSaveObject(){
 }
 
 function _restoreFromSave(save){
-  if(!save||save.version!==1){ alert('Incompatible save file.'); return; }
+  if(!save||(save.version!==1&&save.version!==2)){ alert('Incompatible save file.'); return; }
   const sg=save.galaxy;
   // Restore stars — reattach .color from STAR_COLORS
   const stars=sg.stars.map(s=>({...s, color:STAR_COLORS[s.colorName]}));
@@ -17132,7 +17228,14 @@ function _restoreFromSave(save){
   makeGStars();
   // Restore flat state
   stardate=save.stardate; credits=save.credits; corpName=save.corpName||'Space Tycoon Corporation';
-  gameSpeedIdx=save.gameSpeedIdx||0;
+  // Migrate v1 saves: old SPEED_OPTS was [1,2,5,10] (4 tiers), new is
+  // [0,0.5,1,2,5,10] (6 tiers). Old idx N maps to new idx N+2.
+  {
+    const _savedIdx=save.gameSpeedIdx;
+    if(_savedIdx==null) gameSpeedIdx=SPEED_DEFAULT_IDX;
+    else if(save.version===1) gameSpeedIdx=Math.min(SPEED_OPTS.length-1, _savedIdx+2);
+    else gameSpeedIdx=Math.max(0,Math.min(SPEED_OPTS.length-1, _savedIdx|0));
+  }
   cam={x:save.cam.x, y:save.cam.y, scale:save.cam.scale}; clampCamera();
   fogEnabled=save.fogEnabled!==undefined?save.fogEnabled:true;
   panelTab=save.panelTab||'trains'; panelScroll=save.panelScroll||0; stationPanelScroll=save.stationPanelScroll||0;
@@ -17533,7 +17636,7 @@ function startGame(){
   clampCamera();
   sel={type:'car',data:{trainIdx:0,carIdx:0,car:trains[0].cars[0]}}; routeStops=[]; tracking=true; trackingOffset={x:0,y:0}; assignPending=false; routeHerePending=false; _chatLog=[]; _chatLogHover=false; _chatLogHoverA=0; _chatLogLastDrawMs=0;
   _chatMsg(corpName+' founded.','rgba(255,230,120,1)',8000);
-  activePopup=null; popupState={}; gameSpeedIdx=0; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _produceIronTimerMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _hasZoomed=false;
+  activePopup=null; popupState={}; gameSpeedIdx=SPEED_DEFAULT_IDX; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _produceIronTimerMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _hasZoomed=false;
   _newspaper=null; _newspaperLastSd=829; _newspaperPrevSpeed=0; _newspaperNextHover=false; _newspaperNextBounds=null; _newspaperPrevHover=false; _newspaperPrevBounds=null; _newspaperArchive=[]; _newspaperViewIdx=null; _paperMajorUsed=[]; _paperMinorUsed=[]; _paperLayout=0; _paperIssueNum=0; _paperIdx=randInt(0,_PAPER_NAMES.length-1); _newsEventLog=[]; _newsSnapshot=null;
   _speedLeftHover=false; _speedRightHover=false; _panelTabHover=null; _routeHereBtnHover=false; _assignBtnHover=false; _cancelRouteBtnHover=false; _planetStarNameHover=false; _starPanelPlanetHover=-1; _trainAddHover=false; _trainRowHover=-1; _pokedexSortHover=false; _pokedexRowHover=-1; _starRegistrySortHover=false; _starRegistryRowHover=-1; _goldOkHover=false; _diamondOkHover=false; _carUnlockOkHover=false; _quitYesHover=false; _quitNoHover=false; _saveGameBtnHover=false; _startBtnHover=false; _loadBtnHover=false; _htpBtnHover=false; _htpDotHover=-1; _htpSkipHover=false; pokedexRowBounds=[]; starRegistryRowBounds=[]; loadBtnBounds=null; saveGameBtnBounds=null;
   fogPoints=[]; fogGridSet=new Set(); fogCanvas=null;
@@ -18032,7 +18135,11 @@ let lastT=0;
 function loop(ts){
   try{
   const dt=Math.min((ts-lastT)/16.67,3); lastT=ts;
-  const dtG=dt*SPEED_OPTS[gameSpeedIdx]; // game-time delta (sped up)
+  // Quit-confirm popup fully pauses simulation (not just slowed via gameSpeedIdx=0,
+  // because SPEED_OPTS[0]=1 still advances time). Zeroing dtG cascades into _dtSd
+  // and every downstream tick, so trains/cargo/missions all freeze.
+  let dtG=dt*SPEED_OPTS[gameSpeedIdx]; // game-time delta (sped up)
+  if(activePopup==='quitconfirm') dtG=0;
   if(gs==='fadein'||gs==='galaxy'){
     const _dtSd=dtG*(0.01/600); // stardates elapsed this frame
     const _sdBefore=stardate;
@@ -18213,7 +18320,7 @@ function loop(ts){
           } else {
             // Some (or no) objectives are pre-completed — show the intro popup and pass
             // which objective IDs are already done so the renderer can highlight them.
-            gameSpeedIdx=0; activePopup='new_mission';
+            gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='new_mission';
             popupState={newMissionDef:_nmDef,targetPlanetId:_nmiE.targetPlanetId??null,sourcePlanetId:_nmiE.sourcePlanetId??null,preCompletedObjIds:_preCompObjIds};
             // Any mission with a target planet: auto-center camera on it, zoomed fully out
             if(_nmiE.targetPlanetId!=null){
@@ -18230,7 +18337,7 @@ function loop(ts){
     // Show gold discovery popup when nothing else is blocking
     if(pendingGoldDiscoveries.length>0&&!activePopup){
       playSound('discovery');
-      gameSpeedIdx=0; activePopup='gold_discovery';
+      gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='gold_discovery';
       const _gdPid=pendingGoldDiscoveries[0];
       popupState={goldPlanetId:_gdPid};
       // Select planet, centre camera, zoom to 80% of log scale
@@ -18245,18 +18352,18 @@ function loop(ts){
     }
     // Show diamond discovery popup when nothing else is blocking
     if(pendingCarUnlocks.length>0&&!activePopup){
-      gameSpeedIdx=0; activePopup='car_unlock';
+      gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='car_unlock';
       popupState={carUnlock:pendingCarUnlocks[0]};
     }
     // Engine-unlock revenue check + popup trigger
     _checkEngineUnlocks();
     if(pendingEngineUnlocks.length>0&&!activePopup){
-      gameSpeedIdx=0; activePopup='engine_unlock';
+      gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='engine_unlock';
       popupState={engineUnlock:pendingEngineUnlocks[0]};
     }
     if(pendingDiamondDiscoveries.length>0&&!activePopup){
       playSound('discovery');
-      gameSpeedIdx=0; activePopup='diamond_discovery';
+      gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='diamond_discovery';
       const _ddPid=pendingDiamondDiscoveries[0];
       popupState={diamondPlanetId:_ddPid};
       // Select planet, centre camera, zoom to 80% of log scale
@@ -18275,7 +18382,7 @@ function loop(ts){
       _initAICorp();
       if(_aiCorp){
         const _rfHp=galaxy?.planets[_aiCorp.homePlanetId];
-        gameSpeedIdx=0;
+        gameSpeedIdx=SPEED_DEFAULT_IDX;
         activePopup='rival_founded';
         popupState={rivalFounded:_aiCorp};
         _chatMsg(_aiCorp.name+' has been established at '+(_rfHp?_rfHp.name:'an unknown location')+'.','rgba(232,147,32,1)',8000,true);
@@ -18286,7 +18393,7 @@ function loop(ts){
       _newspaper=_buildNewspaper(Math.floor(stardate));
       _newspaperLastSd=Math.floor(stardate);
       _newspaperPrevSpeed=gameSpeedIdx;
-      gameSpeedIdx=0;
+      gameSpeedIdx=SPEED_DEFAULT_IDX;
     }
     drawGalaxy(ts,dt);
   }
