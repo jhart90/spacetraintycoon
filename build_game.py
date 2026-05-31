@@ -1516,9 +1516,10 @@ let starRegistrySortBounds=null;
 let starRegistryVisitedOnly=true;
 let starRegistryVisitedOnlyBounds=null;
 // Autosave: when true, the auto-popped newspaper closing once per stardate
-// triggers saveGame() (which itself prompts the user via showSaveFilePicker or a
-// download link, exactly as the manual SAVE GAME button does). Off by default.
-let autosaveEnabled=false;
+// silently writes the current game to the reserved `autosave` localStorage
+// slot (no download dialog). Defaults ON now that the save lives in browser
+// storage rather than a downloaded .stt file — silent, near-zero cost.
+let autosaveEnabled=true;
 // Mission Objectives Tracker: when true, the upper-left floating list of
 // active missions + first uncompleted objective is drawn over the galaxy
 // view. Toggled in the Options popup. Defaults to ON for every new game.
@@ -10030,6 +10031,252 @@ function drawCheatsPopup(){
   ctx.restore();
 }
 
+// ── Save Manager popup ───────────────────────────────────────
+// Replaces the old "click save → file picker → download .stt" flow with a
+// proper in-game manager. Lists every save slot held in localStorage (the
+// reserved Autosave slot first, then manual saves newest-first), and exposes
+// per-slot Load / Save-Over / Export / Delete actions plus top-level New
+// Save and Import .stt buttons. Opened from either gs='title' (LOAD GAME
+// button) or gs='galaxy' (SAVE GAME button in quit-confirm popup) by setting
+// `activePopup='savemanager'`; the open call also stashes a mode hint
+// (`'save'` or `'load'`) in `popupState.smMode` so the matching primary
+// action button can be highlighted.
+function drawSaveManagerPopup(){
+  if(activePopup!=='savemanager') return;
+  const pw=560, ph=420;
+  const [px,py]=drawPopupBase(pw,ph,'rgba(120,180,255,0.7)');
+  ctx.save();
+  // ── Header ──
+  ctx.font='bold 13px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='#7df'; ctx.fillText('SAVE / LOAD MANAGER',px+pw/2,py+24);
+  ctx.font='10px "Exo 2",sans-serif'; ctx.textAlign='right';
+  ctx.fillStyle=popupState.escHover?'rgba(255,255,255,0.92)':'rgba(90,130,190,0.55)';
+  ctx.fillText('[ESC] close',px+pw-10,py+24);
+  popupState.escBounds={x:px+pw-90,y:py+12,w:80,h:20};
+  // Storage-status indicator (top-left)
+  ctx.textAlign='left'; ctx.font='9px "Exo 2",sans-serif';
+  const _lsOk=_lsAvailable();
+  ctx.fillStyle=_lsOk?'rgba(120,200,150,0.78)':'rgba(255,120,90,0.85)';
+  ctx.fillText(_lsOk?'● Browser storage: OK':'● Browser storage: UNAVAILABLE',px+12,py+24);
+  ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(px,py+34); ctx.lineTo(px+pw,py+34); ctx.stroke();
+
+  // ── Slot list ──
+  // Autosave is pinned to the top regardless of save time so it's always the
+  // first row; manual saves follow, newest-first.
+  const _idx=_lsLoadIndex();
+  const _autosaveEntry=_idx.find(e=>e.id===LS_AUTOSAVE_ID)||null;
+  const _manualEntries=_idx.filter(e=>e.id!==LS_AUTOSAVE_ID).sort((a,b)=>b.savedAt-a.savedAt);
+  const _list=[];
+  if(_autosaveEntry) _list.push(_autosaveEntry);
+  for(const e of _manualEntries) _list.push(e);
+  const _listX=px+12, _listY=py+44, _listW=pw-24, _rowH=44;
+  const _listH=ph-44-72; // leave 72 px at the bottom for action buttons
+  const _maxRows=Math.floor(_listH/_rowH);
+  popupState.smScroll=Math.max(0,Math.min(popupState.smScroll||0,Math.max(0,_list.length*_rowH-_listH)));
+  ctx.save();
+  ctx.beginPath(); ctx.rect(_listX,_listY,_listW,_listH); ctx.clip();
+  popupState.smRowBounds=[];
+  popupState.smRowActionBounds=[];
+  if(_list.length===0){
+    ctx.font='italic 11px "Exo 2",sans-serif'; ctx.fillStyle='rgba(120,160,210,0.55)'; ctx.textAlign='center';
+    ctx.fillText(_lsOk?'No saved games yet. Click NEW SAVE below to create one, or IMPORT to load a .stt file.':'Browser storage is disabled in this context — only file-based save / load is available.',
+      px+pw/2,_listY+_listH/2);
+  } else {
+    for(let i=0;i<_list.length;i++){
+      const e=_list[i];
+      const _ry=_listY+i*_rowH-(popupState.smScroll||0);
+      if(_ry+_rowH<_listY||_ry>_listY+_listH) continue;
+      const _isAutosave=(e.id===LS_AUTOSAVE_ID);
+      const _selected=(popupState.smSelected===e.id);
+      const _rowHov=(popupState.smHoverRow===i);
+      // Row background
+      ctx.fillStyle=_selected?'rgba(35,80,170,0.75)':_rowHov?'rgba(22,40,80,0.55)':(i%2===0?'rgba(15,25,55,0.42)':'rgba(10,18,42,0.42)');
+      ctx.fillRect(_listX,_ry,_listW,_rowH-2);
+      if(_selected){
+        ctx.strokeStyle='rgba(140,200,255,0.85)'; ctx.lineWidth=1.4;
+        ctx.strokeRect(_listX,_ry,_listW,_rowH-2);
+      }
+      // Title line
+      ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='left'; ctx.fillStyle=_isAutosave?'rgba(255,210,120,0.95)':'rgba(190,225,255,0.96)';
+      const _title=_isAutosave?'AUTOSAVE':(e.label||(e.corp||'Save')+'_'+e.sd.toFixed(2).replace('.',''));
+      ctx.fillText(_title,_listX+10,_ry+15);
+      // Metadata line (corp · SD · saved-X-ago · size)
+      ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(140,180,225,0.72)';
+      const _meta=(e.corp||'(no corp)')+'  ·  SD '+(e.sd||0).toFixed(2)+'  ·  '+_fmtSaveAge(e.savedAt||0)+'  ·  '+_fmtSaveSize(e.size||0);
+      ctx.fillText(_meta,_listX+10,_ry+30);
+      // Per-row action buttons (drawn at right edge); only visible when this
+      // row is selected. Buttons: LOAD, SAVE OVER (skip for autosave so the
+      // user can't accidentally clobber it), EXPORT, DELETE.
+      popupState.smRowBounds.push({x:_listX,y:_ry,w:_listW,h:_rowH-2,id:e.id,rowIdx:i});
+      if(_selected){
+        const _acts=[{k:'load',l:'LOAD',col:'rgba(80,200,130,0.95)'}];
+        if(!_isAutosave) _acts.push({k:'save',l:'OVERWRITE',col:'rgba(80,160,255,0.95)'});
+        _acts.push({k:'export',l:'EXPORT',col:'rgba(255,200,90,0.95)'});
+        _acts.push({k:'delete',l:'DELETE',col:'rgba(230,100,100,0.95)'});
+        const _bw=64,_bh=18,_bgap=4;
+        let _bx=_listX+_listW-10-(_bw+_bgap)*_acts.length+_bgap;
+        const _by=_ry+_rowH-_bh-7;
+        for(const a of _acts){
+          const _bHov=(popupState.smHoverAction===e.id+':'+a.k);
+          ctx.fillStyle=_bHov?a.col:'rgba(18,28,52,0.85)';
+          ctx.beginPath(); ctx.roundRect(_bx,_by,_bw,_bh,3); ctx.fill();
+          ctx.strokeStyle=_bHov?a.col:'rgba(80,120,180,0.55)';
+          ctx.lineWidth=1; ctx.beginPath(); ctx.roundRect(_bx,_by,_bw,_bh,3); ctx.stroke();
+          ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='center';
+          ctx.fillStyle=_bHov?'rgba(20,20,30,0.97)':a.col;
+          ctx.fillText(a.l,_bx+_bw/2,_by+12);
+          popupState.smRowActionBounds.push({x:_bx,y:_by,w:_bw,h:_bh,id:e.id,action:a.k});
+          _bx+=_bw+_bgap;
+        }
+      }
+    }
+  }
+  ctx.restore();
+  // Scrollbar (registered for drag)
+  const _totalH=_list.length*_rowH;
+  if(_totalH>_listH){
+    const _sbW=5, _sbX=px+pw-9;
+    const _thumbH=Math.max(20,_listH*(_listH/_totalH));
+    const _maxS=Math.max(1,_totalH-_listH);
+    const _thumbY=_listY+((popupState.smScroll||0)/_maxS)*(_listH-_thumbH);
+    ctx.fillStyle='rgba(20,40,80,0.45)'; ctx.fillRect(_sbX,_listY,_sbW,_listH);
+    ctx.fillStyle='rgba(120,200,255,0.65)';
+    ctx.beginPath(); ctx.roundRect(_sbX,_thumbY,_sbW,_thumbH,2); ctx.fill();
+    _regScrollbar({x:_sbX,y:_listY,w:_sbW,h:_listH,thumbY:_thumbY,thumbH:_thumbH,maxScroll:_maxS,setScroll:(v)=>{popupState.smScroll=v;}});
+  }
+  // ── Bottom action bar ──
+  const _abY=py+ph-58;
+  ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(px,_abY-6); ctx.lineTo(px+pw,_abY-6); ctx.stroke();
+  // Mode hint
+  ctx.font='9px "Exo 2",sans-serif'; ctx.textAlign='left';
+  ctx.fillStyle='rgba(120,160,220,0.72)';
+  const _hintTxt=(popupState.smMode==='save')
+    ? 'Saving the game: pick a slot above to overwrite, or click NEW SAVE for a fresh slot.'
+    : 'Loading a game: pick a slot above and click LOAD, or IMPORT a .stt file.';
+  ctx.fillText(_hintTxt,px+12,_abY+10);
+  // Action buttons row
+  const _abBtnW=130, _abBtnH=28, _abGap=10;
+  const _abX0=px+pw-_abBtnW*2-_abGap-12, _abYBtn=_abY+24;
+  // NEW SAVE button (always available when a game is loaded and storage works)
+  const _nsAvail=!!galaxy&&_lsOk;
+  const _nsHov=popupState.smHoverAction==='__new_save__';
+  ctx.fillStyle=_nsAvail?(_nsHov?'rgba(40,170,90,0.97)':'rgba(20,120,60,0.92)'):'rgba(18,30,18,0.62)';
+  ctx.beginPath(); ctx.roundRect(_abX0,_abYBtn,_abBtnW,_abBtnH,4); ctx.fill();
+  ctx.strokeStyle=_nsAvail?(_nsHov?'rgba(120,255,180,0.95)':'rgba(80,200,140,0.85)'):'rgba(50,75,55,0.45)';
+  ctx.lineWidth=1.2; ctx.beginPath(); ctx.roundRect(_abX0,_abYBtn,_abBtnW,_abBtnH,4); ctx.stroke();
+  ctx.font='bold 10px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle=_nsAvail?'rgba(220,255,230,0.97)':'rgba(80,100,80,0.55)';
+  ctx.fillText('+ NEW SAVE',_abX0+_abBtnW/2,_abYBtn+18);
+  popupState.smRowActionBounds.push({x:_abX0,y:_abYBtn,w:_abBtnW,h:_abBtnH,id:'__top__',action:'new_save',disabled:!_nsAvail});
+  // IMPORT .stt button (always available; works even without localStorage by
+  // restoring directly into the running game)
+  const _imX=_abX0+_abBtnW+_abGap;
+  const _imHov=popupState.smHoverAction==='__import__';
+  ctx.fillStyle=_imHov?'rgba(220,160,60,0.97)':'rgba(120,80,20,0.88)';
+  ctx.beginPath(); ctx.roundRect(_imX,_abYBtn,_abBtnW,_abBtnH,4); ctx.fill();
+  ctx.strokeStyle=_imHov?'rgba(255,210,120,0.95)':'rgba(200,150,70,0.82)';
+  ctx.lineWidth=1.2; ctx.beginPath(); ctx.roundRect(_imX,_abYBtn,_abBtnW,_abBtnH,4); ctx.stroke();
+  ctx.font='bold 10px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='rgba(255,235,200,0.97)';
+  ctx.fillText('↑ IMPORT .stt',_imX+_abBtnW/2,_abYBtn+18);
+  popupState.smRowActionBounds.push({x:_imX,y:_abYBtn,w:_abBtnW,h:_abBtnH,id:'__top__',action:'import'});
+  ctx.restore();
+}
+
+// Handles a mousedown/click inside the Save Manager popup. Returns `true` if
+// the click was consumed (so the caller skips further click dispatch),
+// `false` if the click missed every interactive element. Called from BOTH
+// the gs='title' and gs='galaxy' click handlers since the popup can open
+// from either state.
+function _smHandleClick(cp){
+  if(activePopup!=='savemanager') return false;
+  // Click-outside-popup → close (mirrors the standard popup behaviour in
+  // the galaxy click handler). Popup is 560×420 centered.
+  const _pw=560,_ph=420, _ppx=(W-_pw)/2, _ppy=(H-_ph)/2;
+  if(cp.x<_ppx||cp.x>_ppx+_pw||cp.y<_ppy||cp.y>_ppy+_ph){
+    activePopup=null; popupState={}; return true;
+  }
+  // ESC text → close
+  if(popupState.escBounds){
+    const b=popupState.escBounds;
+    if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+      activePopup=null; popupState={}; return true;
+    }
+  }
+  // Per-row action buttons (LOAD / OVERWRITE / EXPORT / DELETE) and the
+  // bottom NEW SAVE / IMPORT buttons share the same bounds list.
+  if(popupState.smRowActionBounds){
+    for(const _ab of popupState.smRowActionBounds){
+      if(cp.x>=_ab.x&&cp.x<=_ab.x+_ab.w&&cp.y>=_ab.y&&cp.y<=_ab.y+_ab.h){
+        if(_ab.disabled) return true;
+        const a=_ab.action, id=_ab.id;
+        if(id==='__top__'){
+          if(a==='new_save'){
+            if(!galaxy){ _chatMsg('Nothing to save.','rgba(255,100,100,1)'); return true; }
+            const saveObj=_buildSaveObject(); if(!saveObj) return true;
+            const _slotId=_lsNewSlotId();
+            const res=_lsWriteSlot(_slotId,saveObj,_lsDefaultLabel());
+            if(res.ok){
+              popupState.smSelected=_slotId;
+              _chatMsg('GAME SAVED!','rgba(80,220,130,1)');
+            } else if(res.err==='quota'){
+              alert('Browser storage is full. Delete an existing save first.');
+            } else if(res.err==='unavailable'){
+              _downloadSttFromSaveObj(saveObj,_lsDefaultLabel());
+              _chatMsg('GAME SAVED (downloaded — storage unavailable).','rgba(80,220,130,1)');
+            } else {
+              alert('Save failed: '+res.err);
+            }
+          } else if(a==='import'){
+            _lsImportSttFile().then(newId=>{ if(newId) popupState.smSelected=newId; });
+          }
+          return true;
+        }
+        // Per-row actions
+        const _meta=_lsLoadIndex().find(e=>e.id===id);
+        if(!_meta) return true;
+        if(a==='load'){
+          const _so=_lsReadSlot(id);
+          if(!_so){ alert('Failed to read save.'); return true; }
+          try{ _restoreFromSave(_so); }
+          catch(e){ alert('Failed to load save: '+(e&&e.message||'unknown')); return true; }
+          activePopup=null; popupState={};
+          _chatMsg('GAME LOADED.','rgba(80,220,130,1)');
+        } else if(a==='save'){
+          if(!galaxy){ _chatMsg('Nothing to save.','rgba(255,100,100,1)'); return true; }
+          const saveObj=_buildSaveObject(); if(!saveObj) return true;
+          const res=_lsWriteSlot(id,saveObj,_meta.label||null);
+          if(res.ok) _chatMsg('GAME SAVED!','rgba(80,220,130,1)');
+          else if(res.err==='quota') alert('Browser storage is full. Delete an existing save first.');
+          else alert('Save failed: '+res.err);
+        } else if(a==='export'){
+          const _so=_lsReadSlot(id);
+          if(!_so){ alert('Failed to read save for export.'); return true; }
+          _downloadSttFromSaveObj(_so,_meta.label||(_meta.corp||'save')+'_'+(_meta.sd||0).toFixed(2).replace('.',''));
+        } else if(a==='delete'){
+          if(_lsDeleteSlot(id)){
+            if(popupState.smSelected===id) popupState.smSelected=null;
+            _chatMsg('Save deleted.','rgba(200,180,140,0.95)');
+          }
+        }
+        return true;
+      }
+    }
+  }
+  // Row body click → select the slot
+  if(popupState.smRowBounds){
+    for(const _rb of popupState.smRowBounds){
+      if(cp.x>=_rb.x&&cp.x<=_rb.x+_rb.w&&cp.y>=_rb.y&&cp.y<=_rb.y+_rb.h){
+        popupState.smSelected=_rb.id;
+        return true;
+      }
+    }
+  }
+  return true; // click inside popup window but missed everything — consume so backdrop doesn't fire
+}
+
 function drawTrainDetailPopup(){
   if(activePopup!=='train') return;
   const t=trains[popupState.trainIdx];
@@ -13991,6 +14238,7 @@ function drawGalaxy(ts,dt){
   drawStarRegistry();
   drawOptionsPopup();
   drawCheatsPopup();
+  drawSaveManagerPopup();
   drawTrainDetailPopup();
   drawPlanetDetailPopup();
   drawStarDetailPopup();
@@ -14723,6 +14971,33 @@ canvas.addEventListener('mousemove',e=>{
     }
     popupState.mHovObjKey=_mHovKey;
   } else { popupState.mHovObjKey=null; }
+  // Hover tracking for the Save Manager popup — rows + action buttons. Two
+  // distinct hover slots: `smHoverRow` (an index into smRowBounds) is used
+  // for the row background highlight, while `smHoverAction` (a string id)
+  // drives the per-row LOAD/OVERWRITE/EXPORT/DELETE buttons and the bottom
+  // NEW SAVE / IMPORT buttons.
+  if(activePopup==='savemanager'){
+    let _smHovRow=-1;
+    if(popupState.smRowBounds){
+      for(let _smi=0;_smi<popupState.smRowBounds.length;_smi++){
+        const _smb=popupState.smRowBounds[_smi];
+        if(cp.x>=_smb.x&&cp.x<=_smb.x+_smb.w&&cp.y>=_smb.y&&cp.y<=_smb.y+_smb.h){ _smHovRow=_smi; break; }
+      }
+    }
+    popupState.smHoverRow=_smHovRow;
+    let _smHovAction=null;
+    if(popupState.smRowActionBounds){
+      for(const _smab of popupState.smRowActionBounds){
+        if(cp.x>=_smab.x&&cp.x<=_smab.x+_smab.w&&cp.y>=_smab.y&&cp.y<=_smab.y+_smab.h){
+          if(_smab.id==='__top__') _smHovAction='__'+_smab.action+'__';
+          else _smHovAction=_smab.id+':'+_smab.action;
+          break;
+        }
+      }
+    }
+    popupState.smHoverAction=_smHovAction;
+    if(_smHovRow>=0||_smHovAction) canvas.style.cursor='pointer';
+  } else { popupState.smHoverRow=-1; popupState.smHoverAction=null; }
   // Hover tracking for train builder viz + buttons
   if(activePopup==='trainbuilder'&&trainBuilderState){
     if(trainBuilderState.vizCarBounds.length){
@@ -15003,6 +15278,11 @@ canvas.addEventListener('mouseup',e=>{
   }
 
   if(gs==='title'){
+    // If the Save Manager is open over the title screen, route the click to
+    // its handler first; only fall back to PLAY/LOAD GAME buttons if the
+    // click missed the popup entirely (in which case the handler already
+    // closed it as click-outside-popup).
+    if(_smHandleClick(cp)) return;
     const b=startBtnBounds;
     if(b&&cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h) startGame();
     const lb=loadBtnBounds;
@@ -15049,7 +15329,7 @@ canvas.addEventListener('mouseup',e=>{
           // marking end-of-stardate.
           const _wasAutoPop=!_inArchive;
           gameSpeedIdx=_newspaperPrevSpeed; _newspaper=null; _newspaperViewIdx=null;
-          if(_wasAutoPop&&autosaveEnabled) saveGame();
+          if(_wasAutoPop&&autosaveEnabled) _autosaveToLocalStorage();
         }
         return;
       }
@@ -15268,6 +15548,11 @@ canvas.addEventListener('mouseup',e=>{
           _financeDropdownOpen=false; return;
         }
         return;
+      }
+      // Save Manager popup — routed to the shared helper so the same logic
+      // serves both the title-screen and in-game entry points.
+      if(activePopup==='savemanager'){
+        if(_smHandleClick(cp)) return;
       }
       // Missions popup — clicking an objective row re-centres the camera on
       // the mission's planet of interest. Prefers targetPlanetId (e.g.
@@ -15948,8 +16233,8 @@ canvas.addEventListener('mouseup',e=>{
         }
       }
       // Click outside popup → close
-      const popupW=activePopup==='pokedex'?460:activePopup==='starregistry'?460:activePopup==='train'?430:activePopup==='planet'?470:activePopup==='star'?520:activePopup==='trains'?580:activePopup==='trainbuilder'?620:activePopup==='quitconfirm'?390:activePopup==='finances'?580:activePopup==='corp'?570:activePopup==='ceohire'?700:activePopup==='car_unlock'?320:activePopup==='car_detail'?460:activePopup==='rival_founded'?460:300;
-      const popupH=activePopup==='pokedex'?390:activePopup==='starregistry'?390:activePopup==='train'?430:activePopup==='planet'?416:activePopup==='star'?390:activePopup==='trains'?430:activePopup==='trainbuilder'?390:activePopup==='quitconfirm'?110:activePopup==='options'?160:activePopup==='cheats'?270:activePopup==='finances'?400:activePopup==='corp'?440:activePopup==='ceohire'?370:activePopup==='car_unlock'?230:activePopup==='car_detail'?430:activePopup==='rival_founded'?420:130;
+      const popupW=activePopup==='pokedex'?460:activePopup==='starregistry'?460:activePopup==='train'?430:activePopup==='planet'?470:activePopup==='star'?520:activePopup==='trains'?580:activePopup==='trainbuilder'?620:activePopup==='quitconfirm'?390:activePopup==='finances'?580:activePopup==='corp'?570:activePopup==='ceohire'?700:activePopup==='car_unlock'?320:activePopup==='car_detail'?460:activePopup==='rival_founded'?460:activePopup==='savemanager'?560:300;
+      const popupH=activePopup==='pokedex'?390:activePopup==='starregistry'?390:activePopup==='train'?430:activePopup==='planet'?416:activePopup==='star'?390:activePopup==='trains'?430:activePopup==='trainbuilder'?390:activePopup==='quitconfirm'?110:activePopup==='options'?160:activePopup==='cheats'?270:activePopup==='finances'?400:activePopup==='corp'?440:activePopup==='ceohire'?370:activePopup==='car_unlock'?230:activePopup==='car_detail'?430:activePopup==='rival_founded'?420:activePopup==='savemanager'?420:130;
       const ppx=(W-popupW)/2, ppy=(H-popupH)/2;
       let _outsidePopup=cp.x<ppx||cp.x>ppx+popupW||cp.y<ppy||cp.y>ppy+popupH;
       if(_outsidePopup&&activePopup==='planet'&&popupState._upgradePanelBounds){
@@ -16119,6 +16404,11 @@ document.addEventListener('keydown',e=>{
   // before the gs/popup checks below so e.repeat keystrokes (key held for >0.5s)
   // are also captured. Movement itself is gated in the loop (popup-aware).
   {const _k=(e.key||'').toLowerCase(); if(_k==='w'||_k==='a'||_k==='s'||_k==='d'||_k==='arrowup'||_k==='arrowdown') heldKeys.add(_k);}
+  // Save Manager popup — Esc closes it from any gs (it can open on title).
+  if(activePopup==='savemanager'&&e.key==='Escape'){
+    activePopup=null; popupState={};
+    return;
+  }
   if(gs==='howtoplay'){
     if(e.key==='Escape'){ gs='title'; return; }
     if(e.key==='ArrowRight'||e.key===' '){
@@ -16137,7 +16427,7 @@ document.addEventListener('keydown',e=>{
         // an auto-popped newspaper, not an N-key archive view.
         const _wasAutoPop=(_newspaperViewIdx===null);
         gameSpeedIdx=_newspaperPrevSpeed; _newspaper=null; _newspaperViewIdx=null;
-        if(_wasAutoPop&&autosaveEnabled) saveGame();
+        if(_wasAutoPop&&autosaveEnabled) _autosaveToLocalStorage();
       }
       return;
     }
@@ -16422,7 +16712,7 @@ function _restoreFromSave(save){
   pokedexSortIdx=save.pokedexSortIdx||0; pokedexDiscoveredOnly=save.pokedexDiscoveredOnly!==undefined?save.pokedexDiscoveredOnly:true;
   starRegistrySortIdx=save.starRegistrySortIdx||0;
   starRegistryVisitedOnly=save.starRegistryVisitedOnly!==undefined?save.starRegistryVisitedOnly:true;
-  autosaveEnabled=save.autosaveEnabled!==undefined?save.autosaveEnabled:false;
+  autosaveEnabled=save.autosaveEnabled!==undefined?save.autosaveEnabled:true;
   missionTrackerEnabled=save.missionTrackerEnabled!==undefined?save.missionTrackerEnabled:true;
   _gameStartSd=save._gameStartSd||save.stardate;
   _ironCarUnlocked=!!save._ironCarUnlocked; _steelCarUnlocked=!!save._steelCarUnlocked; _glassCarUnlocked=!!save._glassCarUnlocked; _machineryCarUnlocked=!!save._machineryCarUnlocked; _hazmatCarUnlocked=!!save._hazmatCarUnlocked; _royalCarUnlocked=!!save._royalCarUnlocked; _flowersCarUnlocked=!!save._flowersCarUnlocked; _medicalCarUnlocked=!!save._medicalCarUnlocked;
@@ -16539,65 +16829,187 @@ function _restoreFromSave(save){
   }else{_aiCorp=null;}
 }
 
-async function saveGame(){
-  if(!galaxy){ _chatMsg('Nothing to save.','rgba(255,100,100,1)'); return; }
-  const saveObj=_buildSaveObject();
-  if(!saveObj){ _chatMsg('Save failed.','rgba(255,100,100,1)'); return; }
+// ── localStorage-backed save system ──────────────────────────
+// Persisted saves live in localStorage so the player doesn't have to
+// download/upload a .stt file every time. A small INDEX key lists slot
+// metadata (corp / stardate / saved-at / byte-size) so the manager popup
+// can render the list without parsing every full save. The .stt format
+// remains the interchange format — every slot can be exported as a .stt
+// file (and any .stt can be imported back into a new slot), so saves are
+// still portable between browsers/devices.
+const LS_INDEX_KEY='spacetrain.index';
+const LS_SLOT_PREFIX='spacetrain.save.';
+const LS_AUTOSAVE_ID='autosave';
+function _lsAvailable(){
+  try{ const k='__st_test'; localStorage.setItem(k,'1'); localStorage.removeItem(k); return true; }
+  catch(e){ return false; }
+}
+function _lsLoadIndex(){
+  if(!_lsAvailable()) return [];
+  try{ const raw=localStorage.getItem(LS_INDEX_KEY); return raw?JSON.parse(raw):[]; }
+  catch(e){ return []; }
+}
+function _lsSaveIndex(idx){
+  if(!_lsAvailable()) return false;
+  try{ localStorage.setItem(LS_INDEX_KEY,JSON.stringify(idx)); return true; }
+  catch(e){ return false; }
+}
+// Manual saves use a timestamp-based id so they're naturally sortable and
+// unique. The autosave slot uses a fixed reserved id so it overwrites in
+// place every stardate.
+function _lsNewSlotId(){ return 'slot_'+Date.now().toString(36)+'_'+Math.floor(Math.random()*1000); }
+function _lsSafeCorp(){
+  return (corpName||'').trim().replace(/[^A-Za-z0-9_\-]+/g,'_').replace(/_+/g,'_').replace(/^_|_$/g,'') || 'save';
+}
+function _lsDefaultLabel(){
+  return _lsSafeCorp()+'_'+stardate.toFixed(2).replace('.','');
+}
+// Write a save object (already built) into a named slot. Updates the index.
+// Returns {ok:true} on success, {ok:false, err:'quota'|'unavailable'|<msg>} on
+// failure. The caller is responsible for whatever UI feedback is appropriate.
+function _lsWriteSlot(slotId,saveObj,label){
+  if(!_lsAvailable()) return {ok:false,err:'unavailable'};
   const json=JSON.stringify(saveObj);
-  // Default save filename: "<Corp Name>_<SD>.stt" with two-decimal stardate.
-  // The corp name is sanitized: trimmed, non-filename-safe characters replaced
-  // with underscores, runs of underscores collapsed. Falls back to "save" if
-  // the corp name ends up empty after sanitization.
-  const _safeCorp=(corpName||'').trim().replace(/[^A-Za-z0-9_\-]+/g,'_').replace(/_+/g,'_').replace(/^_|_$/g,'') || 'save';
-  // Two-decimal stardate with the decimal point stripped — 830.10 → "83010".
-  const fname=_safeCorp+'_'+stardate.toFixed(2).replace('.','')+'.stt';
-  let saved=false;
-  if(window.showSaveFilePicker){
-    try{
-      const fh=await window.showSaveFilePicker({
-        suggestedName:fname,
-        types:[{description:'Space Train Save File',accept:{'application/octet-stream':['.stt']}}]
-      });
-      const ws=await fh.createWritable();
-      await ws.write(json); await ws.close();
-      saved=true;
-    } catch(e){ if(e.name==='AbortError') return; }
+  try{
+    localStorage.setItem(LS_SLOT_PREFIX+slotId,json);
+    const idx=_lsLoadIndex();
+    const _meta={
+      id:slotId,
+      label:label||null,
+      corp:corpName||'',
+      sd:stardate,
+      savedAt:Date.now(),
+      size:json.length
+    };
+    const _existing=idx.findIndex(e=>e.id===slotId);
+    if(_existing>=0) idx[_existing]=_meta; else idx.push(_meta);
+    _lsSaveIndex(idx);
+    return {ok:true};
+  } catch(e){
+    return {ok:false,err:(e&&e.name==='QuotaExceededError')?'quota':(e&&e.message||'unknown')};
   }
-  if(!saved){
-    const blob=new Blob([json],{type:'application/octet-stream'});
-    const url=URL.createObjectURL(blob);
-    const a=document.createElement('a');
-    a.href=url; a.download=fname;
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    URL.revokeObjectURL(url); saved=true;
+}
+function _lsReadSlot(slotId){
+  if(!_lsAvailable()) return null;
+  try{
+    const raw=localStorage.getItem(LS_SLOT_PREFIX+slotId);
+    return raw?JSON.parse(raw):null;
+  } catch(e){ return null; }
+}
+function _lsDeleteSlot(slotId){
+  if(!_lsAvailable()) return false;
+  try{
+    localStorage.removeItem(LS_SLOT_PREFIX+slotId);
+    const idx=_lsLoadIndex().filter(e=>e.id!==slotId);
+    _lsSaveIndex(idx);
+    return true;
+  } catch(e){ return false; }
+}
+// Silent autosave path: called from the newspaper auto-popup close hooks.
+// Never opens any UI; just writes to the reserved autosave slot. If
+// localStorage is unavailable, falls back to the original download flow so
+// autosaves aren't silently lost on browsers that block storage.
+function _autosaveToLocalStorage(){
+  if(!galaxy) return;
+  if(!_lsAvailable()){ saveGame(true); return; } // fallback to download
+  const saveObj=_buildSaveObject(); if(!saveObj) return;
+  const res=_lsWriteSlot(LS_AUTOSAVE_ID,saveObj,'Autosave');
+  if(!res.ok&&res.err==='quota'){
+    _chatMsg('AUTOSAVE FAILED — STORAGE FULL','rgba(255,100,100,1)');
   }
-  if(saved&&galaxy) _chatMsg('GAME SAVED!','rgba(80,220,130,1)');
+}
+// Build a downloadable .stt blob from a save object. Reused by the manager's
+// "Export .stt" action AND by the legacy / fallback `saveGame` path. Filename
+// defaults to "<corp>_<sd>.stt" but a custom label can override.
+function _downloadSttFromSaveObj(saveObj,label){
+  if(!saveObj) return;
+  const json=JSON.stringify(saveObj);
+  const _safeLabel=label?String(label).replace(/[^A-Za-z0-9_\-]+/g,'_').replace(/_+/g,'_').replace(/^_|_$/g,''):'save';
+  const fname=(_safeLabel||'save')+'.stt';
+  const blob=new Blob([json],{type:'application/octet-stream'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url; a.download=fname;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+// Import a .stt file (user-picked) and write it to a new slot. Async because
+// the file picker is async; resolves to the new slotId on success or null on
+// cancel/failure.
+async function _lsImportSttFile(){
+  const json=await new Promise(resolve=>{
+    const inp=document.createElement('input');
+    inp.type='file'; inp.accept='.stt,application/octet-stream,application/json,text/plain';
+    inp.onchange=async()=>{ resolve(inp.files[0]?await inp.files[0].text():null); };
+    inp.oncancel=()=>resolve(null);
+    document.body.appendChild(inp); inp.click(); document.body.removeChild(inp);
+  });
+  if(!json) return null;
+  let saveObj;
+  try{ saveObj=JSON.parse(json); } catch(e){ alert('Failed to parse save file: '+e.message); return null; }
+  if(!_lsAvailable()){
+    // Storage unavailable — can't persist as a slot. Fall back to a direct
+    // restore so the player can at least load the .stt this session.
+    try{ _restoreFromSave(saveObj); activePopup=null; popupState={}; _chatMsg('GAME LOADED.','rgba(80,220,130,1)'); }
+    catch(e){ alert('Failed to load save: '+(e&&e.message||'unknown')); }
+    return null;
+  }
+  // Pull display metadata out of the parsed save so the index entry is
+  // accurate (the imported save may be from a different corp / SD than
+  // whatever is currently loaded).
+  const _slotId=_lsNewSlotId();
+  const _importedCorp=saveObj.corpName||'';
+  const _importedSd=typeof saveObj.stardate==='number'?saveObj.stardate:830;
+  const _label=((_importedCorp||'imported').trim().replace(/[^A-Za-z0-9_\-]+/g,'_').replace(/_+/g,'_').replace(/^_|_$/g,'')||'imported')+'_'+_importedSd.toFixed(2).replace('.','');
+  try{
+    localStorage.setItem(LS_SLOT_PREFIX+_slotId,json);
+    const idx=_lsLoadIndex();
+    idx.push({id:_slotId,label:_label,corp:_importedCorp,sd:_importedSd,savedAt:Date.now(),size:json.length});
+    _lsSaveIndex(idx);
+    return _slotId;
+  } catch(e){
+    if(e&&e.name==='QuotaExceededError') alert('Browser storage is full. Delete an existing save first.');
+    else alert('Import failed: '+(e&&e.message||'unknown'));
+    return null;
+  }
 }
 
+// Format helpers for the save manager UI.
+function _fmtSaveAge(savedAtMs){
+  const ms=Date.now()-savedAtMs;
+  const _s=Math.floor(ms/1000);
+  if(_s<60) return _s+'s ago';
+  const _m=Math.floor(_s/60);
+  if(_m<60) return _m+'m ago';
+  const _h=Math.floor(_m/60);
+  if(_h<24) return _h+'h ago';
+  const _d=Math.floor(_h/24);
+  return _d+'d ago';
+}
+function _fmtSaveSize(bytes){
+  if(bytes<1024) return bytes+' B';
+  if(bytes<1024*1024) return Math.round(bytes/1024)+' KB';
+  return (bytes/1024/1024).toFixed(2)+' MB';
+}
+
+// `saveGame` and `loadGame` are now thin entry points that open the Save
+// Manager popup. `forceDownload=true` (used by the autosave fallback when
+// localStorage is unavailable) preserves the old direct-download behaviour
+// for situations where the popup wouldn't help.
+async function saveGame(forceDownload){
+  if(!galaxy){ _chatMsg('Nothing to save.','rgba(255,100,100,1)'); return; }
+  if(forceDownload){
+    const saveObj=_buildSaveObject(); if(!saveObj) return;
+    _downloadSttFromSaveObj(saveObj,_lsDefaultLabel());
+    _chatMsg('GAME SAVED!','rgba(80,220,130,1)');
+    return;
+  }
+  activePopup='savemanager';
+  popupState={smMode:'save',smSelected:null,smScroll:0};
+}
 async function loadGame(){
-  let json=null;
-  if(window.showOpenFilePicker){
-    try{
-      const [fh]=await window.showOpenFilePicker({
-        types:[{description:'Space Train Save File',accept:{'application/octet-stream':['.stt']}}]
-      });
-      const f=await fh.getFile(); json=await f.text();
-    } catch(e){ if(e.name==='AbortError') return; }
-  }
-  if(!json){
-    json=await new Promise(resolve=>{
-      const inp=document.createElement('input');
-      inp.type='file'; inp.accept='.stt';
-      inp.onchange=async()=>{ resolve(inp.files[0]?await inp.files[0].text():null); };
-      inp.oncancel=()=>resolve(null);
-      document.body.appendChild(inp); inp.click(); document.body.removeChild(inp);
-    });
-  }
-  if(!json) return;
-  try{
-    const save=JSON.parse(json);
-    _restoreFromSave(save);
-  } catch(e){ alert('Failed to load save file: '+e.message); }
+  activePopup='savemanager';
+  popupState={smMode:'load',smSelected:null,smScroll:0};
 }
 
 function startGame(){
@@ -17183,6 +17595,10 @@ function loop(ts){
   }
   if(gs==='title'){
     drawTitleScreen(ts,dt);
+    // Save Manager can be opened from the title screen via LOAD GAME.
+    // Render it on top of the title art when active so the player can pick
+    // a slot without leaving the title.
+    if(activePopup==='savemanager'){ _sbBounds=[]; drawSaveManagerPopup(); }
   } else if(gs==='fadeout'){
     drawTitleScreen(ts,0);
     fadeA=Math.min(1,fadeA+dt*.028);
