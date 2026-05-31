@@ -9818,7 +9818,11 @@ function drawMissionsPopup(){
       if(_prog){
         const _pct=Math.min(1,_prog.cur/_prog.max);
         const _pBarX=cX+_mCbW, _pBarW=Math.max(40,cMaxW-_mCbW-4);
-        const _pLabelY=_mRowY+_objTotalH+1;
+        // Label sits a hair above the centre of the PROG_H block so the
+        // bar visually balances between the objective text above and the
+        // next objective's text below (previously the bar hugged the next
+        // objective with a much smaller gap above than below).
+        const _pLabelY=_mRowY+_objTotalH-3;
         // Label: "Planets seeded: 2 / 10"
         ctx.font='9px "Exo 2",sans-serif'; ctx.textAlign='left';
         ctx.fillStyle=isDone?'rgba(72,76,88,0.55)':obj.done?'rgba(100,210,125,0.60)':'rgba(140,170,210,0.65)';
