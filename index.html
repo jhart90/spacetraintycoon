@@ -728,7 +728,7 @@ function _engMaxCars(engineType){ return ENGINE_MAX_CARS[engineType] ?? 10; }
 
 // ── Planet development level system ──────────────────────────
 // Cumulative weighted-cargo score required to reach each level (index = level)
-const DEV_LEVEL_THRESHOLDS=[0,150,400,900,1800,3500,6500,12000,22000,40000,75000];
+const DEV_LEVEL_THRESHOLDS=[0,500,5000,10000,50000,100000,200000,500000,800000,1200000,2000000];
 // Economic weight of one cargo unit toward a planet's development score
 const DEV_CARGO_VALUES={passengers:200,livestock:150,mail:80,water:60,ice:80,sand:50,molten_ore:180,iron:250,gold:800,diamond:1200,hazmat:0,oil:220,battery:300,chemical:160,flowers:180,medical:200,steel:320,glass:220,machinery:420,cargo:100};
 // Supply/demand/population multiplier per dev level
@@ -3786,36 +3786,47 @@ function generateGalaxy(){
     _hs.name='Gigi Prime'; _hs.size='M'; _hs.radius=STAR_R['M'];
     _hs.colorName='yellow'; _hs.color=STAR_COLORS['yellow']; }
 
+  // Home star planet layout — fixed sequence of 6 biomes, from closest to
+  // Gigi Prime to furthest. Orijen sits at index 1 (between the inner lava
+  // world and the desert), gating the player's first sortie outward.
+  const HOME_BIOMES=['lava','resort','desert','agri','rocky','chemical'];
   // Generate planets orbiting each star
   let origenId=0;
   for(const star of stars){
     const isHome=star.id===homeStarId;
-    // Home star gets 4-7 planets guaranteed; others use bell distribution
-    const np=isHome?randInt(4,7):bellPlanetCount();
-    // Home star has a slightly larger orbit cap to ensure all planets fit
-    const orbitCap=isHome?10500:9000;
+    // Home star always gets exactly 6 planets (one per HOME_BIOMES entry);
+    // others use bell distribution.
+    const np=isHome?HOME_BIOMES.length:bellPlanetCount();
+    // Home star uses a generous cap so all six guaranteed worlds fit.
+    const orbitCap=isHome?14000:9000;
     // Maximum orbit allowed by world boundary from this star's position
     const boundLimit=Math.min(WORLD_W-Math.abs(star.x),WORLD_H-Math.abs(star.y))-400;
     let orbitR=star.radius*1.8+400;
     // Each star has a dominant orbit direction; 98% of planets follow it
     const dominantDir=Math.random()<0.5?1:-1;
     for(let i=0;i<np;i++){
-      const isStarter=(isHome&&i===0);
+      const isStarter=(isHome&&i===1); // Orijen sits at HOME_BIOMES index 1
       const sz=(isStarter?'L':pickSize()), pr=SIZE_R[sz];
-      orbitR+=pr+rand(300,1200);
-      if(orbitR>orbitCap) break;
+      // Home star uses tighter random spacing so all 6 fit inside orbitCap.
+      if(isHome) orbitR+=pr+rand(280,720);
+      else       orbitR+=pr+rand(300,1200);
+      if(!isHome&&orbitR>orbitCap) break;        // non-home cap is permissive break
       if(orbitR+pr>boundLimit) break; // orbit would exit world boundary
       const angle=rand(0,Math.PI*2);
       // Kepler-inspired speed: closer planets orbit faster (v ∝ 1/√r)
       // 2% chance of retrograde (opposite dominant direction)
       const dir=(Math.random()<0.02?-dominantDir:dominantDir);
       const spd=0.00025*Math.sqrt(800/orbitR)*dir;
+      // Home system: biome forced by HOME_BIOMES position. Elsewhere: random.
+      const _typeForSlot=isHome
+        ? PTYPES.find(t=>t.id===HOME_BIOMES[i])||PTYPES[0]
+        : _pickBiomeWeighted();
       const p={
         id:pid++, starId:star.id,
         orbitRadius:orbitR, orbitAngle:angle, orbitSpeed:spd,
         x:star.x+orbitR*Math.cos(angle), y:star.y+orbitR*Math.sin(angle),
         size:sz, radius:pr,
-        type:(isStarter?PTYPES[8]:_pickBiomeWeighted()),
+        type:_typeForSlot,
         name:isStarter?'Orijen':makeName(),
         isStarter
       };
@@ -3867,66 +3878,13 @@ function generateGalaxy(){
       }
       star.planetIds.push(p.id);
       planets.push(p);
-      orbitR+=pr+rand(200,800);
+      // Tighter post-spacing on home so all 6 fit inside orbitCap.
+      orbitR+=pr+(isHome?rand(180,520):rand(200,800));
     }
-    // Guarantee home star reaches 4 planets by adding XS worlds with tight spacing
-    if(isHome){
-      while(star.planetIds.length<4){
-        const pr=SIZE_R['XS'];
-        orbitR+=pr+250;
-        if(orbitR+pr>Math.min(boundLimit,orbitCap)) break;
-        const angle=rand(0,Math.PI*2);
-        const spd=0.00025*Math.sqrt(800/orbitR)*dominantDir;
-        const p={id:pid++,starId:star.id,orbitRadius:orbitR,orbitAngle:angle,orbitSpeed:spd,
-                 x:star.x+orbitR*Math.cos(angle),y:star.y+orbitR*Math.sin(angle),
-                 size:'XS',radius:pr,type:_pickBiomeWeighted(),name:makeName(),isStarter:false};
-        _attachBiome(p); p.moons=generateMoons(p); p.ring=null; p.catchphrase=generateCatchphrase(p); p.population=generatePopulation(p);
-        p.clouds=generatePlanetClouds(p); p.cloudAngle=Math.random()*Math.PI*2;
-        {const _gb=['rocky','desert','resort','jungle','ocean']; p.hasGold=(_gb.includes(p.type.id)&&Math.random()<0.1); p.goldRevealed=false; p.goldPatch=p.hasGold?{angle:rand(0,Math.PI*2),arcSize:Math.PI*0.25}:null; p.hasDiamond=(_gb.includes(p.type.id)&&Math.random()<0.02); p.diamondRevealed=false; p.diamondPatch=p.hasDiamond?{angle:rand(0,Math.PI*2),arcSize:Math.PI*0.22}:null;}
-        p.devLevelBase=randInt(1,2); p.devLevel=p.devLevelBase; p.populationBase=p.population; p.devLog=[]; p.passengerDeliveries=[];
-        if(p.type.id==='agri'){const _aR2=Math.random(); p.agriStructAngle=rand(0,Math.PI*2); if(_aR2<0.333){p.grainUnlocked=true;p.upgrades=['granary'];}else if(_aR2<0.667){p.livestockUnlocked=true;p.upgrades=['farm'];}else{p.fruitUnlocked=true;p.upgrades=['orchard'];}}
-        p.supplyRate=computeSupplyRate(p); p.demandRate=computeDemandRate(p); p.economicHealth=computeEconomicHealth(p); seedCargoPlanet(p);
-        if(p.type.id!=='agri') p.upgrades=UPGRADES.filter(u=>u.preBuiltBiomes.includes(p.type.id)).map(u=>u.id); p.hasStation=false;
-        star.planetIds.push(p.id); planets.push(p);
-        orbitR+=pr+200;
-      }
-    }
-    // Guarantee home star has at least one lava, agri, and desert planet.
-    // If any are missing, replace a non-starter planet that doesn't fill
-    // one of the other required types.
-    if(isHome){
-      const _homePlanets=planets.filter(p=>p.starId===star.id&&!p.isStarter);
-      const _needTypes=['lava','agri','desert'];
-      const _usedForReplace=new Set();
-      for(const _tid of _needTypes){
-        if(_homePlanets.some(p=>p.type.id===_tid)) continue;
-        // Prefer a planet whose type isn't one of the required three (not displacing a kept type)
-        let _rep=_homePlanets.find(p=>!_needTypes.includes(p.type.id)&&!_usedForReplace.has(p.id));
-        if(!_rep) _rep=_homePlanets.find(p=>!_usedForReplace.has(p.id));
-        if(!_rep) continue;
-        _usedForReplace.add(_rep.id);
-        const _newType=PTYPES.find(t=>t.id===_tid);
-        _rep.type={..._newType};
-        _attachBiome(_rep);
-        _rep.catchphrase=generateCatchphrase(_rep);
-        _rep.population=generatePopulation(_rep);
-        _rep.clouds=generatePlanetClouds(_rep); _rep.cloudAngle=Math.random()*Math.PI*2;
-        {const _gb=['rocky','desert','resort','jungle','ocean'];
-        _rep.hasGold=_gb.includes(_rep.type.id)&&Math.random()<0.1;
-        _rep.goldRevealed=false;
-        _rep.goldPatch=_rep.hasGold?{angle:rand(0,Math.PI*2),arcSize:Math.PI*0.25}:null;
-        _rep.hasDiamond=_gb.includes(_rep.type.id)&&Math.random()<0.02;
-        _rep.diamondRevealed=false;
-        _rep.diamondPatch=_rep.hasDiamond?{angle:rand(0,Math.PI*2),arcSize:Math.PI*0.22}:null;}
-        if(_rep.type.id==='agri'){const _aR3=Math.random(); _rep.agriStructAngle=rand(0,Math.PI*2); if(_aR3<0.333){_rep.grainUnlocked=true;_rep.upgrades=['granary'];}else if(_aR3<0.667){_rep.livestockUnlocked=true;_rep.upgrades=['farm'];}else{_rep.fruitUnlocked=true;_rep.upgrades=['orchard'];}}
-        _rep.supplyRate=computeSupplyRate(_rep);
-        _rep.demandRate=computeDemandRate(_rep);
-        _rep.economicHealth=computeEconomicHealth(_rep);
-        seedCargoPlanet(_rep);
-        if(_rep.type.id!=='agri') _rep.upgrades=UPGRADES.filter(u=>u.preBuiltBiomes.includes(_rep.type.id)).map(u=>u.id);
-        if(_rep.ring) _rep.ring={..._rep.ring,rgb:_newType.rim.map(v=>Math.min(255,Math.round(v*0.5+rand(30,70))))};
-      }
-    }
+    // (Removed: the old "guarantee home reaches 4 planets" top-up loop and
+    //  the "guarantee lava / agri / desert biomes" replacement pass — both
+    //  are obsolete now that HOME_BIOMES forces exactly six planets with
+    //  exactly the required biomes in a fixed orbital order.)
   }
 
   // ── separate overlapping star systems ───────────────────────
@@ -6482,6 +6440,14 @@ function updateCargoSupplyDemand(dtSd){
     }
     // Oil floor: every station planet (except oil planets themselves) always wants at least 1 oil
     if(p.hasStation&&p.type.id!=='oil'&&(p.demand.oil||0)<1) p.demand.oil=1;
+    // Iron floor: every station planet always wants at least 1 iron. This
+    // ensures the planet can reliably accept iron deliveries — necessary so
+    // the player can accumulate the 4 ironDelivered units required to
+    // upgrade the station to a Large Station. The matching demandRate floor
+    // in computeDemandRate (~line 3284) only sets a per-SD accumulation rate;
+    // this floor enforces a minimum on the live demand value so trains can
+    // unload even right after a previous delivery zeroed the demand.
+    if(p.hasStation&&(p.demand.iron||0)<1) p.demand.iron=1;
     // Flowers demand floor: eligible planets that have never received flowers always want at least 1
     if(!p.flowersReceived&&['jungle','desert','resort'].includes(p.type.id)){
       if((p.demand.flowers||0)<1) p.demand.flowers=1;
@@ -6497,7 +6463,20 @@ function updateCargoSupplyDemand(dtSd){
   }
 }
 
+// Accumulator so updatePlanetDevLevels runs at most once per 0.1 SD instead
+// of every game-tick (~60 fps × speed). The per-tick cost of walking every
+// planet's devLog is non-trivial late-game; 0.1 SD is more than fine since
+// dev-level transitions are already coarse-grained and the diversity score
+// inside the function was already on the same 0.1 SD cadence.
+let _devLevelTickAcc=0;
 function updatePlanetDevLevels(dtSd){
+  _devLevelTickAcc+=dtSd;
+  if(_devLevelTickAcc<0.1) return;
+  const _elapsed=_devLevelTickAcc; // pass full elapsed-since-last-run to inner logic
+  _devLevelTickAcc=0;
+  // Replace the function-local `dtSd` from here on with the accumulated value
+  // so the per-planet diversity timer (p._cdsTimer) advances correctly.
+  dtSd=_elapsed;
   const now=stardate;
   for(const p of galaxy.planets){
     if(!p.devLog) p.devLog=[];
@@ -7066,7 +7045,13 @@ function updateTrain(t, dt){
             }
           }
         }
-        if(_cpl&&(_cpl.hasStation||_cpl.aiHasStation)&&(t.orbitTier==='LOW'||(_cpl.hasLargeStation&&t.orbitTier==='MED'))) _startCargoOps(t,_cpl);
+        // Cargo-ops orbit gate: LOW always works; MED works at Large Station
+        // or Terminal; HIGH works only at Terminal.
+        if(_cpl&&(_cpl.hasStation||_cpl.aiHasStation)&&(
+              t.orbitTier==='LOW' ||
+              (t.orbitTier==='MED' &&(_cpl.hasLargeStation||_cpl.hasTerminal)) ||
+              (t.orbitTier==='HIGH'&& _cpl.hasTerminal)
+           )) _startCargoOps(t,_cpl);
         else if(_cpl&&_cpl.isStarProxy) _startStarOps(t,_cpl);
       }
     }
@@ -7222,8 +7207,11 @@ function updateTrain(t, dt){
           // using normal demand rules before the train goes idle (parked orbit).
           // _cargoCheckedThisStop is already false from departure at the previous stop.
           const _fDstP=_gp(destId);
-          if(_fDstP&&(_fDstP.hasStation||_fDstP.aiHasStation)&&
-             (t.orbitTier==='LOW'||(_fDstP.hasLargeStation&&t.orbitTier==='MED'))){
+          if(_fDstP&&(_fDstP.hasStation||_fDstP.aiHasStation)&&(
+                t.orbitTier==='LOW' ||
+                (t.orbitTier==='MED' &&(_fDstP.hasLargeStation||_fDstP.hasTerminal)) ||
+                (t.orbitTier==='HIGH'&& _fDstP.hasTerminal)
+             )){
             t.route={stops:[destId,destId],isLoop:false,fromIdx:0,toIdx:0,
               phase:'orbit',orbitSpun:0,dir:1,minOrbitDone:true,
               stopOrbitR:[t.orbitR,t.orbitR],_recomputeTimer:0,
@@ -10902,7 +10890,11 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
     }
     return false;
   };
-  const _stEnt={id:'__station__',label:'STATION',desc:'Enables cargo loading and unloading on this planet.',cost:_stationBuildCost(),isStation:true};
+  // Station card title reflects the planet's current tier — STATION while
+  // unbuilt or pre-upgrade, LARGE STATION after the Large upgrade is built,
+  // TERMINAL after the Terminal upgrade is built (all three orbits open).
+  const _stLabel=p.hasTerminal?'TERMINAL':(p.hasLargeStation?'LARGE STATION':'STATION');
+  const _stEnt={id:'__station__',label:_stLabel,desc:'Enables cargo loading and unloading on this planet.',cost:_stationBuildCost(),isStation:true};
   const _candidates=UPGRADES.filter(u=>builtSet.has(u.id)||u.eligibleBiomes.includes(bio)||u.universal);
   const _sortTier=(u)=>{
     if(builtSet.has(u.id)) return 0;          // built first
@@ -10951,7 +10943,9 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
   popupState.upgradeBuildBounds=[];
   popupState.buildStationBtnBounds=null;
   popupState.buildLargeStationBtnBounds=null;
+  popupState.buildTerminalBtnBounds=null;
   popupState._lsTooltip=null;
+  popupState._terminalTooltip=null;
   popupState._upgradeLockedTooltip=null;
   popupState._upUnlockTooltip=null;
   popupState._upgradeBtnLockedBounds=[];
@@ -11033,7 +11027,22 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
       drawPlanetStation(_mvx,_mvy,_mvr,Math.PI*1.2,20,p.isAlienRelic||false,p.hasLargeStation||false);
       ctx.restore();
       if(isBuilt){
-        if(p.hasLargeStation){
+        if(p.hasTerminal){
+          // Fully upgraded — Terminal supports all three orbits, no further
+          // upgrade path.
+          ctx.font='9px "Exo 2",sans-serif';
+          ctx.fillStyle='rgba(110,145,195,0.60)';
+          const _ttDescW=upW-26, _ttDescWds='Allows loading + unloading of cargo in LOW, MEDIUM, and HIGH orbits simultaneously'.split(' ');
+          let _ttDescCur='', _ttDescY=itemY+30;
+          for(const _ttDW of _ttDescWds){
+            const _ttT=_ttDescCur?_ttDescCur+' '+_ttDW:_ttDW;
+            if(ctx.measureText(_ttT).width<=_ttDescW) _ttDescCur=_ttT;
+            else{if(_ttDescCur)ctx.fillText(_ttDescCur,upX+12,_ttDescY); _ttDescCur=_ttDW; _ttDescY+=11;}
+          }
+          if(_ttDescCur) ctx.fillText(_ttDescCur,upX+12,_ttDescY);
+        } else if(p.hasLargeStation){
+          // Large Station built — show description, then the UPGRADE button
+          // that converts it to a Terminal (75k cr + 6 steel).
           ctx.font='9px "Exo 2",sans-serif';
           ctx.fillStyle='rgba(110,145,195,0.60)';
           const _lsDescW=upW-26, _lsDescWds='Allows loading + unloading of cargo in LOW and MEDIUM orbits'.split(' ');
@@ -11044,6 +11053,56 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
             else{if(_lsDescCur)ctx.fillText(_lsDescCur,upX+12,_lsDescY); _lsDescCur=_lsDW; _lsDescY+=11;}
           }
           if(_lsDescCur) ctx.fillText(_lsDescCur,upX+12,_lsDescY);
+          // ── UPGRADE → Terminal button ────────────────────────
+          // Cost 75,000 cr + 6 steel. Uses the same visual treatment as the
+          // Large-Station UPGRADE button (red cost pill + "+" + sprite ×N).
+          const _tLvlOk=(p.devLevel||0)>=5; // require dev level 5 (one above Large Station's 4)
+          const _tSteelOk=(p.steelDelivered||0)>=6;
+          const _tCredOk=credits>=75000;
+          const _tCanBuild=_tLvlOk&&_tSteelOk&&_tCredOk;
+          const _tBtnW=86,_tBtnH=20,_tBtnX=upX+(upW-_tBtnW)/2,_tBtnY=itemY+ITEM_H-_tBtnH-8;
+          const _tHov=popupState.upgradeBtnHover==='__terminal__';
+          ctx.fillStyle=_tHov?'rgba(45,110,230,0.97)':_tCanBuild?'rgba(20,70,180,0.90)':'rgba(18,18,35,0.80)';
+          ctx.beginPath(); ctx.roundRect(_tBtnX,_tBtnY,_tBtnW,_tBtnH,3); ctx.fill();
+          ctx.strokeStyle=_tHov?'rgba(140,210,255,0.95)':_tCanBuild?'rgba(80,160,255,0.80)':'rgba(50,50,80,0.55)';
+          ctx.lineWidth=1; ctx.beginPath(); ctx.roundRect(_tBtnX,_tBtnY,_tBtnW,_tBtnH,3); ctx.stroke();
+          ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
+          ctx.fillStyle=_tCanBuild?'#adf':'rgba(70,70,100,0.75)';
+          ctx.fillText('UPGRADE',_tBtnX+_tBtnW/2,_tBtnY+_tBtnH/2+3.5);
+          // Cost pills: [-75,000 cr] [+] [car_steel ×6]
+          {const _ctTxt='-'+_fmtCr(75000)+' cr';
+          ctx.font='8px "Exo 2",sans-serif';
+          const _ctPW=ctx.measureText(_ctTxt).width+10, _ctPH=13;
+          const _tLbl='\xd76'; const _tLblW=ctx.measureText(_tLbl).width;
+          const _tSz=18;
+          const _tDispW=3+_tSz+2+_tLblW+3;
+          ctx.font='bold 11px Orbitron,sans-serif';
+          const _tPlusLbl='+'; const _tPlusW=ctx.measureText(_tPlusLbl).width;
+          const _tPillsGap=5;
+          const _tPillsTot=_ctPW+_tPillsGap+_tPlusW+_tPillsGap+_tDispW;
+          const _t0X=_tBtnX+(_tBtnW-_tPillsTot)/2, _tPY=_tBtnY-_ctPH/2-3;
+          const _tVCtr=_tPY+_ctPH/2;
+          ctx.fillStyle='rgba(110,18,18,0.92)'; ctx.beginPath(); ctx.roundRect(_t0X,_tPY,_ctPW,_ctPH,4); ctx.fill();
+          ctx.font='8px "Exo 2",sans-serif';
+          ctx.fillStyle='rgba(255,255,255,0.97)'; ctx.textAlign='center'; ctx.textBaseline='middle';
+          ctx.fillText(_ctTxt,_t0X+_ctPW/2,_tVCtr);
+          const _tPlusX=_t0X+_ctPW+_tPillsGap;
+          ctx.font='bold 11px Orbitron,sans-serif';
+          ctx.fillStyle='rgba(255,255,255,0.97)';
+          ctx.textAlign='left';
+          ctx.fillText(_tPlusLbl,_tPlusX,_tVCtr);
+          const _tStX=_tPlusX+_tPlusW+_tPillsGap;
+          if(imgs['car_steel']) ctx.drawImage(imgs['car_steel'],_tStX+3,_tPY+(_ctPH-_tSz)/2,_tSz,_tSz);
+          ctx.font='8px "Exo 2",sans-serif'; ctx.textAlign='left'; ctx.textBaseline='middle';
+          ctx.fillStyle='rgba(210,220,235,0.9)';
+          ctx.fillText(_tLbl,_tStX+3+_tSz+2,_tVCtr);
+          ctx.textBaseline='alphabetic';}
+          // Register bounds + tooltip (uses the same _lsTooltip slot, repurposed
+          // — popupState._lsTooltip carries lvlOk/ironOk/credOk; here we
+          // re-use the structure with steelOk in place of ironOk and label
+          // the tooltip differently in the draw block).
+          popupState.buildTerminalBtnBounds={x:_tBtnX,y:_tBtnY,w:_tBtnW,h:_tBtnH};
+          if(_tHov) popupState._terminalTooltip={bx:_tBtnX,by:_tBtnY,bw:_tBtnW,upX,upW,lvlOk:_tLvlOk,steelOk:_tSteelOk,credOk:_tCredOk,dl:p.devLevel||0,steel:p.steelDelivered||0};
         } else {
           // Description bullet (same word-wrap style as unbuilt items)
           ctx.font='9px "Exo 2",sans-serif';
@@ -11751,6 +11810,32 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
       {ok:_tt.lvlOk, txt:'Planet Lv.4  (current: '+_tt.dl+')'},
       {ok:_tt.ironOk,txt:'4 iron delivered to planet  ('+_tt.iron+' so far)'},
       {ok:_tt.credOk,txt:'50,000 cr'},
+    ];
+    let _ttRy=_ttY+27;
+    for(const _r of _ttReqs){
+      ctx.fillStyle=_r.ok?'rgba(80,200,120,0.85)':'rgba(210,100,100,0.80)';
+      ctx.fillText((_r.ok?'✓  ':'✗  ')+_r.txt,_ttX+8,_ttRy);
+      _ttRy+=10;
+    }
+  }
+  // ── Terminal hover tooltip (same layout as Large Station tooltip) ──
+  if(popupState._terminalTooltip){
+    const _tt=popupState._terminalTooltip;
+    const _ttW=_tt.upW-8, _ttH=56;
+    const _ttX=Math.max(4,_tt.upX+4);
+    const _ttY=_tt.by-_ttH-4;
+    ctx.fillStyle='rgba(6,10,28,0.97)';
+    ctx.strokeStyle='rgba(80,140,255,0.55)';
+    ctx.lineWidth=1;
+    ctx.beginPath(); ctx.roundRect(_ttX,_ttY,_ttW,_ttH,4); ctx.fill(); ctx.stroke();
+    ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='left';
+    ctx.fillStyle='rgba(140,200,255,0.90)';
+    ctx.fillText('TERMINAL',_ttX+8,_ttY+13);
+    ctx.font='7px "Exo 2",sans-serif';
+    const _ttReqs=[
+      {ok:_tt.lvlOk,  txt:'Planet Lv.5  (current: '+_tt.dl+')'},
+      {ok:_tt.steelOk,txt:'6 steel delivered to planet  ('+_tt.steel+' so far)'},
+      {ok:_tt.credOk, txt:'75,000 cr'},
     ];
     let _ttRy=_ttY+27;
     for(const _r of _ttReqs){
@@ -14954,6 +15039,7 @@ canvas.addEventListener('mousemove',e=>{
     let _upHov=null;
     if(popupState.buildStationBtnBounds){const _bsb=popupState.buildStationBtnBounds; if(cp.x>=_bsb.x&&cp.x<=_bsb.x+_bsb.w&&cp.y>=_bsb.y&&cp.y<=_bsb.y+_bsb.h) _upHov='__station__';}
     if(!_upHov&&popupState.buildLargeStationBtnBounds){const _lsb2=popupState.buildLargeStationBtnBounds;if(cp.x>=_lsb2.x&&cp.x<=_lsb2.x+_lsb2.w&&cp.y>=_lsb2.y&&cp.y<=_lsb2.y+_lsb2.h) _upHov='__large_station__';}
+    if(!_upHov&&popupState.buildTerminalBtnBounds){const _tmb=popupState.buildTerminalBtnBounds;if(cp.x>=_tmb.x&&cp.x<=_tmb.x+_tmb.w&&cp.y>=_tmb.y&&cp.y<=_tmb.y+_tmb.h) _upHov='__terminal__';}
     if(!_upHov&&popupState.upgradeBuildBounds){for(const _ub of popupState.upgradeBuildBounds){if(cp.x>=_ub.x&&cp.x<=_ub.x+_ub.w&&cp.y>=_ub.y&&cp.y<=_ub.y+_ub.h){_upHov=_ub.upgradeId;break;}}}
     // Locked (station-not-built) buttons — detectable for tooltip but not clickable
     if(!_upHov&&popupState._upgradeBtnLockedBounds){for(const _lb of popupState._upgradeBtnLockedBounds){if(cp.x>=_lb.x&&cp.x<=_lb.x+_lb.w&&cp.y>=_lb.y&&cp.y<=_lb.y+_lb.h){_upHov=_lb.hoverId;break;}}}
@@ -15861,6 +15947,28 @@ canvas.addEventListener('mouseup',e=>{
               p.supply.iron=Math.max(0,(p.supply.iron||0)-4);
             }
             p.hasLargeStation=true;
+            playSound('construction_complete');
+          }
+          return;
+        }
+      }
+      // Terminal (Large Station → Terminal) UPGRADE button
+      if(activePopup==='planet'&&popupState.buildTerminalBtnBounds){
+        const _tmb=popupState.buildTerminalBtnBounds;
+        if(cp.x>=_tmb.x&&cp.x<=_tmb.x+_tmb.w&&cp.y>=_tmb.y&&cp.y<=_tmb.y+_tmb.h){
+          const p=popupState.planet;
+          if(p&&p.hasLargeStation&&!p.hasTerminal&&credits>=75000&&(p.devLevel||0)>=5&&(p.steelDelivered||0)>=6){
+            credits-=75000; creditDelta-=75000;
+            spawnCreditFloatScreen(_tmb.x+_tmb.w/2,_tmb.y,-75000);
+            purchaseLedger.push({sd:stardate,amount:75000,type:'terminal'});
+            p.steelDelivered=(p.steelDelivered||0)-6;
+            // Steel-specific dual-counter sync (mirrors the iron pattern used
+            // by the Large Station upgrade): blast-furnace-produced steel
+            // sitting in both supply and inventory is spent in lockstep.
+            if((p.supply?.steel||0)>0){
+              p.supply.steel=Math.max(0,(p.supply.steel||0)-6);
+            }
+            p.hasTerminal=true;
             playSound('construction_complete');
           }
           return;
