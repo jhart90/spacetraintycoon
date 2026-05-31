@@ -113,7 +113,15 @@
       "Bash(command -v gh)",
       "Bash(\"/c/Program Files/GitHub CLI/gh.exe\" --version)",
       "Bash(gh auth *)",
-      "Bash(gh pr *)"
+      "Bash(gh pr *)",
+      "Bash(node --check check.js)",
+      "Bash(command -v node)",
+      "Bash(curl -sv http://127.0.0.1:8765/index.html)",
+      "Bash(curl -sI http://127.0.0.1:8765/)",
+      "Bash(curl -sI http://127.0.0.1:62108/index.html)",
+      "Bash(netstat -ano)",
+      "Bash(taskkill //PID 21972 //F)",
+      "Bash(curl -sI http://127.0.0.1:8765/index.html)"
     ]
   },
   "hooks": {

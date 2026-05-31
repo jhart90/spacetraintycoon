@@ -1529,6 +1529,21 @@ let _aiSelConfirmBounds=null;
 let _aiSelBackBounds=null;
 let _totalPassengersDelivered=0; // cumulative passenger delivery count
 let missions=[]; // active/completed mission objects
+// Cached id-sets of every ACTIVE mission's target planet / target star. Refilled
+// by _recomputeMissionTargets() whenever the missions list mutates (accept,
+// complete, fail, restore). Read by the per-frame outline-ring draw code to
+// avoid rebuilding two `Set`s + .find() per draw.
+let _missionTargetPlanetIds=new Set();
+let _missionTargetStarIds=new Set();
+function _recomputeMissionTargets(){
+  _missionTargetPlanetIds.clear();
+  _missionTargetStarIds.clear();
+  for(const m of missions){
+    if(m.status!=='active') continue;
+    if(m.targetPlanetId!=null) _missionTargetPlanetIds.add(m.targetPlanetId);
+    if(m.targetStarId!=null) _missionTargetStarIds.add(m.targetStarId);
+  }
+}
 let pendingMissionIntros=[]; // {defId,readySd,targetPlanetId?,sourcePlanetId?} missions waiting to show new-mission intro popup
 let _gameStartSd=0;           // stardate at game init (used for startsAfter delays)
 let _newMissionAcceptBounds=null;
@@ -3498,6 +3513,7 @@ function _processCargoQueue(t, p){
         if(cargo==='gold')      p.goldDelivered     =(p.goldDelivered     ||0)+_cUU;
         if(cargo==='diamond')   p.diamondDelivered  =(p.diamondDelivered  ||0)+_cUU;
         p.demand[cargo]=Math.max(0,(p.demand[cargo]||0)-_cUU);
+        _bumpSupDem();
         if(!p.devLog) p.devLog=[];
         p.devLog.push({sd:stardate, value:DEV_CARGO_VALUES[cargo]||100, cargo});
         if(cargo==='passengers'){ if(!p.passengerDeliveries) p.passengerDeliveries=[]; p.passengerDeliveries.push(stardate); _totalPassengersDelivered++;
@@ -3661,7 +3677,7 @@ function _processCargoQueue(t, p){
     const cargo=CAR_CARGO_TYPE[t.cars[i]];
     const _cUL=CAR_CARGO_UNITS[t.cars[i]]||1.0;
     if(cargo&&p&&(p.supply?.[cargo]||0)>=_cUL){
-      p.supply[cargo]-=_cUL;
+      p.supply[cargo]-=_cUL; _bumpSupDem();
       // Iron-specific dual-counter sync: if foundry-produced iron is sitting
       // in both supply.iron and ironDelivered, loading it onto a train
       // removes it from inventory too (it's no longer spendable on local
@@ -3839,6 +3855,155 @@ function _drawCreditFloats(screenOnly=false){
 }
 
 // ── galaxy generation ────────────────────────────────────────
+// ── Nebula system ────────────────────────────────────────────
+// Carina-Nebula-inspired procedural backdrops. Each nebula is rendered once
+// at galaxy-build time into a 192×192 offscreen canvas (stack of 25–35
+// overlapping radial gradients + a handful of bright "knots" + a few dark
+// dust lanes) and then drawn every frame as a single translucent
+// drawImage. Five base colour bands: deep purple / red / pink / blue /
+// yellow. Per-nebula deterministic seed lets the bake regenerate identically
+// across save/load.
+const NEBULA_COLOR_PALETTE=[
+  {h:268, s:62, l:32}, // deep purple
+  {h:0,   s:70, l:30}, // deep red
+  {h:328, s:62, l:34}, // deep pink
+  {h:220, s:72, l:34}, // deep blue
+  {h:45,  s:62, l:36}, // deep yellow
+];
+
+function _genNebulaCanvas(seed, colorIdx){
+  const sz=128;
+  const c=document.createElement('canvas');
+  c.width=sz; c.height=sz;
+  const cctx=c.getContext('2d');
+  const rng=_mkRng(seed);
+  const base=NEBULA_COLOR_PALETTE[colorIdx%NEBULA_COLOR_PALETTE.length];
+
+  // Soft full-canvas wash so the gradient stack has a tinted backdrop.
+  {
+    const _w=cctx.createRadialGradient(sz*0.5,sz*0.5,0,sz*0.5,sz*0.5,sz*0.55);
+    _w.addColorStop(0,`hsla(${base.h},${base.s}%,${base.l+8}%,0.22)`);
+    _w.addColorStop(0.7,`hsla(${base.h},${base.s}%,${base.l}%,0.10)`);
+    _w.addColorStop(1,`hsla(${base.h},${base.s}%,${base.l-6}%,0)`);
+    cctx.fillStyle=_w; cctx.fillRect(0,0,sz,sz);
+  }
+
+  // Main cloud — 14-22 overlapping radial gradients of varying size, hue and
+  // brightness, biased toward the canvas centre so the silhouette is roughly
+  // blob-shaped with wispy edges.
+  const N=14+Math.floor(rng()*9);
+  for(let i=0;i<N;i++){
+    const cx=sz*(0.5+(rng()-0.5)*0.85);
+    const cy=sz*(0.5+(rng()-0.5)*0.85);
+    const rad=sz*(0.06+rng()*0.32);
+    const _h=base.h+(rng()-0.5)*36;
+    const _s=Math.max(20,Math.min(92,base.s+(rng()-0.5)*18));
+    const _l=Math.max(14,Math.min(60,base.l+(rng()-0.5)*18));
+    const al=0.16+rng()*0.30;
+    const g=cctx.createRadialGradient(cx,cy,0,cx,cy,rad);
+    g.addColorStop(0,`hsla(${_h},${_s}%,${_l+10}%,${al})`);
+    g.addColorStop(0.5,`hsla(${_h},${_s}%,${_l}%,${al*0.55})`);
+    g.addColorStop(1,`hsla(${_h},${_s}%,${_l-5}%,0)`);
+    cctx.fillStyle=g; cctx.fillRect(0,0,sz,sz);
+  }
+
+  // Bright "knots" — small additive hotspots for the star-forming feel.
+  const K=3+Math.floor(rng()*4);
+  cctx.globalCompositeOperation='lighter';
+  for(let i=0;i<K;i++){
+    const cx=sz*(0.25+rng()*0.50);
+    const cy=sz*(0.25+rng()*0.50);
+    const rad=sz*(0.025+rng()*0.09);
+    const _h=base.h+(rng()-0.5)*30;
+    const g=cctx.createRadialGradient(cx,cy,0,cx,cy,rad);
+    g.addColorStop(0,`hsla(${_h},75%,78%,0.55)`);
+    g.addColorStop(0.45,`hsla(${_h},80%,55%,0.20)`);
+    g.addColorStop(1,'hsla(0,0%,0%,0)');
+    cctx.fillStyle=g; cctx.fillRect(0,0,sz,sz);
+  }
+  cctx.globalCompositeOperation='source-over';
+
+  // Dark dust lanes — 1-3 elongated darkening strokes that carve through
+  // the bright cloud, mimicking Carina's central dust regions.
+  const L=1+Math.floor(rng()*3);
+  cctx.globalCompositeOperation='multiply';
+  for(let i=0;i<L;i++){
+    const cx=sz*(0.20+rng()*0.60);
+    const cy=sz*(0.20+rng()*0.60);
+    const rx=sz*(0.05+rng()*0.10);
+    const ry=sz*(0.18+rng()*0.22);
+    const rot=rng()*Math.PI*2;
+    cctx.save();
+    cctx.translate(cx,cy); cctx.rotate(rot); cctx.scale(rx/ry,1);
+    const g=cctx.createRadialGradient(0,0,0,0,0,ry);
+    g.addColorStop(0,'rgba(8,4,12,0.85)');
+    g.addColorStop(0.5,'rgba(20,15,30,0.55)');
+    g.addColorStop(1,'rgba(80,60,100,0)');
+    cctx.fillStyle=g; cctx.fillRect(-ry,-ry,ry*2,ry*2);
+    cctx.restore();
+  }
+  cctx.globalCompositeOperation='source-over';
+
+  return c;
+}
+
+function _genNebulas(origenPlanet){
+  const out=[];
+  const MIN_DIST=40000;
+  const MAX_DIST=320000;
+  let attempts=0;
+  while(out.length<12&&attempts<400){
+    attempts++;
+    const a=Math.random()*Math.PI*2;
+    const r=MIN_DIST+Math.random()*(MAX_DIST-MIN_DIST);
+    out.push({
+      x:origenPlanet.x+Math.cos(a)*r,
+      y:origenPlanet.y+Math.sin(a)*r,
+      // 7,500 – 25,000 AU half-extent on each axis ⇒ 15k – 50k AU full span
+      rx:Math.round(7500+Math.random()*17500),
+      ry:Math.round(7500+Math.random()*17500),
+      rot:Math.random()*Math.PI*2,
+      colorIdx:Math.floor(Math.random()*NEBULA_COLOR_PALETTE.length),
+      seed:(Math.floor(Math.random()*0x7fffffff)+1)>>>0,
+    });
+  }
+  return out;
+}
+
+// Lazy single-bake gate: at most ONE nebula canvas is generated per frame so
+// the first render after game start (or save load) isn't dominated by a 12 ×
+// (gradient stack) burst. Each bake takes ~30-80 ms; spreading them across
+// frames yields a smooth "fade-in" instead of a multi-frame stall.
+let _nebulaBakeBudget=1;
+function _drawNebulas(){
+  if(!galaxy||!galaxy.nebulas||!galaxy.nebulas.length) return;
+  ctx.save();
+  // Overall translucency so nebulas read as background atmosphere rather
+  // than opaque objects. Individual gradient stops inside the baked canvas
+  // are already partially translucent on top of this.
+  ctx.globalAlpha=0.55;
+  let _baked=0;
+  for(const n of galaxy.nebulas){
+    const [sx,sy]=w2s(n.x,n.y);
+    const sw=n.rx*2*cam.scale, sh=n.ry*2*cam.scale;
+    if(sw<2||sh<2) continue;                    // too small to be visible
+    // Bounding-circle cull (radius = half-diagonal of the rotated rect)
+    const bMax=Math.hypot(sw,sh)*0.5;
+    if(sx+bMax<0||sx-bMax>W||sy+bMax<0||sy-bMax>GH) continue;
+    if(!n._canvas){
+      if(_baked>=_nebulaBakeBudget) continue;   // defer to next frame
+      n._canvas=_genNebulaCanvas(n.seed,n.colorIdx);
+      _baked++;
+    }
+    ctx.save();
+    ctx.translate(sx,sy);
+    ctx.rotate(n.rot);
+    ctx.drawImage(n._canvas,-sw/2,-sh/2,sw,sh);
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
 function generateGalaxy(){
   const stars=[], planets=[];
   let pid=0;
@@ -4292,7 +4457,8 @@ function generateGalaxy(){
     }
   }
 
-  return {stars, planets, homeStarId, origenId, trainPlanetId: origenId, blackHoles: _blackHoles, starProxyMap, colonyTrainDestId:_colonyTrainDestId, faminePlanetId:_faminePlanetId, outbreakPlanetId:_outbreakPlanetId, bhResearchPlanetId:_bhResearchPlanetId, bhResearchPlanetIds:_bhResearchPlanetIds};
+  const _nebulas=_genNebulas(planets[origenId]);
+  return {stars, planets, homeStarId, origenId, trainPlanetId: origenId, blackHoles: _blackHoles, starProxyMap, colonyTrainDestId:_colonyTrainDestId, faminePlanetId:_faminePlanetId, outbreakPlanetId:_outbreakPlanetId, bhResearchPlanetId:_bhResearchPlanetId, bhResearchPlanetIds:_bhResearchPlanetIds, nebulas:_nebulas};
 }
 
 function makeGalaxyTrain(name, planetId, orbitTier, cars, isPlayer){
@@ -5139,11 +5305,6 @@ function _aiComputeNetWorth(){
   return Math.round(_aiCorp.credits+tv+_aiCorp.stationsBuilt*50000);
 }
 
-function _drawAICorpOverlay(ts){
-  // AI corp trains, route lines and orbit dashes are now rendered in the main train pass
-  // (before the fog layer), so fog correctly hides them in unvisited areas.
-  // This function is kept as a no-op to avoid breaking the call site.
-}
 
 function makeGStars(){
   gStars=[];
@@ -6482,7 +6643,7 @@ function drawTrainsPanel(){
         // Helper: format amount — floor to nearest whole unit (3.7 → 3).
         function _fmtAmt(v){ return Math.floor(v).toString(); }
         // Supply entries (sorted descending)
-        const supEntries=Object.entries(p.supply||{}).filter(([ct,v])=>v>=0.05&&(ct!=='gold'||p.goldRevealed)&&(ct!=='diamond'||p.diamondRevealed)).sort((a,b)=>b[1]-a[1]).slice(0,4);
+        const supEntries=_planetTop4(p,'supply');
         ctx.font='7px "Exo 2",sans-serif'; ctx.fillStyle='rgba(80,200,255,0.85)';
         for(let ei=0;ei<supEntries.length;ei++){
           const [ct,v]=supEntries[ei];
@@ -6490,7 +6651,7 @@ function drawTrainsPanel(){
         }
         if(!supEntries.length){ ctx.fillStyle='rgba(80,150,200,0.35)'; ctx.fillText('none',supX,rowY0); }
         // Demand entries (sorted descending)
-        const demEntries=Object.entries(p.demand||{}).filter(([ct,v])=>v>=0.05&&(ct!=='gold'||p.goldRevealed)&&(ct!=='diamond'||p.diamondRevealed)).sort((a,b)=>b[1]-a[1]).slice(0,4);
+        const demEntries=_planetTop4(p,'demand');
         ctx.font='7px "Exo 2",sans-serif'; ctx.fillStyle='rgba(255,170,60,0.85)';
         for(let ei=0;ei<demEntries.length;ei++){
           const [ct,v]=demEntries[ei];
@@ -6531,7 +6692,21 @@ function getSelWorldPos(){
   return [wx,wy];
 }
 
+// Accumulator so updateCargoSupplyDemand runs at most once per 0.01 SD instead
+// of every rendered frame. At 1× speed that's ~1 fire / 10 s; at 5× ~1 / 2 s;
+// at 10× ~1 / 1 s — still rapid enough that supply/demand bars step smoothly,
+// but eliminates the 60 Hz galaxy.planets + trains scan + active-Set rebuild
+// + per-planet cargo accumulation loops. UI-triggered "force update" calls
+// (passed dtSd=0 by click handlers in popup code) bypass the throttle so the
+// detail popup recomputes derived state immediately on open.
+let _csdTickAcc=0;
 function updateCargoSupplyDemand(dtSd){
+  if(dtSd>0){
+    _csdTickAcc+=dtSd;
+    if(_csdTickAcc<0.01) return;
+    dtSd=_csdTickAcc;
+    _csdTickAcc=0;
+  }
   // Only update planets that are economically active this frame:
   // stations, any planet on an active/queued route, the current train location,
   // and the currently-selected planet (so the detail popup stays live).
@@ -6601,7 +6776,7 @@ function updateCargoSupplyDemand(dtSd){
       if((p.demand.flowers||0)<1) p.demand.flowers=1;
     }
     // Iron Foundry demand: needs molten ore + water while storage isn't full
-    if((p.upgrades||[]).includes('iron_foundry')){
+    if(_pUpg(p,'iron_foundry')){
       const _fd=p.upgradeData?.iron_foundry;
       if(_fd){
         if((_fd.ore||0)<10 && (p.demand.molten_ore||0)<1) p.demand.molten_ore=1;
@@ -6609,6 +6784,9 @@ function updateCargoSupplyDemand(dtSd){
       }
     }
   }
+  // Mass mutation finished — bump the global supply/demand stamp so the
+  // Stations-tab top-4 cache rebuilds on next render.
+  _bumpSupDem();
 }
 
 // Accumulator so updatePlanetDevLevels runs at most once per 0.1 SD instead
@@ -6700,7 +6878,7 @@ function updatePlanetDevLevels(dtSd){
 
 function updateFoundries(dtG){
   for(const p of galaxy.planets){
-    if((p.upgrades||[]).includes('iron_foundry')&&p.upgradeData?.iron_foundry){
+    if(_pUpg(p,'iron_foundry')&&p.upgradeData?.iron_foundry){
       const _fd=p.upgradeData.iron_foundry;
       if((_fd.progress||0)>0){
         _fd.progress-=dtG;
@@ -6730,7 +6908,7 @@ function updateFoundries(dtG){
     // planet's supply pool (loadable onto trains) and the steelDelivered
     // inventory counter (spendable on local upgrades, badge in popup).
     // First production unlocks the Steel Car globally.
-    if((p.upgrades||[]).includes('blast_furnace')&&p.upgradeData?.blast_furnace){
+    if(_pUpg(p,'blast_furnace')&&p.upgradeData?.blast_furnace){
       const _bf=p.upgradeData.blast_furnace;
       if((_bf.progress||0)>0){
         _bf.progress-=dtG;
@@ -6762,7 +6940,7 @@ function updateFoundries(dtG){
     // iron/steel pattern: glass enters BOTH the planet's supply pool and the
     // glassDelivered inventory counter; first production unlocks the Glass
     // Car globally.
-    if((p.upgrades||[]).includes('glassworks')&&p.upgradeData?.glassworks){
+    if(_pUpg(p,'glassworks')&&p.upgradeData?.glassworks){
       const _gw=p.upgradeData.glassworks;
       if((_gw.progress||0)>0){
         _gw.progress-=dtG;
@@ -6784,7 +6962,7 @@ function updateFoundries(dtG){
     // Factory tick: assembles 1 iron + 1 oil → 1 machinery over 2× the foundry
     // smelt time. Mirrors the iron / steel / glass pattern: machinery enters
     // BOTH the planet's supply pool and the machineryDelivered inventory counter.
-    if((p.upgrades||[]).includes('factory')&&p.upgradeData?.factory){
+    if(_pUpg(p,'factory')&&p.upgradeData?.factory){
       const _ft=p.upgradeData.factory;
       if((_ft.progress||0)>0){
         _ft.progress-=dtG;
@@ -6804,7 +6982,7 @@ function updateFoundries(dtG){
     }
     // Bakery tick — single input (grain) → 1 unit of generic "cargo" added
     // to supply (NOT to any inventory counter). Same duration as iron smelting.
-    if((p.upgrades||[]).includes('bakery')&&p.upgradeData?.bakery){
+    if(_pUpg(p,'bakery')&&p.upgradeData?.bakery){
       const _bk=p.upgradeData.bakery;
       if((_bk.progress||0)>0){
         _bk.progress-=dtG;
@@ -6818,7 +6996,7 @@ function updateFoundries(dtG){
       }
     }
     // Juicery tick — mirror of the bakery on jungle planets, consuming fruit.
-    if((p.upgrades||[]).includes('juicery')&&p.upgradeData?.juicery){
+    if(_pUpg(p,'juicery')&&p.upgradeData?.juicery){
       const _jc=p.upgradeData.juicery;
       if((_jc.progress||0)>0){
         _jc.progress-=dtG;
@@ -6849,35 +7027,103 @@ function updatePlanetOrbits(dtG, dt){
 // Look up a planet by id, falling back to star-orbit proxies
 function _gp(id){ return galaxy&&(galaxy.planets[id]??galaxy.starProxyMap?.[id]); }
 
+// Global write stamp for p.supply / p.demand mutations. Renderer code that
+// wants the top-4 entries sorted (Stations tab) caches its result with the
+// stamp value seen at compute time; a stamp mismatch triggers a rebuild.
+// Worst case (every visible row rebuilds on every mutation event) is still
+// ~60× less work than the previous per-frame Object.entries().sort().
+let _supDemStamp=0;
+function _bumpSupDem(){ _supDemStamp++; }
+// Lazily compute the top-4 cargoes by amount on the supply or demand side of
+// the planet, filtered to >=0.05 and respecting gold/diamond revelation.
+function _planetTop4(p,side){
+  const _gen=p._top4Stamp;
+  if(_gen===_supDemStamp){
+    return side==='supply'?p._top4Supply:p._top4Demand;
+  }
+  const _src=p.supply||{}, _drc=p.demand||{};
+  const _gr=p.goldRevealed, _dr=p.diamondRevealed;
+  const _topN=(obj)=>{
+    let best=[null,null,null,null]; // 4 entries, descending by amt
+    for(const ct in obj){
+      const v=obj[ct]; if(v<0.05) continue;
+      if(ct==='gold'&&!_gr) continue;
+      if(ct==='diamond'&&!_dr) continue;
+      // Insertion sort into the 4-slot top list
+      for(let i=0;i<4;i++){
+        if(!best[i]||v>best[i][1]){
+          for(let j=3;j>i;j--) best[j]=best[j-1];
+          best[i]=[ct,v]; break;
+        }
+      }
+    }
+    const out=[]; for(let i=0;i<4;i++){ if(best[i]) out.push(best[i]); }
+    return out;
+  };
+  p._top4Supply=_topN(_src);
+  p._top4Demand=_topN(_drc);
+  p._top4Stamp=_supDemStamp;
+  return side==='supply'?p._top4Supply:p._top4Demand;
+}
+
+// Fast "does this planet have upgrade X built?" check. Builds a Set lazily
+// the first time it's queried per planet and re-uses it on every subsequent
+// call. The cache invalidates automatically when p.upgrades changes length
+// (it only ever appends, so length is a sufficient version stamp). Replaces
+// dozens of per-frame (p.upgrades||[]).includes('X') walks across the draw
+// + simulation hot paths.
+function _pUpg(p,id){
+  const arr=p.upgrades||[];
+  let s=p._upgSet;
+  if(!s||p._upgSetLen!==arr.length){
+    s=new Set(arr); p._upgSet=s; p._upgSetLen=arr.length;
+  }
+  return s.has(id);
+}
+
+// Per-tick cache of which orbits are occupied at which planets, so
+// getAvailableOrbitTier doesn't have to do a full trains[] .some() scan
+// for every queried tier. Built lazily; invalidated by setting to null at
+// the start of each frame's update pass.
+let _occOrbitMap=null;
+function _invalidateOccOrbit(){ _occOrbitMap=null; }
+function _buildOccOrbitMap(){
+  const m=new Map();
+  const _add=(pid,tier,t)=>{
+    if(pid==null||!tier) return;
+    let e=m.get(pid);
+    if(!e){ e={LOW:null,MED:null,HIGH:null}; m.set(pid,e); }
+    if(!e[tier]) e[tier]=t;
+  };
+  for(let i=0;i<trains.length;i++){
+    const t=trains[i]; if(!t) continue;
+    const _ph=t.route?.phase;
+    const _occHere=!t.route||_ph==='orbit'||_ph==='waiting';
+    if(_occHere) _add(t.planetId,t.orbitTier,t);
+    if(_ph==='transit'){
+      const _dest=t.route.stops[t.route.toIdx];
+      _add(_dest,t.route.arrivalOrbitTier,t);
+    }
+  }
+  _occOrbitMap=m;
+}
+
 function getAvailableOrbitTier(planetId, excludeTrain){
   const planet=_gp(planetId);
   if(!planet) return null;
+  if(!_occOrbitMap) _buildOccOrbitMap();
+  const _occ=_occOrbitMap.get(planetId);
+  const _free=tier=>{ const t=_occ?_occ[tier]:null; return !t||t===excludeTrain; };
   // Star-orbit proxies have inner (LOW) and outer (MED) orbits — check inner first
   if(planet.isStarProxy){
-    for(const [tier,orbitR] of [['LOW',planet.starOrbitR],['MED',planet.starOrbitROuter]]){
-      const occupied=trains.some(t=>{
-        if(t===excludeTrain) return false;
-        if(t.planetId===planetId&&t.orbitTier===tier&&(!t.route||t.route.phase==='orbit'||t.route.phase==='waiting')) return true;
-        if(t.route&&t.route.phase==='transit'&&t.route.stops[t.route.toIdx]===planetId&&t.route.arrivalOrbitTier===tier) return true;
-        return false;
-      });
-      if(!occupied) return {tier,orbitR};
-    }
-    return null; // both star orbits occupied
+    if(_free('LOW')) return {tier:'LOW',orbitR:planet.starOrbitR};
+    if(_free('MED')) return {tier:'MED',orbitR:planet.starOrbitROuter};
+    return null;
   }
-  for(const tier of ['LOW','MED','HIGH']){
-    const orbitR=ORBIT_TIERS[planet.size][tier];
-    const occupied=trains.some(t=>{
-      if(t===excludeTrain) return false;
-      // (a) train physically in this orbit
-      if(t.planetId===planetId&&t.orbitTier===tier&&(!t.route||t.route.phase==='orbit'||t.route.phase==='waiting')) return true;
-      // (b) train in transit with this orbit reserved as destination
-      if(t.route&&t.route.phase==='transit'&&t.route.stops[t.route.toIdx]===planetId&&t.route.arrivalOrbitTier===tier) return true;
-      return false;
-    });
-    if(!occupied) return {tier,orbitR};
-  }
-  return null; // all orbits occupied
+  if(_free('LOW')) return {tier:'LOW',orbitR:ORBIT_TIERS[planet.size]['LOW']};
+  if(_free('MED')) return {tier:'MED',orbitR:ORBIT_TIERS[planet.size]['MED']};
+  if(_free('HIGH')) return {tier:'HIGH',orbitR:ORBIT_TIERS[planet.size]['HIGH']};
+  return null;
 }
 
 // Returns the departure angle — the orbit angle at the external tangent touch point.
@@ -7337,7 +7583,7 @@ function updateTrain(t, dt){
       t.planetId=r.stops[r.toIdx];
       t._angleAcc=0; // reset orbit accumulator for new planet
       // Track route segment completion
-      if(t.isPlayer){ const sk=r.stops[r.fromIdx]+'_'+r.stops[r.toIdx]; t.routeCounts[sk]=(t.routeCounts[sk]||0)+1; }
+      if(t.isPlayer){ const sk=r.stops[r.fromIdx]+'_'+r.stops[r.toIdx]; t.routeCounts[sk]=(t.routeCounts[sk]||0)+1; t._segmentCount=(t._segmentCount||0)+1; }
       t.orbitR=r.arrivalOrbitR; t.orbitTier=r.arrivalOrbitTier;
       t.orbitGap=CAR_ORB_GAP/t.orbitR;
       t.angle=engineAngleB;
@@ -7576,6 +7822,10 @@ function trackOrbit(t){
   t._angleAcc-=n*Math.PI*2;
   const pid=t.planetId;
   t.orbitCounts[pid]=(t.orbitCounts[pid]||0)+n;
+  // Maintain cached top-orbited entry so the Trains popup doesn't have to do
+  // Object.entries(orbitCounts).sort() per row per frame.
+  const _newC=t.orbitCounts[pid];
+  if(!t._topOrbited||_newC>t._topOrbited.cnt) t._topOrbited={pid,cnt:_newC};
   const ti=trains.indexOf(t);
   if(!planetOrbitCounts[pid]) planetOrbitCounts[pid]={};
   planetOrbitCounts[pid][ti]=(planetOrbitCounts[pid][ti]||0)+n;
@@ -7591,8 +7841,18 @@ function trackOrbit(t){
 // Note: maintenance repair is now applied immediately on orbit entry in the
 // _cargoCheckedThisStop block, not here in trackOrbit.
 
-function updateFog(){
+// Accumulator so updateFog samples player car positions at most once per
+// 0.01 SD instead of every rendered frame. The fog reveal radius (FOG_REVEAL_R
+// = 5000 AU) is far larger than the distance any train travels in 0.01 SD
+// even at 10× game speed, so the reveal coverage is visually identical while
+// eliminating ~50 getTrainCarPos calls (each one a computeLiveTangent +
+// trig) + Set hashing every frame at mid-game scale.
+let _fogTickAcc=0;
+function updateFog(dtSd){
   if(!galaxy) return;
+  _fogTickAcc+=(dtSd||0);
+  if(_fogTickAcc<0.01) return;
+  _fogTickAcc=0;
   for(let ti=0;ti<trains.length;ti++){
     const t=trains[ti];
     if(!t.isPlayer) continue;
@@ -9501,7 +9761,7 @@ function updateMissions(dtSd){
     const def=MISSION_DEFS.find(d=>d.id===m.id); if(!def) continue;
     // Deadline failure check — timed missions expire if the deadline passes
     if(m.deadline&&stardate>m.deadline){
-      m.status='failed'; m.failedSd=stardate;
+      m.status='failed'; m.failedSd=stardate; _recomputeMissionTargets();
       _chatMsg('MISSION FAILED: '+m.name.toUpperCase()+' — TIME RAN OUT','rgba(255,80,80,1)');
       continue;
     }
@@ -9514,7 +9774,7 @@ function updateMissions(dtSd){
       if(!obj.done) allDone=false;
     }
     if(allDone){
-      m.status='completed'; m.completedSd=stardate;
+      m.status='completed'; m.completedSd=stardate; _recomputeMissionTargets();
       _newsLog('mission_complete',{missionId:m.id,missionName:m.name});
       if(m.reward){ credits=Math.min(credits+m.reward,999999999); pendingCreditDeltas.push({timer:60,amount:m.reward}); }
       _chatMsg('MISSION COMPLETE: '+m.name.toUpperCase(),'rgba(255,220,80,1)');
@@ -12085,13 +12345,13 @@ function drawPlanetDetailPopup(){
     if(p.hasGold&&p.goldRevealed) _drawGoldPatch(pcx,pcy,pr,p.goldPatch);
     if(p.hasDiamond&&p.diamondRevealed) _drawDiamondPatch(pcx,pcy,pr,p.diamondPatch);
     if(p.hasStation) drawPlanetStation(pcx,pcy,pr,p.stationAngle||0,pr,p.isAlienRelic,p.hasLargeStation||false,null,p.hasTerminal||false);
-    if((p.upgrades||[]).includes('iron_foundry')) drawFoundryBuilding(pcx,pcy,pr,p.foundryAngle||Math.PI*0.75,pr,(p.upgradeData?.iron_foundry?.progress||0)>0,'iron_foundry');
-    if((p.upgrades||[]).includes('blast_furnace')) drawFoundryBuilding(pcx,pcy,pr,p.blastFurnaceAngle||Math.PI*1.4,pr,(p.upgradeData?.blast_furnace?.progress||0)>0,'blast_furnace');
-    if((p.upgrades||[]).includes('glassworks')) drawFoundryBuilding(pcx,pcy,pr,p.glassworksAngle||Math.PI*1.6,pr,(p.upgradeData?.glassworks?.progress||0)>0,'glassworks');
-    if((p.upgrades||[]).includes('factory')) drawFoundryBuilding(pcx,pcy,pr,p.factoryAngle||Math.PI*0.55,pr,(p.upgradeData?.factory?.progress||0)>0,'factory');
-    if((p.upgrades||[]).includes('bakery')) drawFoundryBuilding(pcx,pcy,pr,p.bakeryAngle||Math.PI*0.95,pr,(p.upgradeData?.bakery?.progress||0)>0,'bakery');
-    if((p.upgrades||[]).includes('juicery')) drawFoundryBuilding(pcx,pcy,pr,p.juiceryAngle||Math.PI*0.95,pr,(p.upgradeData?.juicery?.progress||0)>0,'juicery');
-    {const _hasGr=(p.upgrades||[]).includes('granary'),_hasFm=(p.upgrades||[]).includes('farm'),_hasOr=(p.upgrades||[]).includes('orchard');
+    if(_pUpg(p,'iron_foundry')) drawFoundryBuilding(pcx,pcy,pr,p.foundryAngle||Math.PI*0.75,pr,(p.upgradeData?.iron_foundry?.progress||0)>0,'iron_foundry');
+    if(_pUpg(p,'blast_furnace')) drawFoundryBuilding(pcx,pcy,pr,p.blastFurnaceAngle||Math.PI*1.4,pr,(p.upgradeData?.blast_furnace?.progress||0)>0,'blast_furnace');
+    if(_pUpg(p,'glassworks')) drawFoundryBuilding(pcx,pcy,pr,p.glassworksAngle||Math.PI*1.6,pr,(p.upgradeData?.glassworks?.progress||0)>0,'glassworks');
+    if(_pUpg(p,'factory')) drawFoundryBuilding(pcx,pcy,pr,p.factoryAngle||Math.PI*0.55,pr,(p.upgradeData?.factory?.progress||0)>0,'factory');
+    if(_pUpg(p,'bakery')) drawFoundryBuilding(pcx,pcy,pr,p.bakeryAngle||Math.PI*0.95,pr,(p.upgradeData?.bakery?.progress||0)>0,'bakery');
+    if(_pUpg(p,'juicery')) drawFoundryBuilding(pcx,pcy,pr,p.juiceryAngle||Math.PI*0.95,pr,(p.upgradeData?.juicery?.progress||0)>0,'juicery');
+    {const _hasGr=_pUpg(p,'granary'),_hasFm=_pUpg(p,'farm'),_hasOr=_pUpg(p,'orchard');
     const _ba=p.agriStructAngle||Math.PI*0.95;
     const _structs=[_hasGr&&'granary',_hasFm&&'farm',_hasOr&&'orchard'].filter(Boolean);
     // In the popup ssz===pr===sr, so spread=1.15 gives adequate gap for doubled orchard size.
@@ -13224,13 +13484,12 @@ function drawTrainsPopup(){
     const sy2=ry+114;
     ctx.fillStyle='rgba(180,190,210,0.8)';
     ctx.fillText('Dist: '+Math.round(train.totalDist||0).toLocaleString()+' AU',px+10,sy2);
-    const oc=Object.entries(train.orbitCounts||{}).sort((a,b)=>b[1]-a[1]);
-    if(oc.length>0){
-      const [topP,topC]=oc[0];
-      ctx.fillText('Most orbited: '+(galaxy.planets[topP]?.name||'?')+' ('+topC+')',px+180,sy2);
+    // Cached top-orbited / segment-count entries — see trackOrbit + route advance.
+    const _to=train._topOrbited;
+    if(_to&&_to.cnt>0){
+      ctx.fillText('Most orbited: '+(galaxy.planets[_to.pid]?.name||'?')+' ('+_to.cnt+')',px+180,sy2);
     }
-    const rc=Object.values(train.routeCounts||{}).reduce((a,b2)=>a+b2,0);
-    ctx.fillText('Segments: '+rc,px+10,sy2+14);
+    ctx.fillText('Segments: '+(train._segmentCount||0),px+10,sy2+14);
     // Speed bar if in transit
     const rph=train.route?train.route.phase:null;
     if(rph==='transit'&&train.route){
@@ -13598,6 +13857,11 @@ function drawGalaxy(ts,dt){
 
   ctx.save(); ctx.beginPath(); ctx.rect(0,0,W,GH); ctx.clip();
 
+  // Nebulas — drawn after parallax background stars but before everything
+  // else in world coords (in-galaxy stars, orbits, planets, trains, etc.)
+  // so they read as a deep-space atmospheric backdrop.
+  _drawNebulas();
+
   const origen=galaxy.planets[galaxy.trainPlanetId];
 
   // Stars (drawn before planets so planets appear in front)
@@ -13712,17 +13976,25 @@ function drawGalaxy(ts,dt){
       p.hasTerminal?ORBIT_TIERS[p.size]['LOW']*cam.scale:null
     );
     if(p.aiHasStation){ctx.save();ctx.filter='sepia(1) hue-rotate(-10deg) saturate(2.5) brightness(1.1)';drawPlanetStation(sx,sy,sr,(p.aiStationAngle!==undefined?p.aiStationAngle:Math.PI*0.65),SIZE_R['M']*cam.scale,false,false,null);ctx.filter='none';ctx.restore();}
-    if((p.upgrades||[]).includes('iron_foundry')&&sr>2) drawFoundryBuilding(sx,sy,sr,p.foundryAngle||Math.PI*0.75,SIZE_R['M']*cam.scale,(p.upgradeData?.iron_foundry?.progress||0)>0,'iron_foundry');
-    if((p.upgrades||[]).includes('blast_furnace')&&sr>2) drawFoundryBuilding(sx,sy,sr,p.blastFurnaceAngle||Math.PI*1.4,SIZE_R['M']*cam.scale,(p.upgradeData?.blast_furnace?.progress||0)>0,'blast_furnace');
-    if((p.upgrades||[]).includes('glassworks')&&sr>2) drawFoundryBuilding(sx,sy,sr,p.glassworksAngle||Math.PI*1.6,SIZE_R['M']*cam.scale,(p.upgradeData?.glassworks?.progress||0)>0,'glassworks');
-    if((p.upgrades||[]).includes('factory')&&sr>2) drawFoundryBuilding(sx,sy,sr,p.factoryAngle||Math.PI*0.55,SIZE_R['M']*cam.scale,(p.upgradeData?.factory?.progress||0)>0,'factory');
-    if((p.upgrades||[]).includes('bakery')&&sr>2) drawFoundryBuilding(sx,sy,sr,p.bakeryAngle||Math.PI*0.95,SIZE_R['M']*cam.scale,(p.upgradeData?.bakery?.progress||0)>0,'bakery');
-    if((p.upgrades||[]).includes('juicery')&&sr>2) drawFoundryBuilding(sx,sy,sr,p.juiceryAngle||Math.PI*0.95,SIZE_R['M']*cam.scale,(p.upgradeData?.juicery?.progress||0)>0,'juicery');
-    if(sr>2){const _hasGr2=(p.upgrades||[]).includes('granary'),_hasFm2=(p.upgrades||[]).includes('farm'),_hasOr2=(p.upgrades||[]).includes('orchard');
+    if(sr>2){
+      // Bulk structure draw: gate the whole block on sr>2, then do a single
+      // upgrade-set lookup pass instead of six independent .includes() walks.
+      if(_pUpg(p,'iron_foundry')) drawFoundryBuilding(sx,sy,sr,p.foundryAngle||Math.PI*0.75,SIZE_R['M']*cam.scale,(p.upgradeData?.iron_foundry?.progress||0)>0,'iron_foundry');
+      if(_pUpg(p,'blast_furnace')) drawFoundryBuilding(sx,sy,sr,p.blastFurnaceAngle||Math.PI*1.4,SIZE_R['M']*cam.scale,(p.upgradeData?.blast_furnace?.progress||0)>0,'blast_furnace');
+      if(_pUpg(p,'glassworks')) drawFoundryBuilding(sx,sy,sr,p.glassworksAngle||Math.PI*1.6,SIZE_R['M']*cam.scale,(p.upgradeData?.glassworks?.progress||0)>0,'glassworks');
+      if(_pUpg(p,'factory')) drawFoundryBuilding(sx,sy,sr,p.factoryAngle||Math.PI*0.55,SIZE_R['M']*cam.scale,(p.upgradeData?.factory?.progress||0)>0,'factory');
+      if(_pUpg(p,'bakery')) drawFoundryBuilding(sx,sy,sr,p.bakeryAngle||Math.PI*0.95,SIZE_R['M']*cam.scale,(p.upgradeData?.bakery?.progress||0)>0,'bakery');
+      if(_pUpg(p,'juicery')) drawFoundryBuilding(sx,sy,sr,p.juiceryAngle||Math.PI*0.95,SIZE_R['M']*cam.scale,(p.upgradeData?.juicery?.progress||0)>0,'juicery');
+    }
+    if(sr>2){const _hasGr2=_pUpg(p,'granary'),_hasFm2=_pUpg(p,'farm'),_hasOr2=_pUpg(p,'orchard');
     const _ba2=p.agriStructAngle||Math.PI*0.95; let _ssz2=SIZE_R['M']*cam.scale;
     // XS/S planets: cap building scale so doubled-orchard structures don't overflow the planet
     if(p.size==='XS'||p.size==='S') _ssz2=Math.min(_ssz2,sr*0.90);
-    const _s2=[_hasGr2&&'granary',_hasFm2&&'farm',_hasOr2&&'orchard'].filter(Boolean);
+    // Inline-build the structures list without the per-frame .filter(Boolean) allocation.
+    const _s2=[];
+    if(_hasGr2) _s2.push('granary');
+    if(_hasFm2) _s2.push('farm');
+    if(_hasOr2) _s2.push('orchard');
     // Adaptive spread: scaled for doubled orchard size — tighter on large planets, wider on small.
     const _sSpread2=Math.min(1.15,Math.max(0.15,_ssz2/sr*1.30));
     const _sOff2=[-_sSpread2,0,_sSpread2]; const _sDraw2=(id,ang)=>{if(id==='granary')drawGranaryBuilding(sx,sy,sr,ang,_ssz2);else if(id==='farm')drawFarmBuilding(sx,sy,sr,ang,_ssz2);else drawOrchardBuilding(sx,sy,sr,ang,_ssz2);};
@@ -14011,15 +14283,10 @@ function drawGalaxy(ts,dt){
   // Fog of war overlay (before panel so panel draws on top)
   if(fogEnabled) drawFog();
 
-  // AI Corp route lines + orbit arcs — drawn after fog so they show through it
-  if(_aiCorp) _drawAICorpOverlay(ts);
-
   // Mission objective outlines: pulsing green rings around any active mission's target planet/star (visible through fog)
   {const _moPulse=0.55+0.45*Math.sin(ts*0.0025);
-  // Collect unique target planet IDs from all active missions
-  const _moTgtPlanets=new Set();
-  missions.forEach(m=>{if(m.status==='active'&&m.targetPlanetId!=null) _moTgtPlanets.add(m.targetPlanetId);});
-  _moTgtPlanets.forEach(pid=>{
+  // Target id sets are pre-cached by _recomputeMissionTargets() — no per-frame allocation.
+  _missionTargetPlanetIds.forEach(pid=>{
     const _moP=_gp(pid);
     if(_moP){
       const [_moSx,_moSy]=w2s(_moP.x,_moP.y), _moSr=_moP.radius*cam.scale;
@@ -14037,11 +14304,9 @@ function drawGalaxy(ts,dt){
       }
     }
   });
-  // Collect unique target star IDs from all active missions (for future star-objective missions)
-  const _moTgtStars=new Set();
-  missions.forEach(m=>{if(m.status==='active'&&m.targetStarId!=null) _moTgtStars.add(m.targetStarId);});
-  _moTgtStars.forEach(sid=>{
-    const _moS=galaxy.stars.find(s=>s.id===sid);
+  // Star target outlines — galaxy.stars is indexed by id, so a direct lookup is O(1).
+  _missionTargetStarIds.forEach(sid=>{
+    const _moS=galaxy.stars[sid];
     if(_moS){
       const [_moSx,_moSy]=w2s(_moS.x,_moS.y), _moSr=_moS.radius*cam.scale;
       if(!(_moSx+_moSr+40<-20||_moSx-_moSr-40>W+20||_moSy+_moSr+40<-20||_moSy-_moSr-40>GH+20)){
@@ -16021,6 +16286,7 @@ canvas.addEventListener('mouseup',e=>{
               sourcePlanetId:popupState.sourcePlanetId??null,
               targetPlanetId:popupState.targetPlanetId??null,
               hazmatIncineratedSnapshot:_totalHazmatIncinerated});
+            _recomputeMissionTargets();
             _chatMsg('MISSION STARTED: '+def.name.toUpperCase(),'rgba(255,220,80,1)');
             // Show [M] missions callout tip when the tutorial mission is accepted
             if(def.id==='visit_planet') _missionTipStartMs=Date.now();
@@ -17161,7 +17427,7 @@ function _buildSaveObject(){
     _totalPassengersDelivered, _totalHazmatIncinerated,
     trainyard, financeLedger:_trimmedFinance, _ledgerSummary:_builtLedgerSummary, purchaseLedger, corpValueHistory, _corp, _ceoHireCandidates,
     creditSnapshots, lastCreditSnapshotSd,
-    galaxy:{homeStarId:galaxy.homeStarId, origenId:galaxy.origenId, blackHoles:galaxy.blackHoles, colonyTrainDestId:galaxy.colonyTrainDestId??null, faminePlanetId:galaxy.faminePlanetId??null, outbreakPlanetId:galaxy.outbreakPlanetId??null, bhResearchPlanetId:galaxy.bhResearchPlanetId??null, bhResearchPlanetIds:galaxy.bhResearchPlanetIds??[], stars:saveStars, planets:savePlanets},
+    galaxy:{homeStarId:galaxy.homeStarId, origenId:galaxy.origenId, blackHoles:galaxy.blackHoles, colonyTrainDestId:galaxy.colonyTrainDestId??null, faminePlanetId:galaxy.faminePlanetId??null, outbreakPlanetId:galaxy.outbreakPlanetId??null, bhResearchPlanetId:galaxy.bhResearchPlanetId??null, bhResearchPlanetIds:galaxy.bhResearchPlanetIds??[], stars:saveStars, planets:savePlanets, nebulas:(galaxy.nebulas||[]).map(n=>({x:_r5(n.x),y:_r5(n.y),rx:n.rx,ry:n.ry,rot:_r5(n.rot),colorIdx:n.colorIdx,seed:n.seed}))},
     trains:saveTrains,
     visitedPlanetIds:[...visitedPlanetIds],
     discoveredPlanetIds:[...discoveredPlanetIds],
@@ -17238,7 +17504,8 @@ function _restoreFromSave(save){
     _pstar.proxyPlanetId=_proxyId;
   }
   galaxy={stars, planets, homeStarId:sg.homeStarId, origenId:sg.origenId,
-          trainPlanetId:sg.origenId, blackHoles:sg.blackHoles??[], starProxyMap, colonyTrainDestId:sg.colonyTrainDestId??null, faminePlanetId:sg.faminePlanetId??null, outbreakPlanetId:sg.outbreakPlanetId??null, bhResearchPlanetId:sg.bhResearchPlanetId??null, bhResearchPlanetIds:sg.bhResearchPlanetIds??[]};
+          trainPlanetId:sg.origenId, blackHoles:sg.blackHoles??[], starProxyMap, colonyTrainDestId:sg.colonyTrainDestId??null, faminePlanetId:sg.faminePlanetId??null, outbreakPlanetId:sg.outbreakPlanetId??null, bhResearchPlanetId:sg.bhResearchPlanetId??null, bhResearchPlanetIds:sg.bhResearchPlanetIds??[],
+          nebulas:(sg.nebulas||[]).map(n=>({...n, _canvas:null}))};
   makeGStars();
   // Restore flat state
   stardate=save.stardate; credits=save.credits; corpName=save.corpName||'Space Tycoon Corporation';
@@ -17304,6 +17571,7 @@ function _restoreFromSave(save){
     const {visitedSnapshot,...rest}=m;
     return {...rest, visitedSnapshot:new Set(visitedSnapshot||[])};
   });
+  _recomputeMissionTargets();
   pendingMissionIntros=save.pendingMissionIntros||[];
   pendingGoldDiscoveries=save.pendingGoldDiscoveries||[];
   pendingDiamondDiscoveries=save.pendingDiamondDiscoveries||[];
@@ -17340,6 +17608,18 @@ function _restoreFromSave(save){
     queuedRoute:t.queuedRoute||null,
     _detourPermanentRoute:t._detourPermanentRoute||null,
   }));
+  // Seed cached top-orbited + segment-count for each restored train so the
+  // Trains popup renders without per-frame Object.entries().sort() / .reduce().
+  for(const _t of trains){
+    if(_t.orbitCounts){
+      let _bP=null,_bC=0;
+      for(const _pid in _t.orbitCounts){ const _c=_t.orbitCounts[_pid]; if(_c>_bC){_bC=_c;_bP=+_pid;} }
+      _t._topOrbited=_bP!=null?{pid:_bP,cnt:_bC}:null;
+    } else _t._topOrbited=null;
+    let _sc=0;
+    if(_t.routeCounts){ for(const _k in _t.routeCounts) _sc+=_t.routeCounts[_k]||0; }
+    _t._segmentCount=_sc;
+  }
   // Restore routeStops (UI route selection)
   routeStops=(save.routeStops||[]).map(r=>_gp(r.id)).filter(Boolean);
   // Restore selection from the saved id-based encoding. Falls back to the
@@ -17670,7 +17950,7 @@ function startGame(){
   _classJEngineUnlocked=false; _classREngineUnlocked=false; _N700EngineUnlocked=false;
   _steelProdLog=[]; _steelMissionTimerMs=0;
   _sensorUpgradeActive=false; _stationCostDiscount=0; _galaxyCensusTimerMs=0; _sandstormCheckSd=0; _bhResearchCheckSd=0;
-  missions=[];
+  missions=[]; _recomputeMissionTargets();
   _gameStartSd=stardate;
   pendingMissionIntros=MISSION_DEFS.filter(def=>!def.prerequisite&&def.id!=='build_foundry'&&def.id!=='dispose_hazmat'&&def.id!=='lost_colony'&&def.id!=='seeking_home'&&def.id!=='create_route'&&def.id!=='find_molten_ore'&&def.id!=='research_royal_car'&&def.id!=='colony_train'&&def.id!=='spread_the_seed'&&def.id!=='famine'&&def.id!=='outbreak'&&def.id!=='stellar_cartography'&&def.id!=='galaxy_census'&&def.id!=='sandstorm_relief'&&def.id!=='bh_research'&&def.id!=='design_better_train').map(def=>({defId:def.id,readySd:_gameStartSd+(def.startsAfter||0)}));
   financeLedger=[]; _ledgerSummary={totalRevenue:0,totalCost:0,totalInterest:0}; purchaseLedger=[]; corpValueHistory={}; _financeScrollY=0; _financeBreakdown='stardate'; _financeDropdownOpen=false;
@@ -18223,10 +18503,10 @@ function loop(ts){
   } else if(gs==='aiselect'){
     drawAISelect(ts);
   } else if(gs==='fadein'){
-    for(const t of trains) updateTrain(t,dtG);
+    _invalidateOccOrbit(); for(const t of trains) updateTrain(t,dtG);
     updateAICorp(dtG);
     updatePlanetOrbits(dtG,dt);
-    updateFog();
+    updateFog(_dtSd);
     _updateCargoParticles(dt);
     _updateCreditFloats(dt);
     for(let _pi=pendingCreditDeltas.length-1;_pi>=0;_pi--){pendingCreditDeltas[_pi].timer-=dt;if(pendingCreditDeltas[_pi].timer<=0){creditDelta+=pendingCreditDeltas[_pi].amount;pendingCreditDeltas.splice(_pi,1);}}
@@ -18237,10 +18517,10 @@ function loop(ts){
     ctx.fillStyle=`rgba(0,0,0,${fadeA})`; ctx.fillRect(0,0,W,H);
     if(fadeA<=0) gs='galaxy';
   } else if(gs==='galaxy'){
-    for(const t of trains) updateTrain(t,dtG);
+    _invalidateOccOrbit(); for(const t of trains) updateTrain(t,dtG);
     updateAICorp(dtG);
     updatePlanetOrbits(dtG,dt);
-    updateFog();
+    updateFog(_dtSd);
     _updateCargoParticles(dt);
     _updateCreditFloats(dt);
     for(let _pi=pendingCreditDeltas.length-1;_pi>=0;_pi--){pendingCreditDeltas[_pi].timer-=dt;if(pendingCreditDeltas[_pi].timer<=0){creditDelta+=pendingCreditDeltas[_pi].amount;pendingCreditDeltas.splice(_pi,1);}}
@@ -18328,6 +18608,7 @@ function loop(ts){
                 ironUnlockedSnapshot:_ironCarUnlocked,
                 sourcePlanetId:_nmiE.sourcePlanetId??null,targetPlanetId:_nmiE.targetPlanetId??null,
                 hazmatIncineratedSnapshot:_totalHazmatIncinerated});
+              _recomputeMissionTargets();
               _chatMsg('MISSION STARTED: '+_nmDef.name.toUpperCase(),'rgba(255,220,80,1)');
               if(_nmDef.id==='visit_planet') _missionTipStartMs=Date.now();
             }
