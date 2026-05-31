@@ -215,6 +215,39 @@ const SIZE_R   = {XS:24, S:48, M:96, L:192, XL:288, XXL:432};
 const WORLD_W  = 204800;
 const WORLD_H  = 153600;
 
+// ── Google Analytics custom-event helper ─────────────────────────────────
+// Forwards in-game events to the host page's GA4 tag via `window.gtag()`.
+// Silently no-ops when gtag isn't present (local dev, ad-blocked sessions,
+// file:// URLs) so the game keeps running. Event names follow GA4 conventions
+// (lowercase letters/digits/underscores, ≤40 chars). Custom params are
+// arbitrary; register them as Custom Dimensions in GA4 → Admin → Custom
+// Definitions if you want to filter/group by them in standard reports
+// (Realtime + DebugView work without registration).
+//
+// Auto-injected param on EVERY event:
+//   session_seconds            integer real-time seconds since the script
+//                              first evaluated (= title screen load, i.e.
+//                              the moment the page first rendered).
+//
+// Events sent (extra params in {parens}):
+//   station_built              {biome, planet, sd, credits}
+//   station_upgraded_large     {biome, planet, sd}
+//   station_upgraded_terminal  {biome, planet, sd}
+//   train_built                {engine, car_count, total_cost, sd}
+//   car_unlocked               {car_type, cargo, sd}
+//   mission_complete           {mission_id, mission_name, sd}
+//   engine_unlocked            {engine, sd}
+//   game_start                 {corp, ai_difficulty, sd}
+const _gaSessionStartMs=Date.now();
+function _ga(name, params){
+  try {
+    if(typeof gtag!=='function') return;
+    const _p=params?Object.assign({},params):{};
+    _p.session_seconds=Math.floor((Date.now()-_gaSessionStartMs)/1000);
+    gtag('event', name, _p);
+  } catch(_) {}
+}
+
 // Zoom: min = 65536 world-units wide view, max = 512 wide
 const MIN_SC   = W / 65536;
 const MAX_SC   = W / 512;
@@ -7080,10 +7113,10 @@ function updateFoundries(dtG){
           // lockstep for foundry-origin iron (see _processCargoQueue + the
           // player/AI large-station purchase).
           p.ironDelivered=(p.ironDelivered||0)+1;
-          if(!_ironCarUnlocked){ _ironCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_iron',displayName:'Iron Car'}); _chatMsg('IRON CAR UNLOCKED','rgba(200,210,235,1)'); }
+          if(!_ironCarUnlocked){ _ironCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_iron',displayName:'Iron Car'}); _chatMsg('IRON CAR UNLOCKED','rgba(200,210,235,1)'); _ga('car_unlocked',{car_type:'iron', cargo:'iron', sd:Math.floor(stardate)}); }
           p.supply.hazmat=Math.min(CARGO_MAX_SUPPLY,(p.supply.hazmat||0)+0.5);
           _fd.hazmatTotal=(_fd.hazmatTotal||0)+0.5; // cumulative produced, unaffected by consumption
-          if(!_hazmatCarUnlocked&&_fd.hazmatTotal>=1){ _hazmatCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_hazmat',displayName:'Hazmat Car'}); _chatMsg('HAZMAT CAR UNLOCKED','rgba(255,165,40,1)'); }
+          if(!_hazmatCarUnlocked&&_fd.hazmatTotal>=1){ _hazmatCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_hazmat',displayName:'Hazmat Car'}); _chatMsg('HAZMAT CAR UNLOCKED','rgba(255,165,40,1)'); _ga('car_unlocked',{car_type:'hazmat', cargo:'hazmat', sd:Math.floor(stardate)}); }
         }
       } else if((_fd.ore||0)>=1&&(_fd.water||0)>=1){
         _fd.progress=FOUNDRY_PROD_TIME;
@@ -7111,6 +7144,7 @@ function updateFoundries(dtG){
             _steelCarUnlocked=true;
             pendingCarUnlocks.push({sprite:'car_steel',displayName:'Steel Car'});
             _chatMsg('STEEL CAR UNLOCKED','rgba(220,230,245,1)');
+            _ga('car_unlocked',{car_type:'steel', cargo:'steel', sd:Math.floor(stardate)});
             // Arm the 10-second timer for the "Designing a better space train"
             // mission intro. updateMissions() also re-arms this on next tick
             // if the save/load wiped it.
@@ -7136,10 +7170,10 @@ function updateFoundries(dtG){
           _gw.chemical=Math.max(0,(_gw.chemical||0)-1);
           p.supply.glass  =Math.min(CARGO_MAX_SUPPLY,(p.supply.glass||0)+1);
           p.glassDelivered=(p.glassDelivered||0)+1;
-          if(!_glassCarUnlocked){ _glassCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_glass',displayName:'Glass Car'}); _chatMsg('GLASS CAR UNLOCKED','rgba(170,230,210,1)'); }
+          if(!_glassCarUnlocked){ _glassCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_glass',displayName:'Glass Car'}); _chatMsg('GLASS CAR UNLOCKED','rgba(170,230,210,1)'); _ga('car_unlocked',{car_type:'glass', cargo:'glass', sd:Math.floor(stardate)}); }
           // Industrial chain reaction: first glass produced also unlocks the
           // Machinery Car (which gets manufactured by Factories on urban planets).
-          if(!_machineryCarUnlocked){ _machineryCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_machinery',displayName:'Machinery Car'}); _chatMsg('MACHINERY CAR UNLOCKED','rgba(200,200,170,1)'); }
+          if(!_machineryCarUnlocked){ _machineryCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_machinery',displayName:'Machinery Car'}); _chatMsg('MACHINERY CAR UNLOCKED','rgba(200,200,170,1)'); _ga('car_unlocked',{car_type:'machinery', cargo:'machinery', sd:Math.floor(stardate)}); }
         }
       } else if((_gw.sand||0)>=1&&(_gw.chemical||0)>=1){
         _gw.progress=FOUNDRY_PROD_TIME;
@@ -7160,7 +7194,7 @@ function updateFoundries(dtG){
           p.machineryDelivered=(p.machineryDelivered||0)+1;
           // Safety net: in the unlikely case a factory produces machinery
           // before any glassworks has fired, unlock the Machinery Car here too.
-          if(!_machineryCarUnlocked){ _machineryCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_machinery',displayName:'Machinery Car'}); _chatMsg('MACHINERY CAR UNLOCKED','rgba(200,200,170,1)'); }
+          if(!_machineryCarUnlocked){ _machineryCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_machinery',displayName:'Machinery Car'}); _chatMsg('MACHINERY CAR UNLOCKED','rgba(200,200,170,1)'); _ga('car_unlocked',{car_type:'machinery', cargo:'machinery', sd:Math.floor(stardate)}); }
         }
       } else if((_ft.iron||0)>=1&&(_ft.oil||0)>=1){
         _ft.progress=FOUNDRY_PROD_TIME*2;
@@ -7947,6 +7981,7 @@ function trackVisit(pid){
         pendingCarUnlocks.push({sprite:'car_flowers',displayName:'Flowers Car'});
         _chatMsg('FLOWERS CAR UNLOCKED!','rgba(255,160,210,1)');
         _newsLog('flowers_discovered',{pln:_tp.name,_pln:_tp});
+        _ga('car_unlocked',{car_type:'flowers', cargo:'flowers', sd:Math.floor(stardate)});
       }
       if(!_missionPending('spread_the_seed')){
         pendingMissionIntros.push({defId:'spread_the_seed',readySd:stardate});
@@ -7957,6 +7992,7 @@ function trackVisit(pid){
       _medicalCarUnlocked=true;
       pendingCarUnlocks.push({sprite:'car_medical',displayName:'Medical Supplies Car'});
       _chatMsg('MEDICAL SUPPLIES CAR UNLOCKED!','rgba(80,230,180,1)');
+      _ga('car_unlocked',{car_type:'medical', cargo:'medical', sd:Math.floor(stardate)});
     }
     if(_tp.isOutbreakPlanet&&!_missionPending('outbreak')){
       pendingMissionIntros.push({defId:'outbreak',readySd:stardate,targetPlanetId:pid});
@@ -7972,7 +8008,17 @@ function trackVisit(pid){
     }[_bio];
     if(_bioUnlockMsg && galaxy.planets.filter(p=>visitedPlanetIds.has(p.id)&&p.type.id===_bio).length===1){
       _chatMsg(_bioUnlockMsg,'rgba(80,230,130,1)');
-      if(_bioUnlockCar) pendingCarUnlocks.push(_bioUnlockCar);
+      if(_bioUnlockCar){
+        pendingCarUnlocks.push(_bioUnlockCar);
+        // Biome-first-visit car unlocks. Map sprite → (car_type, cargo) for
+        // consistent param values across all car_unlocked events.
+        const _bioCargo={
+          car_ore:'molten_ore', car_sand:'sand', car_ice:'ice',
+          car_oil:'oil', car_battery:'battery', car_chemical:'chemical'
+        }[_bioUnlockCar.sprite]||_bio;
+        const _bioCarType=(_bioUnlockCar.sprite||'').replace(/^car_/,'')||_bio;
+        _ga('car_unlocked',{car_type:_bioCarType, cargo:_bioCargo, sd:Math.floor(stardate)});
+      }
     }
     // Agri planet visit: unlock the food car specific to this planet's pre-built upgrade
     if(_bio==='agri'){
@@ -7981,16 +8027,19 @@ function trackVisit(pid){
         _grainCarUnlocked=true;
         pendingCarUnlocks.push({sprite:'car_grain',displayName:'Grain Car'});
         _chatMsg('GRAIN CAR UNLOCKED','rgba(80,230,130,1)');
+        _ga('car_unlocked',{car_type:'grain', cargo:'grain', sd:Math.floor(stardate)});
       }
       if(_ups.includes('farm')&&!_livestockCarUnlocked){
         _livestockCarUnlocked=true;
         pendingCarUnlocks.push({sprite:'car_livestock',displayName:'Livestock Car'});
         _chatMsg('LIVESTOCK CAR UNLOCKED','rgba(80,230,130,1)');
+        _ga('car_unlocked',{car_type:'livestock', cargo:'livestock', sd:Math.floor(stardate)});
       }
       if(_ups.includes('orchard')&&!_fruitCarUnlocked){
         _fruitCarUnlocked=true;
         pendingCarUnlocks.push({sprite:'car_fruit',displayName:'Fruit Car'});
         _chatMsg('FRUIT CAR UNLOCKED','rgba(80,230,130,1)');
+        _ga('car_unlocked',{car_type:'fruit', cargo:'fruit', sd:Math.floor(stardate)});
       }
     }
     const _origen=galaxy.planets[galaxy.origenId];
@@ -8438,6 +8487,7 @@ function _checkEngineUnlocks(){
     _N700EngineUnlocked=true;
     pendingEngineUnlocks.push({sprite:'engine_N700',displayName:'N700 Engine'});
     _chatMsg('N700 ENGINE UNLOCKED','rgba(100,255,210,1)');
+    _ga('engine_unlocked',{engine:'N700', sd:Math.floor(stardate)});
   }
 }
 
@@ -9961,6 +10011,7 @@ function updateMissions(dtSd){
     }
     if(allDone){
       m.status='completed'; m.completedSd=stardate; _recomputeMissionTargets();
+      _ga('mission_complete',{mission_id:m.id, mission_name:m.name, sd:Math.floor(stardate)});
       _newsLog('mission_complete',{missionId:m.id,missionName:m.name});
       if(m.reward){ credits=Math.min(credits+m.reward,999999999); pendingCreditDeltas.push({timer:60,amount:m.reward}); }
       _chatMsg('MISSION COMPLETE: '+m.name.toUpperCase(),'rgba(255,220,80,1)');
@@ -9982,6 +10033,7 @@ function updateMissions(dtSd){
       // Unlock Royal Car when research_royal_car mission completes
       if(m.id==='research_royal_car'&&!_royalCarUnlocked){
         _royalCarUnlocked=true;
+        _ga('car_unlocked',{car_type:'royal', cargo:'royal', sd:Math.floor(stardate)});
         pendingCarUnlocks.push({sprite:'car_royal',displayName:'Royal Car'});
         _chatMsg('ROYAL CAR UNLOCKED','rgba(220,170,255,1)');
       }
@@ -9992,11 +10044,13 @@ function updateMissions(dtSd){
           _classJEngineUnlocked=true;
           pendingEngineUnlocks.push({sprite:'engine_classJ',displayName:'Class J Engine'});
           _chatMsg('CLASS J ENGINE UNLOCKED','rgba(255,200,80,1)');
+          _ga('engine_unlocked',{engine:'classJ', sd:Math.floor(stardate)});
         }
         if(!_classREngineUnlocked){
           _classREngineUnlocked=true;
           pendingEngineUnlocks.push({sprite:'engine_classR',displayName:'Class R Engine'});
           _chatMsg('CLASS R ENGINE UNLOCKED','rgba(255,140,80,1)');
+          _ga('engine_unlocked',{engine:'classR', sd:Math.floor(stardate)});
         }
       }
       // Outbreak complete: spawn reward train (Galaxy engine + Medical car + Caboose) in HIGH orbit
@@ -10540,11 +10594,11 @@ function drawStarRegistry(){
 
 function drawOptionsPopup(){
   if(activePopup!=='options') return;
-  // Options is now intentionally minimal: just Fog of War + Autosave. The four
-  // gameplay-shortcut buttons (Add Credits, Flower Planet, Colony Planet, Rival)
-  // were moved into a hidden Cheats popup accessed by pressing 'C' while the
-  // Options popup is open.
-  const pw=300, ph=220;
+  // Options is now intentionally minimal: Autosave + Mission Objectives
+  // Tracker. The four gameplay-shortcut buttons (Add Credits, Flower Planet,
+  // Colony Planet, Rival) AND the Fog of War toggle all live in the hidden
+  // Cheats popup accessed by pressing 'C' while Options is open.
+  const pw=300, ph=180;
   const [px,py]=drawPopupBase(pw,ph,'rgba(80,160,255,0.7)');
   ctx.save();
   ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
@@ -10568,29 +10622,15 @@ function drawOptionsPopup(){
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
   ctx.fillStyle='#fff'; ctx.fillText(autosaveEnabled?'ON':'OFF',asTX+asTW/2,asTT+asTH/2+4);
   popupState.autosaveToggleBounds={x:asTX,y:asTT,w:asTW,h:asTH};
-  // Divider before Fog of War
-  ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.moveTo(px,py+95); ctx.lineTo(px+pw,py+95); ctx.stroke();
-  // Fog of War row
-  const ry6=py+125;
-  ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
-  ctx.fillStyle='rgba(160,200,255,0.9)'; ctx.fillText('Fog of War',px+18,ry6);
-  ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,130,180,0.5)';
-  ctx.fillText('Hides unexplored regions',px+18,ry6+16);
-  const tw=48,th=22,tx=px+pw-18-tw,tt=ry6-16;
-  const _fogHov=!!popupState.fogToggleHover;
-  ctx.fillStyle=fogEnabled?(_fogHov?'rgba(45,200,90,0.97)':'rgba(30,160,70,0.85)'):(_fogHov?'rgba(70,70,105,0.90)':'rgba(50,50,75,0.75)');
-  ctx.fillRect(tx,tt,tw,th);
-  ctx.strokeStyle=fogEnabled?(_fogHov?'rgba(80,240,110,0.85)':'rgba(50,220,90,0.7)'):(_fogHov?'rgba(100,100,145,0.70)':'rgba(70,70,100,0.5)'); ctx.lineWidth=1;
-  ctx.strokeRect(tx,tt,tw,th);
-  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
-  ctx.fillStyle='#fff'; ctx.fillText(fogEnabled?'ON':'OFF',tx+tw/2,tt+th/2+4);
-  popupState.fogToggleBounds={x:tx,y:tt,w:tw,h:th};
   // Divider before Mission Objectives Tracker
   ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.moveTo(px,py+155); ctx.lineTo(px+pw,py+155); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(px,py+95); ctx.lineTo(px+pw,py+95); ctx.stroke();
+  // Fog toggle has moved to the Cheats popup — clear its bounds so the
+  // Options-popup click branch can't hit a stale rectangle from a previous
+  // frame's render.
+  popupState.fogToggleBounds=null;
   // Mission Objectives Tracker row
-  const ry7=py+185;
+  const ry7=py+125;
   ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
   ctx.fillStyle='rgba(160,200,255,0.9)'; ctx.fillText('Mission Objectives Tracker',px+18,ry7);
   ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,130,180,0.5)';
@@ -10616,7 +10656,9 @@ function drawCheatsPopup(){
   if(activePopup!=='cheats') return;
   // Hidden popup reachable only by pressing 'C' while the Options popup is
   // open. Amber palette to visually distinguish from the cool-blue Options.
-  const pw=300, ph=270;
+  // Houses the four planet-shortcut cheats AND the Fog of War toggle so the
+  // standard Options popup stays free of "viewing-mode" debug toggles.
+  const pw=300, ph=312;
   const [px,py]=drawPopupBase(pw,ph,'rgba(255,170,60,0.7)');
   ctx.save();
   ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
@@ -10689,6 +10731,26 @@ function drawCheatsPopup(){
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
   ctx.fillStyle=_rivAvail?'#ffd8c8':'rgba(105,85,80,0.6)'; ctx.fillText('FIND →',rvX+rvW/2,rvT+rvH/2+4);
   popupState.rivalBtnBounds=_rivAvail?{x:rvX,y:rvT,w:rvW,h:rvH}:null;
+  // Divider before Fog of War
+  ctx.strokeStyle='rgba(180,90,40,0.35)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(px,py+235); ctx.lineTo(px+pw,py+235); ctx.stroke();
+  // Fog of War row (moved from the Options popup so the standard options menu
+  // stays free of debug-style toggles; the same green ON/OFF pill style is
+  // preserved so muscle memory still works).
+  const ry6=py+265;
+  ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
+  ctx.fillStyle='rgba(255,210,150,0.92)'; ctx.fillText('Fog of War',px+18,ry6);
+  ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(200,150,90,0.55)';
+  ctx.fillText('Hides unexplored regions',px+18,ry6+16);
+  const fwW=48,fwH=22,fwX=px+pw-18-fwW,fwT=ry6-16;
+  const _fogHov=!!popupState.fogToggleHover;
+  ctx.fillStyle=fogEnabled?(_fogHov?'rgba(45,200,90,0.97)':'rgba(30,160,70,0.85)'):(_fogHov?'rgba(70,70,105,0.90)':'rgba(50,50,75,0.75)');
+  ctx.fillRect(fwX,fwT,fwW,fwH);
+  ctx.strokeStyle=fogEnabled?(_fogHov?'rgba(80,240,110,0.85)':'rgba(50,220,90,0.7)'):(_fogHov?'rgba(100,100,145,0.70)':'rgba(70,70,100,0.5)'); ctx.lineWidth=1;
+  ctx.strokeRect(fwX,fwT,fwW,fwH);
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='#fff'; ctx.fillText(fogEnabled?'ON':'OFF',fwX+fwW/2,fwT+fwH/2+4);
+  popupState.fogToggleBounds={x:fwX,y:fwT,w:fwW,h:fwH};
   ctx.restore();
 }
 
@@ -16559,8 +16621,8 @@ canvas.addEventListener('mouseup',e=>{
         if(quitConfirmNoBounds){const b=quitConfirmNoBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ activePopup=null; popupState={}; return; }}
         return; // eat any other click on the popup
       }
-      // Options fog toggle
-      if(activePopup==='options'&&popupState.fogToggleBounds){
+      // Fog of War toggle — lives in the Cheats popup now.
+      if(activePopup==='cheats'&&popupState.fogToggleBounds){
         const b=popupState.fogToggleBounds;
         if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ fogEnabled=!fogEnabled; return; }
       }
@@ -16678,6 +16740,7 @@ canvas.addEventListener('mouseup',e=>{
               p.hasStation=true;
               _newsLog('station_built',{pln:p.name,_pln:p});
               p.playerBuiltStation=true;
+              _ga('station_built',{biome:p.type.id, planet:p.name, sd:Math.floor(stardate), credits});
               p.stationAngle=Math.random()*Math.PI*2;
               {const _big=(p.size==='L'||p.size==='XL'||p.size==='XXL');
               p.stationSpeed=(Math.random()<0.15?-1:1)*Math.PI*2/(_big?rand(4800,14400):rand(2400,7200));}
@@ -16704,6 +16767,7 @@ canvas.addEventListener('mouseup',e=>{
               p.supply.iron=Math.max(0,(p.supply.iron||0)-4);
             }
             p.hasLargeStation=true;
+            _ga('station_upgraded_large',{biome:p.type.id, planet:p.name, sd:Math.floor(stardate)});
             playSound('construction_complete');
           }
           return;
@@ -16726,6 +16790,7 @@ canvas.addEventListener('mouseup',e=>{
               p.supply.steel=Math.max(0,(p.supply.steel||0)-6);
             }
             p.hasTerminal=true;
+            _ga('station_upgraded_terminal',{biome:p.type.id, planet:p.name, sd:Math.floor(stardate)});
             playSound('construction_complete');
           }
           return;
@@ -17099,6 +17164,7 @@ canvas.addEventListener('mouseup',e=>{
                   }
                   trains.push(nt);
                   _newsLog('fleet_expanded',{pln:_sp.name,_pln:_sp});
+                  _ga('train_built',{engine:nt.cars[0]||'unknown', car_count:nt.cars.length, total_cost:s.computedCost||0, sd:Math.floor(stardate)});
                   playSound('construction_complete');
                 }
               }
@@ -18180,6 +18246,7 @@ function startGame(){
    // Orijen itself is visited from the start (the player's train is already there)
    visitedPlanetIds.add(galaxy.origenId);
   }
+  _ga('game_start',{corp:corpName||'(unnamed)', ai_difficulty:_aiDifficulty||'none', sd:Math.floor(stardate)});
   gs='fadeout'; fadeA=0;
   document.getElementById('refresh-btn').classList.add('hidden');
 }
