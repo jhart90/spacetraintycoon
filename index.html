@@ -3324,6 +3324,10 @@ function computeDemandRate(p){
   //     accept iron deliveries once the station is up.
   if(pop>0) r.iron=(r.iron||0)+dl*0.3;
   if(p.hasStation) r.iron=Math.max(r.iron||0, 1.0);
+  // Steel demand floor: a Large Station planet always has ≥1 steel demand rate
+  // so the player can accumulate the 6 steelDelivered units required for the
+  // Terminal upgrade. Mirror of the iron-for-Large-Station pattern above.
+  if(p.hasLargeStation) r.steel=Math.max(r.steel||0, 1.0);
   // Juicery floor: a jungle planet running a juicery whose fruit bin is not
   // yet maxed (10/10) must show a floor of at least 1 fruit demand so trains
   // can keep feeding it. Computed live so the floor disappears the moment
@@ -5995,7 +5999,11 @@ function drawOrchardBuilding(sx,sy,sr,angle,ssz){
   ctx.restore();
 }
 // ── station draw ─────────────────────────────────────────────
-function drawPlanetStation(sx,sy,sr,angle,ssz,isAlienRelic=false,isLarge=false,largeMedR=null){
+function drawPlanetStation(sx,sy,sr,angle,ssz,isAlienRelic=false,isLarge=false,largeMedR=null,isTerminal=false,largeHighR=null,largeLowR=null){
+  // Terminal supersedes Large Station: when isTerminal is true, the Large-Station
+  // path is suppressed and the Terminal path takes over (dock ring at HIGH orbit,
+  // five towers reaching LOW / MED / HIGH respectively).
+  if(isTerminal) isLarge=false;
   // sr  = actual planet screen radius — controls WHERE the ring sits and where buildings are rooted
   // ssz = fixed visual size (always M-planet equivalent) — controls HOW BIG everything looks
   const _tieCol  =isAlienRelic?'#1a3520':'#2a3a55';
@@ -6033,9 +6041,11 @@ function drawPlanetStation(sx,sy,sr,angle,ssz,isAlienRelic=false,isLarge=false,l
   }
   // City skyline: roots at actual planet surface (sr), building dimensions use ssz
   if(ssz>=10){
-    // Large Station: tall narrow central pillar + outer MED orbit dock ring
-    if(isLarge&&largeMedR&&largeMedR>sr+2){
-      const _orGap=ssz*0.06, _or1=largeMedR*0.97, _or2=_or1+Math.max(1.0,ssz*0.04);
+    // Dock ring: Large Station draws it at MED orbit; Terminal draws it at HIGH
+    // orbit (replacing the Large Station dock ring entirely).
+    const _dockR = isTerminal ? largeHighR : (isLarge ? largeMedR : null);
+    if(_dockR&&_dockR>sr+2){
+      const _or1=_dockR*0.97, _or2=_or1+Math.max(1.0,ssz*0.04);
       const nT2=Math.max(4,Math.min(64,Math.round(sr*0.45)));
       ctx.strokeStyle='rgba(80,180,255,0.30)'; ctx.lineWidth=Math.max(0.4,ssz*0.02);
       for(let i=0;i<nT2;i++){const a=(i/nT2)*Math.PI*2+angle,ca=Math.cos(a),sa=Math.sin(a);ctx.beginPath();ctx.moveTo(sx+(_or1-0.5)*ca,sy+(_or1-0.5)*sa);ctx.lineTo(sx+(_or2+0.5)*ca,sy+(_or2+0.5)*sa);ctx.stroke();}
@@ -6045,19 +6055,41 @@ function drawPlanetStation(sx,sy,sr,angle,ssz,isAlienRelic=false,isLarge=false,l
       ctx.strokeStyle='rgba(140,220,255,0.22)'; ctx.lineWidth=Math.max(0.2,ssz*0.008);
       ctx.beginPath(); ctx.arc(sx,sy,_or1,0,Math.PI*2); ctx.stroke();
     }
-    const buildings=isLarge?[
-      {da:-0.24,bh:0.22,bw:0.065},
-      {da:-0.11,bh:0.37,bw:0.058},
-      {da: 0.00,bh:1.30,bw:0.032},
-      {da: 0.12,bh:0.32,bw:0.058},
-      {da: 0.25,bh:0.19,bw:0.065},
-    ]:[
-      {da:-0.24,bh:0.22,bw:0.065},
-      {da:-0.11,bh:0.37,bw:0.058},
-      {da: 0.00,bh:0.45,bw:0.075},
-      {da: 0.12,bh:0.32,bw:0.058},
-      {da: 0.25,bh:0.19,bw:0.065},
-    ];
+    let buildings;
+    if(isTerminal){
+      // Terminal: 5 towers, same widths as Large, but heights span the 3 orbit
+      // tiers — center reaches nearly HIGH, ±1 reaches nearly MED, ±2 reaches
+      // nearly LOW. When the absolute orbit radii are passed in (world view),
+      // we derive heights from them; otherwise fall back to ssz-relative
+      // multipliers tuned to mimic the same proportions in the popup mini-viz.
+      const _gap=ssz*0.10;
+      const _hC=(largeHighR!=null&&largeHighR>sr+2) ? (largeHighR-sr-_gap)/ssz : 1.95;
+      const _hM=(largeMedR !=null&&largeMedR >sr+2) ? (largeMedR -sr-_gap)/ssz : 1.30;
+      const _hL=(largeLowR !=null&&largeLowR >sr+2) ? (largeLowR -sr-_gap)/ssz : 0.55;
+      buildings=[
+        {da:-0.24,bh:_hL,bw:0.065},
+        {da:-0.11,bh:_hM,bw:0.058},
+        {da: 0.00,bh:_hC,bw:0.032},
+        {da: 0.12,bh:_hM,bw:0.058},
+        {da: 0.25,bh:_hL,bw:0.065},
+      ];
+    } else if(isLarge){
+      buildings=[
+        {da:-0.24,bh:0.22,bw:0.065},
+        {da:-0.11,bh:0.37,bw:0.058},
+        {da: 0.00,bh:1.30,bw:0.032},
+        {da: 0.12,bh:0.32,bw:0.058},
+        {da: 0.25,bh:0.19,bw:0.065},
+      ];
+    } else {
+      buildings=[
+        {da:-0.24,bh:0.22,bw:0.065},
+        {da:-0.11,bh:0.37,bw:0.058},
+        {da: 0.00,bh:0.45,bw:0.075},
+        {da: 0.12,bh:0.32,bw:0.058},
+        {da: 0.25,bh:0.19,bw:0.065},
+      ];
+    }
     ctx.fillStyle=_bldgFill;
     ctx.strokeStyle=_bldgStr;
     ctx.lineWidth=Math.max(0.3,ssz*0.014);
@@ -6089,7 +6121,7 @@ function drawPlanetStation(sx,sy,sr,angle,ssz,isAlienRelic=false,isLarge=false,l
         const wx2=sx+sr*cosa+bh*0.65*cosa, wy2=sy+sr*sina+bh*0.65*sina;
         ctx.fillRect(wx2-wSz/2,wy2-wSz/2,wSz,wSz);
       }
-      if(isLarge&&b.da===0&&b.bh>0.9&&ssz>=16){
+      if((isLarge||isTerminal)&&b.da===0&&b.bh>0.9&&ssz>=16){
         for(let _wi=1;_wi<=3;_wi++){
           const _wf=0.15+_wi*0.2;
           const _wx3=sx+sr*cosa+bh*_wf*cosa, _wy3=sy+sr*sina+bh*_wf*sina;
@@ -6373,7 +6405,7 @@ function drawTrainsPanel(){
       if(p.type.id==='urban') drawCityscape(vizCX,rowMidY,VIZ_R);
       if(p.hasGold&&p.goldRevealed) _drawGoldPatch(vizCX,rowMidY,VIZ_R,p.goldPatch);
       if(p.hasDiamond&&p.diamondRevealed) _drawDiamondPatch(vizCX,rowMidY,VIZ_R,p.diamondPatch);
-      drawPlanetStation(vizCX,rowMidY,VIZ_R,0,VIZ_R,p.isAlienRelic,p.hasLargeStation||false);
+      drawPlanetStation(vizCX,rowMidY,VIZ_R,0,VIZ_R,p.isAlienRelic,p.hasLargeStation||false,null,p.hasTerminal||false);
       // Surface structures (foundry + agri buildings) — drawn just above and
       // below the station so the right-panel viz reflects every upgrade built
       // on the planet (matching what's shown in the main galaxy view and the
@@ -6547,6 +6579,10 @@ function updateCargoSupplyDemand(dtSd){
     // this floor enforces a minimum on the live demand value so trains can
     // unload even right after a previous delivery zeroed the demand.
     if(p.hasStation&&(p.demand.iron||0)<1) p.demand.iron=1;
+    // Steel live-demand floor for Large Station planets — parallels the iron
+    // floor above so the Terminal-upgrade material can build up in inventory
+    // even right after a delivery zeroes the demand.
+    if(p.hasLargeStation&&(p.demand.steel||0)<1) p.demand.steel=1;
     // Flowers demand floor: eligible planets that have never received flowers always want at least 1
     if(!p.flowersReceived&&['jungle','desert','resort'].includes(p.type.id)){
       if((p.demand.flowers||0)<1) p.demand.flowers=1;
@@ -11161,7 +11197,7 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
       ctx.save(); ctx.globalAlpha=isBuilt?0.9:0.35;
       ctx.fillStyle='rgba(20,30,55,0.7)';
       ctx.beginPath(); ctx.arc(_mvx,_mvy,_mvr,0,Math.PI*2); ctx.fill();
-      drawPlanetStation(_mvx,_mvy,_mvr,Math.PI*1.2,20,p.isAlienRelic||false,p.hasLargeStation||false);
+      drawPlanetStation(_mvx,_mvy,_mvr,Math.PI*1.2,20,p.isAlienRelic||false,p.hasLargeStation||false,null,p.hasTerminal||false);
       ctx.restore();
       if(isBuilt){
         if(p.hasTerminal){
@@ -12013,7 +12049,7 @@ function drawPlanetDetailPopup(){
     if(p.type.id==='urban') drawCityscape(pcx,pcy,pr);
     if(p.hasGold&&p.goldRevealed) _drawGoldPatch(pcx,pcy,pr,p.goldPatch);
     if(p.hasDiamond&&p.diamondRevealed) _drawDiamondPatch(pcx,pcy,pr,p.diamondPatch);
-    if(p.hasStation) drawPlanetStation(pcx,pcy,pr,p.stationAngle||0,pr,p.isAlienRelic,p.hasLargeStation||false);
+    if(p.hasStation) drawPlanetStation(pcx,pcy,pr,p.stationAngle||0,pr,p.isAlienRelic,p.hasLargeStation||false,null,p.hasTerminal||false);
     if((p.upgrades||[]).includes('iron_foundry')) drawFoundryBuilding(pcx,pcy,pr,p.foundryAngle||Math.PI*0.75,pr,(p.upgradeData?.iron_foundry?.progress||0)>0,'iron_foundry');
     if((p.upgrades||[]).includes('blast_furnace')) drawFoundryBuilding(pcx,pcy,pr,p.blastFurnaceAngle||Math.PI*1.4,pr,(p.upgradeData?.blast_furnace?.progress||0)>0,'blast_furnace');
     if((p.upgrades||[]).includes('glassworks')) drawFoundryBuilding(pcx,pcy,pr,p.glassworksAngle||Math.PI*1.6,pr,(p.upgradeData?.glassworks?.progress||0)>0,'glassworks');
@@ -13563,7 +13599,15 @@ function drawGalaxy(ts,dt){
     if(p.hasGold&&p.goldRevealed&&sr>3) _drawGoldPatch(sx,sy,sr,p.goldPatch,ORBIT_TIERS[p.size]['LOW']*cam.scale*0.88);
     if(p.hasDiamond&&p.diamondRevealed&&sr>3) _drawDiamondPatch(sx,sy,sr,p.diamondPatch,ORBIT_TIERS[p.size]['LOW']*cam.scale*0.88);
     if(p.clouds&&sr>4) drawPlanetClouds(sx,sy,sr,p);
-    if(p.hasStation) drawPlanetStation(sx,sy,sr,p.stationAngle||0,SIZE_R['M']*cam.scale,p.isAlienRelic,p.hasLargeStation||false,p.hasLargeStation?ORBIT_TIERS[p.size]['MED']*cam.scale:null);
+    if(p.hasStation) drawPlanetStation(
+      sx,sy,sr,p.stationAngle||0,SIZE_R['M']*cam.scale,
+      p.isAlienRelic,
+      p.hasLargeStation||false,
+      (p.hasLargeStation||p.hasTerminal)?ORBIT_TIERS[p.size]['MED']*cam.scale:null,
+      p.hasTerminal||false,
+      p.hasTerminal?ORBIT_TIERS[p.size]['HIGH']*cam.scale:null,
+      p.hasTerminal?ORBIT_TIERS[p.size]['LOW']*cam.scale:null
+    );
     if(p.aiHasStation){ctx.save();ctx.filter='sepia(1) hue-rotate(-10deg) saturate(2.5) brightness(1.1)';drawPlanetStation(sx,sy,sr,(p.aiStationAngle!==undefined?p.aiStationAngle:Math.PI*0.65),SIZE_R['M']*cam.scale,false,false,null);ctx.filter='none';ctx.restore();}
     if((p.upgrades||[]).includes('iron_foundry')&&sr>2) drawFoundryBuilding(sx,sy,sr,p.foundryAngle||Math.PI*0.75,SIZE_R['M']*cam.scale,(p.upgradeData?.iron_foundry?.progress||0)>0,'iron_foundry');
     if((p.upgrades||[]).includes('blast_furnace')&&sr>2) drawFoundryBuilding(sx,sy,sr,p.blastFurnaceAngle||Math.PI*1.4,SIZE_R['M']*cam.scale,(p.upgradeData?.blast_furnace?.progress||0)>0,'blast_furnace');
@@ -14122,7 +14166,7 @@ function drawGalaxy(ts,dt){
       if(p.type.id==='urban') drawCityscape(0,GH+BAR_H/2,pDR);
       if(p.hasGold&&p.goldRevealed) _drawGoldPatch(0,GH+BAR_H/2,pDR,p.goldPatch);
       if(p.hasDiamond&&p.diamondRevealed) _drawDiamondPatch(0,GH+BAR_H/2,pDR,p.diamondPatch);
-      if(p.hasStation) drawPlanetStation(0,GH+BAR_H/2,pDR,0,pDR,p.isAlienRelic,p.hasLargeStation||false);
+      if(p.hasStation) drawPlanetStation(0,GH+BAR_H/2,pDR,0,pDR,p.isAlienRelic,p.hasLargeStation||false,null,p.hasTerminal||false);
       if(_bras) drawPlanetRing(0,GH+BAR_H/2,pDR,p.ring,true);
     } else {
       // Blacked-out disc
@@ -16982,10 +17026,21 @@ function _buildSaveObject(){
     const {visitedSnapshot,...rest}=m;
     return {...rest, visitedSnapshot:visitedSnapshot?[...visitedSnapshot]:[]};
   });
+  // Encode current selection by stable id, since the live `sel` holds object
+  // references that won't survive serialization.
+  const _savedSel=(()=>{
+    if(!sel) return null;
+    if(sel.type==='train'){const _ti=trains.indexOf(sel.train);return _ti>=0?{type:'train',trainIdx:_ti}:null;}
+    if(sel.type==='car'  ) return {type:'car', trainIdx:sel.data?.trainIdx??-1, carIdx:sel.data?.carIdx??-1};
+    if(sel.type==='planet') return {type:'planet', planetId:sel.data?.id};
+    if(sel.type==='star'  ) return {type:'star',   starId:sel.data?.id};
+    return null;
+  })();
   return {
     version:1,
     stardate, credits, corpName, gameSpeedIdx,
     cam:{x:cam.x,y:cam.y,scale:cam.scale},
+    sel:_savedSel, tracking, trackingOffset:{x:trackingOffset.x,y:trackingOffset.y},
     fogEnabled, panelTab, panelScroll, stationPanelScroll,
     pokedexSortIdx, pokedexDiscoveredOnly, starRegistrySortIdx, starRegistryVisitedOnly, autosaveEnabled, missionTrackerEnabled,
     _gameStartSd, _ironCarUnlocked, _steelCarUnlocked, _glassCarUnlocked, _machineryCarUnlocked, _hazmatCarUnlocked, _royalCarUnlocked, _flowersCarUnlocked, _medicalCarUnlocked,
@@ -17170,9 +17225,38 @@ function _restoreFromSave(save){
   }));
   // Restore routeStops (UI route selection)
   routeStops=(save.routeStops||[]).map(r=>_gp(r.id)).filter(Boolean);
-  // Reset sel + misc UI
-  sel={type:'car',data:{trainIdx:0,carIdx:0,car:trains[0]?.cars[0]}};
-  tracking=true; trackingOffset={x:0,y:0}; assignPending=false; routeHerePending=false;
+  // Restore selection from the saved id-based encoding. Falls back to the
+  // first car of the first player train if the saved selection can't be
+  // resolved (e.g. the referenced train was scrapped pre-save somehow), or
+  // null if there are no trains.
+  const _selSave=save.sel;
+  sel=null;
+  if(_selSave){
+    if(_selSave.type==='train'){
+      const _t=trains[_selSave.trainIdx];
+      if(_t) sel={type:'train', train:_t};
+    } else if(_selSave.type==='car'){
+      const _t=trains[_selSave.trainIdx];
+      const _c=_t?.cars?.[_selSave.carIdx];
+      if(_t&&_c) sel={type:'car', data:{trainIdx:_selSave.trainIdx, carIdx:_selSave.carIdx, car:_c}};
+    } else if(_selSave.type==='planet'){
+      const _p=galaxy.planets[_selSave.planetId];
+      if(_p) sel={type:'planet', data:_p};
+    } else if(_selSave.type==='star'){
+      const _s=galaxy.stars.find(s=>s.id===_selSave.starId);
+      if(_s) sel={type:'star', data:_s};
+    }
+  }
+  if(!sel && trains[0]?.cars?.[0]){
+    sel={type:'car', data:{trainIdx:0, carIdx:0, car:trains[0].cars[0]}};
+  }
+  // Restore tracking state. When tracking is on, the camera is kept locked to
+  // the selected object's world position offset by trackingOffset. The saved
+  // cam.x/y already reflects the post-tracking camera, so the lock will hold
+  // immediately on first tick after restore.
+  tracking=save.tracking!==undefined ? !!save.tracking : false;
+  trackingOffset=save.trackingOffset ? {x:save.trackingOffset.x||0, y:save.trackingOffset.y||0} : {x:0,y:0};
+  assignPending=false; routeHerePending=false;
   activePopup=null; popupState={}; colorPickerState=null; trainBuilderState=null;
   cargoParticles=[]; creditFloats=[]; pendingCreditDeltas=[]; zoomReturnPos=null; zoomReturnTimer=0;
   // Reset hover flags
