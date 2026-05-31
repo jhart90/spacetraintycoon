@@ -6292,6 +6292,8 @@ function drawTrainsPanel(){
       ctx.beginPath(); ctx.rect(px,ry,PANEL_W,ROW_H); ctx.clip();
       if(p.ring) drawPlanetRing(vizCX,rowMidY,VIZ_R,p.ring,false);
       drawPlanet(vizCX,rowMidY,VIZ_R,p.type,p.ring,VIZ_GM,undefined,undefined,!!p.ring,p.flowerPositions||null);
+      // Urban cityscape drawn BEFORE station/structures so those render on top.
+      if(p.type.id==='urban') drawCityscape(vizCX,rowMidY,VIZ_R);
       if(p.hasGold&&p.goldRevealed) _drawGoldPatch(vizCX,rowMidY,VIZ_R,p.goldPatch);
       if(p.hasDiamond&&p.diamondRevealed) _drawDiamondPatch(vizCX,rowMidY,VIZ_R,p.diamondPatch);
       drawPlanetStation(vizCX,rowMidY,VIZ_R,0,VIZ_R,p.isAlienRelic,p.hasLargeStation||false);
@@ -6312,7 +6314,6 @@ function drawTrainsPanel(){
         if(_ups.includes('factory')) _structDraws.push((a)=>drawFoundryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R,(p.upgradeData?.factory?.progress||0)>0));
         if(_ups.includes('bakery')) _structDraws.push((a)=>drawFoundryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R,(p.upgradeData?.bakery?.progress||0)>0));
         if(_ups.includes('juicery')) _structDraws.push((a)=>drawFoundryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R,(p.upgradeData?.juicery?.progress||0)>0));
-        if(p.type.id==='urban') _structDraws.push(()=>drawCityscape(vizCX,rowMidY,VIZ_R));
         if(_ups.includes('granary'))      _structDraws.push((a)=>drawGranaryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R));
         if(_ups.includes('farm'))         _structDraws.push((a)=>drawFarmBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R));
         if(_ups.includes('orchard'))      _structDraws.push((a)=>drawOrchardBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R));
@@ -10570,6 +10571,7 @@ function drawStarDetailPopup(){
     const _sp2Vis=visitedPlanetIds.has(p.id);
     if(_sp2Vis){
       drawPlanet(pcx2,stripMidY,pr,p.type,p.ring,isXXL?XXL_GM:2.0,undefined,undefined,false,p.flowerPositions||null);
+      if(p.type.id==='urban'&&pr>=3) drawCityscape(pcx2,stripMidY,pr);
       if(p.hasGold&&p.goldRevealed&&pr>3) _drawGoldPatch(pcx2,stripMidY,pr,p.goldPatch);
       if(p.hasDiamond&&p.diamondRevealed&&pr>3) _drawDiamondPatch(pcx2,stripMidY,pr,p.diamondPatch);
       if(p.hasStation){
@@ -11510,6 +11512,8 @@ function drawPlanetDetailPopup(){
     const _ppras=p.ring&&p.hasStation;
     if(_ppras) drawPlanetRing(pcx,pcy,pr,p.ring,false);
     drawPlanet(pcx,pcy,pr,p.type,p.ring,4.5,undefined,undefined,_ppras,p.flowerPositions||null);
+    // Urban cityscape drawn BEFORE station/structures so those render on top.
+    if(p.type.id==='urban') drawCityscape(pcx,pcy,pr);
     if(p.hasGold&&p.goldRevealed) _drawGoldPatch(pcx,pcy,pr,p.goldPatch);
     if(p.hasDiamond&&p.diamondRevealed) _drawDiamondPatch(pcx,pcy,pr,p.diamondPatch);
     if(p.hasStation) drawPlanetStation(pcx,pcy,pr,p.stationAngle||0,pr,p.isAlienRelic,p.hasLargeStation||false);
@@ -11519,7 +11523,6 @@ function drawPlanetDetailPopup(){
     if((p.upgrades||[]).includes('factory')) drawFoundryBuilding(pcx,pcy,pr,p.factoryAngle||Math.PI*0.55,pr,(p.upgradeData?.factory?.progress||0)>0);
     if((p.upgrades||[]).includes('bakery')) drawFoundryBuilding(pcx,pcy,pr,p.bakeryAngle||Math.PI*0.95,pr,(p.upgradeData?.bakery?.progress||0)>0);
     if((p.upgrades||[]).includes('juicery')) drawFoundryBuilding(pcx,pcy,pr,p.juiceryAngle||Math.PI*0.95,pr,(p.upgradeData?.juicery?.progress||0)>0);
-    if(p.type.id==='urban') drawCityscape(pcx,pcy,pr);
     {const _hasGr=(p.upgrades||[]).includes('granary'),_hasFm=(p.upgrades||[]).includes('farm'),_hasOr=(p.upgrades||[]).includes('orchard');
     const _ba=p.agriStructAngle||Math.PI*0.95;
     const _structs=[_hasGr&&'granary',_hasFm&&'farm',_hasOr&&'orchard'].filter(Boolean);
@@ -13057,6 +13060,9 @@ function drawGalaxy(ts,dt){
     const _pStarSc=_pStar?w2s(_pStar.x,_pStar.y):null;
     if(p.ring) drawPlanetRing(sx,sy,sr,p.ring,false); // back half — behind trains
     drawPlanet(sx,sy,sr,p.type,p.ring,4.5,...(_pStarSc||[undefined,undefined]),!!p.ring,p.flowerPositions||null); // skip built-in ring for all ringed planets
+    // Urban cityscape drawn BEFORE clouds/station/structures so those render
+    // on top of the buildings (matches the bottom-info-bar render order).
+    if(p.type.id==='urban'&&sr>2) drawCityscape(sx,sy,sr);
     if(p.hasGold&&p.goldRevealed&&sr>3) _drawGoldPatch(sx,sy,sr,p.goldPatch,ORBIT_TIERS[p.size]['LOW']*cam.scale*0.88);
     if(p.hasDiamond&&p.diamondRevealed&&sr>3) _drawDiamondPatch(sx,sy,sr,p.diamondPatch,ORBIT_TIERS[p.size]['LOW']*cam.scale*0.88);
     if(p.clouds&&sr>4) drawPlanetClouds(sx,sy,sr,p);
@@ -13068,7 +13074,6 @@ function drawGalaxy(ts,dt){
     if((p.upgrades||[]).includes('factory')&&sr>2) drawFoundryBuilding(sx,sy,sr,p.factoryAngle||Math.PI*0.55,SIZE_R['M']*cam.scale,(p.upgradeData?.factory?.progress||0)>0);
     if((p.upgrades||[]).includes('bakery')&&sr>2) drawFoundryBuilding(sx,sy,sr,p.bakeryAngle||Math.PI*0.95,SIZE_R['M']*cam.scale,(p.upgradeData?.bakery?.progress||0)>0);
     if((p.upgrades||[]).includes('juicery')&&sr>2) drawFoundryBuilding(sx,sy,sr,p.juiceryAngle||Math.PI*0.95,SIZE_R['M']*cam.scale,(p.upgradeData?.juicery?.progress||0)>0);
-    if(p.type.id==='urban'&&sr>2) drawCityscape(sx,sy,sr);
     if(sr>2){const _hasGr2=(p.upgrades||[]).includes('granary'),_hasFm2=(p.upgrades||[]).includes('farm'),_hasOr2=(p.upgrades||[]).includes('orchard');
     const _ba2=p.agriStructAngle||Math.PI*0.95; let _ssz2=SIZE_R['M']*cam.scale;
     // XS/S planets: cap building scale so doubled-orchard structures don't overflow the planet
@@ -13570,6 +13575,7 @@ function drawGalaxy(ts,dt){
       const _pVis2=visitedPlanetIds.has(p.id);
       if(_pVis2){
         drawPlanet(cx,barCY,pr,p.type,p.ring,isXXL?XXL_GM:2.0,undefined,undefined,false,p.flowerPositions||null);
+        if(p.type.id==='urban'&&pr>=3) drawCityscape(cx,barCY,pr);
         if(p.hasGold&&p.goldRevealed&&pr>3) _drawGoldPatch(cx,barCY,pr,p.goldPatch);
         if(p.hasDiamond&&p.diamondRevealed&&pr>3) _drawDiamondPatch(cx,barCY,pr,p.diamondPatch);
         if(p.hasStation){
@@ -13616,6 +13622,7 @@ function drawGalaxy(ts,dt){
       const _bras=p.ring&&p.hasStation;
       if(_bras) drawPlanetRing(0,GH+BAR_H/2,pDR,p.ring,false);
       drawPlanet(0,GH+BAR_H/2,pDR,p.type,p.ring,pGM,undefined,undefined,_bras,p.flowerPositions||null);
+      if(p.type.id==='urban') drawCityscape(0,GH+BAR_H/2,pDR);
       if(p.hasGold&&p.goldRevealed) _drawGoldPatch(0,GH+BAR_H/2,pDR,p.goldPatch);
       if(p.hasDiamond&&p.diamondRevealed) _drawDiamondPatch(0,GH+BAR_H/2,pDR,p.diamondPatch);
       if(p.hasStation) drawPlanetStation(0,GH+BAR_H/2,pDR,0,pDR,p.isAlienRelic,p.hasLargeStation||false);
