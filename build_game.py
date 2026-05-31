@@ -3871,21 +3871,64 @@ const NEBULA_COLOR_PALETTE=[
   {h:45,  s:62, l:36}, // deep yellow
 ];
 
-function _genNebulaCanvas(seed, colorIdx){
-  const sz=128;
+// Procedural name pool. Combined with the literal word " Nebula" at render
+// time. Mix of real nebula names + evocative cosmic words so each randomly
+// generated galaxy still feels distinct.
+const NEBULA_NAME_POOL=[
+  'Carina','Orion','Eagle','Crab','Helix','Veil','Tarantula','Horsehead',
+  'Phoenix','Serpent','Drake','Ghost','Wolf','Lotus','Storm','Spire',
+  'Crystal','Mirror','Ember','Echo','Whisper','Silence','Mist','Halo',
+  'Crown','Anvil','Forge','Garden','Bloom','Spectre','Phantom','Shroud',
+  'Crescent','Beacon','Lyre','Vault','Chalice','Diadem','Talon','Wing',
+  'Ocular','Lantern','Cinder','Rune','Tessera','Vortex','Cradle','Mantle',
+  'Pyre','Cascade','Glimmer','Quasar','Lambent','Argent','Verdant',
+  'Vermilion','Saffron','Azure','Obsidian','Aurora','Borealis','Aether',
+  'Empyrean','Hyperion','Memento','Mosaic','Sigil','Cypher','Arcanum',
+  'Solstice','Equinox','Zenith','Nadir','Penumbra','Umbra','Caelum',
+  'Astra','Lumen','Stellar','Cosmos','Pulse','Radiant','Dusk','Dawn',
+];
+
+function _genNebulaCanvas(seed, colorIdx, secondaryColorIdx){
+  const sz=192;
   const c=document.createElement('canvas');
   c.width=sz; c.height=sz;
   const cctx=c.getContext('2d');
   const rng=_mkRng(seed);
   const base=NEBULA_COLOR_PALETTE[colorIdx%NEBULA_COLOR_PALETTE.length];
+  // Fall back to a deterministic adjacent palette entry when no secondary is
+  // recorded (e.g. older saves that pre-date the two-colour feature).
+  const _secIdx=secondaryColorIdx!=null?secondaryColorIdx:((colorIdx+2)%NEBULA_COLOR_PALETTE.length);
+  const sec=NEBULA_COLOR_PALETTE[_secIdx%NEBULA_COLOR_PALETTE.length];
 
-  // Soft full-canvas wash so the gradient stack has a tinted backdrop.
+  // Secondary "halo" wash — broader and a touch brighter than before so it
+  // bleeds out from underneath the primary at edges and through gaps in the
+  // primary cloud above.
   {
-    const _w=cctx.createRadialGradient(sz*0.5,sz*0.5,0,sz*0.5,sz*0.5,sz*0.55);
-    _w.addColorStop(0,`hsla(${base.h},${base.s}%,${base.l+8}%,0.22)`);
-    _w.addColorStop(0.7,`hsla(${base.h},${base.s}%,${base.l}%,0.10)`);
-    _w.addColorStop(1,`hsla(${base.h},${base.s}%,${base.l-6}%,0)`);
+    const _w=cctx.createRadialGradient(sz*0.5,sz*0.5,0,sz*0.5,sz*0.5,sz*0.58);
+    _w.addColorStop(0,`hsla(${sec.h},${sec.s}%,${sec.l+8}%,0.30)`);
+    _w.addColorStop(0.7,`hsla(${sec.h},${sec.s}%,${sec.l}%,0.16)`);
+    _w.addColorStop(1,`hsla(${sec.h},${sec.s}%,${sec.l-6}%,0)`);
     cctx.fillStyle=_w; cctx.fillRect(0,0,sz,sz);
+  }
+
+  // Secondary cloud — fewer, broader gradients spread wider than the primary
+  // so they extend past the primary's silhouette and peek through gaps.
+  {
+    const SN=8+Math.floor(rng()*7);
+    for(let i=0;i<SN;i++){
+      const cx=sz*(0.5+(rng()-0.5)*0.85);
+      const cy=sz*(0.5+(rng()-0.5)*0.85);
+      const rad=sz*(0.10+rng()*0.30);
+      const _h=sec.h+(rng()-0.5)*36;
+      const _s=Math.max(20,Math.min(92,sec.s+(rng()-0.5)*18));
+      const _l=Math.max(14,Math.min(60,sec.l+(rng()-0.5)*18));
+      const al=0.18+rng()*0.25;
+      const g=cctx.createRadialGradient(cx,cy,0,cx,cy,rad);
+      g.addColorStop(0,`hsla(${_h},${_s}%,${_l+8}%,${al})`);
+      g.addColorStop(0.5,`hsla(${_h},${_s}%,${_l}%,${al*0.5})`);
+      g.addColorStop(1,`hsla(${_h},${_s}%,${_l-5}%,0)`);
+      cctx.fillStyle=g; cctx.fillRect(0,0,sz,sz);
+    }
   }
 
   // Main cloud — 14-22 overlapping radial gradients of varying size, hue and
@@ -3893,8 +3936,10 @@ function _genNebulaCanvas(seed, colorIdx){
   // blob-shaped with wispy edges.
   const N=14+Math.floor(rng()*9);
   for(let i=0;i<N;i++){
-    const cx=sz*(0.5+(rng()-0.5)*0.85);
-    const cy=sz*(0.5+(rng()-0.5)*0.85);
+    // Keep gradient centres inside the inner ~70 % of the canvas so the
+    // bright cores aren't clipped by the soft-edge mask applied at the end.
+    const cx=sz*(0.5+(rng()-0.5)*0.70);
+    const cy=sz*(0.5+(rng()-0.5)*0.70);
     const rad=sz*(0.06+rng()*0.32);
     const _h=base.h+(rng()-0.5)*36;
     const _s=Math.max(20,Math.min(92,base.s+(rng()-0.5)*18));
@@ -3944,6 +3989,35 @@ function _genNebulaCanvas(seed, colorIdx){
   }
   cctx.globalCompositeOperation='source-over';
 
+  // Soft Gaussian blur pass — smooths out the concentric-ring banding that
+  // the stacked radial gradients (especially the additive 'lighter' knots)
+  // produce when their edges align. Captures the current canvas into a
+  // sibling, clears the original, then redraws through `ctx.filter` so the
+  // blur is applied uniformly without compositing the original twice.
+  {
+    const _tmp=document.createElement('canvas');
+    _tmp.width=sz; _tmp.height=sz;
+    _tmp.getContext('2d').drawImage(c,0,0);
+    cctx.clearRect(0,0,sz,sz);
+    cctx.filter='blur(2px)';
+    cctx.drawImage(_tmp,0,0);
+    cctx.filter='none';
+  }
+
+  // Soft circular alpha mask — kills the rotated-square silhouette that
+  // shows up when the bake is drawn at an arbitrary rotation, and forces
+  // every pixel to fade to fully transparent before the canvas edge.
+  // The inner ~45 % stays at full opacity; the outer ~55 % fades smoothly.
+  cctx.globalCompositeOperation='destination-in';
+  const _mask=cctx.createRadialGradient(sz*0.5,sz*0.5,0,sz*0.5,sz*0.5,sz*0.5);
+  _mask.addColorStop(0,    'rgba(0,0,0,1)');
+  _mask.addColorStop(0.45, 'rgba(0,0,0,1)');
+  _mask.addColorStop(0.75, 'rgba(0,0,0,0.55)');
+  _mask.addColorStop(1,    'rgba(0,0,0,0)');
+  cctx.fillStyle=_mask;
+  cctx.fillRect(0,0,sz,sz);
+  cctx.globalCompositeOperation='source-over';
+
   return c;
 }
 
@@ -3951,23 +4025,127 @@ function _genNebulas(origenPlanet){
   const out=[];
   const MIN_DIST=40000;
   const MAX_DIST=320000;
+  const PAL_N=NEBULA_COLOR_PALETTE.length;
+  // World bounds with a 5,000-AU edge buffer so every nebula's name (i.e. its
+  // centre point, where the label is drawn) is always reachable on the
+  // panable galaxy map and never sits in a region the camera can't centre on.
+  const _safeMinX=-WORLD_W+5000, _safeMaxX=WORLD_W-5000;
+  const _safeMinY=-WORLD_H+5000, _safeMaxY=WORLD_H-5000;
+  const _clampX=v=>Math.max(_safeMinX,Math.min(_safeMaxX,v));
+  const _clampY=v=>Math.max(_safeMinY,Math.min(_safeMaxY,v));
+  // Shuffled name pool so the 12 generated nebulas have distinct names.
+  const _namePool=NEBULA_NAME_POOL.slice();
+  for(let i=_namePool.length-1;i>0;i--){
+    const _j=Math.floor(Math.random()*(i+1));
+    [_namePool[i],_namePool[_j]]=[_namePool[_j],_namePool[i]];
+  }
+  let _nameIdx=0;
   let attempts=0;
-  while(out.length<12&&attempts<400){
+  while(out.length<16&&attempts<400){
     attempts++;
     const a=Math.random()*Math.PI*2;
     const r=MIN_DIST+Math.random()*(MAX_DIST-MIN_DIST);
+    // Primary + distinct secondary colour. Random ordered-pair from the
+    // 5-entry palette ⇒ 20 possible pairings (e.g. red+yellow, blue+pink,
+    // purple+pink, yellow+purple, …).
+    const _pri=Math.floor(Math.random()*PAL_N);
+    let _sec=Math.floor(Math.random()*(PAL_N-1));
+    if(_sec>=_pri) _sec++; // skip _pri so the secondary is always distinct
+    // 50 % of nebulas spawn at 2× size — gives a satisfying mix of big and
+    // small clouds across the galaxy.
+    const _sizeMult=Math.random()<0.5?2:1;
     out.push({
-      x:origenPlanet.x+Math.cos(a)*r,
-      y:origenPlanet.y+Math.sin(a)*r,
-      // 7,500 – 25,000 AU half-extent on each axis ⇒ 15k – 50k AU full span
-      rx:Math.round(7500+Math.random()*17500),
-      ry:Math.round(7500+Math.random()*17500),
-      rot:Math.random()*Math.PI*2,
-      colorIdx:Math.floor(Math.random()*NEBULA_COLOR_PALETTE.length),
+      x:_clampX(origenPlanet.x+Math.cos(a)*r),
+      y:_clampY(origenPlanet.y+Math.sin(a)*r),
+      // 7,500 – 25,000 AU half-extent on each axis ⇒ 15k – 50k AU full span;
+      // the 2× multiplier yields the 30k – 100k AU "big" tier.
+      rx:Math.round((7500+Math.random()*17500)*_sizeMult),
+      ry:Math.round((7500+Math.random()*17500)*_sizeMult),
+      // Snap rotation to a multiple of 90° so the soft-edge mask aligns with
+      // the screen axes and never reveals a diagonal silhouette.
+      rot:Math.floor(Math.random()*4)*(Math.PI/2),
+      colorIdx:_pri,
+      secondaryColorIdx:_sec,
       seed:(Math.floor(Math.random()*0x7fffffff)+1)>>>0,
+      name:_namePool[(_nameIdx++)%_namePool.length],
     });
   }
+  // ── Declumping pass ────────────────────────────────────────
+  // Nebulas placed purely by random angle+distance can pile up. Detect any
+  // nebula with ≥ 2 close neighbours (i.e. a cluster of 3 or more) and
+  // re-locate the most-crowded ones to a fresher patch of space until every
+  // nebula has at most 1 neighbour within CLUSTER_R.
+  const CLUSTER_R=70000;     // AU — two centres within this distance are "clustered"
+  const _nearCount=(idx,arr)=>{
+    let _c=0; const _a=arr[idx];
+    for(let _j=0;_j<arr.length;_j++){
+      if(_j===idx) continue;
+      if(Math.hypot(arr[_j].x-_a.x,arr[_j].y-_a.y)<CLUSTER_R) _c++;
+    }
+    return _c;
+  };
+  const _isFarFromAll=(x,y)=>{
+    for(const _b of out) if(Math.hypot(_b.x-x,_b.y-y)<CLUSTER_R) return false;
+    return true;
+  };
+  const MAX_PASSES=6;
+  for(let _pass=0;_pass<MAX_PASSES;_pass++){
+    // Find the most-crowded offender first
+    let _worst=-1, _worstN=1;
+    for(let _i=0;_i<out.length;_i++){
+      const _n=_nearCount(_i,out);
+      if(_n>_worstN){ _worstN=_n; _worst=_i; }
+    }
+    if(_worst<0) break; // all nebulas now have ≤ 1 nearby neighbour
+    // Try to relocate the offender far from everyone (then accept a
+    // single-neighbour location if no perfectly-isolated spot exists).
+    let _placed=false;
+    const _moved=out[_worst];
+    for(let _try=0;_try<60;_try++){
+      const _a=Math.random()*Math.PI*2;
+      const _r=MIN_DIST+Math.random()*(MAX_DIST-MIN_DIST);
+      const _nx=_clampX(origenPlanet.x+Math.cos(_a)*_r);
+      const _ny=_clampY(origenPlanet.y+Math.sin(_a)*_r);
+      // Temporarily remove the offender from the proximity check
+      out.splice(_worst,1);
+      const _far=_isFarFromAll(_nx,_ny);
+      out.splice(_worst,0,_moved);
+      if(_far){ _moved.x=_nx; _moved.y=_ny; _placed=true; break; }
+    }
+    if(!_placed) break; // give up if no isolated spot found in 60 tries
+  }
   return out;
+}
+
+// Draw the all-caps "<NAME> NEBULA" label at the centre of each visible
+// nebula. Only fires when the on-screen extent is large enough that the
+// label is readable (matches how star names only appear at certain zoom).
+// Drawn AFTER world content (planets/trains/etc.) so the label sits on top
+// when it does appear — same render order as star name labels.
+function _drawNebulaNames(){
+  if(!galaxy||!galaxy.nebulas||!galaxy.nebulas.length) return;
+  ctx.save();
+  ctx.textAlign='center';
+  ctx.textBaseline='middle';
+  ctx.shadowColor='rgba(0,0,0,0.65)';
+  ctx.shadowBlur=4;
+  for(const n of galaxy.nebulas){
+    if(!n.name) continue;
+    const [sx,sy]=w2s(n.x,n.y);
+    const sw=n.rx*2*cam.scale, sh=n.ry*2*cam.scale;
+    const _minDim=Math.min(sw,sh);
+    if(_minDim<150) continue;          // too tiny to fit readable text
+    if(sx<-100||sx>W+100||sy<-40||sy>GH+40) continue;
+    // Font size scales with nebula's smaller axis but clamped to 7–12 px
+    // (halved from the previous 13–24 range). Fade in over the 150→260 px
+    // range so labels appear smoothly.
+    const _fa=Math.min(1, (_minDim-150)/110);
+    const _fs=Math.round(Math.min(12, Math.max(7, _minDim*0.03)));
+    ctx.font=`${_fs}px "Exo 2",sans-serif`;
+    ctx.fillStyle=`rgba(205,205,210,${0.62*_fa})`;
+    ctx.fillText((n.name+' Nebula').toUpperCase(), sx, sy);
+  }
+  ctx.restore();
 }
 
 // Lazy single-bake gate: at most ONE nebula canvas is generated per frame so
@@ -3975,6 +4153,10 @@ function _genNebulas(origenPlanet){
 // (gradient stack) burst. Each bake takes ~30-80 ms; spreading them across
 // frames yields a smooth "fade-in" instead of a multi-frame stall.
 let _nebulaBakeBudget=1;
+// Bump whenever the bake recipe (_genNebulaCanvas) changes — every loaded
+// game's existing _canvas refs whose recipeVer don't match get tossed and
+// re-baked from seed. Cheap way to force a visual refresh after a code update.
+const _NEBULA_RECIPE_VER=4;
 function _drawNebulas(){
   if(!galaxy||!galaxy.nebulas||!galaxy.nebulas.length) return;
   ctx.save();
@@ -3990,14 +4172,18 @@ function _drawNebulas(){
     // Bounding-circle cull (radius = half-diagonal of the rotated rect)
     const bMax=Math.hypot(sw,sh)*0.5;
     if(sx+bMax<0||sx-bMax>W||sy+bMax<0||sy-bMax>GH) continue;
-    if(!n._canvas){
+    if(!n._canvas||n._recipeVer!==_NEBULA_RECIPE_VER){
       if(_baked>=_nebulaBakeBudget) continue;   // defer to next frame
-      n._canvas=_genNebulaCanvas(n.seed,n.colorIdx);
+      n._canvas=_genNebulaCanvas(n.seed,n.colorIdx,n.secondaryColorIdx);
+      n._recipeVer=_NEBULA_RECIPE_VER;
       _baked++;
     }
     ctx.save();
     ctx.translate(sx,sy);
-    ctx.rotate(n.rot);
+    // Snap to the nearest 90° even if the saved value came from an older
+    // continuous-rotation build, so the rotated rectangle never bleeds
+    // through as a diagonal silhouette.
+    ctx.rotate(Math.round(n.rot/(Math.PI/2))*(Math.PI/2));
     ctx.drawImage(n._canvas,-sw/2,-sh/2,sw,sh);
     ctx.restore();
   }
@@ -13859,7 +14045,8 @@ function drawGalaxy(ts,dt){
 
   // Nebulas — drawn after parallax background stars but before everything
   // else in world coords (in-galaxy stars, orbits, planets, trains, etc.)
-  // so they read as a deep-space atmospheric backdrop.
+  // so they read as a deep-space atmospheric backdrop. Names render later
+  // in drawGalaxy so they sit on top of planets/stars when visible.
   _drawNebulas();
 
   const origen=galaxy.planets[galaxy.trainPlanetId];
@@ -14279,6 +14466,11 @@ function drawGalaxy(ts,dt){
     }
     ctx.restore();
   }
+
+  // Nebula name labels — drawn after world content so they sit on top of
+  // planets/stars/orbits, and before the fog overlay so fog properly
+  // conceals labels of nebulas in still-unexplored regions.
+  _drawNebulaNames();
 
   // Fog of war overlay (before panel so panel draws on top)
   if(fogEnabled) drawFog();
@@ -17427,7 +17619,7 @@ function _buildSaveObject(){
     _totalPassengersDelivered, _totalHazmatIncinerated,
     trainyard, financeLedger:_trimmedFinance, _ledgerSummary:_builtLedgerSummary, purchaseLedger, corpValueHistory, _corp, _ceoHireCandidates,
     creditSnapshots, lastCreditSnapshotSd,
-    galaxy:{homeStarId:galaxy.homeStarId, origenId:galaxy.origenId, blackHoles:galaxy.blackHoles, colonyTrainDestId:galaxy.colonyTrainDestId??null, faminePlanetId:galaxy.faminePlanetId??null, outbreakPlanetId:galaxy.outbreakPlanetId??null, bhResearchPlanetId:galaxy.bhResearchPlanetId??null, bhResearchPlanetIds:galaxy.bhResearchPlanetIds??[], stars:saveStars, planets:savePlanets, nebulas:(galaxy.nebulas||[]).map(n=>({x:_r5(n.x),y:_r5(n.y),rx:n.rx,ry:n.ry,rot:_r5(n.rot),colorIdx:n.colorIdx,seed:n.seed}))},
+    galaxy:{homeStarId:galaxy.homeStarId, origenId:galaxy.origenId, blackHoles:galaxy.blackHoles, colonyTrainDestId:galaxy.colonyTrainDestId??null, faminePlanetId:galaxy.faminePlanetId??null, outbreakPlanetId:galaxy.outbreakPlanetId??null, bhResearchPlanetId:galaxy.bhResearchPlanetId??null, bhResearchPlanetIds:galaxy.bhResearchPlanetIds??[], stars:saveStars, planets:savePlanets, nebulas:(galaxy.nebulas||[]).map(n=>({x:_r5(n.x),y:_r5(n.y),rx:n.rx,ry:n.ry,rot:_r5(n.rot),colorIdx:n.colorIdx,secondaryColorIdx:n.secondaryColorIdx,seed:n.seed,name:n.name}))},
     trains:saveTrains,
     visitedPlanetIds:[...visitedPlanetIds],
     discoveredPlanetIds:[...discoveredPlanetIds],
@@ -17505,7 +17697,10 @@ function _restoreFromSave(save){
   }
   galaxy={stars, planets, homeStarId:sg.homeStarId, origenId:sg.origenId,
           trainPlanetId:sg.origenId, blackHoles:sg.blackHoles??[], starProxyMap, colonyTrainDestId:sg.colonyTrainDestId??null, faminePlanetId:sg.faminePlanetId??null, outbreakPlanetId:sg.outbreakPlanetId??null, bhResearchPlanetId:sg.bhResearchPlanetId??null, bhResearchPlanetIds:sg.bhResearchPlanetIds??[],
-          nebulas:(sg.nebulas||[]).map(n=>({...n, _canvas:null}))};
+          nebulas:(sg.nebulas||[]).map(n=>({...n, _canvas:null,
+            // Backfill name for pre-name-feature saves — pick a deterministic
+            // entry from the pool keyed by seed so it stays stable forever.
+            name:n.name||NEBULA_NAME_POOL[(n.seed||0)%NEBULA_NAME_POOL.length]}))};
   makeGStars();
   // Restore flat state
   stardate=save.stardate; credits=save.credits; corpName=save.corpName||'Space Tycoon Corporation';
@@ -17581,6 +17776,7 @@ function _restoreFromSave(save){
   fogPoints=save.fogPoints||[];
   fogGridSet=new Set(fogPoints.map(p=>{const gx=Math.round(p.wx/FOG_GRID),gy=Math.round(p.wy/FOG_GRID);return gx+'_'+gy;}));
   fogCanvas=null; fogDirty=true; fogStampCanvas=null; fogLastCamX=NaN; fogLastCamY=NaN; fogLastCamScale=NaN;
+  _fogTickAcc=0; // reset the throttle so it fires at the normal cadence after load
   // Restore trains — route objects are plain-data and restore directly.
   // Planet positions are also restored from saved orbitAngle, so transit
   // tangent locks (_lockedTanLen, _lockedTanAngle) remain valid.
@@ -17935,6 +18131,11 @@ function startGame(){
   _speedLeftHover=false; _speedRightHover=false; _panelTabHover=null; _routeHereBtnHover=false; _assignBtnHover=false; _cancelRouteBtnHover=false; _planetStarNameHover=false; _starPanelPlanetHover=-1; _trainAddHover=false; _trainRowHover=-1; _pokedexSortHover=false; _pokedexRowHover=-1; _starRegistrySortHover=false; _starRegistryRowHover=-1; _goldOkHover=false; _diamondOkHover=false; _carUnlockOkHover=false; _quitYesHover=false; _quitNoHover=false; _saveGameBtnHover=false; _startBtnHover=false; _loadBtnHover=false; _htpBtnHover=false; _htpDotHover=-1; _htpSkipHover=false; pokedexRowBounds=[]; starRegistryRowBounds=[]; loadBtnBounds=null; saveGameBtnBounds=null;
   fogPoints=[]; fogGridSet=new Set(); fogCanvas=null;
   fogDirty=false; fogStampCanvas=null; fogLastCamX=NaN; fogLastCamY=NaN; fogLastCamScale=NaN;
+  // Seed the initial fog reveal at the train's spawn position so the home
+  // system is unfogged before the first 0.01-SD throttle tick fires. Without
+  // this, the player sees a fully-fogged galaxy for the first ~10 s at 1×
+  // speed (or up to ~1 s at 10×) before the throttle's first run.
+  _fogTickAcc=0; updateFog(0.02);
   visitedPlanetIds=new Set(); planetOrbitCounts={};
   revealedStarIds=new Set(); revealedStarsInOrder=[]; fogStarReveals=[];
   revealedOrbitedPlanetIds=new Set(); discoveredPlanetIds=new Set();
@@ -18434,8 +18635,11 @@ function loop(ts){
   // and every downstream tick, so trains/cargo/missions all freeze.
   let dtG=dt*SPEED_OPTS[gameSpeedIdx]; // game-time delta (sped up)
   if(activePopup==='quitconfirm') dtG=0;
+  // Hoisted to the outer loop scope so the later else-if(gs==='fadein'|'galaxy')
+  // branches (which call updateFog(_dtSd)) can see it too. In gs!='fadein'/'galaxy'
+  // states it just sits unused at 0.
+  const _dtSd=dtG*(0.01/600); // stardates elapsed this frame
   if(gs==='fadein'||gs==='galaxy'){
-    const _dtSd=dtG*(0.01/600); // stardates elapsed this frame
     const _sdBefore=stardate;
     stardate+=_dtSd;
     // CEO salary + candidate re-roll — once per whole stardate crossed (X.00)
