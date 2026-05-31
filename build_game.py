@@ -112,6 +112,14 @@ function fitCanvas() {
 fitCanvas();
 window.addEventListener('resize', fitCanvas);
 
+// ── LZ-string (pieroxy/lz-string v1.5.0, MIT) ────────────────
+// Minified, inlined verbatim. Used by the save manager to compress save
+// JSON before writing to localStorage (typical ratio ~3×, e.g. 600 KB →
+// ~180 KB), and to decompress on read. Only compressToUTF16/decompressFromUTF16
+// are exercised — the UTF-16 packing gives the best per-character density
+// (15 bits / 16-bit char) for browser-string storage.
+var LZString=function(){var r=String.fromCharCode,o="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+/=",n="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-$",e={};function t(r,o){if(!e[r]){e[r]={};for(var n=0;n<r.length;n++)e[r][r.charAt(n)]=n}return e[r][o]}var i={compressToBase64:function(r){if(null==r)return"";var n=i._compress(r,6,function(r){return o.charAt(r)});switch(n.length%4){default:case 0:return n;case 1:return n+"===";case 2:return n+"==";case 3:return n+"="}},decompressFromBase64:function(r){return null==r?"":""==r?null:i._decompress(r.length,32,function(n){return t(o,r.charAt(n))})},compressToUTF16:function(o){return null==o?"":i._compress(o,15,function(o){return r(o+32)})+" "},decompressFromUTF16:function(r){return null==r?"":""==r?null:i._decompress(r.length,16384,function(o){return r.charCodeAt(o)-32})},compressToUint8Array:function(r){for(var o=i.compress(r),n=new Uint8Array(2*o.length),e=0,t=o.length;e<t;e++){var s=o.charCodeAt(e);n[2*e]=s>>>8,n[2*e+1]=s%256}return n},decompressFromUint8Array:function(o){if(null==o)return i.decompress(o);for(var n=new Array(o.length/2),e=0,t=n.length;e<t;e++)n[e]=256*o[2*e]+o[2*e+1];var s=[];return n.forEach(function(o){s.push(r(o))}),i.decompress(s.join(""))},compressToEncodedURIComponent:function(r){return null==r?"":i._compress(r,6,function(r){return n.charAt(r)})},decompressFromEncodedURIComponent:function(r){return null==r?"":""==r?null:(r=r.replace(/ /g,"+"),i._decompress(r.length,32,function(o){return t(n,r.charAt(o))}))},compress:function(o){return i._compress(o,16,function(o){return r(o)})},_compress:function(r,o,n){if(null==r)return"";var e,t,i,s={},u={},a="",p="",c="",f=2,l=3,h=2,d=[],m=0,v=0;for(i=0;i<r.length;i+=1)if(a=r.charAt(i),Object.prototype.hasOwnProperty.call(s,a)||(s[a]=l++,u[a]=!0),p=c+a,Object.prototype.hasOwnProperty.call(s,p))c=p;else{if(Object.prototype.hasOwnProperty.call(u,c)){if(c.charCodeAt(0)<256){for(e=0;e<h;e++)m<<=1,v==o-1?(v=0,d.push(n(m)),m=0):v++;for(t=c.charCodeAt(0),e=0;e<8;e++)m=m<<1|1&t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t>>=1}else{for(t=1,e=0;e<h;e++)m=m<<1|t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t=0;for(t=c.charCodeAt(0),e=0;e<16;e++)m=m<<1|1&t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t>>=1}0==--f&&(f=Math.pow(2,h),h++),delete u[c]}else for(t=s[c],e=0;e<h;e++)m=m<<1|1&t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t>>=1;0==--f&&(f=Math.pow(2,h),h++),s[p]=l++,c=String(a)}if(""!==c){if(Object.prototype.hasOwnProperty.call(u,c)){if(c.charCodeAt(0)<256){for(e=0;e<h;e++)m<<=1,v==o-1?(v=0,d.push(n(m)),m=0):v++;for(t=c.charCodeAt(0),e=0;e<8;e++)m=m<<1|1&t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t>>=1}else{for(t=1,e=0;e<h;e++)m=m<<1|t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t=0;for(t=c.charCodeAt(0),e=0;e<16;e++)m=m<<1|1&t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t>>=1}0==--f&&(f=Math.pow(2,h),h++),delete u[c]}else for(t=s[c],e=0;e<h;e++)m=m<<1|1&t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t>>=1;0==--f&&(f=Math.pow(2,h),h++)}for(t=2,e=0;e<h;e++)m=m<<1|1&t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t>>=1;for(;;){if(m<<=1,v==o-1){d.push(n(m));break}v++}return d.join("")},decompress:function(r){return null==r?"":""==r?null:i._decompress(r.length,32768,function(o){return r.charCodeAt(o)})},_decompress:function(o,n,e){var t,i,s,u,a,p,c,f=[],l=4,h=4,d=3,m="",v=[],g={val:e(0),position:n,index:1};for(t=0;t<3;t+=1)f[t]=t;for(s=0,a=Math.pow(2,2),p=1;p!=a;)u=g.val&g.position,g.position>>=1,0==g.position&&(g.position=n,g.val=e(g.index++)),s|=(u>0?1:0)*p,p<<=1;switch(s){case 0:for(s=0,a=Math.pow(2,8),p=1;p!=a;)u=g.val&g.position,g.position>>=1,0==g.position&&(g.position=n,g.val=e(g.index++)),s|=(u>0?1:0)*p,p<<=1;c=r(s);break;case 1:for(s=0,a=Math.pow(2,16),p=1;p!=a;)u=g.val&g.position,g.position>>=1,0==g.position&&(g.position=n,g.val=e(g.index++)),s|=(u>0?1:0)*p,p<<=1;c=r(s);break;case 2:return""}for(f[3]=c,i=c,v.push(c);;){if(g.index>o)return"";for(s=0,a=Math.pow(2,d),p=1;p!=a;)u=g.val&g.position,g.position>>=1,0==g.position&&(g.position=n,g.val=e(g.index++)),s|=(u>0?1:0)*p,p<<=1;switch(c=s){case 0:for(s=0,a=Math.pow(2,8),p=1;p!=a;)u=g.val&g.position,g.position>>=1,0==g.position&&(g.position=n,g.val=e(g.index++)),s|=(u>0?1:0)*p,p<<=1;f[h++]=r(s),c=h-1,l--;break;case 1:for(s=0,a=Math.pow(2,16),p=1;p!=a;)u=g.val&g.position,g.position>>=1,0==g.position&&(g.position=n,g.val=e(g.index++)),s|=(u>0?1:0)*p,p<<=1;f[h++]=r(s),c=h-1,l--;break;case 2:return v.join("")}if(0==l&&(l=Math.pow(2,d),d++),f[c])m=f[c];else{if(c!==h)return null;m=i+i.charAt(0)}v.push(m),f[h++]=i+m.charAt(0),i=m,0==--l&&(l=Math.pow(2,d),d++)}}};return i}();
+
 // ── image loading ────────────────────────────────────────────
 const imgs = {};
 let loaded = 0;
@@ -730,7 +738,7 @@ function _engMaxCars(engineType){ return ENGINE_MAX_CARS[engineType] ?? 10; }
 
 // ── Planet development level system ──────────────────────────
 // Cumulative weighted-cargo score required to reach each level (index = level)
-const DEV_LEVEL_THRESHOLDS=[0,150,400,900,1800,3500,6500,12000,22000,40000,75000];
+const DEV_LEVEL_THRESHOLDS=[0,500,5000,10000,50000,100000,200000,500000,800000,1200000,2000000];
 // Economic weight of one cargo unit toward a planet's development score
 const DEV_CARGO_VALUES={passengers:200,livestock:150,mail:80,water:60,ice:80,sand:50,molten_ore:180,iron:250,gold:800,diamond:1200,hazmat:0,oil:220,battery:300,chemical:160,flowers:180,medical:200,steel:320,glass:220,machinery:420,cargo:100};
 // Supply/demand/population multiplier per dev level
@@ -1516,9 +1524,10 @@ let starRegistrySortBounds=null;
 let starRegistryVisitedOnly=true;
 let starRegistryVisitedOnlyBounds=null;
 // Autosave: when true, the auto-popped newspaper closing once per stardate
-// triggers saveGame() (which itself prompts the user via showSaveFilePicker or a
-// download link, exactly as the manual SAVE GAME button does). Off by default.
-let autosaveEnabled=false;
+// silently writes the current game to the reserved `autosave` localStorage
+// slot (no download dialog). Defaults ON now that the save lives in browser
+// storage rather than a downloaded .stt file — silent, near-zero cost.
+let autosaveEnabled=true;
 // Mission Objectives Tracker: when true, the upper-left floating list of
 // active missions + first uncompleted objective is drawn over the galaxy
 // view. Toggled in the Options popup. Defaults to ON for every new game.
@@ -1576,6 +1585,13 @@ let creditSnapshots=[]; // [{sd, cr}]
 let lastCreditSnapshotSd=829.00;
 let creditDelta=0;
 let financeLedger=[]; // {sd,revenue,cost,cargoType,trainName,planetId,starId}
+// Aggregated totals for ledger entries that were trimmed off at save time
+// (entries older than 30 SDs). Holds {totalRevenue, totalCost, totalInterest}
+// so the Corp Details / Finances "Total Revenue" / "Total Cost" lines stay
+// accurate even after older entries are evicted from the raw ledger.
+// Updated only at save-build time (see _buildSaveObject) and at load time
+// (restored from save). New live entries during play go into financeLedger.
+let _ledgerSummary={totalRevenue:0,totalCost:0,totalInterest:0};
 let purchaseLedger=[]; // {sd,amount,type} — player purchases (station/train/upgrade)
 // Active loans the player has taken out. Interest accrues once per stardate on each
 // loan's anniversary (takenSd offset) until the player repays — repayment isn't wired up yet,
@@ -2525,11 +2541,9 @@ function drawCorpSetup(ts){
     ctx.beginPath(); ctx.roundRect(_salPX,_salPY-12,_salPillW,20,4); ctx.fill();
     ctx.fillStyle=_salTc; ctx.textBaseline='middle';
     ctx.fillText(_salTxt,_cc,_salPY-2); ctx.textBaseline='alphabetic';
-    // Separator
+    // Perk pill (no separator line above — the salary/perk pill grouping
+    // reads cleanly on its own and the stray rule was visually noisy).
     const _pkY=_pY+_pH+78;
-    ctx.strokeStyle='rgba(55,80,165,0.28)'; ctx.lineWidth=0.6;
-    ctx.beginPath(); ctx.moveTo(_cx+14,_pkY-8); ctx.lineTo(_cx+_cardW-14,_pkY-8); ctx.stroke();
-    // Perk pill
     if(_ceo.primaryPerk){
       ctx.font='11px "Exo 2",sans-serif';
       const _pkMaxW=_cardW-28;
@@ -3067,18 +3081,32 @@ function generatePopulation(p){
 // Generate random flower positions within a unit circle.
 // fx/fy are fractions of planet radius; size is also a fraction of radius.
 // dense=false → sparse origin planet; dense=true → fully seeded planet.
-function _genFlowerPositions(count, dense){
+// seed (optional, int): when provided, uses a deterministic seeded RNG so
+// the same seed always produces the same flower layout. This lets saves
+// persist only the seed (~5 bytes) instead of the full ~300-entry array
+// (~12-25 KB), regenerating positions on load.
+function _genFlowerPositions(count, dense, seed){
   const result=[];
   const _maxR=dense?0.87:0.83;
+  // Tiny mulberry32-style seeded RNG. Pure function: same seed → same stream.
+  let _s=(seed==null)?null:((seed>>>0)||1);
+  const _rng=()=>{
+    if(_s==null) return Math.random();
+    _s=(_s+0x6d2b79f5)>>>0;
+    let t=_s;
+    t=Math.imul(t^(t>>>15),t|1);
+    t^=t+Math.imul(t^(t>>>7),t|61);
+    return((t^(t>>>14))>>>0)/4294967296;
+  };
   for(let i=0;i<count;i++){
     let fx,fy,d2,att=0;
-    do { fx=(Math.random()*2-1); fy=(Math.random()*2-1); d2=fx*fx+fy*fy; att++; } while(d2>_maxR*_maxR&&att<25);
-    if(d2>_maxR*_maxR){ fx=(Math.random()-0.5)*_maxR; fy=(Math.random()-0.5)*_maxR; }
+    do { fx=(_rng()*2-1); fy=(_rng()*2-1); d2=fx*fx+fy*fy; att++; } while(d2>_maxR*_maxR&&att<25);
+    if(d2>_maxR*_maxR){ fx=(_rng()-0.5)*_maxR; fy=(_rng()-0.5)*_maxR; }
     const _hues=[308,316,322,332,290,52,60,45,8,340,270]; // pinks, hot pinks, purples, yellows, peach whites, lavender
-    const hue=_hues[Math.floor(Math.random()*_hues.length)]+(Math.floor(Math.random()*14)-7);
+    const hue=_hues[Math.floor(_rng()*_hues.length)]+(Math.floor(_rng()*14)-7);
     // Dense mode: wide size range for "blanket" variety — tiny dots to large blooms
-    const size=dense?(0.012+Math.pow(Math.random(),0.6)*0.075):(0.016+Math.random()*0.030);
-    result.push({fx,fy,size,hue,rot:Math.random()*Math.PI*2});
+    const size=dense?(0.012+Math.pow(_rng(),0.6)*0.075):(0.016+_rng()*0.030);
+    result.push({fx,fy,size,hue,rot:_rng()*Math.PI*2});
   }
   return result;
 }
@@ -3521,7 +3549,8 @@ function _processCargoQueue(t, p){
           p.flowersReceived=(p.flowersReceived||0)+1;
           if(p.flowersReceived>=1.0){
             p.flowerUnlocked=true;
-            p.flowerPositions=_genFlowerPositions(148,true); // dense flower coverage
+            p.flowerSeed=(Math.floor(Math.random()*0x7fffffff)+1)>>>0;
+            p.flowerPositions=_genFlowerPositions(148,true,p.flowerSeed); // dense flower coverage
             p.supplyRate={...p.supplyRate, flowers:1.5};
             _chatMsg(p.name+' can now grow flowers!','rgba(255,160,210,1)');
           }
@@ -3767,36 +3796,47 @@ function generateGalaxy(){
     _hs.name='Gigi Prime'; _hs.size='M'; _hs.radius=STAR_R['M'];
     _hs.colorName='yellow'; _hs.color=STAR_COLORS['yellow']; }
 
+  // Home star planet layout — fixed sequence of 6 biomes, from closest to
+  // Gigi Prime to furthest. Orijen sits at index 1 (between the inner lava
+  // world and the desert), gating the player's first sortie outward.
+  const HOME_BIOMES=['lava','resort','desert','agri','rocky','chemical'];
   // Generate planets orbiting each star
   let origenId=0;
   for(const star of stars){
     const isHome=star.id===homeStarId;
-    // Home star gets 4-7 planets guaranteed; others use bell distribution
-    const np=isHome?randInt(4,7):bellPlanetCount();
-    // Home star has a slightly larger orbit cap to ensure all planets fit
-    const orbitCap=isHome?10500:9000;
+    // Home star always gets exactly 6 planets (one per HOME_BIOMES entry);
+    // others use bell distribution.
+    const np=isHome?HOME_BIOMES.length:bellPlanetCount();
+    // Home star uses a generous cap so all six guaranteed worlds fit.
+    const orbitCap=isHome?14000:9000;
     // Maximum orbit allowed by world boundary from this star's position
     const boundLimit=Math.min(WORLD_W-Math.abs(star.x),WORLD_H-Math.abs(star.y))-400;
     let orbitR=star.radius*1.8+400;
     // Each star has a dominant orbit direction; 98% of planets follow it
     const dominantDir=Math.random()<0.5?1:-1;
     for(let i=0;i<np;i++){
-      const isStarter=(isHome&&i===0);
+      const isStarter=(isHome&&i===1); // Orijen sits at HOME_BIOMES index 1
       const sz=(isStarter?'L':pickSize()), pr=SIZE_R[sz];
-      orbitR+=pr+rand(300,1200);
-      if(orbitR>orbitCap) break;
+      // Home star uses tighter random spacing so all 6 fit inside orbitCap.
+      if(isHome) orbitR+=pr+rand(280,720);
+      else       orbitR+=pr+rand(300,1200);
+      if(!isHome&&orbitR>orbitCap) break;        // non-home cap is permissive break
       if(orbitR+pr>boundLimit) break; // orbit would exit world boundary
       const angle=rand(0,Math.PI*2);
       // Kepler-inspired speed: closer planets orbit faster (v ∝ 1/√r)
       // 2% chance of retrograde (opposite dominant direction)
       const dir=(Math.random()<0.02?-dominantDir:dominantDir);
       const spd=0.00025*Math.sqrt(800/orbitR)*dir;
+      // Home system: biome forced by HOME_BIOMES position. Elsewhere: random.
+      const _typeForSlot=isHome
+        ? PTYPES.find(t=>t.id===HOME_BIOMES[i])||PTYPES[0]
+        : _pickBiomeWeighted();
       const p={
         id:pid++, starId:star.id,
         orbitRadius:orbitR, orbitAngle:angle, orbitSpeed:spd,
         x:star.x+orbitR*Math.cos(angle), y:star.y+orbitR*Math.sin(angle),
         size:sz, radius:pr,
-        type:(isStarter?PTYPES[8]:_pickBiomeWeighted()),
+        type:_typeForSlot,
         name:isStarter?'Orijen':makeName(),
         isStarter
       };
@@ -3848,66 +3888,13 @@ function generateGalaxy(){
       }
       star.planetIds.push(p.id);
       planets.push(p);
-      orbitR+=pr+rand(200,800);
+      // Tighter post-spacing on home so all 6 fit inside orbitCap.
+      orbitR+=pr+(isHome?rand(180,520):rand(200,800));
     }
-    // Guarantee home star reaches 4 planets by adding XS worlds with tight spacing
-    if(isHome){
-      while(star.planetIds.length<4){
-        const pr=SIZE_R['XS'];
-        orbitR+=pr+250;
-        if(orbitR+pr>Math.min(boundLimit,orbitCap)) break;
-        const angle=rand(0,Math.PI*2);
-        const spd=0.00025*Math.sqrt(800/orbitR)*dominantDir;
-        const p={id:pid++,starId:star.id,orbitRadius:orbitR,orbitAngle:angle,orbitSpeed:spd,
-                 x:star.x+orbitR*Math.cos(angle),y:star.y+orbitR*Math.sin(angle),
-                 size:'XS',radius:pr,type:_pickBiomeWeighted(),name:makeName(),isStarter:false};
-        _attachBiome(p); p.moons=generateMoons(p); p.ring=null; p.catchphrase=generateCatchphrase(p); p.population=generatePopulation(p);
-        p.clouds=generatePlanetClouds(p); p.cloudAngle=Math.random()*Math.PI*2;
-        {const _gb=['rocky','desert','resort','jungle','ocean']; p.hasGold=(_gb.includes(p.type.id)&&Math.random()<0.1); p.goldRevealed=false; p.goldPatch=p.hasGold?{angle:rand(0,Math.PI*2),arcSize:Math.PI*0.25}:null; p.hasDiamond=(_gb.includes(p.type.id)&&Math.random()<0.02); p.diamondRevealed=false; p.diamondPatch=p.hasDiamond?{angle:rand(0,Math.PI*2),arcSize:Math.PI*0.22}:null;}
-        p.devLevelBase=randInt(1,2); p.devLevel=p.devLevelBase; p.populationBase=p.population; p.devLog=[]; p.passengerDeliveries=[];
-        if(p.type.id==='agri'){const _aR2=Math.random(); p.agriStructAngle=rand(0,Math.PI*2); if(_aR2<0.333){p.grainUnlocked=true;p.upgrades=['granary'];}else if(_aR2<0.667){p.livestockUnlocked=true;p.upgrades=['farm'];}else{p.fruitUnlocked=true;p.upgrades=['orchard'];}}
-        p.supplyRate=computeSupplyRate(p); p.demandRate=computeDemandRate(p); p.economicHealth=computeEconomicHealth(p); seedCargoPlanet(p);
-        if(p.type.id!=='agri') p.upgrades=UPGRADES.filter(u=>u.preBuiltBiomes.includes(p.type.id)).map(u=>u.id); p.hasStation=false;
-        star.planetIds.push(p.id); planets.push(p);
-        orbitR+=pr+200;
-      }
-    }
-    // Guarantee home star has at least one lava, agri, and desert planet.
-    // If any are missing, replace a non-starter planet that doesn't fill
-    // one of the other required types.
-    if(isHome){
-      const _homePlanets=planets.filter(p=>p.starId===star.id&&!p.isStarter);
-      const _needTypes=['lava','agri','desert'];
-      const _usedForReplace=new Set();
-      for(const _tid of _needTypes){
-        if(_homePlanets.some(p=>p.type.id===_tid)) continue;
-        // Prefer a planet whose type isn't one of the required three (not displacing a kept type)
-        let _rep=_homePlanets.find(p=>!_needTypes.includes(p.type.id)&&!_usedForReplace.has(p.id));
-        if(!_rep) _rep=_homePlanets.find(p=>!_usedForReplace.has(p.id));
-        if(!_rep) continue;
-        _usedForReplace.add(_rep.id);
-        const _newType=PTYPES.find(t=>t.id===_tid);
-        _rep.type={..._newType};
-        _attachBiome(_rep);
-        _rep.catchphrase=generateCatchphrase(_rep);
-        _rep.population=generatePopulation(_rep);
-        _rep.clouds=generatePlanetClouds(_rep); _rep.cloudAngle=Math.random()*Math.PI*2;
-        {const _gb=['rocky','desert','resort','jungle','ocean'];
-        _rep.hasGold=_gb.includes(_rep.type.id)&&Math.random()<0.1;
-        _rep.goldRevealed=false;
-        _rep.goldPatch=_rep.hasGold?{angle:rand(0,Math.PI*2),arcSize:Math.PI*0.25}:null;
-        _rep.hasDiamond=_gb.includes(_rep.type.id)&&Math.random()<0.02;
-        _rep.diamondRevealed=false;
-        _rep.diamondPatch=_rep.hasDiamond?{angle:rand(0,Math.PI*2),arcSize:Math.PI*0.22}:null;}
-        if(_rep.type.id==='agri'){const _aR3=Math.random(); _rep.agriStructAngle=rand(0,Math.PI*2); if(_aR3<0.333){_rep.grainUnlocked=true;_rep.upgrades=['granary'];}else if(_aR3<0.667){_rep.livestockUnlocked=true;_rep.upgrades=['farm'];}else{_rep.fruitUnlocked=true;_rep.upgrades=['orchard'];}}
-        _rep.supplyRate=computeSupplyRate(_rep);
-        _rep.demandRate=computeDemandRate(_rep);
-        _rep.economicHealth=computeEconomicHealth(_rep);
-        seedCargoPlanet(_rep);
-        if(_rep.type.id!=='agri') _rep.upgrades=UPGRADES.filter(u=>u.preBuiltBiomes.includes(_rep.type.id)).map(u=>u.id);
-        if(_rep.ring) _rep.ring={..._rep.ring,rgb:_newType.rim.map(v=>Math.min(255,Math.round(v*0.5+rand(30,70))))};
-      }
-    }
+    // (Removed: the old "guarantee home reaches 4 planets" top-up loop and
+    //  the "guarantee lava / agri / desert biomes" replacement pass — both
+    //  are obsolete now that HOME_BIOMES forces exactly six planets with
+    //  exactly the required biomes in a fixed orbital order.)
   }
 
   // ── separate overlapping star systems ───────────────────────
@@ -4050,7 +4037,8 @@ function generateGalaxy(){
       const fp=_fcands[Math.floor(Math.random()*_fcands.length)];
       fp.isFlowersOrigin=true;
       fp.flowersReceived=0;
-      fp.flowerPositions=_genFlowerPositions(300,true); // dense blanket — origin world
+      fp.flowerSeed=(Math.floor(Math.random()*0x7fffffff)+1)>>>0;
+      fp.flowerPositions=_genFlowerPositions(300,true,fp.flowerSeed); // dense blanket — origin world
       // Re-seed supply/demand now that isFlowersOrigin is set
       fp.supplyRate=computeSupplyRate(fp);
       fp.demandRate=computeDemandRate(fp);
@@ -4216,7 +4204,7 @@ function generateGalaxy(){
           _victim.hasGold=false; _victim.goldRevealed=false; _victim.goldPatch=null;
           _victim.hasDiamond=false; _victim.diamondRevealed=false; _victim.diamondPatch=null;
           // Urban planets shouldn't carry flower fields either.
-          _victim.flowerUnlocked=false; _victim.flowerPositions=null; _victim.isFlowersOrigin=false;
+          _victim.flowerUnlocked=false; _victim.flowerPositions=null; _victim.flowerSeed=null; _victim.isFlowersOrigin=false;
         }
       }
     }
@@ -6462,6 +6450,14 @@ function updateCargoSupplyDemand(dtSd){
     }
     // Oil floor: every station planet (except oil planets themselves) always wants at least 1 oil
     if(p.hasStation&&p.type.id!=='oil'&&(p.demand.oil||0)<1) p.demand.oil=1;
+    // Iron floor: every station planet always wants at least 1 iron. This
+    // ensures the planet can reliably accept iron deliveries — necessary so
+    // the player can accumulate the 4 ironDelivered units required to
+    // upgrade the station to a Large Station. The matching demandRate floor
+    // in computeDemandRate (~line 3284) only sets a per-SD accumulation rate;
+    // this floor enforces a minimum on the live demand value so trains can
+    // unload even right after a previous delivery zeroed the demand.
+    if(p.hasStation&&(p.demand.iron||0)<1) p.demand.iron=1;
     // Flowers demand floor: eligible planets that have never received flowers always want at least 1
     if(!p.flowersReceived&&['jungle','desert','resort'].includes(p.type.id)){
       if((p.demand.flowers||0)<1) p.demand.flowers=1;
@@ -6477,7 +6473,20 @@ function updateCargoSupplyDemand(dtSd){
   }
 }
 
+// Accumulator so updatePlanetDevLevels runs at most once per 0.1 SD instead
+// of every game-tick (~60 fps × speed). The per-tick cost of walking every
+// planet's devLog is non-trivial late-game; 0.1 SD is more than fine since
+// dev-level transitions are already coarse-grained and the diversity score
+// inside the function was already on the same 0.1 SD cadence.
+let _devLevelTickAcc=0;
 function updatePlanetDevLevels(dtSd){
+  _devLevelTickAcc+=dtSd;
+  if(_devLevelTickAcc<0.1) return;
+  const _elapsed=_devLevelTickAcc; // pass full elapsed-since-last-run to inner logic
+  _devLevelTickAcc=0;
+  // Replace the function-local `dtSd` from here on with the accumulated value
+  // so the per-planet diversity timer (p._cdsTimer) advances correctly.
+  dtSd=_elapsed;
   const now=stardate;
   for(const p of galaxy.planets){
     if(!p.devLog) p.devLog=[];
@@ -7046,7 +7055,13 @@ function updateTrain(t, dt){
             }
           }
         }
-        if(_cpl&&(_cpl.hasStation||_cpl.aiHasStation)&&(t.orbitTier==='LOW'||(_cpl.hasLargeStation&&t.orbitTier==='MED'))) _startCargoOps(t,_cpl);
+        // Cargo-ops orbit gate: LOW always works; MED works at Large Station
+        // or Terminal; HIGH works only at Terminal.
+        if(_cpl&&(_cpl.hasStation||_cpl.aiHasStation)&&(
+              t.orbitTier==='LOW' ||
+              (t.orbitTier==='MED' &&(_cpl.hasLargeStation||_cpl.hasTerminal)) ||
+              (t.orbitTier==='HIGH'&& _cpl.hasTerminal)
+           )) _startCargoOps(t,_cpl);
         else if(_cpl&&_cpl.isStarProxy) _startStarOps(t,_cpl);
       }
     }
@@ -7202,8 +7217,11 @@ function updateTrain(t, dt){
           // using normal demand rules before the train goes idle (parked orbit).
           // _cargoCheckedThisStop is already false from departure at the previous stop.
           const _fDstP=_gp(destId);
-          if(_fDstP&&(_fDstP.hasStation||_fDstP.aiHasStation)&&
-             (t.orbitTier==='LOW'||(_fDstP.hasLargeStation&&t.orbitTier==='MED'))){
+          if(_fDstP&&(_fDstP.hasStation||_fDstP.aiHasStation)&&(
+                t.orbitTier==='LOW' ||
+                (t.orbitTier==='MED' &&(_fDstP.hasLargeStation||_fDstP.hasTerminal)) ||
+                (t.orbitTier==='HIGH'&& _fDstP.hasTerminal)
+             )){
             t.route={stops:[destId,destId],isLoop:false,fromIdx:0,toIdx:0,
               phase:'orbit',orbitSpun:0,dir:1,minOrbitDone:true,
               stopOrbitR:[t.orbitR,t.orbitR],_recomputeTimer:0,
@@ -8157,11 +8175,13 @@ function drawCorpPopup(){
     ctx.font='bold 13px Orbitron,sans-serif'; ctx.fillStyle=valCol||'rgba(185,215,255,0.92)';
     ctx.fillText(val,x,y+_fValDY);
   };
-  const _totRev=financeLedger.reduce((s,e)=>s+e.revenue,0);
-  // Total expenses = operational costs (financeLedger) + cumulative purchases
-  // (trains, stations, upgrades — tracked separately in purchaseLedger).
+  // Totals fold in _ledgerSummary so older trimmed-off entries still count
+  // toward the displayed lifetime numbers.
+  const _totRev=financeLedger.reduce((s,e)=>s+e.revenue,0)+(_ledgerSummary?.totalRevenue||0);
+  // Total expenses = operational costs (financeLedger + _ledgerSummary)
+  // + cumulative purchases (trains, stations, upgrades — tracked separately).
   const _totPurchases=purchaseLedger.reduce((s,e)=>s+(e.amount||0),0);
-  const _totCost=financeLedger.reduce((s,e)=>s+e.cost,0)+_totPurchases;
+  const _totCost=financeLedger.reduce((s,e)=>s+e.cost,0)+(_ledgerSummary?.totalCost||0)+(_ledgerSummary?.totalInterest||0)+_totPurchases;
   const _profit=_totRev-_totCost;
   const _av=_corpAssets();
   const _hardVal=_av.trainVal+_av.stationVal+_av.upgradeVal;
@@ -8867,10 +8887,10 @@ function drawFinancesPopup(){
     ctx.textAlign='right'; ctx.fillText('CORP VALUE',_cEnd-2,_hdrY);
   }
 
-  // Totals row
-  const _totRev=financeLedger.reduce((s,e)=>s+e.revenue,0);
-  const _totInterest=financeLedger.reduce((s,e)=>s+(e.cargoType==='interest'?e.cost:0),0);
-  const _totCost=financeLedger.reduce((s,e)=>s+(e.cargoType==='interest'?0:e.cost),0);
+  // Totals row — fold in _ledgerSummary so trimmed older entries still count.
+  const _totRev=financeLedger.reduce((s,e)=>s+e.revenue,0)+(_ledgerSummary?.totalRevenue||0);
+  const _totInterest=financeLedger.reduce((s,e)=>s+(e.cargoType==='interest'?e.cost:0),0)+(_ledgerSummary?.totalInterest||0);
+  const _totCost=financeLedger.reduce((s,e)=>s+(e.cargoType==='interest'?0:e.cost),0)+(_ledgerSummary?.totalCost||0);
   const _totProfit=_totRev-_totCost-_totInterest;
   const _totPurchases=_isSd?purchaseLedger.reduce((s,e)=>s+e.amount,0):0;
   const _totY=py+ph-28;
@@ -10030,6 +10050,252 @@ function drawCheatsPopup(){
   ctx.restore();
 }
 
+// ── Save Manager popup ───────────────────────────────────────
+// Replaces the old "click save → file picker → download .stt" flow with a
+// proper in-game manager. Lists every save slot held in localStorage (the
+// reserved Autosave slot first, then manual saves newest-first), and exposes
+// per-slot Load / Save-Over / Export / Delete actions plus top-level New
+// Save and Import .stt buttons. Opened from either gs='title' (LOAD GAME
+// button) or gs='galaxy' (SAVE GAME button in quit-confirm popup) by setting
+// `activePopup='savemanager'`; the open call also stashes a mode hint
+// (`'save'` or `'load'`) in `popupState.smMode` so the matching primary
+// action button can be highlighted.
+function drawSaveManagerPopup(){
+  if(activePopup!=='savemanager') return;
+  const pw=560, ph=420;
+  const [px,py]=drawPopupBase(pw,ph,'rgba(120,180,255,0.7)');
+  ctx.save();
+  // ── Header ──
+  ctx.font='bold 13px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='#7df'; ctx.fillText('SAVE / LOAD MANAGER',px+pw/2,py+24);
+  ctx.font='10px "Exo 2",sans-serif'; ctx.textAlign='right';
+  ctx.fillStyle=popupState.escHover?'rgba(255,255,255,0.92)':'rgba(90,130,190,0.55)';
+  ctx.fillText('[ESC] close',px+pw-10,py+24);
+  popupState.escBounds={x:px+pw-90,y:py+12,w:80,h:20};
+  // Storage-status indicator (top-left)
+  ctx.textAlign='left'; ctx.font='9px "Exo 2",sans-serif';
+  const _lsOk=_lsAvailable();
+  ctx.fillStyle=_lsOk?'rgba(120,200,150,0.78)':'rgba(255,120,90,0.85)';
+  ctx.fillText(_lsOk?'● Browser storage: OK':'● Browser storage: UNAVAILABLE',px+12,py+24);
+  ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(px,py+34); ctx.lineTo(px+pw,py+34); ctx.stroke();
+
+  // ── Slot list ──
+  // Autosave is pinned to the top regardless of save time so it's always the
+  // first row; manual saves follow, newest-first.
+  const _idx=_lsLoadIndex();
+  const _autosaveEntry=_idx.find(e=>e.id===LS_AUTOSAVE_ID)||null;
+  const _manualEntries=_idx.filter(e=>e.id!==LS_AUTOSAVE_ID).sort((a,b)=>b.savedAt-a.savedAt);
+  const _list=[];
+  if(_autosaveEntry) _list.push(_autosaveEntry);
+  for(const e of _manualEntries) _list.push(e);
+  const _listX=px+12, _listY=py+44, _listW=pw-24, _rowH=44;
+  const _listH=ph-44-72; // leave 72 px at the bottom for action buttons
+  const _maxRows=Math.floor(_listH/_rowH);
+  popupState.smScroll=Math.max(0,Math.min(popupState.smScroll||0,Math.max(0,_list.length*_rowH-_listH)));
+  ctx.save();
+  ctx.beginPath(); ctx.rect(_listX,_listY,_listW,_listH); ctx.clip();
+  popupState.smRowBounds=[];
+  popupState.smRowActionBounds=[];
+  if(_list.length===0){
+    ctx.font='italic 11px "Exo 2",sans-serif'; ctx.fillStyle='rgba(120,160,210,0.55)'; ctx.textAlign='center';
+    ctx.fillText(_lsOk?'No saved games yet. Click NEW SAVE below to create one, or IMPORT to load a .stt file.':'Browser storage is disabled in this context — only file-based save / load is available.',
+      px+pw/2,_listY+_listH/2);
+  } else {
+    for(let i=0;i<_list.length;i++){
+      const e=_list[i];
+      const _ry=_listY+i*_rowH-(popupState.smScroll||0);
+      if(_ry+_rowH<_listY||_ry>_listY+_listH) continue;
+      const _isAutosave=(e.id===LS_AUTOSAVE_ID);
+      const _selected=(popupState.smSelected===e.id);
+      const _rowHov=(popupState.smHoverRow===i);
+      // Row background
+      ctx.fillStyle=_selected?'rgba(35,80,170,0.75)':_rowHov?'rgba(22,40,80,0.55)':(i%2===0?'rgba(15,25,55,0.42)':'rgba(10,18,42,0.42)');
+      ctx.fillRect(_listX,_ry,_listW,_rowH-2);
+      if(_selected){
+        ctx.strokeStyle='rgba(140,200,255,0.85)'; ctx.lineWidth=1.4;
+        ctx.strokeRect(_listX,_ry,_listW,_rowH-2);
+      }
+      // Title line
+      ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='left'; ctx.fillStyle=_isAutosave?'rgba(255,210,120,0.95)':'rgba(190,225,255,0.96)';
+      const _title=_isAutosave?'AUTOSAVE':(e.label||(e.corp||'Save')+'_'+e.sd.toFixed(2).replace('.',''));
+      ctx.fillText(_title,_listX+10,_ry+15);
+      // Metadata line (corp · SD · saved-X-ago · size)
+      ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(140,180,225,0.72)';
+      const _meta=(e.corp||'(no corp)')+'  ·  SD '+(e.sd||0).toFixed(2)+'  ·  '+_fmtSaveAge(e.savedAt||0)+'  ·  '+_fmtSaveSize(e.size||0);
+      ctx.fillText(_meta,_listX+10,_ry+30);
+      // Per-row action buttons (drawn at right edge); only visible when this
+      // row is selected. Buttons: LOAD, SAVE OVER (skip for autosave so the
+      // user can't accidentally clobber it), EXPORT, DELETE.
+      popupState.smRowBounds.push({x:_listX,y:_ry,w:_listW,h:_rowH-2,id:e.id,rowIdx:i});
+      if(_selected){
+        const _acts=[{k:'load',l:'LOAD',col:'rgba(80,200,130,0.95)'}];
+        if(!_isAutosave) _acts.push({k:'save',l:'OVERWRITE',col:'rgba(80,160,255,0.95)'});
+        _acts.push({k:'export',l:'EXPORT',col:'rgba(255,200,90,0.95)'});
+        _acts.push({k:'delete',l:'DELETE',col:'rgba(230,100,100,0.95)'});
+        const _bw=64,_bh=18,_bgap=4;
+        let _bx=_listX+_listW-10-(_bw+_bgap)*_acts.length+_bgap;
+        const _by=_ry+_rowH-_bh-7;
+        for(const a of _acts){
+          const _bHov=(popupState.smHoverAction===e.id+':'+a.k);
+          ctx.fillStyle=_bHov?a.col:'rgba(18,28,52,0.85)';
+          ctx.beginPath(); ctx.roundRect(_bx,_by,_bw,_bh,3); ctx.fill();
+          ctx.strokeStyle=_bHov?a.col:'rgba(80,120,180,0.55)';
+          ctx.lineWidth=1; ctx.beginPath(); ctx.roundRect(_bx,_by,_bw,_bh,3); ctx.stroke();
+          ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='center';
+          ctx.fillStyle=_bHov?'rgba(20,20,30,0.97)':a.col;
+          ctx.fillText(a.l,_bx+_bw/2,_by+12);
+          popupState.smRowActionBounds.push({x:_bx,y:_by,w:_bw,h:_bh,id:e.id,action:a.k});
+          _bx+=_bw+_bgap;
+        }
+      }
+    }
+  }
+  ctx.restore();
+  // Scrollbar (registered for drag)
+  const _totalH=_list.length*_rowH;
+  if(_totalH>_listH){
+    const _sbW=5, _sbX=px+pw-9;
+    const _thumbH=Math.max(20,_listH*(_listH/_totalH));
+    const _maxS=Math.max(1,_totalH-_listH);
+    const _thumbY=_listY+((popupState.smScroll||0)/_maxS)*(_listH-_thumbH);
+    ctx.fillStyle='rgba(20,40,80,0.45)'; ctx.fillRect(_sbX,_listY,_sbW,_listH);
+    ctx.fillStyle='rgba(120,200,255,0.65)';
+    ctx.beginPath(); ctx.roundRect(_sbX,_thumbY,_sbW,_thumbH,2); ctx.fill();
+    _regScrollbar({x:_sbX,y:_listY,w:_sbW,h:_listH,thumbY:_thumbY,thumbH:_thumbH,maxScroll:_maxS,setScroll:(v)=>{popupState.smScroll=v;}});
+  }
+  // ── Bottom action bar ──
+  const _abY=py+ph-58;
+  ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(px,_abY-6); ctx.lineTo(px+pw,_abY-6); ctx.stroke();
+  // Mode hint
+  ctx.font='9px "Exo 2",sans-serif'; ctx.textAlign='left';
+  ctx.fillStyle='rgba(120,160,220,0.72)';
+  const _hintTxt=(popupState.smMode==='save')
+    ? 'Saving the game: pick a slot above to overwrite, or click NEW SAVE for a fresh slot.'
+    : 'Loading a game: pick a slot above and click LOAD, or IMPORT a .stt file.';
+  ctx.fillText(_hintTxt,px+12,_abY+10);
+  // Action buttons row
+  const _abBtnW=130, _abBtnH=28, _abGap=10;
+  const _abX0=px+pw-_abBtnW*2-_abGap-12, _abYBtn=_abY+24;
+  // NEW SAVE button (always available when a game is loaded and storage works)
+  const _nsAvail=!!galaxy&&_lsOk;
+  const _nsHov=popupState.smHoverAction==='__new_save__';
+  ctx.fillStyle=_nsAvail?(_nsHov?'rgba(40,170,90,0.97)':'rgba(20,120,60,0.92)'):'rgba(18,30,18,0.62)';
+  ctx.beginPath(); ctx.roundRect(_abX0,_abYBtn,_abBtnW,_abBtnH,4); ctx.fill();
+  ctx.strokeStyle=_nsAvail?(_nsHov?'rgba(120,255,180,0.95)':'rgba(80,200,140,0.85)'):'rgba(50,75,55,0.45)';
+  ctx.lineWidth=1.2; ctx.beginPath(); ctx.roundRect(_abX0,_abYBtn,_abBtnW,_abBtnH,4); ctx.stroke();
+  ctx.font='bold 10px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle=_nsAvail?'rgba(220,255,230,0.97)':'rgba(80,100,80,0.55)';
+  ctx.fillText('+ NEW SAVE',_abX0+_abBtnW/2,_abYBtn+18);
+  popupState.smRowActionBounds.push({x:_abX0,y:_abYBtn,w:_abBtnW,h:_abBtnH,id:'__top__',action:'new_save',disabled:!_nsAvail});
+  // IMPORT .stt button (always available; works even without localStorage by
+  // restoring directly into the running game)
+  const _imX=_abX0+_abBtnW+_abGap;
+  const _imHov=popupState.smHoverAction==='__import__';
+  ctx.fillStyle=_imHov?'rgba(220,160,60,0.97)':'rgba(120,80,20,0.88)';
+  ctx.beginPath(); ctx.roundRect(_imX,_abYBtn,_abBtnW,_abBtnH,4); ctx.fill();
+  ctx.strokeStyle=_imHov?'rgba(255,210,120,0.95)':'rgba(200,150,70,0.82)';
+  ctx.lineWidth=1.2; ctx.beginPath(); ctx.roundRect(_imX,_abYBtn,_abBtnW,_abBtnH,4); ctx.stroke();
+  ctx.font='bold 10px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='rgba(255,235,200,0.97)';
+  ctx.fillText('↑ IMPORT .stt',_imX+_abBtnW/2,_abYBtn+18);
+  popupState.smRowActionBounds.push({x:_imX,y:_abYBtn,w:_abBtnW,h:_abBtnH,id:'__top__',action:'import'});
+  ctx.restore();
+}
+
+// Handles a mousedown/click inside the Save Manager popup. Returns `true` if
+// the click was consumed (so the caller skips further click dispatch),
+// `false` if the click missed every interactive element. Called from BOTH
+// the gs='title' and gs='galaxy' click handlers since the popup can open
+// from either state.
+function _smHandleClick(cp){
+  if(activePopup!=='savemanager') return false;
+  // Click-outside-popup → close (mirrors the standard popup behaviour in
+  // the galaxy click handler). Popup is 560×420 centered.
+  const _pw=560,_ph=420, _ppx=(W-_pw)/2, _ppy=(H-_ph)/2;
+  if(cp.x<_ppx||cp.x>_ppx+_pw||cp.y<_ppy||cp.y>_ppy+_ph){
+    activePopup=null; popupState={}; return true;
+  }
+  // ESC text → close
+  if(popupState.escBounds){
+    const b=popupState.escBounds;
+    if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+      activePopup=null; popupState={}; return true;
+    }
+  }
+  // Per-row action buttons (LOAD / OVERWRITE / EXPORT / DELETE) and the
+  // bottom NEW SAVE / IMPORT buttons share the same bounds list.
+  if(popupState.smRowActionBounds){
+    for(const _ab of popupState.smRowActionBounds){
+      if(cp.x>=_ab.x&&cp.x<=_ab.x+_ab.w&&cp.y>=_ab.y&&cp.y<=_ab.y+_ab.h){
+        if(_ab.disabled) return true;
+        const a=_ab.action, id=_ab.id;
+        if(id==='__top__'){
+          if(a==='new_save'){
+            if(!galaxy){ _chatMsg('Nothing to save.','rgba(255,100,100,1)'); return true; }
+            const saveObj=_buildSaveObject(); if(!saveObj) return true;
+            const _slotId=_lsNewSlotId();
+            const res=_lsWriteSlot(_slotId,saveObj,_lsDefaultLabel());
+            if(res.ok){
+              popupState.smSelected=_slotId;
+              _chatMsg('GAME SAVED!','rgba(80,220,130,1)');
+            } else if(res.err==='quota'){
+              alert('Browser storage is full. Delete an existing save first.');
+            } else if(res.err==='unavailable'){
+              _downloadSttFromSaveObj(saveObj,_lsDefaultLabel());
+              _chatMsg('GAME SAVED (downloaded — storage unavailable).','rgba(80,220,130,1)');
+            } else {
+              alert('Save failed: '+res.err);
+            }
+          } else if(a==='import'){
+            _lsImportSttFile().then(newId=>{ if(newId) popupState.smSelected=newId; });
+          }
+          return true;
+        }
+        // Per-row actions
+        const _meta=_lsLoadIndex().find(e=>e.id===id);
+        if(!_meta) return true;
+        if(a==='load'){
+          const _so=_lsReadSlot(id);
+          if(!_so){ alert('Failed to read save.'); return true; }
+          try{ _restoreFromSave(_so); }
+          catch(e){ alert('Failed to load save: '+(e&&e.message||'unknown')); return true; }
+          activePopup=null; popupState={};
+          _chatMsg('GAME LOADED.','rgba(80,220,130,1)');
+        } else if(a==='save'){
+          if(!galaxy){ _chatMsg('Nothing to save.','rgba(255,100,100,1)'); return true; }
+          const saveObj=_buildSaveObject(); if(!saveObj) return true;
+          const res=_lsWriteSlot(id,saveObj,_meta.label||null);
+          if(res.ok) _chatMsg('GAME SAVED!','rgba(80,220,130,1)');
+          else if(res.err==='quota') alert('Browser storage is full. Delete an existing save first.');
+          else alert('Save failed: '+res.err);
+        } else if(a==='export'){
+          const _so=_lsReadSlot(id);
+          if(!_so){ alert('Failed to read save for export.'); return true; }
+          _downloadSttFromSaveObj(_so,_meta.label||(_meta.corp||'save')+'_'+(_meta.sd||0).toFixed(2).replace('.',''));
+        } else if(a==='delete'){
+          if(_lsDeleteSlot(id)){
+            if(popupState.smSelected===id) popupState.smSelected=null;
+            _chatMsg('Save deleted.','rgba(200,180,140,0.95)');
+          }
+        }
+        return true;
+      }
+    }
+  }
+  // Row body click → select the slot
+  if(popupState.smRowBounds){
+    for(const _rb of popupState.smRowBounds){
+      if(cp.x>=_rb.x&&cp.x<=_rb.x+_rb.w&&cp.y>=_rb.y&&cp.y<=_rb.y+_rb.h){
+        popupState.smSelected=_rb.id;
+        return true;
+      }
+    }
+  }
+  return true; // click inside popup window but missed everything — consume so backdrop doesn't fire
+}
+
 function drawTrainDetailPopup(){
   if(activePopup!=='train') return;
   const t=trains[popupState.trainIdx];
@@ -10634,7 +10900,11 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
     }
     return false;
   };
-  const _stEnt={id:'__station__',label:'STATION',desc:'Enables cargo loading and unloading on this planet.',cost:_stationBuildCost(),isStation:true};
+  // Station card title reflects the planet's current tier — STATION while
+  // unbuilt or pre-upgrade, LARGE STATION after the Large upgrade is built,
+  // TERMINAL after the Terminal upgrade is built (all three orbits open).
+  const _stLabel=p.hasTerminal?'TERMINAL':(p.hasLargeStation?'LARGE STATION':'STATION');
+  const _stEnt={id:'__station__',label:_stLabel,desc:'Enables cargo loading and unloading on this planet.',cost:_stationBuildCost(),isStation:true};
   const _candidates=UPGRADES.filter(u=>builtSet.has(u.id)||u.eligibleBiomes.includes(bio)||u.universal);
   const _sortTier=(u)=>{
     if(builtSet.has(u.id)) return 0;          // built first
@@ -10683,7 +10953,9 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
   popupState.upgradeBuildBounds=[];
   popupState.buildStationBtnBounds=null;
   popupState.buildLargeStationBtnBounds=null;
+  popupState.buildTerminalBtnBounds=null;
   popupState._lsTooltip=null;
+  popupState._terminalTooltip=null;
   popupState._upgradeLockedTooltip=null;
   popupState._upUnlockTooltip=null;
   popupState._upgradeBtnLockedBounds=[];
@@ -10765,7 +11037,22 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
       drawPlanetStation(_mvx,_mvy,_mvr,Math.PI*1.2,20,p.isAlienRelic||false,p.hasLargeStation||false);
       ctx.restore();
       if(isBuilt){
-        if(p.hasLargeStation){
+        if(p.hasTerminal){
+          // Fully upgraded — Terminal supports all three orbits, no further
+          // upgrade path.
+          ctx.font='9px "Exo 2",sans-serif';
+          ctx.fillStyle='rgba(110,145,195,0.60)';
+          const _ttDescW=upW-26, _ttDescWds='Allows loading + unloading of cargo in LOW, MEDIUM, and HIGH orbits simultaneously'.split(' ');
+          let _ttDescCur='', _ttDescY=itemY+30;
+          for(const _ttDW of _ttDescWds){
+            const _ttT=_ttDescCur?_ttDescCur+' '+_ttDW:_ttDW;
+            if(ctx.measureText(_ttT).width<=_ttDescW) _ttDescCur=_ttT;
+            else{if(_ttDescCur)ctx.fillText(_ttDescCur,upX+12,_ttDescY); _ttDescCur=_ttDW; _ttDescY+=11;}
+          }
+          if(_ttDescCur) ctx.fillText(_ttDescCur,upX+12,_ttDescY);
+        } else if(p.hasLargeStation){
+          // Large Station built — show description, then the UPGRADE button
+          // that converts it to a Terminal (75k cr + 6 steel).
           ctx.font='9px "Exo 2",sans-serif';
           ctx.fillStyle='rgba(110,145,195,0.60)';
           const _lsDescW=upW-26, _lsDescWds='Allows loading + unloading of cargo in LOW and MEDIUM orbits'.split(' ');
@@ -10776,6 +11063,56 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
             else{if(_lsDescCur)ctx.fillText(_lsDescCur,upX+12,_lsDescY); _lsDescCur=_lsDW; _lsDescY+=11;}
           }
           if(_lsDescCur) ctx.fillText(_lsDescCur,upX+12,_lsDescY);
+          // ── UPGRADE → Terminal button ────────────────────────
+          // Cost 75,000 cr + 6 steel. Uses the same visual treatment as the
+          // Large-Station UPGRADE button (red cost pill + "+" + sprite ×N).
+          const _tLvlOk=(p.devLevel||0)>=5; // require dev level 5 (one above Large Station's 4)
+          const _tSteelOk=(p.steelDelivered||0)>=6;
+          const _tCredOk=credits>=75000;
+          const _tCanBuild=_tLvlOk&&_tSteelOk&&_tCredOk;
+          const _tBtnW=86,_tBtnH=20,_tBtnX=upX+(upW-_tBtnW)/2,_tBtnY=itemY+ITEM_H-_tBtnH-8;
+          const _tHov=popupState.upgradeBtnHover==='__terminal__';
+          ctx.fillStyle=_tHov?'rgba(45,110,230,0.97)':_tCanBuild?'rgba(20,70,180,0.90)':'rgba(18,18,35,0.80)';
+          ctx.beginPath(); ctx.roundRect(_tBtnX,_tBtnY,_tBtnW,_tBtnH,3); ctx.fill();
+          ctx.strokeStyle=_tHov?'rgba(140,210,255,0.95)':_tCanBuild?'rgba(80,160,255,0.80)':'rgba(50,50,80,0.55)';
+          ctx.lineWidth=1; ctx.beginPath(); ctx.roundRect(_tBtnX,_tBtnY,_tBtnW,_tBtnH,3); ctx.stroke();
+          ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
+          ctx.fillStyle=_tCanBuild?'#adf':'rgba(70,70,100,0.75)';
+          ctx.fillText('UPGRADE',_tBtnX+_tBtnW/2,_tBtnY+_tBtnH/2+3.5);
+          // Cost pills: [-75,000 cr] [+] [car_steel ×6]
+          {const _ctTxt='-'+_fmtCr(75000)+' cr';
+          ctx.font='8px "Exo 2",sans-serif';
+          const _ctPW=ctx.measureText(_ctTxt).width+10, _ctPH=13;
+          const _tLbl='\xd76'; const _tLblW=ctx.measureText(_tLbl).width;
+          const _tSz=18;
+          const _tDispW=3+_tSz+2+_tLblW+3;
+          ctx.font='bold 11px Orbitron,sans-serif';
+          const _tPlusLbl='+'; const _tPlusW=ctx.measureText(_tPlusLbl).width;
+          const _tPillsGap=5;
+          const _tPillsTot=_ctPW+_tPillsGap+_tPlusW+_tPillsGap+_tDispW;
+          const _t0X=_tBtnX+(_tBtnW-_tPillsTot)/2, _tPY=_tBtnY-_ctPH/2-3;
+          const _tVCtr=_tPY+_ctPH/2;
+          ctx.fillStyle='rgba(110,18,18,0.92)'; ctx.beginPath(); ctx.roundRect(_t0X,_tPY,_ctPW,_ctPH,4); ctx.fill();
+          ctx.font='8px "Exo 2",sans-serif';
+          ctx.fillStyle='rgba(255,255,255,0.97)'; ctx.textAlign='center'; ctx.textBaseline='middle';
+          ctx.fillText(_ctTxt,_t0X+_ctPW/2,_tVCtr);
+          const _tPlusX=_t0X+_ctPW+_tPillsGap;
+          ctx.font='bold 11px Orbitron,sans-serif';
+          ctx.fillStyle='rgba(255,255,255,0.97)';
+          ctx.textAlign='left';
+          ctx.fillText(_tPlusLbl,_tPlusX,_tVCtr);
+          const _tStX=_tPlusX+_tPlusW+_tPillsGap;
+          if(imgs['car_steel']) ctx.drawImage(imgs['car_steel'],_tStX+3,_tPY+(_ctPH-_tSz)/2,_tSz,_tSz);
+          ctx.font='8px "Exo 2",sans-serif'; ctx.textAlign='left'; ctx.textBaseline='middle';
+          ctx.fillStyle='rgba(210,220,235,0.9)';
+          ctx.fillText(_tLbl,_tStX+3+_tSz+2,_tVCtr);
+          ctx.textBaseline='alphabetic';}
+          // Register bounds + tooltip (uses the same _lsTooltip slot, repurposed
+          // — popupState._lsTooltip carries lvlOk/ironOk/credOk; here we
+          // re-use the structure with steelOk in place of ironOk and label
+          // the tooltip differently in the draw block).
+          popupState.buildTerminalBtnBounds={x:_tBtnX,y:_tBtnY,w:_tBtnW,h:_tBtnH};
+          if(_tHov) popupState._terminalTooltip={bx:_tBtnX,by:_tBtnY,bw:_tBtnW,upX,upW,lvlOk:_tLvlOk,steelOk:_tSteelOk,credOk:_tCredOk,dl:p.devLevel||0,steel:p.steelDelivered||0};
         } else {
           // Description bullet (same word-wrap style as unbuilt items)
           ctx.font='9px "Exo 2",sans-serif';
@@ -11483,6 +11820,32 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
       {ok:_tt.lvlOk, txt:'Planet Lv.4  (current: '+_tt.dl+')'},
       {ok:_tt.ironOk,txt:'4 iron delivered to planet  ('+_tt.iron+' so far)'},
       {ok:_tt.credOk,txt:'50,000 cr'},
+    ];
+    let _ttRy=_ttY+27;
+    for(const _r of _ttReqs){
+      ctx.fillStyle=_r.ok?'rgba(80,200,120,0.85)':'rgba(210,100,100,0.80)';
+      ctx.fillText((_r.ok?'✓  ':'✗  ')+_r.txt,_ttX+8,_ttRy);
+      _ttRy+=10;
+    }
+  }
+  // ── Terminal hover tooltip (same layout as Large Station tooltip) ──
+  if(popupState._terminalTooltip){
+    const _tt=popupState._terminalTooltip;
+    const _ttW=_tt.upW-8, _ttH=56;
+    const _ttX=Math.max(4,_tt.upX+4);
+    const _ttY=_tt.by-_ttH-4;
+    ctx.fillStyle='rgba(6,10,28,0.97)';
+    ctx.strokeStyle='rgba(80,140,255,0.55)';
+    ctx.lineWidth=1;
+    ctx.beginPath(); ctx.roundRect(_ttX,_ttY,_ttW,_ttH,4); ctx.fill(); ctx.stroke();
+    ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='left';
+    ctx.fillStyle='rgba(140,200,255,0.90)';
+    ctx.fillText('TERMINAL',_ttX+8,_ttY+13);
+    ctx.font='7px "Exo 2",sans-serif';
+    const _ttReqs=[
+      {ok:_tt.lvlOk,  txt:'Planet Lv.5  (current: '+_tt.dl+')'},
+      {ok:_tt.steelOk,txt:'6 steel delivered to planet  ('+_tt.steel+' so far)'},
+      {ok:_tt.credOk, txt:'75,000 cr'},
     ];
     let _ttRy=_ttY+27;
     for(const _r of _ttReqs){
@@ -13991,6 +14354,7 @@ function drawGalaxy(ts,dt){
   drawStarRegistry();
   drawOptionsPopup();
   drawCheatsPopup();
+  drawSaveManagerPopup();
   drawTrainDetailPopup();
   drawPlanetDetailPopup();
   drawStarDetailPopup();
@@ -14685,6 +15049,7 @@ canvas.addEventListener('mousemove',e=>{
     let _upHov=null;
     if(popupState.buildStationBtnBounds){const _bsb=popupState.buildStationBtnBounds; if(cp.x>=_bsb.x&&cp.x<=_bsb.x+_bsb.w&&cp.y>=_bsb.y&&cp.y<=_bsb.y+_bsb.h) _upHov='__station__';}
     if(!_upHov&&popupState.buildLargeStationBtnBounds){const _lsb2=popupState.buildLargeStationBtnBounds;if(cp.x>=_lsb2.x&&cp.x<=_lsb2.x+_lsb2.w&&cp.y>=_lsb2.y&&cp.y<=_lsb2.y+_lsb2.h) _upHov='__large_station__';}
+    if(!_upHov&&popupState.buildTerminalBtnBounds){const _tmb=popupState.buildTerminalBtnBounds;if(cp.x>=_tmb.x&&cp.x<=_tmb.x+_tmb.w&&cp.y>=_tmb.y&&cp.y<=_tmb.y+_tmb.h) _upHov='__terminal__';}
     if(!_upHov&&popupState.upgradeBuildBounds){for(const _ub of popupState.upgradeBuildBounds){if(cp.x>=_ub.x&&cp.x<=_ub.x+_ub.w&&cp.y>=_ub.y&&cp.y<=_ub.y+_ub.h){_upHov=_ub.upgradeId;break;}}}
     // Locked (station-not-built) buttons — detectable for tooltip but not clickable
     if(!_upHov&&popupState._upgradeBtnLockedBounds){for(const _lb of popupState._upgradeBtnLockedBounds){if(cp.x>=_lb.x&&cp.x<=_lb.x+_lb.w&&cp.y>=_lb.y&&cp.y<=_lb.y+_lb.h){_upHov=_lb.hoverId;break;}}}
@@ -14723,6 +15088,33 @@ canvas.addEventListener('mousemove',e=>{
     }
     popupState.mHovObjKey=_mHovKey;
   } else { popupState.mHovObjKey=null; }
+  // Hover tracking for the Save Manager popup — rows + action buttons. Two
+  // distinct hover slots: `smHoverRow` (an index into smRowBounds) is used
+  // for the row background highlight, while `smHoverAction` (a string id)
+  // drives the per-row LOAD/OVERWRITE/EXPORT/DELETE buttons and the bottom
+  // NEW SAVE / IMPORT buttons.
+  if(activePopup==='savemanager'){
+    let _smHovRow=-1;
+    if(popupState.smRowBounds){
+      for(let _smi=0;_smi<popupState.smRowBounds.length;_smi++){
+        const _smb=popupState.smRowBounds[_smi];
+        if(cp.x>=_smb.x&&cp.x<=_smb.x+_smb.w&&cp.y>=_smb.y&&cp.y<=_smb.y+_smb.h){ _smHovRow=_smi; break; }
+      }
+    }
+    popupState.smHoverRow=_smHovRow;
+    let _smHovAction=null;
+    if(popupState.smRowActionBounds){
+      for(const _smab of popupState.smRowActionBounds){
+        if(cp.x>=_smab.x&&cp.x<=_smab.x+_smab.w&&cp.y>=_smab.y&&cp.y<=_smab.y+_smab.h){
+          if(_smab.id==='__top__') _smHovAction='__'+_smab.action+'__';
+          else _smHovAction=_smab.id+':'+_smab.action;
+          break;
+        }
+      }
+    }
+    popupState.smHoverAction=_smHovAction;
+    if(_smHovRow>=0||_smHovAction) canvas.style.cursor='pointer';
+  } else { popupState.smHoverRow=-1; popupState.smHoverAction=null; }
   // Hover tracking for train builder viz + buttons
   if(activePopup==='trainbuilder'&&trainBuilderState){
     if(trainBuilderState.vizCarBounds.length){
@@ -15003,6 +15395,11 @@ canvas.addEventListener('mouseup',e=>{
   }
 
   if(gs==='title'){
+    // If the Save Manager is open over the title screen, route the click to
+    // its handler first; only fall back to PLAY/LOAD GAME buttons if the
+    // click missed the popup entirely (in which case the handler already
+    // closed it as click-outside-popup).
+    if(_smHandleClick(cp)) return;
     const b=startBtnBounds;
     if(b&&cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h) startGame();
     const lb=loadBtnBounds;
@@ -15049,7 +15446,7 @@ canvas.addEventListener('mouseup',e=>{
           // marking end-of-stardate.
           const _wasAutoPop=!_inArchive;
           gameSpeedIdx=_newspaperPrevSpeed; _newspaper=null; _newspaperViewIdx=null;
-          if(_wasAutoPop&&autosaveEnabled) saveGame();
+          if(_wasAutoPop&&autosaveEnabled) _autosaveToLocalStorage();
         }
         return;
       }
@@ -15268,6 +15665,11 @@ canvas.addEventListener('mouseup',e=>{
           _financeDropdownOpen=false; return;
         }
         return;
+      }
+      // Save Manager popup — routed to the shared helper so the same logic
+      // serves both the title-screen and in-game entry points.
+      if(activePopup==='savemanager'){
+        if(_smHandleClick(cp)) return;
       }
       // Missions popup — clicking an objective row re-centres the camera on
       // the mission's planet of interest. Prefers targetPlanetId (e.g.
@@ -15555,6 +15957,28 @@ canvas.addEventListener('mouseup',e=>{
               p.supply.iron=Math.max(0,(p.supply.iron||0)-4);
             }
             p.hasLargeStation=true;
+            playSound('construction_complete');
+          }
+          return;
+        }
+      }
+      // Terminal (Large Station → Terminal) UPGRADE button
+      if(activePopup==='planet'&&popupState.buildTerminalBtnBounds){
+        const _tmb=popupState.buildTerminalBtnBounds;
+        if(cp.x>=_tmb.x&&cp.x<=_tmb.x+_tmb.w&&cp.y>=_tmb.y&&cp.y<=_tmb.y+_tmb.h){
+          const p=popupState.planet;
+          if(p&&p.hasLargeStation&&!p.hasTerminal&&credits>=75000&&(p.devLevel||0)>=5&&(p.steelDelivered||0)>=6){
+            credits-=75000; creditDelta-=75000;
+            spawnCreditFloatScreen(_tmb.x+_tmb.w/2,_tmb.y,-75000);
+            purchaseLedger.push({sd:stardate,amount:75000,type:'terminal'});
+            p.steelDelivered=(p.steelDelivered||0)-6;
+            // Steel-specific dual-counter sync (mirrors the iron pattern used
+            // by the Large Station upgrade): blast-furnace-produced steel
+            // sitting in both supply and inventory is spent in lockstep.
+            if((p.supply?.steel||0)>0){
+              p.supply.steel=Math.max(0,(p.supply.steel||0)-6);
+            }
+            p.hasTerminal=true;
             playSound('construction_complete');
           }
           return;
@@ -15948,8 +16372,8 @@ canvas.addEventListener('mouseup',e=>{
         }
       }
       // Click outside popup → close
-      const popupW=activePopup==='pokedex'?460:activePopup==='starregistry'?460:activePopup==='train'?430:activePopup==='planet'?470:activePopup==='star'?520:activePopup==='trains'?580:activePopup==='trainbuilder'?620:activePopup==='quitconfirm'?390:activePopup==='finances'?580:activePopup==='corp'?570:activePopup==='ceohire'?700:activePopup==='car_unlock'?320:activePopup==='car_detail'?460:activePopup==='rival_founded'?460:300;
-      const popupH=activePopup==='pokedex'?390:activePopup==='starregistry'?390:activePopup==='train'?430:activePopup==='planet'?416:activePopup==='star'?390:activePopup==='trains'?430:activePopup==='trainbuilder'?390:activePopup==='quitconfirm'?110:activePopup==='options'?160:activePopup==='cheats'?270:activePopup==='finances'?400:activePopup==='corp'?440:activePopup==='ceohire'?370:activePopup==='car_unlock'?230:activePopup==='car_detail'?430:activePopup==='rival_founded'?420:130;
+      const popupW=activePopup==='pokedex'?460:activePopup==='starregistry'?460:activePopup==='train'?430:activePopup==='planet'?470:activePopup==='star'?520:activePopup==='trains'?580:activePopup==='trainbuilder'?620:activePopup==='quitconfirm'?390:activePopup==='finances'?580:activePopup==='corp'?570:activePopup==='ceohire'?700:activePopup==='car_unlock'?320:activePopup==='car_detail'?460:activePopup==='rival_founded'?460:activePopup==='savemanager'?560:300;
+      const popupH=activePopup==='pokedex'?390:activePopup==='starregistry'?390:activePopup==='train'?430:activePopup==='planet'?416:activePopup==='star'?390:activePopup==='trains'?430:activePopup==='trainbuilder'?390:activePopup==='quitconfirm'?110:activePopup==='options'?160:activePopup==='cheats'?270:activePopup==='finances'?400:activePopup==='corp'?440:activePopup==='ceohire'?370:activePopup==='car_unlock'?230:activePopup==='car_detail'?430:activePopup==='rival_founded'?420:activePopup==='savemanager'?420:130;
       const ppx=(W-popupW)/2, ppy=(H-popupH)/2;
       let _outsidePopup=cp.x<ppx||cp.x>ppx+popupW||cp.y<ppy||cp.y>ppy+popupH;
       if(_outsidePopup&&activePopup==='planet'&&popupState._upgradePanelBounds){
@@ -16119,6 +16543,11 @@ document.addEventListener('keydown',e=>{
   // before the gs/popup checks below so e.repeat keystrokes (key held for >0.5s)
   // are also captured. Movement itself is gated in the loop (popup-aware).
   {const _k=(e.key||'').toLowerCase(); if(_k==='w'||_k==='a'||_k==='s'||_k==='d'||_k==='arrowup'||_k==='arrowdown') heldKeys.add(_k);}
+  // Save Manager popup — Esc closes it from any gs (it can open on title).
+  if(activePopup==='savemanager'&&e.key==='Escape'){
+    activePopup=null; popupState={};
+    return;
+  }
   if(gs==='howtoplay'){
     if(e.key==='Escape'){ gs='title'; return; }
     if(e.key==='ArrowRight'||e.key===' '){
@@ -16137,7 +16566,7 @@ document.addEventListener('keydown',e=>{
         // an auto-popped newspaper, not an N-key archive view.
         const _wasAutoPop=(_newspaperViewIdx===null);
         gameSpeedIdx=_newspaperPrevSpeed; _newspaper=null; _newspaperViewIdx=null;
-        if(_wasAutoPop&&autosaveEnabled) saveGame();
+        if(_wasAutoPop&&autosaveEnabled) _autosaveToLocalStorage();
       }
       return;
     }
@@ -16306,29 +16735,65 @@ document.addEventListener('keydown',e=>{
 // ── Save / Load ──────────────────────────────────────────────
 function _buildSaveObject(){
   if(!galaxy) return null;
-  // Stars: strip the .color reference (re-derived from colorName on load)
+  // ── Float-precision rounding helper ─────────────────────────
+  // Several save fields (planet/train angles, fog point coords, x/y) carry
+  // full ~15-digit precision but only ~5 digits matter visually. Rounding
+  // those before serialization saves a meaningful chunk (~5-10 KB) without
+  // any perceptible drift.
+  const _r5=n=>(typeof n==='number'&&isFinite(n))?Math.round(n*1e5)/1e5:n;
+  // Stars: strip the .color reference (re-derived from colorName on load).
   const saveStars=galaxy.stars.map(s=>{ const {color,...rest}=s; return rest; });
-  // Planets: strip .clouds (regenerated) and recompute .type as id string
+  // Planets: strip derived/regenerable fields to shrink the save:
+  //   • clouds              — regenerated via generatePlanetClouds on load
+  //   • supplyRate          — pure function of (biome, devLevel, flags); recomputed
+  //   • demandRate          — pure function of (biome, devLevel, flags, pop); recomputed
+  //   • economicHealth      — pure function of (biome, pop); recomputed
+  //   • flowerPositions     — deterministically regenerable from flowerSeed; we
+  //                           keep flowerSeed in the save and re-run
+  //                           _genFlowerPositions on load
+  // Also rounds the high-frequency float fields (x, y, orbit*, stationAngle,
+  // structure angles) to 5 decimals.
   const savePlanets=galaxy.planets.map(p=>{
-    const {clouds,...rest}=p;
-    return {...rest, type:{id:p.type.id}};
+    const {clouds,supplyRate,demandRate,economicHealth,flowerPositions,...rest}=p;
+    const out={...rest, type:{id:p.type.id}};
+    // Round low-precision-OK floats in place.
+    out.x=_r5(out.x); out.y=_r5(out.y);
+    out.orbitAngle=_r5(out.orbitAngle); out.orbitRadius=_r5(out.orbitRadius);
+    out.orbitSpeed=_r5(out.orbitSpeed);
+    if(out.stationAngle!=null) out.stationAngle=_r5(out.stationAngle);
+    if(out.stationSpeed!=null) out.stationSpeed=_r5(out.stationSpeed);
+    if(out.foundryAngle!=null) out.foundryAngle=_r5(out.foundryAngle);
+    if(out.blastFurnaceAngle!=null) out.blastFurnaceAngle=_r5(out.blastFurnaceAngle);
+    if(out.glassworksAngle!=null) out.glassworksAngle=_r5(out.glassworksAngle);
+    if(out.factoryAngle!=null) out.factoryAngle=_r5(out.factoryAngle);
+    if(out.bakeryAngle!=null) out.bakeryAngle=_r5(out.bakeryAngle);
+    if(out.juiceryAngle!=null) out.juiceryAngle=_r5(out.juiceryAngle);
+    if(out.agriStructAngle!=null) out.agriStructAngle=_r5(out.agriStructAngle);
+    if(out.cloudAngle!=null) out.cloudAngle=_r5(out.cloudAngle);
+    if(out.aiStationAngle!=null) out.aiStationAngle=_r5(out.aiStationAngle);
+    // Round per-cargo supply/demand values to 4 decimals — these only need to
+    // be roughly accurate; the recomputed supplyRate/demandRate tables
+    // drive accumulation going forward.
+    if(out.supply){ const _s={}; for(const k in out.supply) _s[k]=Math.round(out.supply[k]*1e4)/1e4; out.supply=_s; }
+    if(out.demand){ const _d={}; for(const k in out.demand) _d[k]=Math.round(out.demand[k]*1e4)/1e4; out.demand=_d; }
+    return out;
   });
   // Trains: save all fields including full route objects.
   // Route objects only contain plain numbers/booleans/strings and stops[] arrays of
   // planet IDs — they are directly JSON-serializable with no circular references.
   const saveTrains=trains.map(t=>({
     name:t.name, cars:t.cars, planetId:t.planetId, orbitTier:t.orbitTier,
-    orbitR:t.orbitR, orbitGap:t.orbitGap, angle:t.angle, isPlayer:t.isPlayer,
-    orbitCounts:t.orbitCounts, routeCounts:t.routeCounts, totalDist:t.totalDist,
-    _angleAcc:t._angleAcc, color:t.color, maintenance:t.maintenance,
-    distSinceMaint:t.distSinceMaint, totalRevenue:t.totalRevenue, totalCosts:t.totalCosts,
+    orbitR:t.orbitR, orbitGap:t.orbitGap, angle:_r5(t.angle), isPlayer:t.isPlayer,
+    orbitCounts:t.orbitCounts, routeCounts:t.routeCounts, totalDist:_r5(t.totalDist),
+    _angleAcc:_r5(t._angleAcc), color:t.color, maintenance:t.maintenance,
+    distSinceMaint:_r5(t.distSinceMaint), totalRevenue:t.totalRevenue, totalCosts:t.totalCosts,
     carFull:t.carFull, carCargo:t.carCargo, carCargoSource:t.carCargoSource,
     carPurchaseSd:t.carPurchaseSd||null, carRevenue:t.carRevenue||null,
     carSegments:t.carSegments||null, carFullSegments:t.carFullSegments||null,
     carUnitsLoaded:t.carUnitsLoaded||null, carUnitsUnloaded:t.carUnitsUnloaded||null,
     carEngineHistory:t.carEngineHistory||null,
     _engineHistory:t._engineHistory||null,
-    cargoPhase:t.cargoPhase, cargoQueue:t.cargoQueue, cargoTimer:t.cargoTimer,
+    cargoPhase:t.cargoPhase, cargoQueue:t.cargoQueue, cargoTimer:_r5(t.cargoTimer),
     _cargoCheckedThisStop:t._cargoCheckedThisStop,
     _hazmatStarDump:t._hazmatStarDump||false,
     _routeStartSd:t._routeStartSd||null,
@@ -16336,6 +16801,45 @@ function _buildSaveObject(){
     queuedRoute:t.queuedRoute||null,
     _detourPermanentRoute:t._detourPermanentRoute||null,
   }));
+  // ── Ledger + newspaper trimming ─────────────────────────────
+  // financeLedger and _newspaperArchive both grow linearly with stardates
+  // played — they dominate late-game saves. Strategy:
+  //   • Keep raw entries / issues from the last 30 SDs of detail.
+  //   • Aggregate older finance entries into a _ledgerSummary (totals only).
+  //     This preserves total-revenue / total-cost / total-interest sums for
+  //     the Corp Details and Finances popups while shedding the per-entry
+  //     breakdown for older stardates.
+  //   • Drop newspaper issues older than 30 SDs entirely (player rarely
+  //     re-reads ancient papers).
+  const _trimCutoffSd=stardate-30;
+  let _trimmedFinance=financeLedger;
+  let _builtLedgerSummary=null;
+  if(Array.isArray(financeLedger)){
+    const _recent=[]; let _sumRev=0,_sumCost=0,_sumInt=0;
+    for(const _le of financeLedger){
+      if(_le.sd>=_trimCutoffSd) _recent.push(_le);
+      else {
+        _sumRev+=(_le.revenue||0);
+        if(_le.cargoType==='interest') _sumInt+=(_le.cost||0);
+        else _sumCost+=(_le.cost||0);
+      }
+    }
+    _trimmedFinance=_recent;
+    // Fold any existing in-memory summary into the freshly-aggregated totals
+    // (running game already carries _ledgerSummary from a prior save).
+    const _prev=(typeof _ledgerSummary!=='undefined'&&_ledgerSummary)?_ledgerSummary:{totalRevenue:0,totalCost:0,totalInterest:0};
+    _builtLedgerSummary={
+      totalRevenue:(_prev.totalRevenue||0)+_sumRev,
+      totalCost:(_prev.totalCost||0)+_sumCost,
+      totalInterest:(_prev.totalInterest||0)+_sumInt,
+    };
+  }
+  let _trimmedNewspaper=_newspaperArchive;
+  if(Array.isArray(_newspaperArchive)){
+    _trimmedNewspaper=_newspaperArchive.filter(_iss=>_iss&&(_iss.sd==null||_iss.sd>=_trimCutoffSd));
+  }
+  // Round fog stamp x/y to 5 decimals.
+  const _trimmedFog=Array.isArray(fogPoints)?fogPoints.map(f=>({...f,x:_r5(f.x),y:_r5(f.y)})):fogPoints;
   // Missions: convert visitedSnapshot Set → Array
   const saveMissions=missions.map(m=>{
     const {visitedSnapshot,...rest}=m;
@@ -16352,7 +16856,7 @@ function _buildSaveObject(){
     _classJEngineUnlocked, _classREngineUnlocked, _N700EngineUnlocked,
     _sensorUpgradeActive, _stationCostDiscount, _sandstormCheckSd, _bhResearchCheckSd,
     _totalPassengersDelivered, _totalHazmatIncinerated,
-    trainyard, financeLedger, purchaseLedger, corpValueHistory, _corp, _ceoHireCandidates,
+    trainyard, financeLedger:_trimmedFinance, _ledgerSummary:_builtLedgerSummary, purchaseLedger, corpValueHistory, _corp, _ceoHireCandidates,
     creditSnapshots, lastCreditSnapshotSd,
     galaxy:{homeStarId:galaxy.homeStarId, origenId:galaxy.origenId, blackHoles:galaxy.blackHoles, colonyTrainDestId:galaxy.colonyTrainDestId??null, faminePlanetId:galaxy.faminePlanetId??null, outbreakPlanetId:galaxy.outbreakPlanetId??null, bhResearchPlanetId:galaxy.bhResearchPlanetId??null, bhResearchPlanetIds:galaxy.bhResearchPlanetIds??[], stars:saveStars, planets:savePlanets},
     trains:saveTrains,
@@ -16362,7 +16866,7 @@ function _buildSaveObject(){
     revealedStarsInOrder,
     revealedOrbitedPlanetIds:[...revealedOrbitedPlanetIds],
     planetOrbitCounts,
-    fogPoints,
+    fogPoints:_trimmedFog,
     missions:saveMissions,
     pendingMissionIntros,
     pendingGoldDiscoveries,
@@ -16371,7 +16875,7 @@ function _buildSaveObject(){
     _aiDifficulty,
     _aiCorp:_aiCorp?{..._aiCorp,ownedPlanetIds:[..._aiCorp.ownedPlanetIds],visitedPlanetIds:[..._aiCorp.visitedPlanetIds],discoveredStarIds:[..._aiCorp.discoveredStarIds]}:null,
     _newspaperLastSd,_paperIdx,_paperIssueNum,_paperMajorUsed,_paperMinorUsed,_paperLayout,_newsEventLog,_newsSnapshot,
-    _newspaperArchive,
+    _newspaperArchive:_trimmedNewspaper,
   };
 }
 
@@ -16380,11 +16884,26 @@ function _restoreFromSave(save){
   const sg=save.galaxy;
   // Restore stars — reattach .color from STAR_COLORS
   const stars=sg.stars.map(s=>({...s, color:STAR_COLORS[s.colorName]}));
-  // Restore planets — reattach full PTYPE object, regenerate clouds
+  // Restore planets — reattach full PTYPE object, regenerate clouds, AND
+  // regenerate the derived fields that we strip from the save to keep it
+  // small (supplyRate, demandRate, economicHealth, flowerPositions). All
+  // pure functions of biome + dev level + flags + flowerSeed, so the
+  // restored planet matches what would have been there pre-strip.
   const planets=sg.planets.map(p=>{
     const ptype=PTYPES.find(t=>t.id===p.type.id)||PTYPES[0];
     const rp={...p, type:ptype};
     rp.clouds=generatePlanetClouds(rp);
+    // Derived rate/health tables — recompute from scratch.
+    rp.supplyRate=computeSupplyRate(rp);
+    rp.demandRate=computeDemandRate(rp);
+    rp.economicHealth=computeEconomicHealth(rp);
+    // Flower layout — regenerate from the seed if this planet had flowers.
+    if(rp.flowerSeed){
+      const _fCount=rp.isFlowersOrigin?300:148;
+      rp.flowerPositions=_genFlowerPositions(_fCount,true,rp.flowerSeed);
+    } else if(rp.flowerPositions===undefined){
+      rp.flowerPositions=null;
+    }
     return rp;
   });
   // Rebuild starProxyMap
@@ -16422,7 +16941,7 @@ function _restoreFromSave(save){
   pokedexSortIdx=save.pokedexSortIdx||0; pokedexDiscoveredOnly=save.pokedexDiscoveredOnly!==undefined?save.pokedexDiscoveredOnly:true;
   starRegistrySortIdx=save.starRegistrySortIdx||0;
   starRegistryVisitedOnly=save.starRegistryVisitedOnly!==undefined?save.starRegistryVisitedOnly:true;
-  autosaveEnabled=save.autosaveEnabled!==undefined?save.autosaveEnabled:false;
+  autosaveEnabled=save.autosaveEnabled!==undefined?save.autosaveEnabled:true;
   missionTrackerEnabled=save.missionTrackerEnabled!==undefined?save.missionTrackerEnabled:true;
   _gameStartSd=save._gameStartSd||save.stardate;
   _ironCarUnlocked=!!save._ironCarUnlocked; _steelCarUnlocked=!!save._steelCarUnlocked; _glassCarUnlocked=!!save._glassCarUnlocked; _machineryCarUnlocked=!!save._machineryCarUnlocked; _hazmatCarUnlocked=!!save._hazmatCarUnlocked; _royalCarUnlocked=!!save._royalCarUnlocked; _flowersCarUnlocked=!!save._flowersCarUnlocked; _medicalCarUnlocked=!!save._medicalCarUnlocked;
@@ -16442,7 +16961,7 @@ function _restoreFromSave(save){
   _newspaperArchive=save._newspaperArchive||[]; _newspaperViewIdx=null;
   _sandstormCheckSd=save._sandstormCheckSd||0; _bhResearchCheckSd=save._bhResearchCheckSd||0;
   _totalPassengersDelivered=save._totalPassengersDelivered||0; _totalHazmatIncinerated=save._totalHazmatIncinerated||0;
-  trainyard=save.trainyard||{}; financeLedger=save.financeLedger||[]; purchaseLedger=save.purchaseLedger||[]; corpValueHistory=save.corpValueHistory||{};
+  trainyard=save.trainyard||{}; financeLedger=save.financeLedger||[]; _ledgerSummary=save._ledgerSummary||{totalRevenue:0,totalCost:0,totalInterest:0}; purchaseLedger=save.purchaseLedger||[]; corpValueHistory=save.corpValueHistory||{};
   // Migrate old trainyard format {type: count} → {type: [carRecord]} so the
   // record-based code paths can read it uniformly. Old saves' anonymous yard
   // cars become empty-record entries (no preserved stats, fresh on restore).
@@ -16539,65 +17058,208 @@ function _restoreFromSave(save){
   }else{_aiCorp=null;}
 }
 
-async function saveGame(){
-  if(!galaxy){ _chatMsg('Nothing to save.','rgba(255,100,100,1)'); return; }
-  const saveObj=_buildSaveObject();
-  if(!saveObj){ _chatMsg('Save failed.','rgba(255,100,100,1)'); return; }
+// ── localStorage-backed save system ──────────────────────────
+// Persisted saves live in localStorage so the player doesn't have to
+// download/upload a .stt file every time. A small INDEX key lists slot
+// metadata (corp / stardate / saved-at / byte-size) so the manager popup
+// can render the list without parsing every full save. The .stt format
+// remains the interchange format — every slot can be exported as a .stt
+// file (and any .stt can be imported back into a new slot), so saves are
+// still portable between browsers/devices.
+const LS_INDEX_KEY='spacetrain.index';
+const LS_SLOT_PREFIX='spacetrain.save.';
+const LS_AUTOSAVE_ID='autosave';
+function _lsAvailable(){
+  try{ const k='__st_test'; localStorage.setItem(k,'1'); localStorage.removeItem(k); return true; }
+  catch(e){ return false; }
+}
+function _lsLoadIndex(){
+  if(!_lsAvailable()) return [];
+  try{ const raw=localStorage.getItem(LS_INDEX_KEY); return raw?JSON.parse(raw):[]; }
+  catch(e){ return []; }
+}
+function _lsSaveIndex(idx){
+  if(!_lsAvailable()) return false;
+  try{ localStorage.setItem(LS_INDEX_KEY,JSON.stringify(idx)); return true; }
+  catch(e){ return false; }
+}
+// Manual saves use a timestamp-based id so they're naturally sortable and
+// unique. The autosave slot uses a fixed reserved id so it overwrites in
+// place every stardate.
+function _lsNewSlotId(){ return 'slot_'+Date.now().toString(36)+'_'+Math.floor(Math.random()*1000); }
+function _lsSafeCorp(){
+  return (corpName||'').trim().replace(/[^A-Za-z0-9_\-]+/g,'_').replace(/_+/g,'_').replace(/^_|_$/g,'') || 'save';
+}
+function _lsDefaultLabel(){
+  return _lsSafeCorp()+'_'+stardate.toFixed(2).replace('.','');
+}
+// Write a save object (already built) into a named slot. Updates the index.
+// Returns {ok:true} on success, {ok:false, err:'quota'|'unavailable'|<msg>} on
+// failure. Save bytes are LZ-string-compressed (compressToUTF16) before
+// storage — typical ratio ~3× — so the 5 MB localStorage cap holds many
+// more slots than the raw JSON would. The .stt export path uses the same
+// `saveObj`, so the on-wire `.stt` file remains plain readable JSON.
+function _lsWriteSlot(slotId,saveObj,label){
+  if(!_lsAvailable()) return {ok:false,err:'unavailable'};
   const json=JSON.stringify(saveObj);
-  // Default save filename: "<Corp Name>_<SD>.stt" with two-decimal stardate.
-  // The corp name is sanitized: trimmed, non-filename-safe characters replaced
-  // with underscores, runs of underscores collapsed. Falls back to "save" if
-  // the corp name ends up empty after sanitization.
-  const _safeCorp=(corpName||'').trim().replace(/[^A-Za-z0-9_\-]+/g,'_').replace(/_+/g,'_').replace(/^_|_$/g,'') || 'save';
-  // Two-decimal stardate with the decimal point stripped — 830.10 → "83010".
-  const fname=_safeCorp+'_'+stardate.toFixed(2).replace('.','')+'.stt';
-  let saved=false;
-  if(window.showSaveFilePicker){
-    try{
-      const fh=await window.showSaveFilePicker({
-        suggestedName:fname,
-        types:[{description:'Space Train Save File',accept:{'application/octet-stream':['.stt']}}]
-      });
-      const ws=await fh.createWritable();
-      await ws.write(json); await ws.close();
-      saved=true;
-    } catch(e){ if(e.name==='AbortError') return; }
+  const compressed=LZString.compressToUTF16(json);
+  try{
+    localStorage.setItem(LS_SLOT_PREFIX+slotId,compressed);
+    const idx=_lsLoadIndex();
+    const _meta={
+      id:slotId,
+      label:label||null,
+      corp:corpName||'',
+      sd:stardate,
+      savedAt:Date.now(),
+      // size = approximate bytes of localStorage consumed (compressed length
+      // in UTF-16 code units × 2 bytes). This is the figure that matters
+      // for the 5 MB quota; raw JSON length is kept separately for stats.
+      size:compressed.length*2,
+      rawSize:json.length
+    };
+    const _existing=idx.findIndex(e=>e.id===slotId);
+    if(_existing>=0) idx[_existing]=_meta; else idx.push(_meta);
+    _lsSaveIndex(idx);
+    return {ok:true};
+  } catch(e){
+    return {ok:false,err:(e&&e.name==='QuotaExceededError')?'quota':(e&&e.message||'unknown')};
   }
-  if(!saved){
-    const blob=new Blob([json],{type:'application/octet-stream'});
-    const url=URL.createObjectURL(blob);
-    const a=document.createElement('a');
-    a.href=url; a.download=fname;
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    URL.revokeObjectURL(url); saved=true;
+}
+function _lsReadSlot(slotId){
+  if(!_lsAvailable()) return null;
+  try{
+    const raw=localStorage.getItem(LS_SLOT_PREFIX+slotId);
+    if(!raw) return null;
+    // Backward compat: very old saves (pre-compression) were stored as raw
+    // JSON. Try compressed-first (current format), fall back to raw JSON if
+    // decompression yields nothing parseable.
+    let json=LZString.decompressFromUTF16(raw);
+    if(!json){ json=raw; } // treat as legacy uncompressed JSON
+    return JSON.parse(json);
+  } catch(e){
+    // One last attempt — maybe the slot is legacy JSON.
+    try{ const raw=localStorage.getItem(LS_SLOT_PREFIX+slotId); return raw?JSON.parse(raw):null; }
+    catch(_){ return null; }
   }
-  if(saved&&galaxy) _chatMsg('GAME SAVED!','rgba(80,220,130,1)');
+}
+function _lsDeleteSlot(slotId){
+  if(!_lsAvailable()) return false;
+  try{
+    localStorage.removeItem(LS_SLOT_PREFIX+slotId);
+    const idx=_lsLoadIndex().filter(e=>e.id!==slotId);
+    _lsSaveIndex(idx);
+    return true;
+  } catch(e){ return false; }
+}
+// Silent autosave path: called from the newspaper auto-popup close hooks.
+// Never opens any UI; just writes to the reserved autosave slot. If
+// localStorage is unavailable, falls back to the original download flow so
+// autosaves aren't silently lost on browsers that block storage.
+function _autosaveToLocalStorage(){
+  if(!galaxy) return;
+  if(!_lsAvailable()){ saveGame(true); return; } // fallback to download
+  const saveObj=_buildSaveObject(); if(!saveObj) return;
+  const res=_lsWriteSlot(LS_AUTOSAVE_ID,saveObj,'Autosave');
+  if(!res.ok&&res.err==='quota'){
+    _chatMsg('AUTOSAVE FAILED — STORAGE FULL','rgba(255,100,100,1)');
+  }
+}
+// Build a downloadable .stt blob from a save object. Reused by the manager's
+// "Export .stt" action AND by the legacy / fallback `saveGame` path. Filename
+// defaults to "<corp>_<sd>.stt" but a custom label can override.
+function _downloadSttFromSaveObj(saveObj,label){
+  if(!saveObj) return;
+  const json=JSON.stringify(saveObj);
+  const _safeLabel=label?String(label).replace(/[^A-Za-z0-9_\-]+/g,'_').replace(/_+/g,'_').replace(/^_|_$/g,''):'save';
+  const fname=(_safeLabel||'save')+'.stt';
+  const blob=new Blob([json],{type:'application/octet-stream'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url; a.download=fname;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+// Import a .stt file (user-picked) and write it to a new slot. Async because
+// the file picker is async; resolves to the new slotId on success or null on
+// cancel/failure.
+async function _lsImportSttFile(){
+  const json=await new Promise(resolve=>{
+    const inp=document.createElement('input');
+    inp.type='file'; inp.accept='.stt,application/octet-stream,application/json,text/plain';
+    inp.onchange=async()=>{ resolve(inp.files[0]?await inp.files[0].text():null); };
+    inp.oncancel=()=>resolve(null);
+    document.body.appendChild(inp); inp.click(); document.body.removeChild(inp);
+  });
+  if(!json) return null;
+  let saveObj;
+  try{ saveObj=JSON.parse(json); } catch(e){ alert('Failed to parse save file: '+e.message); return null; }
+  if(!_lsAvailable()){
+    // Storage unavailable — can't persist as a slot. Fall back to a direct
+    // restore so the player can at least load the .stt this session.
+    try{ _restoreFromSave(saveObj); activePopup=null; popupState={}; _chatMsg('GAME LOADED.','rgba(80,220,130,1)'); }
+    catch(e){ alert('Failed to load save: '+(e&&e.message||'unknown')); }
+    return null;
+  }
+  // Pull display metadata out of the parsed save so the index entry is
+  // accurate (the imported save may be from a different corp / SD than
+  // whatever is currently loaded).
+  const _slotId=_lsNewSlotId();
+  const _importedCorp=saveObj.corpName||'';
+  const _importedSd=typeof saveObj.stardate==='number'?saveObj.stardate:830;
+  const _label=((_importedCorp||'imported').trim().replace(/[^A-Za-z0-9_\-]+/g,'_').replace(/_+/g,'_').replace(/^_|_$/g,'')||'imported')+'_'+_importedSd.toFixed(2).replace('.','');
+  // Compress before storing so the imported slot lives at the same density
+  // as native saves and counts the same against the quota.
+  const _compressed=LZString.compressToUTF16(json);
+  try{
+    localStorage.setItem(LS_SLOT_PREFIX+_slotId,_compressed);
+    const idx=_lsLoadIndex();
+    idx.push({id:_slotId,label:_label,corp:_importedCorp,sd:_importedSd,savedAt:Date.now(),size:_compressed.length*2,rawSize:json.length});
+    _lsSaveIndex(idx);
+    return _slotId;
+  } catch(e){
+    if(e&&e.name==='QuotaExceededError') alert('Browser storage is full. Delete an existing save first.');
+    else alert('Import failed: '+(e&&e.message||'unknown'));
+    return null;
+  }
 }
 
+// Format helpers for the save manager UI.
+function _fmtSaveAge(savedAtMs){
+  const ms=Date.now()-savedAtMs;
+  const _s=Math.floor(ms/1000);
+  if(_s<60) return _s+'s ago';
+  const _m=Math.floor(_s/60);
+  if(_m<60) return _m+'m ago';
+  const _h=Math.floor(_m/60);
+  if(_h<24) return _h+'h ago';
+  const _d=Math.floor(_h/24);
+  return _d+'d ago';
+}
+function _fmtSaveSize(bytes){
+  if(bytes<1024) return bytes+' B';
+  if(bytes<1024*1024) return Math.round(bytes/1024)+' KB';
+  return (bytes/1024/1024).toFixed(2)+' MB';
+}
+
+// `saveGame` and `loadGame` are now thin entry points that open the Save
+// Manager popup. `forceDownload=true` (used by the autosave fallback when
+// localStorage is unavailable) preserves the old direct-download behaviour
+// for situations where the popup wouldn't help.
+async function saveGame(forceDownload){
+  if(!galaxy){ _chatMsg('Nothing to save.','rgba(255,100,100,1)'); return; }
+  if(forceDownload){
+    const saveObj=_buildSaveObject(); if(!saveObj) return;
+    _downloadSttFromSaveObj(saveObj,_lsDefaultLabel());
+    _chatMsg('GAME SAVED!','rgba(80,220,130,1)');
+    return;
+  }
+  activePopup='savemanager';
+  popupState={smMode:'save',smSelected:null,smScroll:0};
+}
 async function loadGame(){
-  let json=null;
-  if(window.showOpenFilePicker){
-    try{
-      const [fh]=await window.showOpenFilePicker({
-        types:[{description:'Space Train Save File',accept:{'application/octet-stream':['.stt']}}]
-      });
-      const f=await fh.getFile(); json=await f.text();
-    } catch(e){ if(e.name==='AbortError') return; }
-  }
-  if(!json){
-    json=await new Promise(resolve=>{
-      const inp=document.createElement('input');
-      inp.type='file'; inp.accept='.stt';
-      inp.onchange=async()=>{ resolve(inp.files[0]?await inp.files[0].text():null); };
-      inp.oncancel=()=>resolve(null);
-      document.body.appendChild(inp); inp.click(); document.body.removeChild(inp);
-    });
-  }
-  if(!json) return;
-  try{
-    const save=JSON.parse(json);
-    _restoreFromSave(save);
-  } catch(e){ alert('Failed to load save file: '+e.message); }
+  activePopup='savemanager';
+  popupState={smMode:'load',smSelected:null,smScroll:0};
 }
 
 function startGame(){
@@ -16653,7 +17315,7 @@ function startGame(){
   missions=[];
   _gameStartSd=stardate;
   pendingMissionIntros=MISSION_DEFS.filter(def=>!def.prerequisite&&def.id!=='build_foundry'&&def.id!=='dispose_hazmat'&&def.id!=='lost_colony'&&def.id!=='seeking_home'&&def.id!=='create_route'&&def.id!=='find_molten_ore'&&def.id!=='research_royal_car'&&def.id!=='colony_train'&&def.id!=='spread_the_seed'&&def.id!=='famine'&&def.id!=='outbreak'&&def.id!=='stellar_cartography'&&def.id!=='galaxy_census'&&def.id!=='sandstorm_relief'&&def.id!=='bh_research').map(def=>({defId:def.id,readySd:_gameStartSd+(def.startsAfter||0)}));
-  financeLedger=[]; purchaseLedger=[]; corpValueHistory={}; _financeScrollY=0; _financeBreakdown='stardate'; _financeDropdownOpen=false;
+  financeLedger=[]; _ledgerSummary={totalRevenue:0,totalCost:0,totalInterest:0}; purchaseLedger=[]; corpValueHistory={}; _financeScrollY=0; _financeBreakdown='stardate'; _financeDropdownOpen=false;
   loans=[]; _loanCounter=0; _financeTab='financials'; _financeLoanSelected='small'; _financeLoanHover=null; _financeTakeLoanHover=false;
   // Fresh pool of issuer names per game; assign one to each loan tier
   _bankNames=_generateBankNames();
@@ -17183,6 +17845,10 @@ function loop(ts){
   }
   if(gs==='title'){
     drawTitleScreen(ts,dt);
+    // Save Manager can be opened from the title screen via LOAD GAME.
+    // Render it on top of the title art when active so the player can pick
+    // a slot without leaving the title.
+    if(activePopup==='savemanager'){ _sbBounds=[]; drawSaveManagerPopup(); }
   } else if(gs==='fadeout'){
     drawTitleScreen(ts,0);
     fadeA=Math.min(1,fadeA+dt*.028);
