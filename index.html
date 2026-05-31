@@ -422,6 +422,22 @@ const MISSION_DEFS=[
        return !!(galaxy&&galaxy.planets.some(p=>(p.playerBuiltStation||p.isStarter)&&p.hasLargeStation));
      return false;
    }},
+  {id:'design_better_train',
+   name:'Designing a better space train',
+   imageType:'car', imageKey:'engine_classJ',
+   objectives:[
+     {id:'deliver_10_steel_home',   text:'Deliver 20 steel to {TARGET}'},
+     {id:'deliver_10_battery_home', text:'Deliver 20 batteries to {TARGET}'},
+     {id:'deliver_10_oil_home',     text:'Deliver 20 Oil to {TARGET}'},
+   ],
+   details:'Scientists on {TARGET} are prototyping a new space train engine, and they need materials from nearby planets',
+   reward:null, rewardText:'A new engine type', timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='deliver_10_steel_home')   return (m._homeSteelDelivered||0)>=20;
+     if(oid==='deliver_10_battery_home') return (m._homeBatteryDelivered||0)>=20;
+     if(oid==='deliver_10_oil_home')     return (m._homeOilDelivered||0)>=20;
+     return false;
+   }},
   {id:'build_foundry',
    name:'Build a Foundry',
    imageType:'foundry', imageKey:null,
@@ -648,7 +664,7 @@ const ENGINE_VIZ_W_MULT  = {engine_constellation:1.0,   engine_galaxy:1.1,   eng
 // Asset values for corporation net-worth calculation
 const CAR_ASSET_VALUE = {
   engine_constellation:10000, engine_galaxy:20000, engine_classJ:50000, engine_classR:70000, engine_N700:100000,
-  car_passenger:5000, car_royal:12000, car_water_tank:8000, car_cargo:4000, car_livestock:6000,
+  car_passenger:5000, car_royal:10000, car_water_tank:8000, car_cargo:4000, car_livestock:6000,
   car_mail:4000, car_ice:9000, car_sand:5000, car_ore:8000, car_iron:10000, car_hazmat:7000,
   car_oil:9000, car_battery:11000, car_chemical:9000, car_gold:30000, car_diamond:45000, car_flowers:7000, car_medical:8000, caboose:3000,
 };
@@ -925,6 +941,7 @@ function _engRepairMult(train){ return ENGINE_REPAIR_MULT[train.cars?.[0]]??1.0;
 function _engMaxRange(train){ return ENGINE_MAX_RANGE[train.cars?.[0]]??Infinity; }
 const _ENGINE_TYPE_SET=new Set(['engine_constellation','engine_galaxy','engine_classJ','engine_classR','engine_N700']);
 function _carUnitCost(type){
+  if(type==='car_royal') return 10000;
   let cost=ENGINE_COSTS[type]??1000;
   if(_ENGINE_TYPE_SET.has(type)){
     if(_corp?.primaryPerk?.cat==='eng_cost_red') cost=Math.round(cost*(1-_corp.primaryPerk.val/100));
@@ -1447,6 +1464,11 @@ let _zoomBarCenter={x:0,y:0}; // cached screen centre of the zoom bar (set each 
 let _createRouteTimerMs=0; // real-time ms when player first visited a non-home-star planet (0=not yet)
 let _findOreTimerMs=0;     // real-time ms when create_route mission completed (0=not yet)
 let _produceIronTimerMs=0; // real-time ms when produce_iron mission completed (0=not yet)
+let _steelMissionTimerMs=0; // real-time ms when first steel was produced (arms 10s intro for design_better_train)
+// Steel production sliding-window log for N700 unlock. Each entry: {sd, units}.
+// Pruned every tick to entries within the last 20 stardates; N700 unlocks once
+// the windowed sum reaches 200.
+let _steelProdLog=[];
 let pendingGoldDiscoveries=[]; // planetIds queued to show gold discovery popup
 let pendingDiamondDiscoveries=[]; // planetIds queued to show diamond discovery popup
 let pendingCarUnlocks=[]; // {sprite,displayName} queued to show car-unlock popup
@@ -1454,9 +1476,9 @@ let pendingEngineUnlocks=[]; // {sprite,displayName} queued to show engine-unloc
 // Engine unlocks gate the Class J / Class R / N700 purchases behind cumulative
 // revenue thresholds. Constellation + Galaxy are always available from game
 // start. Flags persist via the rule of three (save / load / new-game reset).
-let _classJEngineUnlocked=false;  // unlocks at 75,000 total revenues
-let _classREngineUnlocked=false;  // unlocks at 150,000 total revenues
-let _N700EngineUnlocked=false;    // unlocks at 300,000 total revenues
+let _classJEngineUnlocked=false;  // unlocks on "Designing a better space train" mission complete
+let _classREngineUnlocked=false;  // unlocks on "Designing a better space train" mission complete
+let _N700EngineUnlocked=false;    // unlocks once 200 units of steel produced in the last 20 SD
 let _ironCarUnlocked=false;    // true once a foundry first produces iron
 let _steelCarUnlocked=false;   // true once a blast furnace first produces steel
 let _glassCarUnlocked=false;   // true once a glassworks first produces glass
@@ -2809,42 +2831,56 @@ function generateMoons(p){
   return moons;
 }
 
-function _genResortBiome(){
+// Mulberry32 seeded RNG factory. If seed is null/undefined, returns Math.random
+// itself so callers that don't care about determinism still work.
+function _mkRng(seed){
+  if(seed==null) return Math.random;
+  let _s=(seed>>>0)||1;
+  return ()=>{
+    _s=(_s+0x6d2b79f5)>>>0;
+    let t=_s;
+    t=Math.imul(t^(t>>>15),t|1);
+    t^=t+Math.imul(t^(t>>>7),t|61);
+    return((t^(t>>>14))>>>0)/4294967296;
+  };
+}
+function _genResortBiome(_R){
+  _R=_R||Math.random;
   const _blobPts=(rx,ry,rot,n,rough)=>{
     const pts=[];
     for(let i=0;i<n;i++){
-      const a=(i/n)*Math.PI*2+rot, p=1.0-rough*0.5+Math.random()*rough;
+      const a=(i/n)*Math.PI*2+rot, p=1.0-rough*0.5+_R()*rough;
       pts.push({x:Math.cos(a)*rx*p, y:Math.sin(a)*ry*p});
     }
     return pts;
   };
   const lms=[], _rc=c=>'rgba('+c+',0.93)';
   // One large irregular continent near edge — 14 blob points, high roughness
-  const bigA=Math.random()*Math.PI*2, bigD=0.56+Math.random()*0.28;
-  const bigRx=0.44+Math.random()*0.30, bigRy=0.24+Math.random()*0.22, bigRot=Math.random()*Math.PI;
+  const bigA=_R()*Math.PI*2, bigD=0.56+_R()*0.28;
+  const bigRx=0.44+_R()*0.30, bigRy=0.24+_R()*0.22, bigRot=_R()*Math.PI;
   lms.push({cx:Math.cos(bigA)*bigD, cy:Math.sin(bigA)*bigD,
     rx:bigRx, ry:bigRy, rot:bigRot, isLarge:true,
     pts:_blobPts(bigRx,bigRy,bigRot,14,0.72),
-    sand:_rc((218+~~(Math.random()*24))+','+(194+~~(Math.random()*20))+','+(114+~~(Math.random()*30))),
-    veg:_rc((44+~~(Math.random()*30))+','+(124+~~(Math.random()*34))+','+(40+~~(Math.random()*24))),
-    deep:_rc((14+~~(Math.random()*16))+','+(64+~~(Math.random()*24))+','+(14+~~(Math.random()*18)))});
+    sand:_rc((218+~~(_R()*24))+','+(194+~~(_R()*20))+','+(114+~~(_R()*30))),
+    veg:_rc((44+~~(_R()*30))+','+(124+~~(_R()*34))+','+(40+~~(_R()*24))),
+    deep:_rc((14+~~(_R()*16))+','+(64+~~(_R()*24))+','+(14+~~(_R()*18)))});
   // 6-12 small islands — fewer blob points, moderate roughness
-  const n=6+~~(Math.random()*7);
+  const n=6+~~(_R()*7);
   for(let i=0;i<n;i++){
-    const a=Math.random()*Math.PI*2, d=Math.random()*0.84;
-    const rx=0.024+Math.random()*0.068, ry=0.016+Math.random()*0.044, rot=Math.random()*Math.PI;
+    const a=_R()*Math.PI*2, d=_R()*0.84;
+    const rx=0.024+_R()*0.068, ry=0.016+_R()*0.044, rot=_R()*Math.PI;
     lms.push({cx:Math.cos(a)*d, cy:Math.sin(a)*d,
       rx, ry, rot, isLarge:false,
       pts:_blobPts(rx,ry,rot,6,0.54),
-      sand:'rgba('+(194+~~(Math.random()*36))+','+(168+~~(Math.random()*28))+','+(96+~~(Math.random()*36))+',0.92)',
-      veg:'rgba('+(40+~~(Math.random()*36))+','+(108+~~(Math.random()*40))+','+(36+~~(Math.random()*28))+',0.89)',
+      sand:'rgba('+(194+~~(_R()*36))+','+(168+~~(_R()*28))+','+(96+~~(_R()*36))+',0.92)',
+      veg:'rgba('+(40+~~(_R()*36))+','+(108+~~(_R()*40))+','+(36+~~(_R()*28))+',0.89)',
       deep:null});
   }
   const sws=[];
-  for(let i=0;i<2+~~(Math.random()*4);i++){
-    const a=Math.random()*Math.PI*2, d=Math.random()*0.72;
+  for(let i=0;i<2+~~(_R()*4);i++){
+    const a=_R()*Math.PI*2, d=_R()*0.72;
     sws.push({cx:Math.cos(a)*d, cy:Math.sin(a)*d,
-      rx:0.05+Math.random()*0.11, ry:0.04+Math.random()*0.08, rot:Math.random()*Math.PI});
+      rx:0.05+_R()*0.11, ry:0.04+_R()*0.08, rot:_R()*Math.PI});
   }
   return {id:'resort', lms, sws};
 }
@@ -2853,117 +2889,130 @@ const _CROP_COLS=[
   'rgba(182,218,75,0.84)','rgba(248,216,65,0.80)','rgba(112,178,32,0.84)',
   'rgba(240,185,48,0.80)','rgba(168,212,60,0.84)','rgba(198,168,50,0.80)',
 ];
-function _genAgriBiome(){
+function _genAgriBiome(_R){
+  _R=_R||Math.random;
   const fields=[];
   // 5-20 large clusters + 25-50 small clusters (5× original density)
-  const nL=5+~~(Math.random()*16), nS=25+~~(Math.random()*26);
+  const nL=5+~~(_R()*16), nS=25+~~(_R()*26);
   const clusters=[];
   for(let i=0;i<nL;i++){
-    const a=Math.random()*Math.PI*2, d=Math.random()*0.62;
-    clusters.push({cx:Math.cos(a)*d, cy:Math.sin(a)*d, spread:0.13+Math.random()*0.10, n:8+~~(Math.random()*10)});
+    const a=_R()*Math.PI*2, d=_R()*0.62;
+    clusters.push({cx:Math.cos(a)*d, cy:Math.sin(a)*d, spread:0.13+_R()*0.10, n:8+~~(_R()*10)});
   }
   for(let i=0;i<nS;i++){
-    const a=Math.random()*Math.PI*2, d=Math.random()*0.80;
-    clusters.push({cx:Math.cos(a)*d, cy:Math.sin(a)*d, spread:0.04+Math.random()*0.06, n:3+~~(Math.random()*5)});
+    const a=_R()*Math.PI*2, d=_R()*0.80;
+    clusters.push({cx:Math.cos(a)*d, cy:Math.sin(a)*d, spread:0.04+_R()*0.06, n:3+~~(_R()*5)});
   }
   for(const cl of clusters){
     for(let fi=0;fi<cl.n;fi++){
-      const fa=Math.random()*Math.PI*2, fd=Math.random()*cl.spread;
+      const fa=_R()*Math.PI*2, fd=_R()*cl.spread;
       const nx=cl.cx+Math.cos(fa)*fd, ny=cl.cy+Math.sin(fa)*fd;
       if(nx*nx+ny*ny>0.84) continue;
       fields.push({x:nx, y:ny,
-        w:0.044+Math.random()*0.055, h:0.018+Math.random()*0.028,
-        rot:Math.random()*Math.PI,
-        col:_CROP_COLS[~~(Math.random()*_CROP_COLS.length)]});
+        w:0.044+_R()*0.055, h:0.018+_R()*0.028,
+        rot:_R()*Math.PI,
+        col:_CROP_COLS[~~(_R()*_CROP_COLS.length)]});
     }
   }
   return {id:'agri', fields};
 }
 // Oil biome: generates random shimmer band data for iridescent surface rendering
-function _genOilBiome(){
+function _genOilBiome(_R){
+  _R=_R||Math.random;
   // 5-9 sweeping shimmer bands across the surface, each with angle, width, and color phase offset
   const bands=[];
-  const N=5+~~(Math.random()*5);
+  const N=5+~~(_R()*5);
   for(let i=0;i<N;i++){
     bands.push({
-      angle: Math.random()*Math.PI*2,        // rotation angle of the band
-      spread: 0.18+Math.random()*0.30,       // angular width (radians)
-      phase: Math.random()*Math.PI*2,        // color wheel phase offset
-      alpha: 0.30+Math.random()*0.28,       // max opacity of this band
+      angle: _R()*Math.PI*2,        // rotation angle of the band
+      spread: 0.18+_R()*0.30,       // angular width (radians)
+      phase: _R()*Math.PI*2,        // color wheel phase offset
+      alpha: 0.30+_R()*0.28,       // max opacity of this band
     });
   }
   // 3-6 small specular glints (bright iridescent spots)
   const glints=[];
-  const G=3+~~(Math.random()*4);
+  const G=3+~~(_R()*4);
   for(let i=0;i<G;i++){
-    const a=Math.random()*Math.PI*2, d=Math.random()*0.72;
-    glints.push({cx:Math.cos(a)*d, cy:Math.sin(a)*d, r:0.04+Math.random()*0.12, phase:Math.random()*Math.PI*2});
+    const a=_R()*Math.PI*2, d=_R()*0.72;
+    glints.push({cx:Math.cos(a)*d, cy:Math.sin(a)*d, r:0.04+_R()*0.12, phase:_R()*Math.PI*2});
   }
   return {id:'oil', bands, glints};
 }
 // Storm planet: generate lightning bolt data for animated rendering
-function _genStormLightning(){
+function _genStormLightning(_R){
+  _R=_R||Math.random;
+  // Local seeded versions of rand/randInt so the global helpers don't leak unseeded randomness in.
+  const _rd=(a,b)=>_R()*(b-a)+a;
+  const _ri=(a,b)=>Math.floor(_rd(a,b+0.999));
   const bolts=[];
-  const N=3+randInt(0,4); // 3–6 radial bolts (originate near centre)
+  const N=3+_ri(0,4); // 3–6 radial bolts (originate near centre)
   for(let i=0;i<N;i++){
     // Each bolt: a jagged chain of points stored in normalised sphere coords
     // (dx,dy) are offsets from planet centre in units of planet radius.
     // 'lat' biases the starting latitude; bolts are more common near equator.
-    const lat=rand(-0.55,0.55); // starting latitude (sphere Y fraction)
-    const angle=Math.random()*Math.PI*2; // horizontal angle of bolt start
-    const nSeg=3+randInt(0,3); // 3–5 segments
+    const lat=_rd(-0.55,0.55); // starting latitude (sphere Y fraction)
+    const angle=_R()*Math.PI*2; // horizontal angle of bolt start
+    const nSeg=3+_ri(0,3); // 3–5 segments
     // Build zigzag path: each step moves "inward→outward" in radius
     const pts=[];
-    let r0=rand(0.08,0.35), a0=angle;
+    let r0=_rd(0.08,0.35), a0=angle;
     pts.push({r:r0,a:a0,lat});
     for(let s=0;s<nSeg;s++){
-      r0+=rand(0.10,0.22);
-      a0+=rand(-0.55,0.55);
-      const la=lat+rand(-0.08,0.08);
+      r0+=_rd(0.10,0.22);
+      a0+=_rd(-0.55,0.55);
+      const la=lat+_rd(-0.08,0.08);
       pts.push({r:Math.min(r0,0.98),a:a0,lat:la});
     }
     bolts.push({
       pts,
-      phase:Math.random()*6000,      // timing offset in ms
-      period:1800+Math.random()*3200, // ms between flashes
-      dur:60+Math.random()*100,       // ms flash lasts
-      br:Math.random()<0.3            // branch: secondary fork?
+      phase:_R()*6000,      // timing offset in ms
+      period:1800+_R()*3200, // ms between flashes
+      dur:60+_R()*100,       // ms flash lasts
+      br:_R()<0.3            // branch: secondary fork?
     });
   }
   // Float bolts: arc laterally through the atmosphere — do NOT originate from centre.
   // Start radius is 0.50–0.82 of planet radius; each step changes angle more than radius
   // so the bolt travels across cloud bands rather than radiating outward.
   const floatBolts=[];
-  const M=2+randInt(0,4); // 2–5 atmospheric arc bolts
+  const M=2+_ri(0,4); // 2–5 atmospheric arc bolts
   for(let i=0;i<M;i++){
-    const lat=rand(-0.62,0.62);
-    const angle=Math.random()*Math.PI*2;
-    const nSeg=3+randInt(0,4); // 3–6 segments — can be longer arcs
+    const lat=_rd(-0.62,0.62);
+    const angle=_R()*Math.PI*2;
+    const nSeg=3+_ri(0,4); // 3–6 segments — can be longer arcs
     const pts=[];
-    let r0=rand(0.50,0.82), a0=angle;
+    let r0=_rd(0.50,0.82), a0=angle;
     pts.push({r:r0,a:a0,lat});
     for(let s=0;s<nSeg;s++){
-      r0+=rand(-0.07,0.09); // slight drift in/out — stays mid-atmosphere
+      r0+=_rd(-0.07,0.09); // slight drift in/out — stays mid-atmosphere
       r0=Math.max(0.35,Math.min(0.97,r0));
-      a0+=rand(-0.65,0.65); // large lateral sweep per segment
-      const la=lat+rand(-0.07,0.07);
+      a0+=_rd(-0.65,0.65); // large lateral sweep per segment
+      const la=lat+_rd(-0.07,0.07);
       pts.push({r:r0,a:a0,lat:la});
     }
     floatBolts.push({
       pts,
-      phase:Math.random()*6000,
-      period:2200+Math.random()*3800,
-      dur:55+Math.random()*95,
+      phase:_R()*6000,
+      period:2200+_R()*3800,
+      dur:55+_R()*95,
     });
   }
   return {id:'storm',bolts,floatBolts};
 }
 function _attachBiome(p){
-  if(p.type.id==='resort') p.type={...p.type,_b:_genResortBiome()};
-  else if(p.type.id==='agri') p.type={...p.type,_b:_genAgriBiome()};
-  else if(p.type.id==='oil')  p.type={...p.type,_b:_genOilBiome()};
-  else if(p.type.id==='storm') p.type={...p.type,_b:_genStormLightning()};
-  const _mtn=generatePlanetMountains(p);
+  // Assign a stable per-planet seed so reloads regenerate identical landmasses.
+  // Existing saves without biomeSeed get one assigned at first restore, which
+  // then persists in subsequent saves.
+  if(p.biomeSeed==null) p.biomeSeed=(Math.floor(Math.random()*0xFFFFFFFE)+1)>>>0;
+  const _R=_mkRng(p.biomeSeed);
+  if(p.type.id==='resort') p.type={...p.type,_b:_genResortBiome(_R)};
+  else if(p.type.id==='agri') p.type={...p.type,_b:_genAgriBiome(_R)};
+  else if(p.type.id==='oil')  p.type={...p.type,_b:_genOilBiome(_R)};
+  else if(p.type.id==='storm') p.type={...p.type,_b:_genStormLightning(_R)};
+  // Mountains get a derived seed (XOR with golden ratio constant) so the
+  // biome generator and mountain generator don't draw from the same stream.
+  const _mtn=generatePlanetMountains(p, _mkRng((p.biomeSeed^0x9e3779b9)>>>0));
   if(_mtn) p.type={...p.type,_mtn};
 }
 
@@ -2991,30 +3040,33 @@ function generatePlanetClouds(p){
   }
   return clouds;
 }
-function generatePlanetMountains(p){
+function generatePlanetMountains(p, _R){
+  _R=_R||Math.random;
+  const _rd=(a,b)=>_R()*(b-a)+a;
+  const _ri=(a,b)=>Math.floor(_rd(a,b+0.999));
   const id=p.type.id;
   let useGrey=false;
   if(id==='rocky'){
     // always generate
   } else if(id==='desert'||id==='jungle'){
-    if(Math.random()<0.5) return null;
+    if(_R()<0.5) return null;
   } else if(id==='ocean'||id==='lava'||id==='resort'){
-    if(Math.random()<0.5) return null;
+    if(_R()<0.5) return null;
     useGrey=true;
   } else {
     return null;
   }
-  const n=randInt(1,4);
+  const n=_ri(1,4);
   const col=useGrey?'rgb(112,108,104)':shade(p.type.base,22);
   const mtns=[];
   for(let i=0;i<n;i++){
-    const h=rand(0.12,0.30);   // peak height as fraction of r beyond surface
+    const h=_rd(0.12,0.30);   // peak height as fraction of r beyond surface
     const tall=h>0.20;
     mtns.push({
-      a:Math.random()*Math.PI*2,
+      a:_R()*Math.PI*2,
       h,
-      wHalf:rand(0.05,0.14),   // half angular width in radians
-      tipH:tall?h*rand(0.28,0.48):0,
+      wHalf:_rd(0.05,0.14),   // half angular width in radians
+      tipH:tall?h*_rd(0.28,0.48):0,
       col, tall
     });
   }
@@ -3534,6 +3586,15 @@ function _processCargoQueue(t, p){
             _bhMx._chemicalDeliveries=(_bhMx._chemicalDeliveries||0)+1;
           }
         }
+        // Designing a better space train: count steel/battery/oil deliveries to the home planet
+        if(cargo==='steel'||cargo==='battery'||cargo==='oil'){
+          const _dbtMx=missions.find(mx=>mx.id==='design_better_train'&&mx.status==='active');
+          if(t.isPlayer&&_dbtMx&&p.id===_dbtMx.targetPlanetId){
+            if(cargo==='steel')   _dbtMx._homeSteelDelivered  =(_dbtMx._homeSteelDelivered  ||0)+_cUU;
+            if(cargo==='battery') _dbtMx._homeBatteryDelivered=(_dbtMx._homeBatteryDelivered||0)+_cUU;
+            if(cargo==='oil')     _dbtMx._homeOilDelivered    =(_dbtMx._homeOilDelivered    ||0)+_cUU;
+          }
+        }
         // Flowers delivery: seed flower cultivation on eligible planets
         if(cargo==='flowers'&&['jungle','desert','resort'].includes(p.type.id)&&!p.flowerUnlocked&&!p.isFlowersOrigin){
           p.flowersReceived=(p.flowersReceived||0)+1;
@@ -3660,16 +3721,30 @@ function _spawnCargoBeam(train, dt){
   // Color by cargo type
   const isLoading2=isLoading;
   const _ctype=isLoading2?CAR_CARGO_TYPE[train.cars[carIdx]]:(train.carCargo?.[carIdx]||null);
-  const _BEAM_COLS={passengers:{col:'#ffe060',glow:'#ffcc00'},royal:{col:'#dd88ff',glow:'#bb44ee'},livestock:{col:'#cc8844',glow:'#aa6622'},water:{col:'#44ccff',glow:'#22aaff'},mail:{col:'#a8d8ff',glow:'#7ab8f0'},ice:{col:'#aaeeff',glow:'#ddf8ff'},sand:{col:'#e8c96a',glow:'#c8a030'},molten_ore:{col:'#ff6010',glow:'#ff2200'},iron:{col:'#ffcc44',glow:'#ddaa00'},gold:{col:'#ffe030',glow:'#ffbb00'},hazmat:{col:'#80ff20',glow:'#40cc00'},oil:{col:'#cc44ff',glow:'#9900cc'},flowers:{col:'#ff88cc',glow:'#ff44aa'},medical:{col:'#40eeaa',glow:'#00cc88'},grain:{col:'#e8d840',glow:'#c0aa10'},fruit:{col:'#ff8822',glow:'#ff5500'},steel:{col:'#c8d0e0',glow:'#8898b0'},glass:{col:'#a8e6d8',glow:'#60c0a8'},machinery:{col:'#a8a890',glow:'#706a4a'},cargo:{col:'#e8c898',glow:'#a88848'}};
+  const _BEAM_COLS={passengers:{col:'#ffe060',glow:'#ffcc00'},royal:{col:'#dd88ff',glow:'#bb44ee'},livestock:{col:'#cc8844',glow:'#aa6622'},water:{col:'#44ccff',glow:'#22aaff'},mail:{col:'#a8d8ff',glow:'#7ab8f0'},ice:{col:'#aaeeff',glow:'#ddf8ff'},sand:{col:'#e8c96a',glow:'#c8a030'},molten_ore:{col:'#ff6010',glow:'#ff2200'},iron:{col:'#ffcc44',glow:'#ddaa00'},gold:{col:'#ffe030',glow:'#ffbb00'},diamond:{col:'#80c0ff',glow:'#c0e0ff'},hazmat:{col:'#80ff20',glow:'#40cc00'},oil:{col:'#0a0a0a',glow:'#1a1a1a'},battery:{col:'#fff230',glow:'#ffff80'},flowers:{col:'#ff88cc',glow:'#ff44aa'},medical:{col:'#40eeaa',glow:'#00cc88'},grain:{col:'#e8d840',glow:'#c0aa10'},fruit:{col:'#ff8822',glow:'#ff5500'},steel:{col:'#c8d0e0',glow:'#8898b0'},glass:{col:'#a8e6d8',glow:'#60c0a8'},machinery:{col:'#a8a890',glow:'#706a4a'},cargo:{col:'#e8c898',glow:'#a88848'},chemical:{col:'#60d820',glow:'#28980c'}};
   const {col:pcol,glow:pglow}=_BEAM_COLS[_ctype]||{col:'#88ccff',glow:'#44aaff'};
+  // Oil gets a per-particle slick effect: mostly black, with occasional iridescent
+  // rainbow sprinkles to evoke the rainbow sheen on real oil.
+  const _OIL_RAINBOW=[
+    {col:'#ff3030',glow:'#aa1010'}, {col:'#ff9020',glow:'#cc5000'},
+    {col:'#ffe040',glow:'#bba000'}, {col:'#40dd60',glow:'#108830'},
+    {col:'#40b8ff',glow:'#0070cc'}, {col:'#a060ff',glow:'#5020bb'},
+    {col:'#ff60d8',glow:'#bb20a0'}
+  ];
+  const _isOil=(_ctype==='oil');
   for(let k=0;k<spawnN;k++){
     const spr=(Math.random()-0.5)*2*spread;
+    let pcK=pcol, pgK=pglow;
+    if(_isOil && Math.random()<0.18){
+      const _rb=_OIL_RAINBOW[Math.floor(Math.random()*_OIL_RAINBOW.length)];
+      pcK=_rb.col; pgK=_rb.glow;
+    }
     cargoParticles.push({
       x:srcX+perpX*spr, y:srcY+perpY*spr,
       vx:bdx*speed - perpX*spr/lifetime,
       vy:bdy*speed - perpY*spr/lifetime,
       life:lifetime, maxLife:lifetime,
-      col:pcol, glow:pglow
+      col:pcK, glow:pgK
     });
   }
 }
@@ -5041,7 +5116,7 @@ function _aiDoAssignRoute(trainIdx,planetIds){
 
 function _aiComputeNetWorth(){
   if(!_aiCorp) return 0;
-  const vals={engine_constellation:10000,engine_galaxy:20000,engine_classJ:50000,engine_classR:70000,engine_N700:100000,car_passenger:5000,car_royal:12000,car_water_tank:8000,car_cargo:4000,car_livestock:6000,car_grain:5000,car_fruit:6000,car_mail:4000,car_ice:9000,car_sand:5000,car_ore:8000,car_iron:10000,car_hazmat:7000,car_oil:9000,car_battery:11000,car_chemical:9000,car_gold:30000,car_diamond:45000,car_flowers:7000,car_medical:8000,caboose:3000};
+  const vals={engine_constellation:10000,engine_galaxy:20000,engine_classJ:50000,engine_classR:70000,engine_N700:100000,car_passenger:5000,car_royal:10000,car_water_tank:8000,car_cargo:4000,car_livestock:6000,car_grain:5000,car_fruit:6000,car_mail:4000,car_ice:9000,car_sand:5000,car_ore:8000,car_iron:10000,car_hazmat:7000,car_oil:9000,car_battery:11000,car_chemical:9000,car_gold:30000,car_diamond:45000,car_flowers:7000,car_medical:8000,caboose:3000};
   let tv=0;
   for(const ti of _aiCorp.trainIndices){const t=trains[ti];if(t) tv+=t.cars.reduce((s,c)=>s+(vals[c]||4000),0);}
   return Math.round(_aiCorp.credits+tv+_aiCorp.stationsBuilt*50000);
@@ -5747,7 +5822,7 @@ function drawCityscape(sx,sy,sr){
 }
 
 // ── foundry building draw ─────────────────────────────────────
-function drawFoundryBuilding(sx,sy,sr,angle,ssz,smelting=false){
+function drawFoundryBuilding(sx,sy,sr,angle,ssz,smelting=false,kind=''){
   const rx=sx+Math.cos(angle)*sr, ry=sy+Math.sin(angle)*sr;
   ctx.save();
   ctx.translate(rx,ry);
@@ -5768,7 +5843,7 @@ function drawFoundryBuilding(sx,sy,sr,angle,ssz,smelting=false){
   const stw=ssz*0.04, sth=ssz*0.11, stx=b1w*0.35-b1w*0.55;
   ctx.fillStyle='rgba(48,48,52,0.95)';
   ctx.fillRect(stx,-b1h-sth,stw,sth);
-  // Indicator light: alternating red/white normally; yellow/off while smelting
+  // Indicator light: yellow/off while producing; otherwise alternates per upgrade kind
   const _ph=Math.floor(Date.now()/500)%2;
   const puffR=Math.max(1.5,ssz*0.028);
   if(smelting){
@@ -5780,8 +5855,32 @@ function drawFoundryBuilding(sx,sy,sr,angle,ssz,smelting=false){
       ctx.fillStyle='rgba(28,26,20,0.55)'; // off — nearly dark
     }
   } else {
-    ctx.shadowColor=_ph?'#ff4010':'#ffffff'; ctx.shadowBlur=Math.max(3,ssz*0.08);
-    ctx.fillStyle=_ph?'rgba(255,55,10,0.88)':'rgba(235,235,235,0.80)';
+    // Per-kind alternating palette. Default = red/white.
+    let cA='#ff4010', cB='#ffffff', fA='rgba(255,55,10,0.88)', fB='rgba(235,235,235,0.80)';
+    let bOff=false; // if true, _ph==0 means "off"
+    if(kind==='iron_foundry'){       // molten_ore orange / water blue
+      cA='#ff6010'; fA='rgba(255,96,16,0.92)';
+      cB='#44ccff'; fB='rgba(68,204,255,0.90)';
+    } else if(kind==='blast_furnace'){ // iron grey / chemical green
+      cA='#b0b8c0'; fA='rgba(200,208,220,0.90)';
+      cB='#60d820'; fB='rgba(96,216,32,0.92)';
+    } else if(kind==='glassworks'){   // sand beige / chemical green
+      cA='#e8c96a'; fA='rgba(232,201,106,0.92)';
+      cB='#60d820'; fB='rgba(96,216,32,0.92)';
+    } else if(kind==='bakery'){      // grain orange / off
+      cA='#e8a040'; fA='rgba(232,160,64,0.92)';
+      bOff=true;
+    } else if(kind==='juicery'){     // fruit rich green / off
+      cA='#3cb054'; fA='rgba(60,176,84,0.92)';
+      bOff=true;
+    }
+    if(bOff && !_ph){
+      ctx.shadowBlur=0;
+      ctx.fillStyle='rgba(28,26,20,0.55)';
+    } else {
+      ctx.shadowColor=_ph?cA:cB; ctx.shadowBlur=Math.max(3,ssz*0.08);
+      ctx.fillStyle=_ph?fA:fB;
+    }
   }
   ctx.beginPath(); ctx.arc(stx+stw/2,-b1h-sth-puffR,puffR,0,Math.PI*2); ctx.fill();
   ctx.shadowBlur=0;
@@ -6286,12 +6385,12 @@ function drawTrainsPanel(){
       {
         const _ups=p.upgrades||[];
         const _structDraws=[];
-        if(_ups.includes('iron_foundry')) _structDraws.push((a)=>drawFoundryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R,(p.upgradeData?.iron_foundry?.progress||0)>0));
-        if(_ups.includes('blast_furnace')) _structDraws.push((a)=>drawFoundryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R,(p.upgradeData?.blast_furnace?.progress||0)>0));
-        if(_ups.includes('glassworks')) _structDraws.push((a)=>drawFoundryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R,(p.upgradeData?.glassworks?.progress||0)>0));
-        if(_ups.includes('factory')) _structDraws.push((a)=>drawFoundryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R,(p.upgradeData?.factory?.progress||0)>0));
-        if(_ups.includes('bakery')) _structDraws.push((a)=>drawFoundryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R,(p.upgradeData?.bakery?.progress||0)>0));
-        if(_ups.includes('juicery')) _structDraws.push((a)=>drawFoundryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R,(p.upgradeData?.juicery?.progress||0)>0));
+        if(_ups.includes('iron_foundry')) _structDraws.push((a)=>drawFoundryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R,(p.upgradeData?.iron_foundry?.progress||0)>0,'iron_foundry'));
+        if(_ups.includes('blast_furnace')) _structDraws.push((a)=>drawFoundryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R,(p.upgradeData?.blast_furnace?.progress||0)>0,'blast_furnace'));
+        if(_ups.includes('glassworks')) _structDraws.push((a)=>drawFoundryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R,(p.upgradeData?.glassworks?.progress||0)>0,'glassworks'));
+        if(_ups.includes('factory')) _structDraws.push((a)=>drawFoundryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R,(p.upgradeData?.factory?.progress||0)>0,'factory'));
+        if(_ups.includes('bakery')) _structDraws.push((a)=>drawFoundryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R,(p.upgradeData?.bakery?.progress||0)>0,'bakery'));
+        if(_ups.includes('juicery')) _structDraws.push((a)=>drawFoundryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R,(p.upgradeData?.juicery?.progress||0)>0,'juicery'));
         if(_ups.includes('granary'))      _structDraws.push((a)=>drawGranaryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R));
         if(_ups.includes('farm'))         _structDraws.push((a)=>drawFarmBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R));
         if(_ups.includes('orchard'))      _structDraws.push((a)=>drawOrchardBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R));
@@ -6592,7 +6691,18 @@ function updateFoundries(dtG){
           _bf.chemical=Math.max(0,(_bf.chemical||0)-1);
           p.supply.steel  =Math.min(CARGO_MAX_SUPPLY,(p.supply.steel||0)+1);
           p.steelDelivered=(p.steelDelivered||0)+1;
-          if(!_steelCarUnlocked){ _steelCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_steel',displayName:'Steel Car'}); _chatMsg('STEEL CAR UNLOCKED','rgba(220,230,245,1)'); }
+          // Sliding-window log of steel production (per-tick units), used for the
+          // N700 unlock check (200 units in any 20-stardate window).
+          _steelProdLog.push({sd:stardate,units:1});
+          if(!_steelCarUnlocked){
+            _steelCarUnlocked=true;
+            pendingCarUnlocks.push({sprite:'car_steel',displayName:'Steel Car'});
+            _chatMsg('STEEL CAR UNLOCKED','rgba(220,230,245,1)');
+            // Arm the 10-second timer for the "Designing a better space train"
+            // mission intro. updateMissions() also re-arms this on next tick
+            // if the save/load wiped it.
+            if(_steelMissionTimerMs===0) _steelMissionTimerMs=Date.now();
+          }
         }
       } else if((_bf.iron||0)>=1&&(_bf.chemical||0)>=1){
         _bf.progress=BLAST_FURNACE_PROD_TIME;
@@ -7721,7 +7831,11 @@ function drawNewMissionPopup(){
     const _dtLH=15;
     ctx.font='italic 12px "Exo 2",sans-serif'; ctx.textAlign='left';
     ctx.fillStyle='rgba(150,185,220,0.80)';
-    const _dtWords=def.details.split(' ');
+    // Resolve {SOURCE}/{TARGET} placeholders before word-wrap.
+    let _dtTxt=def.details;
+    if(_dtTxt.includes('{SOURCE}')&&popupState.sourcePlanetId!=null){const _sp4=_gp(popupState.sourcePlanetId);if(_sp4)_dtTxt=_dtTxt.replace(/\{SOURCE\}/g,_sp4.name);}
+    if(_dtTxt.includes('{TARGET}')&&popupState.targetPlanetId!=null){const _tp4=_gp(popupState.targetPlanetId);if(_tp4)_dtTxt=_dtTxt.replace(/\{TARGET\}/g,_tp4.name);}
+    const _dtWords=_dtTxt.split(' ');
     let _dtLine='';
     for(const _w of _dtWords){
       const _t=_dtLine?_dtLine+' '+_w:_w;
@@ -7808,36 +7922,21 @@ function drawNewMissionPopup(){
   ctx.restore();
 }
 
-// Engine-unlock revenue thresholds. Tested every game tick against
-// cumulative ledger revenue; first crossing per engine queues an
-// engine_unlock popup and locks in the flag. Thresholds match the user
-// spec: Class J at 75k, Class R at 150k, N700 at 300k.
-const _ENGINE_UNLOCK_THRESHOLDS=[
-  {flag:'_classJEngineUnlocked',rev:75000, sprite:'engine_classJ',displayName:'Class J Engine'},
-  {flag:'_classREngineUnlocked',rev:150000,sprite:'engine_classR',displayName:'Class R Engine'},
-  {flag:'_N700EngineUnlocked',  rev:300000,sprite:'engine_N700',  displayName:'N700 Engine'},
-];
+// Engine unlock policy (post-rebalance):
+//   • Class J + Class R — unlocked by completing the "Designing a better space
+//     train" mission (see mission-complete handler in updateMissions).
+//   • N700 — unlocked the first time the player has produced ≥200 units of
+//     steel in any rolling 20-stardate window. Tracked via _steelProdLog.
+// This function runs every tick to prune the log and check the N700 gate.
 function _checkEngineUnlocks(){
-  // Compute the cumulative revenue once — financeLedger is the only authoritative
-  // source for "total revenues ever earned" (same number the Corp screen shows).
-  let _tr=0; for(const e of financeLedger) _tr+=e.revenue;
-  for(const u of _ENGINE_UNLOCK_THRESHOLDS){
-    if(_tr>=u.rev){
-      // Use a switch on the flag name since JS has no clean "set variable by string".
-      if(u.flag==='_classJEngineUnlocked' && !_classJEngineUnlocked){
-        _classJEngineUnlocked=true;
-        pendingEngineUnlocks.push({sprite:u.sprite,displayName:u.displayName});
-        _chatMsg('CLASS J ENGINE UNLOCKED','rgba(255,200,80,1)');
-      } else if(u.flag==='_classREngineUnlocked' && !_classREngineUnlocked){
-        _classREngineUnlocked=true;
-        pendingEngineUnlocks.push({sprite:u.sprite,displayName:u.displayName});
-        _chatMsg('CLASS R ENGINE UNLOCKED','rgba(255,140,80,1)');
-      } else if(u.flag==='_N700EngineUnlocked' && !_N700EngineUnlocked){
-        _N700EngineUnlocked=true;
-        pendingEngineUnlocks.push({sprite:u.sprite,displayName:u.displayName});
-        _chatMsg('N700 ENGINE UNLOCKED','rgba(100,255,210,1)');
-      }
-    }
+  // Prune entries that fall outside the 20-SD window.
+  while(_steelProdLog.length&&stardate-_steelProdLog[0].sd>20) _steelProdLog.shift();
+  if(_N700EngineUnlocked) return;
+  let _recent=0; for(const e of _steelProdLog) _recent+=e.units;
+  if(_recent>=200){
+    _N700EngineUnlocked=true;
+    pendingEngineUnlocks.push({sprite:'engine_N700',displayName:'N700 Engine'});
+    _chatMsg('N700 ENGINE UNLOCKED','rgba(100,255,210,1)');
   }
 }
 
@@ -9236,8 +9335,19 @@ function _drawZoomCallout(){
   ctx.restore();
 }
 
-function updateMissions(){
+// Accumulator so updateMissions runs at most once per 0.1 SD instead of every
+// rendered frame. The mission system's intro-gate checks and per-objective
+// sweep scan galaxy.planets and trains[] — at mid/late game with many active
+// missions this is the single biggest hot loop. All conditions advance from
+// either delivery events (which fire immediately at the unload site) or
+// slow-moving world state (planet visits, station counts), so a ~150ms
+// detection lag at 1× speed is imperceptible.
+let _missionTickAcc=0;
+function updateMissions(dtSd){
   if(!galaxy) return;
+  _missionTickAcc+=dtSd||0;
+  if(_missionTickAcc<0.1) return;
+  _missionTickAcc=0;
   // Unlock "Build a Foundry" on whichever triggers first:
   // (1) "Find Molten Ore" completed, (2) any rocky/desert planet visited, (3) 0.5 sd elapsed
   if(!_missionPending('build_foundry')){
@@ -9262,6 +9372,14 @@ function updateMissions(){
   // upgrade_station intro: 10 real-time seconds after produce_iron completes
   if(_produceIronTimerMs>0&&Date.now()-_produceIronTimerMs>=10000&&!_missionPending('upgrade_station')){
     pendingMissionIntros.push({defId:'upgrade_station',readySd:stardate});
+  }
+  // design_better_train intro: arm timer once first steel produced; fire 10 real-time seconds later.
+  // The timer self-rearms on load (since it's not persisted) so it survives save/load cycles.
+  if(_steelMissionTimerMs===0&&_steelCarUnlocked&&!_missionPending('design_better_train')){
+    _steelMissionTimerMs=Date.now();
+  }
+  if(_steelMissionTimerMs>0&&Date.now()-_steelMissionTimerMs>=10000&&!_missionPending('design_better_train')){
+    pendingMissionIntros.push({defId:'design_better_train',readySd:stardate,targetPlanetId:galaxy.origenId});
   }
   // research_royal_car intro: triggered once 20 passenger units have been delivered
   if(_totalPassengersDelivered>=20&&!_missionPending('research_royal_car')){
@@ -9353,6 +9471,20 @@ function updateMissions(){
         _royalCarUnlocked=true;
         pendingCarUnlocks.push({sprite:'car_royal',displayName:'Royal Car'});
         _chatMsg('ROYAL CAR UNLOCKED','rgba(220,170,255,1)');
+      }
+      // Designing a better space train: unlock Class J and Class R engines.
+      // (N700 stays gated behind the steel-production window — see _checkEngineUnlocks.)
+      if(m.id==='design_better_train'){
+        if(!_classJEngineUnlocked){
+          _classJEngineUnlocked=true;
+          pendingEngineUnlocks.push({sprite:'engine_classJ',displayName:'Class J Engine'});
+          _chatMsg('CLASS J ENGINE UNLOCKED','rgba(255,200,80,1)');
+        }
+        if(!_classREngineUnlocked){
+          _classREngineUnlocked=true;
+          pendingEngineUnlocks.push({sprite:'engine_classR',displayName:'Class R Engine'});
+          _chatMsg('CLASS R ENGINE UNLOCKED','rgba(255,140,80,1)');
+        }
       }
       // Outbreak complete: spawn reward train (Galaxy engine + Medical car + Caboose) in HIGH orbit
       if(m.id==='outbreak'&&m.targetPlanetId!=null){
@@ -9453,6 +9585,9 @@ function drawMissionsPopup(){
     if(objId==='stations_7')           return galaxy?{cur:Math.min(galaxy.planets.filter(p=>p.playerBuiltStation||p.isStarter).length,7), max:7, label:'Stations built'}:null;
     if(objId==='trains_profitable_1sd') return {cur:Math.min(trains.filter(t=>t.isPlayer&&t.route?.isLoop&&(t.totalRevenue||0)>0&&(stardate-(t._routeStartSd||stardate))>=1.0).length,5), max:5, label:'Profitable trains'};
     if(objId==='deliver_5_chemical')   return {cur:Math.min(m._chemicalDeliveries||0,5), max:5, label:'Chemical delivered'};
+    if(objId==='deliver_10_steel_home')   return {cur:Math.min(m._homeSteelDelivered  ||0,20), max:20, label:'Steel delivered'};
+    if(objId==='deliver_10_battery_home') return {cur:Math.min(m._homeBatteryDelivered||0,20), max:20, label:'Batteries delivered'};
+    if(objId==='deliver_10_oil_home')     return {cur:Math.min(m._homeOilDelivered    ||0,20), max:20, label:'Oil delivered'};
     return null;
   };
   const PROG_H=20; // px added per objective that has a progress bar (label+bar+margins)
@@ -10074,10 +10209,12 @@ function drawSaveManagerPopup(){
   // Autosave is pinned to the top regardless of save time so it's always the
   // first row; manual saves follow, newest-first.
   const _idx=_lsLoadIndex();
-  const _autosaveEntry=_idx.find(e=>e.id===LS_AUTOSAVE_ID)||null;
-  const _manualEntries=_idx.filter(e=>e.id!==LS_AUTOSAVE_ID).sort((a,b)=>b.savedAt-a.savedAt);
+  // Autosaves now split per corp (id starts with 'autosave_'). Show every
+  // autosave at the top, most-recently-written first, then all manual saves.
+  const _autosaveEntries=_idx.filter(e=>_isAutosaveId(e.id)).sort((a,b)=>b.savedAt-a.savedAt);
+  const _manualEntries=_idx.filter(e=>!_isAutosaveId(e.id)).sort((a,b)=>b.savedAt-a.savedAt);
   const _list=[];
-  if(_autosaveEntry) _list.push(_autosaveEntry);
+  for(const e of _autosaveEntries) _list.push(e);
   for(const e of _manualEntries) _list.push(e);
   const _listX=px+12, _listY=py+44, _listW=pw-24, _rowH=44;
   const _listH=ph-44-72; // leave 72 px at the bottom for action buttons
@@ -10096,7 +10233,7 @@ function drawSaveManagerPopup(){
       const e=_list[i];
       const _ry=_listY+i*_rowH-(popupState.smScroll||0);
       if(_ry+_rowH<_listY||_ry>_listY+_listH) continue;
-      const _isAutosave=(e.id===LS_AUTOSAVE_ID);
+      const _isAutosave=_isAutosaveId(e.id);
       const _selected=(popupState.smSelected===e.id);
       const _rowHov=(popupState.smHoverRow===i);
       // Row background
@@ -10108,7 +10245,7 @@ function drawSaveManagerPopup(){
       }
       // Title line
       ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='left'; ctx.fillStyle=_isAutosave?'rgba(255,210,120,0.95)':'rgba(190,225,255,0.96)';
-      const _title=_isAutosave?'AUTOSAVE':(e.label||(e.corp||'Save')+'_'+e.sd.toFixed(2).replace('.',''));
+      const _title=_isAutosave?('AUTOSAVE — '+(e.corp||'(unknown corp)')):(e.label||(e.corp||'Save')+'_'+e.sd.toFixed(2).replace('.',''));
       ctx.fillText(_title,_listX+10,_ry+15);
       // Metadata line (corp · SD · saved-X-ago · size)
       ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(140,180,225,0.72)';
@@ -11193,7 +11330,7 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
       ctx.globalAlpha=isBuilt?0.9:0.35;
       ctx.fillStyle='rgba(55,60,65,0.7)';
       ctx.beginPath(); ctx.arc(_mvx,_mvy,_mvr,0,Math.PI*2); ctx.fill();
-      drawFoundryBuilding(_mvx,_mvy,_mvr,Math.PI*0.75,20,(p.upgradeData?.iron_foundry?.progress||0)>0);
+      drawFoundryBuilding(_mvx,_mvy,_mvr,Math.PI*0.75,20,(p.upgradeData?.iron_foundry?.progress||0)>0,'iron_foundry');
       ctx.restore();
       if(isBuilt){
         // Storage bars for ore and water, plus smelting progress
@@ -11263,7 +11400,7 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
       ctx.globalAlpha=isBuilt?0.9:0.35;
       ctx.fillStyle='rgba(70,55,40,0.78)';
       ctx.beginPath(); ctx.arc(_mvx,_mvy,_mvr,0,Math.PI*2); ctx.fill();
-      drawFoundryBuilding(_mvx,_mvy,_mvr,Math.PI*0.75,20,(p.upgradeData?.blast_furnace?.progress||0)>0);
+      drawFoundryBuilding(_mvx,_mvy,_mvr,Math.PI*0.75,20,(p.upgradeData?.blast_furnace?.progress||0)>0,'blast_furnace');
       ctx.restore();
       if(isBuilt){
         const _bf=p.upgradeData?.blast_furnace||{iron:0,chemical:0,progress:0};
@@ -11280,19 +11417,23 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
           ctx.strokeRect(_barX,barY,_barW,_barH);
         }
         _bfBar('IRON',_bf.iron||0,itemY+30,'rgba(200,210,235,0.78)');
-        _bfBar('CHEMICAL',_bf.chemical||0,itemY+46,'rgba(180,90,220,0.78)');
+        _bfBar('CHEMICAL',_bf.chemical||0,itemY+46,'rgba(96,216,32,0.78)');
         const _prog=_bf.progress||0;
         if(_prog>0){
           const _frac=1-_prog/BLAST_FURNACE_PROD_TIME;
           const _pbarY=itemY+62;
           ctx.font='bold 7px Orbitron,sans-serif'; ctx.textAlign='left';
-          ctx.fillStyle='rgba(255,140,60,0.88)'; ctx.fillText('BLASTING',_barX,_pbarY-1);
+          // Yellow production-progress palette — standardized across every
+          // refinery (foundry / blast furnace / glassworks / factory /
+          // bakery / juicery) so a "bar filling up to make a new resource"
+          // reads as the same UI motif everywhere.
+          ctx.fillStyle='rgba(255,200,60,0.85)'; ctx.fillText('BLASTING',_barX,_pbarY-1);
           const _lw3=ctx.measureText('BLASTING').width+4;
-          ctx.font='7px "Exo 2",sans-serif'; ctx.fillStyle='rgba(255,200,130,0.78)';
+          ctx.font='7px "Exo 2",sans-serif'; ctx.fillStyle='rgba(255,230,140,0.75)';
           ctx.fillText(Math.round(_frac*100)+'%',_barX+_lw3,_pbarY-1);
-          ctx.fillStyle='rgba(40,25,15,0.85)'; ctx.fillRect(_barX,_pbarY,_barW,_barH);
-          ctx.fillStyle='rgba(255,130,40,0.85)'; ctx.fillRect(_barX,_pbarY,_barW*_frac,_barH);
-          ctx.strokeStyle='rgba(150,70,20,0.45)'; ctx.lineWidth=0.5;
+          ctx.fillStyle='rgba(20,35,70,0.8)'; ctx.fillRect(_barX,_pbarY,_barW,_barH);
+          ctx.fillStyle='rgba(255,200,60,0.80)'; ctx.fillRect(_barX,_pbarY,_barW*_frac,_barH);
+          ctx.strokeStyle='rgba(120,90,20,0.4)'; ctx.lineWidth=0.5;
           ctx.strokeRect(_barX,_pbarY,_barW,_barH);
         } else {
           const _pbarY=itemY+62;
@@ -11339,7 +11480,7 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
       ctx.globalAlpha=isBuilt?0.9:0.35;
       ctx.fillStyle='rgba(40,70,70,0.78)';
       ctx.beginPath(); ctx.arc(_mvx,_mvy,_mvr,0,Math.PI*2); ctx.fill();
-      drawFoundryBuilding(_mvx,_mvy,_mvr,Math.PI*0.75,20,(p.upgradeData?.glassworks?.progress||0)>0);
+      drawFoundryBuilding(_mvx,_mvy,_mvr,Math.PI*0.75,20,(p.upgradeData?.glassworks?.progress||0)>0,'glassworks');
       ctx.restore();
       if(isBuilt){
         const _gw=p.upgradeData?.glassworks||{sand:0,chemical:0,progress:0};
@@ -11356,19 +11497,20 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
           ctx.strokeRect(_barX,barY,_barW,_barH);
         }
         _gwBar('SAND',_gw.sand||0,itemY+30,'rgba(232,201,106,0.78)');
-        _gwBar('CHEMICAL',_gw.chemical||0,itemY+46,'rgba(180,90,220,0.78)');
+        _gwBar('CHEMICAL',_gw.chemical||0,itemY+46,'rgba(96,216,32,0.78)');
         const _prog=_gw.progress||0;
         if(_prog>0){
           const _frac=1-_prog/FOUNDRY_PROD_TIME;
           const _pbarY=itemY+62;
           ctx.font='bold 7px Orbitron,sans-serif'; ctx.textAlign='left';
-          ctx.fillStyle='rgba(100,220,200,0.88)'; ctx.fillText('MELTING',_barX,_pbarY-1);
+          // Yellow production-progress palette (see _bfBar above).
+          ctx.fillStyle='rgba(255,200,60,0.85)'; ctx.fillText('MELTING',_barX,_pbarY-1);
           const _lw3=ctx.measureText('MELTING').width+4;
-          ctx.font='7px "Exo 2",sans-serif'; ctx.fillStyle='rgba(160,240,225,0.78)';
+          ctx.font='7px "Exo 2",sans-serif'; ctx.fillStyle='rgba(255,230,140,0.75)';
           ctx.fillText(Math.round(_frac*100)+'%',_barX+_lw3,_pbarY-1);
-          ctx.fillStyle='rgba(15,40,35,0.85)'; ctx.fillRect(_barX,_pbarY,_barW,_barH);
-          ctx.fillStyle='rgba(80,210,185,0.85)'; ctx.fillRect(_barX,_pbarY,_barW*_frac,_barH);
-          ctx.strokeStyle='rgba(50,150,130,0.45)'; ctx.lineWidth=0.5;
+          ctx.fillStyle='rgba(20,35,70,0.8)'; ctx.fillRect(_barX,_pbarY,_barW,_barH);
+          ctx.fillStyle='rgba(255,200,60,0.80)'; ctx.fillRect(_barX,_pbarY,_barW*_frac,_barH);
+          ctx.strokeStyle='rgba(120,90,20,0.4)'; ctx.lineWidth=0.5;
           ctx.strokeRect(_barX,_pbarY,_barW,_barH);
         } else {
           const _pbarY=itemY+62;
@@ -11419,7 +11561,7 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
       ctx.globalAlpha=isBuilt?0.9:0.35;
       ctx.fillStyle='rgba(60,60,75,0.78)';
       ctx.beginPath(); ctx.arc(_mvx,_mvy,_mvr,0,Math.PI*2); ctx.fill();
-      drawFoundryBuilding(_mvx,_mvy,_mvr,Math.PI*0.75,20,(p.upgradeData?.factory?.progress||0)>0);
+      drawFoundryBuilding(_mvx,_mvy,_mvr,Math.PI*0.75,20,(p.upgradeData?.factory?.progress||0)>0,'factory');
       ctx.restore();
       if(isBuilt){
         const _ft=p.upgradeData?.factory||{iron:0,oil:0,progress:0};
@@ -11442,13 +11584,14 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
           const _frac=1-_prog/(FOUNDRY_PROD_TIME*2);
           const _pbarY=itemY+62;
           ctx.font='bold 7px Orbitron,sans-serif'; ctx.textAlign='left';
-          ctx.fillStyle='rgba(180,210,255,0.88)'; ctx.fillText('BUILDING',_barX,_pbarY-1);
+          // Yellow production-progress palette (see _bfBar above).
+          ctx.fillStyle='rgba(255,200,60,0.85)'; ctx.fillText('BUILDING',_barX,_pbarY-1);
           const _lw3=ctx.measureText('BUILDING').width+4;
-          ctx.font='7px "Exo 2",sans-serif'; ctx.fillStyle='rgba(220,235,255,0.78)';
+          ctx.font='7px "Exo 2",sans-serif'; ctx.fillStyle='rgba(255,230,140,0.75)';
           ctx.fillText(Math.round(_frac*100)+'%',_barX+_lw3,_pbarY-1);
-          ctx.fillStyle='rgba(20,28,42,0.85)'; ctx.fillRect(_barX,_pbarY,_barW,_barH);
-          ctx.fillStyle='rgba(150,185,235,0.85)'; ctx.fillRect(_barX,_pbarY,_barW*_frac,_barH);
-          ctx.strokeStyle='rgba(80,110,160,0.45)'; ctx.lineWidth=0.5;
+          ctx.fillStyle='rgba(20,35,70,0.8)'; ctx.fillRect(_barX,_pbarY,_barW,_barH);
+          ctx.fillStyle='rgba(255,200,60,0.80)'; ctx.fillRect(_barX,_pbarY,_barW*_frac,_barH);
+          ctx.strokeStyle='rgba(120,90,20,0.4)'; ctx.lineWidth=0.5;
           ctx.strokeRect(_barX,_pbarY,_barW,_barH);
         } else {
           const _pbarY=itemY+62;
@@ -11503,7 +11646,7 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
       ctx.globalAlpha=isBuilt?0.9:0.35;
       ctx.fillStyle=_isBakery?'rgba(70,55,30,0.78)':'rgba(70,40,30,0.78)';
       ctx.beginPath(); ctx.arc(_mvx,_mvy,_mvr,0,Math.PI*2); ctx.fill();
-      drawFoundryBuilding(_mvx,_mvy,_mvr,Math.PI*0.75,20,(_bjData.progress||0)>0);
+      drawFoundryBuilding(_mvx,_mvy,_mvr,Math.PI*0.75,20,(_bjData.progress||0)>0,_isBakery?'bakery':'juicery');
       ctx.restore();
       if(isBuilt){
         const _barX=upX+12, _barW=upW-28, _barH=6;
@@ -11523,13 +11666,14 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
           const _frac=1-_prog/FOUNDRY_PROD_TIME;
           const _pbarY=itemY+50;
           ctx.font='bold 7px Orbitron,sans-serif'; ctx.textAlign='left';
-          ctx.fillStyle='rgba(232,200,136,0.88)'; ctx.fillText(_bjVerb,_barX,_pbarY-1);
+          // Yellow production-progress palette (see _bfBar above).
+          ctx.fillStyle='rgba(255,200,60,0.85)'; ctx.fillText(_bjVerb,_barX,_pbarY-1);
           const _lw3=ctx.measureText(_bjVerb).width+4;
-          ctx.font='7px "Exo 2",sans-serif'; ctx.fillStyle='rgba(255,225,160,0.78)';
+          ctx.font='7px "Exo 2",sans-serif'; ctx.fillStyle='rgba(255,230,140,0.75)';
           ctx.fillText(Math.round(_frac*100)+'%',_barX+_lw3,_pbarY-1);
-          ctx.fillStyle='rgba(35,25,15,0.85)'; ctx.fillRect(_barX,_pbarY,_barW,_barH);
-          ctx.fillStyle='rgba(232,200,136,0.85)'; ctx.fillRect(_barX,_pbarY,_barW*_frac,_barH);
-          ctx.strokeStyle='rgba(150,110,40,0.45)'; ctx.lineWidth=0.5;
+          ctx.fillStyle='rgba(20,35,70,0.8)'; ctx.fillRect(_barX,_pbarY,_barW,_barH);
+          ctx.fillStyle='rgba(255,200,60,0.80)'; ctx.fillRect(_barX,_pbarY,_barW*_frac,_barH);
+          ctx.strokeStyle='rgba(120,90,20,0.4)'; ctx.lineWidth=0.5;
           ctx.strokeRect(_barX,_pbarY,_barW,_barH);
         } else {
           const _pbarY=itemY+62;
@@ -11870,12 +12014,12 @@ function drawPlanetDetailPopup(){
     if(p.hasGold&&p.goldRevealed) _drawGoldPatch(pcx,pcy,pr,p.goldPatch);
     if(p.hasDiamond&&p.diamondRevealed) _drawDiamondPatch(pcx,pcy,pr,p.diamondPatch);
     if(p.hasStation) drawPlanetStation(pcx,pcy,pr,p.stationAngle||0,pr,p.isAlienRelic,p.hasLargeStation||false);
-    if((p.upgrades||[]).includes('iron_foundry')) drawFoundryBuilding(pcx,pcy,pr,p.foundryAngle||Math.PI*0.75,pr,(p.upgradeData?.iron_foundry?.progress||0)>0);
-    if((p.upgrades||[]).includes('blast_furnace')) drawFoundryBuilding(pcx,pcy,pr,p.blastFurnaceAngle||Math.PI*1.4,pr,(p.upgradeData?.blast_furnace?.progress||0)>0);
-    if((p.upgrades||[]).includes('glassworks')) drawFoundryBuilding(pcx,pcy,pr,p.glassworksAngle||Math.PI*1.6,pr,(p.upgradeData?.glassworks?.progress||0)>0);
-    if((p.upgrades||[]).includes('factory')) drawFoundryBuilding(pcx,pcy,pr,p.factoryAngle||Math.PI*0.55,pr,(p.upgradeData?.factory?.progress||0)>0);
-    if((p.upgrades||[]).includes('bakery')) drawFoundryBuilding(pcx,pcy,pr,p.bakeryAngle||Math.PI*0.95,pr,(p.upgradeData?.bakery?.progress||0)>0);
-    if((p.upgrades||[]).includes('juicery')) drawFoundryBuilding(pcx,pcy,pr,p.juiceryAngle||Math.PI*0.95,pr,(p.upgradeData?.juicery?.progress||0)>0);
+    if((p.upgrades||[]).includes('iron_foundry')) drawFoundryBuilding(pcx,pcy,pr,p.foundryAngle||Math.PI*0.75,pr,(p.upgradeData?.iron_foundry?.progress||0)>0,'iron_foundry');
+    if((p.upgrades||[]).includes('blast_furnace')) drawFoundryBuilding(pcx,pcy,pr,p.blastFurnaceAngle||Math.PI*1.4,pr,(p.upgradeData?.blast_furnace?.progress||0)>0,'blast_furnace');
+    if((p.upgrades||[]).includes('glassworks')) drawFoundryBuilding(pcx,pcy,pr,p.glassworksAngle||Math.PI*1.6,pr,(p.upgradeData?.glassworks?.progress||0)>0,'glassworks');
+    if((p.upgrades||[]).includes('factory')) drawFoundryBuilding(pcx,pcy,pr,p.factoryAngle||Math.PI*0.55,pr,(p.upgradeData?.factory?.progress||0)>0,'factory');
+    if((p.upgrades||[]).includes('bakery')) drawFoundryBuilding(pcx,pcy,pr,p.bakeryAngle||Math.PI*0.95,pr,(p.upgradeData?.bakery?.progress||0)>0,'bakery');
+    if((p.upgrades||[]).includes('juicery')) drawFoundryBuilding(pcx,pcy,pr,p.juiceryAngle||Math.PI*0.95,pr,(p.upgradeData?.juicery?.progress||0)>0,'juicery');
     {const _hasGr=(p.upgrades||[]).includes('granary'),_hasFm=(p.upgrades||[]).includes('farm'),_hasOr=(p.upgrades||[]).includes('orchard');
     const _ba=p.agriStructAngle||Math.PI*0.95;
     const _structs=[_hasGr&&'granary',_hasFm&&'farm',_hasOr&&'orchard'].filter(Boolean);
@@ -13421,12 +13565,12 @@ function drawGalaxy(ts,dt){
     if(p.clouds&&sr>4) drawPlanetClouds(sx,sy,sr,p);
     if(p.hasStation) drawPlanetStation(sx,sy,sr,p.stationAngle||0,SIZE_R['M']*cam.scale,p.isAlienRelic,p.hasLargeStation||false,p.hasLargeStation?ORBIT_TIERS[p.size]['MED']*cam.scale:null);
     if(p.aiHasStation){ctx.save();ctx.filter='sepia(1) hue-rotate(-10deg) saturate(2.5) brightness(1.1)';drawPlanetStation(sx,sy,sr,(p.aiStationAngle!==undefined?p.aiStationAngle:Math.PI*0.65),SIZE_R['M']*cam.scale,false,false,null);ctx.filter='none';ctx.restore();}
-    if((p.upgrades||[]).includes('iron_foundry')&&sr>2) drawFoundryBuilding(sx,sy,sr,p.foundryAngle||Math.PI*0.75,SIZE_R['M']*cam.scale,(p.upgradeData?.iron_foundry?.progress||0)>0);
-    if((p.upgrades||[]).includes('blast_furnace')&&sr>2) drawFoundryBuilding(sx,sy,sr,p.blastFurnaceAngle||Math.PI*1.4,SIZE_R['M']*cam.scale,(p.upgradeData?.blast_furnace?.progress||0)>0);
-    if((p.upgrades||[]).includes('glassworks')&&sr>2) drawFoundryBuilding(sx,sy,sr,p.glassworksAngle||Math.PI*1.6,SIZE_R['M']*cam.scale,(p.upgradeData?.glassworks?.progress||0)>0);
-    if((p.upgrades||[]).includes('factory')&&sr>2) drawFoundryBuilding(sx,sy,sr,p.factoryAngle||Math.PI*0.55,SIZE_R['M']*cam.scale,(p.upgradeData?.factory?.progress||0)>0);
-    if((p.upgrades||[]).includes('bakery')&&sr>2) drawFoundryBuilding(sx,sy,sr,p.bakeryAngle||Math.PI*0.95,SIZE_R['M']*cam.scale,(p.upgradeData?.bakery?.progress||0)>0);
-    if((p.upgrades||[]).includes('juicery')&&sr>2) drawFoundryBuilding(sx,sy,sr,p.juiceryAngle||Math.PI*0.95,SIZE_R['M']*cam.scale,(p.upgradeData?.juicery?.progress||0)>0);
+    if((p.upgrades||[]).includes('iron_foundry')&&sr>2) drawFoundryBuilding(sx,sy,sr,p.foundryAngle||Math.PI*0.75,SIZE_R['M']*cam.scale,(p.upgradeData?.iron_foundry?.progress||0)>0,'iron_foundry');
+    if((p.upgrades||[]).includes('blast_furnace')&&sr>2) drawFoundryBuilding(sx,sy,sr,p.blastFurnaceAngle||Math.PI*1.4,SIZE_R['M']*cam.scale,(p.upgradeData?.blast_furnace?.progress||0)>0,'blast_furnace');
+    if((p.upgrades||[]).includes('glassworks')&&sr>2) drawFoundryBuilding(sx,sy,sr,p.glassworksAngle||Math.PI*1.6,SIZE_R['M']*cam.scale,(p.upgradeData?.glassworks?.progress||0)>0,'glassworks');
+    if((p.upgrades||[]).includes('factory')&&sr>2) drawFoundryBuilding(sx,sy,sr,p.factoryAngle||Math.PI*0.55,SIZE_R['M']*cam.scale,(p.upgradeData?.factory?.progress||0)>0,'factory');
+    if((p.upgrades||[]).includes('bakery')&&sr>2) drawFoundryBuilding(sx,sy,sr,p.bakeryAngle||Math.PI*0.95,SIZE_R['M']*cam.scale,(p.upgradeData?.bakery?.progress||0)>0,'bakery');
+    if((p.upgrades||[]).includes('juicery')&&sr>2) drawFoundryBuilding(sx,sy,sr,p.juiceryAngle||Math.PI*0.95,SIZE_R['M']*cam.scale,(p.upgradeData?.juicery?.progress||0)>0,'juicery');
     if(sr>2){const _hasGr2=(p.upgrades||[]).includes('granary'),_hasFm2=(p.upgrades||[]).includes('farm'),_hasOr2=(p.upgrades||[]).includes('orchard');
     const _ba2=p.agriStructAngle||Math.PI*0.95; let _ssz2=SIZE_R['M']*cam.scale;
     // XS/S planets: cap building scale so doubled-orchard structures don't overflow the planet
@@ -15714,11 +15858,14 @@ canvas.addEventListener('mouseup',e=>{
                 if(_txt.includes('{TARGET}')&&popupState.targetPlanetId!=null){const _tp3=_gp(popupState.targetPlanetId);if(_tp3)_txt=_txt.replace('{TARGET}',_tp3.name);}
                 return {id:o.id,text:_txt,done:false};
               }),
-              details:def.details,reward:def.reward||null,timeLimit:def.timeLimit||null,
+              details:(()=>{let _d=def.details||'';
+                if(_d.includes('{SOURCE}')&&popupState.sourcePlanetId!=null){const _sp5=_gp(popupState.sourcePlanetId);if(_sp5)_d=_d.replace(/\{SOURCE\}/g,_sp5.name);}
+                if(_d.includes('{TARGET}')&&popupState.targetPlanetId!=null){const _tp5=_gp(popupState.targetPlanetId);if(_tp5)_d=_d.replace(/\{TARGET\}/g,_tp5.name);}
+                return _d;})(),reward:def.reward||null,timeLimit:def.timeLimit||null,
               deadline:def.timeLimit?stardate+def.timeLimit:null,
               status:'active',acceptedSd:stardate,completedSd:null,
               // find_molten_ore / build_foundry: empty snapshot so any previously visited matching planet immediately satisfies the visit objective
-              visitedSnapshot:(def.id==='find_molten_ore'||def.id==='build_foundry')?new Set():new Set(visitedPlanetIds),ironUnlockedSnapshot:_ironCarUnlocked,
+              visitedSnapshot:(def.id==='find_molten_ore'||def.id==='build_foundry'||def.id==='stellar_cartography')?new Set():new Set(visitedPlanetIds),ironUnlockedSnapshot:_ironCarUnlocked,
               sourcePlanetId:popupState.sourcePlanetId??null,
               targetPlanetId:popupState.targetPlanetId??null,
               hazmatIncineratedSnapshot:_totalHazmatIncinerated});
@@ -16844,6 +16991,7 @@ function _buildSaveObject(){
     _gameStartSd, _ironCarUnlocked, _steelCarUnlocked, _glassCarUnlocked, _machineryCarUnlocked, _hazmatCarUnlocked, _royalCarUnlocked, _flowersCarUnlocked, _medicalCarUnlocked,
     _grainCarUnlocked, _livestockCarUnlocked, _fruitCarUnlocked,
     _classJEngineUnlocked, _classREngineUnlocked, _N700EngineUnlocked,
+    _steelProdLog,
     _sensorUpgradeActive, _stationCostDiscount, _sandstormCheckSd, _bhResearchCheckSd,
     _totalPassengersDelivered, _totalHazmatIncinerated,
     trainyard, financeLedger:_trimmedFinance, _ledgerSummary:_builtLedgerSummary, purchaseLedger, corpValueHistory, _corp, _ceoHireCandidates,
@@ -16882,6 +17030,11 @@ function _restoreFromSave(save){
   const planets=sg.planets.map(p=>{
     const ptype=PTYPES.find(t=>t.id===p.type.id)||PTYPES[0];
     const rp={...p, type:ptype};
+    // Re-attach biome-specific procedural fields that are stripped from saves:
+    //   resort/agri/oil → _b (landmasses/swatches); storm → _b (lightning bolts);
+    //   any biome → _mtn (mountain ridges).
+    // Without this, resort planets render as featureless ocean (no continents).
+    _attachBiome(rp);
     rp.clouds=generatePlanetClouds(rp);
     // Derived rate/health tables — recompute from scratch.
     rp.supplyRate=computeSupplyRate(rp);
@@ -16937,6 +17090,8 @@ function _restoreFromSave(save){
   _ironCarUnlocked=!!save._ironCarUnlocked; _steelCarUnlocked=!!save._steelCarUnlocked; _glassCarUnlocked=!!save._glassCarUnlocked; _machineryCarUnlocked=!!save._machineryCarUnlocked; _hazmatCarUnlocked=!!save._hazmatCarUnlocked; _royalCarUnlocked=!!save._royalCarUnlocked; _flowersCarUnlocked=!!save._flowersCarUnlocked; _medicalCarUnlocked=!!save._medicalCarUnlocked;
   _grainCarUnlocked=!!save._grainCarUnlocked; _livestockCarUnlocked=!!save._livestockCarUnlocked; _fruitCarUnlocked=!!save._fruitCarUnlocked;
   _classJEngineUnlocked=!!save._classJEngineUnlocked; _classREngineUnlocked=!!save._classREngineUnlocked; _N700EngineUnlocked=!!save._N700EngineUnlocked;
+  _steelProdLog=Array.isArray(save._steelProdLog)?save._steelProdLog:[];
+  _steelMissionTimerMs=0; // re-armed by updateMissions() if the design_better_train intro hasn't fired yet
   _sensorUpgradeActive=!!save._sensorUpgradeActive; _stationCostDiscount=save._stationCostDiscount||0;
   _galaxyCensusTimerMs=0; // timer resets on load; updateMissions() will re-arm if needed
   _hasZoomed=true; // loaded games have played before — suppress the zoom callout hint
@@ -17058,7 +17213,14 @@ function _restoreFromSave(save){
 // still portable between browsers/devices.
 const LS_INDEX_KEY='spacetrain.index';
 const LS_SLOT_PREFIX='spacetrain.save.';
+// Legacy single-slot id (pre per-corp autosave split). Still recognized for
+// backward compat so old autosaves remain loadable until the user deletes them.
 const LS_AUTOSAVE_ID='autosave';
+// New per-corp autosave id form: 'autosave_<safe_corp_name>'. Each corp gets
+// its own slot, so a new game can't clobber the previous corp's autosave.
+const LS_AUTOSAVE_PREFIX='autosave_';
+function _lsAutosaveId(){ return LS_AUTOSAVE_PREFIX+_lsSafeCorp(); }
+function _isAutosaveId(id){ return id===LS_AUTOSAVE_ID || (typeof id==='string' && id.indexOf(LS_AUTOSAVE_PREFIX)===0); }
 function _lsAvailable(){
   try{ const k='__st_test'; localStorage.setItem(k,'1'); localStorage.removeItem(k); return true; }
   catch(e){ return false; }
@@ -17150,7 +17312,11 @@ function _autosaveToLocalStorage(){
   if(!galaxy) return;
   if(!_lsAvailable()){ saveGame(true); return; } // fallback to download
   const saveObj=_buildSaveObject(); if(!saveObj) return;
-  const res=_lsWriteSlot(LS_AUTOSAVE_ID,saveObj,'Autosave');
+  // Per-corp slot id, so a fresh game with a new corp name doesn't overwrite
+  // the previous corp's autosave. Each corp has its own autosave slot.
+  const _slotId=_lsAutosaveId();
+  const _label='Autosave: '+(corpName||'Save');
+  const res=_lsWriteSlot(_slotId,saveObj,_label);
   if(!res.ok&&res.err==='quota'){
     _chatMsg('AUTOSAVE FAILED — STORAGE FULL','rgba(255,100,100,1)');
   }
@@ -17283,7 +17449,7 @@ function startGame(){
   clampCamera();
   sel={type:'car',data:{trainIdx:0,carIdx:0,car:trains[0].cars[0]}}; routeStops=[]; tracking=true; trackingOffset={x:0,y:0}; assignPending=false; routeHerePending=false; _chatLog=[]; _chatLogHover=false; _chatLogHoverA=0; _chatLogLastDrawMs=0;
   _chatMsg(corpName+' founded.','rgba(255,230,120,1)',8000);
-  activePopup=null; popupState={}; gameSpeedIdx=0; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _produceIronTimerMs=0; _galaxyCensusTimerMs=0; _hasZoomed=false;
+  activePopup=null; popupState={}; gameSpeedIdx=0; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _produceIronTimerMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _hasZoomed=false;
   _newspaper=null; _newspaperLastSd=829; _newspaperPrevSpeed=0; _newspaperNextHover=false; _newspaperNextBounds=null; _newspaperPrevHover=false; _newspaperPrevBounds=null; _newspaperArchive=[]; _newspaperViewIdx=null; _paperMajorUsed=[]; _paperMinorUsed=[]; _paperLayout=0; _paperIssueNum=0; _paperIdx=randInt(0,_PAPER_NAMES.length-1); _newsEventLog=[]; _newsSnapshot=null;
   _speedLeftHover=false; _speedRightHover=false; _panelTabHover=null; _routeHereBtnHover=false; _assignBtnHover=false; _cancelRouteBtnHover=false; _planetStarNameHover=false; _starPanelPlanetHover=-1; _trainAddHover=false; _trainRowHover=-1; _pokedexSortHover=false; _pokedexRowHover=-1; _starRegistrySortHover=false; _starRegistryRowHover=-1; _goldOkHover=false; _diamondOkHover=false; _carUnlockOkHover=false; _quitYesHover=false; _quitNoHover=false; _saveGameBtnHover=false; _startBtnHover=false; _loadBtnHover=false; _htpBtnHover=false; _htpDotHover=-1; _htpSkipHover=false; pokedexRowBounds=[]; starRegistryRowBounds=[]; loadBtnBounds=null; saveGameBtnBounds=null;
   fogPoints=[]; fogGridSet=new Set(); fogCanvas=null;
@@ -17301,10 +17467,11 @@ function startGame(){
   pendingMissionIntros=[];
   _ironCarUnlocked=false; _steelCarUnlocked=false; _glassCarUnlocked=false; _machineryCarUnlocked=false; _hazmatCarUnlocked=false; _royalCarUnlocked=false; _flowersCarUnlocked=false; _medicalCarUnlocked=false; _grainCarUnlocked=false; _livestockCarUnlocked=false; _fruitCarUnlocked=false; _totalPassengersDelivered=0; _totalHazmatIncinerated=0;
   _classJEngineUnlocked=false; _classREngineUnlocked=false; _N700EngineUnlocked=false;
+  _steelProdLog=[]; _steelMissionTimerMs=0;
   _sensorUpgradeActive=false; _stationCostDiscount=0; _galaxyCensusTimerMs=0; _sandstormCheckSd=0; _bhResearchCheckSd=0;
   missions=[];
   _gameStartSd=stardate;
-  pendingMissionIntros=MISSION_DEFS.filter(def=>!def.prerequisite&&def.id!=='build_foundry'&&def.id!=='dispose_hazmat'&&def.id!=='lost_colony'&&def.id!=='seeking_home'&&def.id!=='create_route'&&def.id!=='find_molten_ore'&&def.id!=='research_royal_car'&&def.id!=='colony_train'&&def.id!=='spread_the_seed'&&def.id!=='famine'&&def.id!=='outbreak'&&def.id!=='stellar_cartography'&&def.id!=='galaxy_census'&&def.id!=='sandstorm_relief'&&def.id!=='bh_research').map(def=>({defId:def.id,readySd:_gameStartSd+(def.startsAfter||0)}));
+  pendingMissionIntros=MISSION_DEFS.filter(def=>!def.prerequisite&&def.id!=='build_foundry'&&def.id!=='dispose_hazmat'&&def.id!=='lost_colony'&&def.id!=='seeking_home'&&def.id!=='create_route'&&def.id!=='find_molten_ore'&&def.id!=='research_royal_car'&&def.id!=='colony_train'&&def.id!=='spread_the_seed'&&def.id!=='famine'&&def.id!=='outbreak'&&def.id!=='stellar_cartography'&&def.id!=='galaxy_census'&&def.id!=='sandstorm_relief'&&def.id!=='bh_research'&&def.id!=='design_better_train').map(def=>({defId:def.id,readySd:_gameStartSd+(def.startsAfter||0)}));
   financeLedger=[]; _ledgerSummary={totalRevenue:0,totalCost:0,totalInterest:0}; purchaseLedger=[]; corpValueHistory={}; _financeScrollY=0; _financeBreakdown='stardate'; _financeDropdownOpen=false;
   loans=[]; _loanCounter=0; _financeTab='financials'; _financeLoanSelected='small'; _financeLoanHover=null; _financeTakeLoanHover=false;
   // Fresh pool of issuer names per game; assign one to each loan tier
@@ -17799,7 +17966,7 @@ function loop(ts){
     }
     updateCargoSupplyDemand(_dtSd);
     updateFoundries(dtG);
-    updateMissions();
+    updateMissions(_dtSd);
     updatePlanetDevLevels(_dtSd);
     // Loan interest + amortization tick. Each loan charges, on every anniversary of takenSd:
     //   • interest  = remainingPrincipal × interestRate  → logged as INTEREST expense
@@ -17921,12 +18088,13 @@ function loop(ts){
           // Build a temporary mission object mirroring what accept() would create, so we can
           // check which objectives are already satisfied before deciding whether to show the popup.
           const _tmpM={
-            visitedSnapshot:(_nmDef.id==='find_molten_ore'||_nmDef.id==='build_foundry')?new Set():new Set(visitedPlanetIds),
+            visitedSnapshot:(_nmDef.id==='find_molten_ore'||_nmDef.id==='build_foundry'||_nmDef.id==='stellar_cartography')?new Set():new Set(visitedPlanetIds),
             ironUnlockedSnapshot:_ironCarUnlocked,
             hazmatIncineratedSnapshot:_totalHazmatIncinerated,
             sourcePlanetId:_nmiE.sourcePlanetId??null,
             targetPlanetId:_nmiE.targetPlanetId??null,
             _famineDeliveries:0,_medicalDeliveries:0,_sandDeliveries:0,_longHaulDone:false,_chemicalDeliveries:0,
+            _homeSteelDelivered:0,_homeBatteryDelivered:0,_homeOilDelivered:0,
             _rockyDelivered:false,_colonistsLoaded:false,
             _colonistsDelivered:false,_routeAssigned:false,_trainRouted:false,
             _origenPassengersCount:_totalPassengersDelivered
@@ -17945,10 +18113,13 @@ function loop(ts){
             if(!missions.some(mx=>mx.id===_nmDef.id)){
               missions.push({id:_nmDef.id,name:_nmDef.name,imageType:_nmDef.imageType,imageKey:_nmDef.imageKey||null,
                 objectives:_nmDef.objectives.map(o=>({id:o.id,text:_resolveObjTxt(o),done:true})),
-                details:_nmDef.details,reward:_nmDef.reward||null,timeLimit:_nmDef.timeLimit||null,
+                details:(()=>{let _d=_nmDef.details||'';
+                  if(_d.includes('{SOURCE}')&&_nmiE.sourcePlanetId!=null){const _sp6=_gp(_nmiE.sourcePlanetId);if(_sp6)_d=_d.replace(/\{SOURCE\}/g,_sp6.name);}
+                  if(_d.includes('{TARGET}')&&_nmiE.targetPlanetId!=null){const _tp6=_gp(_nmiE.targetPlanetId);if(_tp6)_d=_d.replace(/\{TARGET\}/g,_tp6.name);}
+                  return _d;})(),reward:_nmDef.reward||null,timeLimit:_nmDef.timeLimit||null,
                 deadline:_nmDef.timeLimit?stardate+_nmDef.timeLimit:null,
                 status:'active',acceptedSd:stardate,completedSd:null,
-                visitedSnapshot:(_nmDef.id==='find_molten_ore'||_nmDef.id==='build_foundry')?new Set():new Set(visitedPlanetIds),
+                visitedSnapshot:(_nmDef.id==='find_molten_ore'||_nmDef.id==='build_foundry'||_nmDef.id==='stellar_cartography')?new Set():new Set(visitedPlanetIds),
                 ironUnlockedSnapshot:_ironCarUnlocked,
                 sourcePlanetId:_nmiE.sourcePlanetId??null,targetPlanetId:_nmiE.targetPlanetId??null,
                 hazmatIncineratedSnapshot:_totalHazmatIncinerated});
