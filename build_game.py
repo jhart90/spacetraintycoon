@@ -253,6 +253,10 @@ function _ga(name, params){
   try {
     const _p=params?Object.assign({},params):{};
     _p.session_seconds=Math.floor((Date.now()-_gaSessionStartMs)/1000);
+    // Auto-inject corp name on every event so all GA reports can be sliced
+    // by corporation. If a caller already passed `corp` explicitly, keep
+    // theirs (they may have a reason to override, e.g. logging a rival).
+    if(_p.corp===undefined) _p.corp=(typeof corpName!=='undefined'&&corpName)?corpName:'(unnamed)';
     // Build the Measurement Protocol v2 POST body. String params get the
     // `ep.` prefix; numeric params get `epn.` for proper typing in GA's
     // ingestion pipeline.
@@ -19750,7 +19754,7 @@ function loop(ts){
       gs='galaxy';
       // game_start fires now — galaxy view first appears, and corpName +
       // _aiDifficulty are both finalized (corpsetup + aiselect already done).
-      _ga('game_start',{corp:corpName||'(unnamed)', ai_difficulty:_aiDifficulty||'none', sd:Math.floor(stardate)});
+      _ga('game_start',{ai_difficulty:_aiDifficulty||'none', sd:Math.floor(stardate)});
     }
   } else if(gs==='galaxy'){
     _invalidateOccOrbit(); for(const t of trains) updateTrain(t,dtG);
