@@ -1600,6 +1600,14 @@ let pendingGoldDiscoveries=[]; // planetIds queued to show gold discovery popup
 let pendingDiamondDiscoveries=[]; // planetIds queued to show diamond discovery popup
 let pendingCarUnlocks=[]; // {sprite,displayName} queued to show car-unlock popup
 let pendingEngineUnlocks=[]; // {sprite,displayName} queued to show engine-unlock popup
+// Ancient-world broadcast popup. Triggered on first visit to each ANCIENT
+// biome planet. Each visit also "translates" 3 more random untranslated
+// words from the mystery sentence (gibberish placeholder is permanently
+// untranslated). Save/load persists _ancientTranslatedWords.
+const _ANCIENT_MSG_WORDS=['DO','NOT','VISIT','OUR','SACRED','WORLDS.','EACH','WORLD','YOU','VISIT','ALERTS','THE','!^#<$(%','TO','YOUR','GROWING','PRESENCE.','BEWARE','OR','YOU','WILL','SUFFER','THE','SAME','FATE','AS','OUR','CIVILIZATION'];
+const _ANCIENT_GIBBERISH_IDX=12; // '!^#<$(%' — never translates
+let _ancientTranslatedWords=new Set(); // integer word indices already translated
+let pendingAncientPopups=[]; // queue of {planetId, planetName} for first ANCIENT-visit popups
 // Engine unlocks gate the Class J / Class R / N700 purchases behind cumulative
 // revenue thresholds. Constellation + Galaxy are always available from game
 // start. Flags persist via the rule of three (save / load / new-game reset).
@@ -2599,6 +2607,8 @@ function _doStartGame(){
   _corp.ceoSalary=_cho.ceoSalary; _corp.lastHireSD=null;
   _ceoHireCandidates=_csCeoOptions.filter((_,i)=>i!==_csSelectedCeo)
     .map(c=>{ const _r=CEO_ROSTER.find(r=>r.name===c.ceoName)||CEO_ROSTER[0]; return _genCeoCandidate(_r); });
+  // First-time entry to aiselect in this new-game flow → preselect Very Easy.
+  if(!_aiSelectSeen){ _aiDifficulty='very_easy'; _aiSelectSeen=true; }
   gs='aiselect';
 }
 function drawCorpSetup(ts){
@@ -8392,6 +8402,25 @@ function trackVisit(pid){
     }
     playSound('discovery');
     _chatMsg(_tp.name+' — VISITED','rgba(80,200,255,1)',5000,true);
+    // ANCIENT-world first-visit broadcast popup. Each visit translates 3 more
+    // random untranslated words from the mystery sentence (the gibberish
+    // placeholder is excluded — it stays untranslated forever). Popup gets
+    // queued; the main-loop consumer (see pendingAncientPopups below) opens
+    // it once no other popup is active.
+    if(_tp.type.id==='ancient'){
+      const _untranslated=[];
+      for(let _wi=0;_wi<_ANCIENT_MSG_WORDS.length;_wi++){
+        if(_wi===_ANCIENT_GIBBERISH_IDX) continue;
+        if(!_ancientTranslatedWords.has(_wi)) _untranslated.push(_wi);
+      }
+      // Fisher–Yates partial shuffle: pick up to 3 random untranslated words
+      for(let _k=0;_k<3&&_untranslated.length>0;_k++){
+        const _swp=Math.floor(Math.random()*_untranslated.length);
+        _ancientTranslatedWords.add(_untranslated[_swp]);
+        _untranslated.splice(_swp,1);
+      }
+      pendingAncientPopups.push({planetId:pid,planetName:_tp.name});
+    }
     // Seeking a Way Home: first visit of any Rocky planet
     if(_tp.type.id==='rocky'&&!missions.some(mx=>mx.id==='seeking_home')&&!pendingMissionIntros.some(pi=>pi.defId==='seeking_home')){
       const _rockyOthers=galaxy.planets.filter(p=>p.type.id==='rocky'&&p.id!==pid);
@@ -9139,6 +9168,119 @@ function drawRivalFoundedPopup(){
   ctx.fillStyle='rgba(255,225,150,0.97)';
   ctx.fillText("IT'S ON!",_bx+_bw/2,_by+18);
   _rivalFoundedOkBounds={x:_bx,y:_by,w:_bw,h:_bh};
+  ctx.restore();
+}
+
+// ── Ancient-world broadcast popup ────────────────────────────
+// Triggered on first visit to each ANCIENT-biome planet. Shows the English
+// intro text, then a wrapped mystery paragraph in Noto Sans Meroitic. Words
+// that have been "translated" (3 per ancient-world visit so far) render in
+// Lato green at the same size — as if the player's computer has slowly
+// chewed through the recording. The gibberish placeholder (!^#<$(%) never
+// translates. State lives in the module-level _ancientTranslatedWords Set.
+let _ancientPopupOkBounds=null;
+// Transliterate ASCII letters into the Phags-pa block (U+A840–U+A859) so that
+// the assigned alien font has glyphs to render — otherwise the canvas would
+// fall back to a regular font and the "untranslated" words would still read
+// as English. Non-letters pass through unchanged so the gibberish placeholder
+// still reads as obvious noise (!^#<$(%).
+function _ancientToGlyphs(s){
+  let out='';
+  for(let _i=0;_i<s.length;_i++){
+    const _c=s.charCodeAt(_i);
+    if(_c>=0x41&&_c<=0x5A) out+=String.fromCharCode(0xA840+(_c-0x41));      // A–Z
+    else if(_c>=0x61&&_c<=0x7A) out+=String.fromCharCode(0xA840+(_c-0x61)); // a–z
+    else out+=s[_i];
+  }
+  return out;
+}
+function drawAncientMessagePopup(){
+  if(activePopup!=='ancient_message') return;
+  const pw=520, ph=320;
+  const [px,py]=drawPopupBase(pw,ph,'rgba(216,184,120,0.72)');
+  ctx.save();
+  // Title
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='rgba(240,220,170,0.85)';
+  ctx.fillText('ANCIENT WORLD — REPEATING BROADCAST',px+pw/2,py+18);
+  // Planet name subtitle
+  ctx.font='bold 13px Orbitron,sans-serif';
+  ctx.fillStyle='#f0d890'; ctx.shadowColor='rgba(160,120,40,0.85)'; ctx.shadowBlur=10;
+  ctx.fillText(popupState.ancientPlanetName||'',px+pw/2,py+38);
+  ctx.shadowBlur=0;
+  // Divider
+  ctx.strokeStyle='rgba(180,140,70,0.40)'; ctx.lineWidth=0.7;
+  ctx.beginPath(); ctx.moveTo(px+20,py+48); ctx.lineTo(px+pw-20,py+48); ctx.stroke();
+  // English intro paragraph (wrapped)
+  const _introText='You find an ancient planet that looks like it was once thriving, but looks like it’s been ripped to shreds. Your computers receive a repeating broadcast, which even your computers cannot fully translate:';
+  ctx.font='12px "Exo 2",sans-serif';
+  ctx.fillStyle='rgba(230,212,175,0.93)';
+  ctx.textAlign='left';
+  const _bodyX=px+24, _bodyR=px+pw-24;
+  const _bodyW=_bodyR-_bodyX;
+  // Word-wrap the intro line by line
+  const _introWords=_introText.split(' ');
+  let _line='', _yCur=py+72;
+  const _lineH=17;
+  for(const _w of _introWords){
+    const _candidate=_line?_line+' '+_w:_w;
+    if(ctx.measureText(_candidate).width<=_bodyW) _line=_candidate;
+    else { ctx.fillText(_line,_bodyX,_yCur); _yCur+=_lineH; _line=_w; }
+  }
+  if(_line) { ctx.fillText(_line,_bodyX,_yCur); _yCur+=_lineH; }
+  // Extra breathing room before the alien paragraph
+  _yCur+=24;
+  // Mystery paragraph: word-by-word render. Translated words show their plain
+  // English in bold Lato green; untranslated words are transliterated into
+  // Phags-pa glyphs and rendered with the Noto Sans Phags Pa font.
+  const _alienFont='17px "Noto Sans Phags Pa","Noto Sans","Segoe UI Historic",serif';
+  const _latoFont='bold 16px "Lato",sans-serif';
+  const _alienColor='rgba(95,65,30,0.95)';
+  const _latoColor='rgba(95,220,120,0.97)';
+  const _myLineH=24;
+  // Pre-measure each word with its target font, build (text, font, color, w) records
+  const _items=_ANCIENT_MSG_WORDS.map((w,i)=>{
+    const _isTrans=_ancientTranslatedWords.has(i)&&i!==_ANCIENT_GIBBERISH_IDX;
+    const _font=_isTrans?_latoFont:_alienFont;
+    const _disp=_isTrans?w:_ancientToGlyphs(w);
+    ctx.font=_font;
+    return {text:_disp, font:_font, color:_isTrans?_latoColor:_alienColor, w:ctx.measureText(_disp).width};
+  });
+  // Lay them out
+  const _spaceW=7;
+  let _lineItems=[], _lineW=0;
+  const _drawLine=(items,y)=>{
+    // Center each line horizontally for a more poster-like feel
+    const _totW=items.reduce((s,it,i)=>s+it.w+(i>0?_spaceW:0),0);
+    let _x=_bodyX+Math.max(0,(_bodyW-_totW)/2);
+    for(let _i=0;_i<items.length;_i++){
+      const _it=items[_i];
+      ctx.font=_it.font;
+      ctx.fillStyle=_it.color;
+      ctx.fillText(_it.text,_x,y);
+      _x+=_it.w+_spaceW;
+    }
+  };
+  for(const _it of _items){
+    const _added=_lineW+(_lineItems.length>0?_spaceW:0)+_it.w;
+    if(_added>_bodyW&&_lineItems.length>0){
+      _drawLine(_lineItems,_yCur); _yCur+=_myLineH;
+      _lineItems=[_it]; _lineW=_it.w;
+    } else {
+      _lineItems.push(_it); _lineW=_added;
+    }
+  }
+  if(_lineItems.length) { _drawLine(_lineItems,_yCur); _yCur+=_myLineH; }
+  // OK button
+  const _bw=120,_bh=28,_bx=px+(pw-_bw)/2,_by=py+ph-42;
+  const _okHov=!!popupState.ancientOkHover;
+  ctx.fillStyle=_okHov?'rgba(180,140,70,0.97)':'rgba(115,85,40,0.92)';
+  ctx.fillRect(_bx,_by,_bw,_bh);
+  ctx.strokeStyle=_okHov?'rgba(255,220,150,0.95)':'rgba(210,170,90,0.80)'; ctx.lineWidth=1.5; ctx.strokeRect(_bx,_by,_bw,_bh);
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='rgba(255,230,180,0.97)';
+  ctx.fillText('ACKNOWLEDGED',_bx+_bw/2,_by+18);
+  _ancientPopupOkBounds={x:_bx,y:_by,w:_bw,h:_bh};
   ctx.restore();
 }
 
@@ -15873,6 +16015,7 @@ function drawGalaxy(ts,dt){
   drawCarUnlockPopup();
   drawEngineUnlockPopup();
   drawRivalFoundedPopup();
+  drawAncientMessagePopup();
   drawMissionsPopup();
   drawCorpPopup();
   drawCeoHirePopup();
@@ -16433,7 +16576,9 @@ canvas.addEventListener('wheel',e=>{
       stationPanelScroll=Math.max(0,Math.min(maxStScroll,stationPanelScroll+e.deltaY*0.6));
     } else {
       const playerCount2=trains.filter(t=>t.isPlayer).length;
-      const maxScroll2=Math.max(0,playerCount2*82-(GH-TOP_H));
+      // +1 row for the "Add new train" pseudo-slot drawn after the last train,
+      // so wheel-scrolling reaches the bottom of that slot.
+      const maxScroll2=Math.max(0,(playerCount2+1)*82-(GH-TOP_H));
       panelScroll=Math.max(0,Math.min(maxScroll2,panelScroll+e.deltaY*0.6));
     }
     return;
@@ -16730,6 +16875,7 @@ canvas.addEventListener('mousemove',e=>{
   _carUnlockOkHover=!!(activePopup==='car_unlock'&&_carUnlockOkBounds&&cp.x>=_carUnlockOkBounds.x&&cp.x<=_carUnlockOkBounds.x+_carUnlockOkBounds.w&&cp.y>=_carUnlockOkBounds.y&&cp.y<=_carUnlockOkBounds.y+_carUnlockOkBounds.h);
   _engineUnlockOkHover=!!(activePopup==='engine_unlock'&&_engineUnlockOkBounds&&cp.x>=_engineUnlockOkBounds.x&&cp.x<=_engineUnlockOkBounds.x+_engineUnlockOkBounds.w&&cp.y>=_engineUnlockOkBounds.y&&cp.y<=_engineUnlockOkBounds.y+_engineUnlockOkBounds.h);
   if(activePopup==='rival_founded'&&_rivalFoundedOkBounds){const b=_rivalFoundedOkBounds; popupState.rivalOkHover=cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h; if(popupState.rivalOkHover) canvas.style.cursor='pointer';}
+  if(activePopup==='ancient_message'&&_ancientPopupOkBounds){const b=_ancientPopupOkBounds; popupState.ancientOkHover=cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h; if(popupState.ancientOkHover) canvas.style.cursor='pointer';}
   _quitYesHover=!!(activePopup==='quitconfirm'&&quitConfirmYesBounds&&cp.x>=quitConfirmYesBounds.x&&cp.x<=quitConfirmYesBounds.x+quitConfirmYesBounds.w&&cp.y>=quitConfirmYesBounds.y&&cp.y<=quitConfirmYesBounds.y+quitConfirmYesBounds.h);
   _quitNoHover=!!(activePopup==='quitconfirm'&&quitConfirmNoBounds&&cp.x>=quitConfirmNoBounds.x&&cp.x<=quitConfirmNoBounds.x+quitConfirmNoBounds.w&&cp.y>=quitConfirmNoBounds.y&&cp.y<=quitConfirmNoBounds.y+quitConfirmNoBounds.h);
   _saveGameBtnHover=!!(activePopup==='quitconfirm'&&saveGameBtnBounds&&cp.x>=saveGameBtnBounds.x&&cp.x<=saveGameBtnBounds.x+saveGameBtnBounds.w&&cp.y>=saveGameBtnBounds.y&&cp.y<=saveGameBtnBounds.y+saveGameBtnBounds.h);
@@ -16919,7 +17065,7 @@ canvas.addEventListener('mouseup',e=>{
   } else if(gs==='howtoplay'){
     const b=_htpBtnBounds;
     if(b&&cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
-      gs='corpsetup'; corpName=_genRandomCorpName(); _csCeoOptions=_genStartingCeos(); _csSelectedCeo=0; _csAutoEdit=true;
+      gs='corpsetup'; corpName=_genRandomCorpName(); _csCeoOptions=_genStartingCeos(); _csSelectedCeo=0; _csAutoEdit=true; _aiSelectSeen=false;
     }
     const sb=_htpSkipBounds;
     if(sb&&cp.x>=sb.x&&cp.x<=sb.x+sb.w&&cp.y>=sb.y&&cp.y<=sb.y+sb.h){ gs='title'; }
@@ -17315,6 +17461,14 @@ canvas.addEventListener('mouseup',e=>{
           activePopup=null; popupState={}; return;
         }}
         return;
+      }
+      // Ancient-world broadcast popup — ACKNOWLEDGED button dequeues and closes
+      if(activePopup==='ancient_message'){
+        if(_ancientPopupOkBounds){const b=_ancientPopupOkBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+          pendingAncientPopups.shift();
+          activePopup=null; popupState={}; return;
+        }}
+        return; // consume backdrop clicks so the popup doesn't accidentally close
       }
       // Car unlock popup
       if(activePopup==='car_unlock'){
@@ -17923,8 +18077,8 @@ canvas.addEventListener('mouseup',e=>{
         }
       }
       // Click outside popup → close
-      const popupW=activePopup==='pokedex'?460:activePopup==='starregistry'?460:activePopup==='train'?430:activePopup==='planet'?470:activePopup==='star'?520:activePopup==='trains'?580:activePopup==='trainbuilder'?620:activePopup==='quitconfirm'?390:activePopup==='finances'?580:activePopup==='corp'?570:activePopup==='ceohire'?700:activePopup==='car_unlock'?320:activePopup==='car_detail'?460:activePopup==='rival_founded'?460:activePopup==='savemanager'?560:300;
-      const popupH=activePopup==='pokedex'?390:activePopup==='starregistry'?390:activePopup==='train'?430:activePopup==='planet'?416:activePopup==='star'?390:activePopup==='trains'?430:activePopup==='trainbuilder'?390:activePopup==='quitconfirm'?110:activePopup==='options'?160:activePopup==='cheats'?270:activePopup==='finances'?400:activePopup==='corp'?440:activePopup==='ceohire'?370:activePopup==='car_unlock'?230:activePopup==='car_detail'?430:activePopup==='rival_founded'?420:activePopup==='savemanager'?420:130;
+      const popupW=activePopup==='pokedex'?460:activePopup==='starregistry'?460:activePopup==='train'?430:activePopup==='planet'?470:activePopup==='star'?520:activePopup==='trains'?580:activePopup==='trainbuilder'?620:activePopup==='quitconfirm'?390:activePopup==='finances'?580:activePopup==='corp'?570:activePopup==='ceohire'?700:activePopup==='car_unlock'?320:activePopup==='car_detail'?460:activePopup==='rival_founded'?460:activePopup==='ancient_message'?520:activePopup==='savemanager'?560:300;
+      const popupH=activePopup==='pokedex'?390:activePopup==='starregistry'?390:activePopup==='train'?430:activePopup==='planet'?416:activePopup==='star'?390:activePopup==='trains'?430:activePopup==='trainbuilder'?390:activePopup==='quitconfirm'?110:activePopup==='options'?160:activePopup==='cheats'?270:activePopup==='finances'?400:activePopup==='corp'?440:activePopup==='ceohire'?370:activePopup==='car_unlock'?230:activePopup==='car_detail'?430:activePopup==='rival_founded'?420:activePopup==='ancient_message'?320:activePopup==='savemanager'?420:130;
       const ppx=(W-popupW)/2, ppy=(H-popupH)/2;
       let _outsidePopup=cp.x<ppx||cp.x>ppx+popupW||cp.y<ppy||cp.y>ppy+popupH;
       if(_outsidePopup&&activePopup==='planet'&&popupState._upgradePanelBounds){
@@ -18086,6 +18240,7 @@ function _fireEsc(){
   if(activePopup==='new_mission') return; // must use Accept button — cannot ESC out
   if(activePopup==='quitconfirm'){ activePopup=null; popupState={}; return; }
   if(activePopup==='trainbuilder'){ if(trainBuilderState?.editTrainIdx!=null){ activePopup='train'; popupState={trainIdx:trainBuilderState.editTrainIdx}; } else { activePopup='trains'; popupState={scroll:0}; } trainBuilderState=null; return; }
+  if(activePopup==='ancient_message'){ pendingAncientPopups.shift(); activePopup=null; popupState={}; return; }
   if(routeHerePending||assignPending){ routeHerePending=false; assignPending=false; return; }
   if(activePopup){ activePopup=null; popupState={}; colorPickerState=null; return; }
   activePopup='quitconfirm'; popupState={};
@@ -18111,7 +18266,7 @@ document.addEventListener('keydown',e=>{
   if(gs==='howtoplay'){
     if(e.key==='Escape'){ gs='title'; return; }
     if(e.key==='ArrowRight'||e.key===' '){
-      gs='corpsetup'; corpName=_genRandomCorpName(); _csCeoOptions=_genStartingCeos(); _csSelectedCeo=0; _csAutoEdit=true; return;
+      gs='corpsetup'; corpName=_genRandomCorpName(); _csCeoOptions=_genStartingCeos(); _csSelectedCeo=0; _csAutoEdit=true; _aiSelectSeen=false; return;
     }
   }
   if(gs==='corpsetup'){
@@ -18463,6 +18618,7 @@ function _buildSaveObject(){
     pendingMissionIntros,
     pendingGoldDiscoveries,
     pendingDiamondDiscoveries,
+    _ancientTranslatedWords:[..._ancientTranslatedWords],
     routeStops:routeStops.map(p=>({id:p.id,isStarProxy:!!p.isStarProxy})),
     _aiDifficulty,
     _aiCorp:_aiCorp?{..._aiCorp,ownedPlanetIds:[..._aiCorp.ownedPlanetIds],visitedPlanetIds:[..._aiCorp.visitedPlanetIds],discoveredStarIds:[..._aiCorp.discoveredStarIds]}:null,
@@ -18612,6 +18768,8 @@ function _restoreFromSave(save){
   pendingDiamondDiscoveries=save.pendingDiamondDiscoveries||[];
   pendingCarUnlocks=[];
   pendingEngineUnlocks=[];
+  pendingAncientPopups=[]; // queue is transient — never restored from save
+  _ancientTranslatedWords=new Set(Array.isArray(save._ancientTranslatedWords)?save._ancientTranslatedWords:[]);
   // Restore fog
   fogPoints=save.fogPoints||[];
   fogGridSet=new Set(fogPoints.map(p=>{const gx=Math.round(p.wx/FOG_GRID),gy=Math.round(p.wy/FOG_GRID);return gx+'_'+gy;}));
@@ -18988,6 +19146,7 @@ function startGame(){
   pendingCarUnlocks=[];
   pendingEngineUnlocks=[];
   pendingMissionIntros=[];
+  pendingAncientPopups=[]; _ancientTranslatedWords=new Set();
   _ironCarUnlocked=false; _steelCarUnlocked=false; _glassCarUnlocked=false; _machineryCarUnlocked=false; _hazmatCarUnlocked=false; _royalCarUnlocked=false; _flowersCarUnlocked=false; _medicalCarUnlocked=false; _grainCarUnlocked=false; _livestockCarUnlocked=false; _fruitCarUnlocked=false; _totalPassengersDelivered=0; _totalHazmatIncinerated=0;
   _classJEngineUnlocked=false; _classREngineUnlocked=false; _N700EngineUnlocked=false;
   _steelProdLog=[]; _steelMissionTimerMs=0;
@@ -19714,6 +19873,14 @@ function loop(ts){
         tracking=true; trackingOffset={x:cam.x-_gdP.x,y:cam.y-_gdP.y};
       }
     }
+    // Ancient-world broadcast popup — drained one at a time when no other
+    // popup is blocking. Each entry pauses the game speed (matches other
+    // single-event popups like car-unlock / engine-unlock).
+    if(pendingAncientPopups.length>0&&!activePopup){
+      gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='ancient_message';
+      const _ae=pendingAncientPopups[0];
+      popupState={ancientPlanetId:_ae.planetId, ancientPlanetName:_ae.planetName};
+    }
     // Show diamond discovery popup when nothing else is blocking
     if(pendingCarUnlocks.length>0&&!activePopup){
       gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='car_unlock';
@@ -19775,7 +19942,7 @@ html = f"""<!DOCTYPE html>
 <title>Space Train</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Exo+2:wght@300;400;600;700&family=UnifrakturMaguntia&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Exo+2:wght@300;400;600;700&family=UnifrakturMaguntia&family=Noto+Sans+Phags+Pa&family=Lato:wght@400;700&display=swap" rel="stylesheet">
 <!-- (Google Analytics 4 events are sent directly via the in-game `_ga()`
      helper using the Measurement Protocol. No gtag.js snippet needed
      here — gtag's cookie pipeline doesn't work in itch.io's cross-origin
