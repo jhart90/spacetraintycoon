@@ -19174,7 +19174,10 @@ function startGame(){
    // Orijen itself is visited from the start (the player's train is already there)
    visitedPlanetIds.add(galaxy.origenId);
   }
-  _ga('game_start',{corp:corpName||'(unnamed)', ai_difficulty:_aiDifficulty||'none', sd:Math.floor(stardate)});
+  // game_start GA event is intentionally NOT fired here — corpName and
+  // _aiDifficulty haven't been chosen by the player yet at this point in
+  // the flow (title PLAY → startGame() runs BEFORE corpsetup + aiselect).
+  // It fires later at the fadein → galaxy transition, once setup is final.
   gs='fadeout'; fadeA=0;
   document.getElementById('refresh-btn').classList.add('hidden');
 }
@@ -19737,7 +19740,12 @@ function loop(ts){
     drawGalaxy(ts,dt);
     fadeA=Math.max(0,fadeA-dt*.028);
     ctx.fillStyle=`rgba(0,0,0,${fadeA})`; ctx.fillRect(0,0,W,H);
-    if(fadeA<=0) gs='galaxy';
+    if(fadeA<=0){
+      gs='galaxy';
+      // game_start fires now — galaxy view first appears, and corpName +
+      // _aiDifficulty are both finalized (corpsetup + aiselect already done).
+      _ga('game_start',{corp:corpName||'(unnamed)', ai_difficulty:_aiDifficulty||'none', sd:Math.floor(stardate)});
+    }
   } else if(gs==='galaxy'){
     _invalidateOccOrbit(); for(const t of trains) updateTrain(t,dtG);
     updateAICorp(dtG);
