@@ -451,6 +451,24 @@ const MISSION_DEFS=[
      if(oid==='assign_train') return _hasLoopRoute||!!(m._routeAssigned);
      return false;
    }},
+  {id:'buy_second_train',
+   name:'Buy a 2nd train',
+   imageType:'car', imageKey:'engine_galaxy',
+   objectives:[
+     {id:'open_trains',    text:'Press "T" to open the "Trains" window'},
+     {id:'open_builder',   text:'Press the "+" sign to open the Train Builder'},
+     {id:'purchase_train', text:'Purchase a new train'},
+   ],
+   details:"A rail empire can't grow with a single engine! Buy a second train and set up a second route to diversify your revenue.",
+   reward:15000, timeLimit:null,
+   checkObj:(oid,m)=>{
+     const _bought=trains&&trains.filter(t=>t.isPlayer).length>=2;
+     if(_bought) return true;
+     if(oid==='open_trains')    return activePopup==='trains'||activePopup==='trainbuilder';
+     if(oid==='open_builder')   return activePopup==='trainbuilder';
+     if(oid==='purchase_train') return false;
+     return false;
+   }},
   {id:'find_molten_ore',
    name:'Find Molten Ore',
    imageType:'car', imageKey:'car_ore',
@@ -667,7 +685,7 @@ const MISSION_DEFS=[
   {id:'galactic_distance',
    name:'Galactic Distance Record',
    imageType:'car', imageKey:'car_passenger',
-   startsAfter:0.5,
+   startsAfter:1.25,
    objectives:[
      {id:'deliver_15k_au', text:'Deliver any cargo or passengers on a single trip of more than 15,000 AU'},
    ],
@@ -918,11 +936,17 @@ const PTYPES = [
   {id:'agri',   base:'#72ae32', hi:'#a8d450', rim:[135,210,55]},
   {id:'oil',    base:'#060608', hi:'#14101e', rim:[90,20,120]},
   {id:'urban',  base:'#2a3548', hi:'#5a6c84', rim:[180,210,255]},
+  // ANCIENT — broken Greek/Roman ruins suspended in a hazy gold sky; uninhabited,
+  // supplies only sand from the eroded stonework. Warm sandstone palette so the
+  // disc reads as a "weathered classical world" before the ruin silhouettes
+  // even render. 2× rarer than urban → 4× rarer than every other biome.
+  {id:'ancient',base:'#a89060', hi:'#d8b878', rim:[230,200,140]},
 ];
 // Per-biome relative frequency for galaxy generation. Default is 1.0; Urban
-// is 0.5 (= 2× rarer than every other biome). _pickBiomeWeighted() consults
-// this map and falls back to 1.0 for any biome not listed.
-const BIOME_WEIGHTS = {urban:0.5};
+// is 0.5 (= 2× rarer than every other biome). Ancient is 0.25 (= 2× rarer than
+// urban, 4× rarer than baseline). _pickBiomeWeighted() consults this map and
+// falls back to 1.0 for any biome not listed.
+const BIOME_WEIGHTS = {urban:0.5, ancient:0.25};
 function _pickBiomeWeighted(){
   let total=0;
   for(const pt of PTYPES) total+=(BIOME_WEIGHTS[pt.id]??1.0);
@@ -1555,6 +1579,8 @@ let _speedTipStartMs=0;      // real-time ms when the speed-button callout bubbl
 let _speedTipSuppressed=false; // true once the player has clicked the increase-speed arrow at least once
 let _zoomCalloutStartMs=0;   // real-time ms when zoom hint callout was triggered (0=not yet, <0=done/suppressed)
 let _hasZoomed=false;        // true once the player first uses the scroll wheel to zoom
+let _buyTrainTipStartMs=0;   // real-time ms when "Click here to purchase a second train" callout was triggered (0=inactive)
+let _buyTrainTipShown=false; // true once the buy-train callout has been triggered at least once this career
 let _zoomBarCenter={x:0,y:0}; // cached screen centre of the zoom bar (set each frame by drawSpeedIndicator)
 let _createRouteTimerMs=0; // real-time ms when player first visited a non-home-star planet (0=not yet)
 let _findOreTimerMs=0;     // real-time ms when create_route mission completed (0=not yet)
@@ -1791,6 +1817,10 @@ let _routeHereBtnHover=false, _assignBtnHover=false, _cancelRouteBtnHover=false;
 let _planetStarNameHover=false;    // star-name link in planet info bar
 let _starPanelPlanetHover=-1;      // index in starPanelPlanetBounds
 let _trainAddHover=false, _trainRowHover=-1;
+// Right-side Trains panel "Add new train" pseudo-slot: bounds set during draw
+// (cleared if the slot is scrolled out of view), hover flag updated by mousemove.
+let _addTrainPanelBounds=null;
+let _addTrainPanelHover=false;
 let _pokedexSortHover=false, _pokedexRowHover=-1;
 let _starRegistrySortHover=false,  _starRegistryRowHover=-1;
 let _goldOkHover=false, _diamondOkHover=false, _carUnlockOkHover=false;
@@ -2909,6 +2939,7 @@ function generateCatchphrase(p){
     resort:["Every shore is a postcard no one mailed.","The water here is the exact color of wanting to stay.","Built for leisure, maintained by envy.","The sunsets run on schedule."],
     agri:["The fields stretch from the sunrise to the next sunrise.","Someone has been planting here for a very long time.","Fed a hundred worlds. Barely gets a mention.","The soil here remembers every season."],
     oil:["The surface shimmers like a fever dream.","A world drowned in rainbow darkness.","Every ripple catches every color at once.","The whole planet is one vast reservoir."],
+    ancient:["Broken pillars hang in the air, defying gravity itself.","An entire civilisation, suspended mid-collapse.","Whoever lived here left without taking their architecture.","The columns are older than the sun above them.","Time forgot to finish ruining this place.","Every arch frames an empty sky."],
   };
   const pool=(base[id]||["A world of quiet mystery."]).slice();
   // Moon-aware phrases added only when the count matches
@@ -3202,6 +3233,9 @@ function _drawLandBlob(lmCx,lmCy,pts,scale,ox,oy,r){
 }
 
 function generatePopulation(p){
+  // Ancient worlds are always uninhabited — they're shattered ruins
+  // suspended in the sky, not active settlements.
+  if(p.type.id==='ancient') return 0;
   // Biome habitability: ocean/jungle most livable; storm/lava/chemical inhospitable
   const biomeMult={ocean:1.6,jungle:1.5,resort:1.4,agri:1.2,rocky:1.0,desert:0.8,
                    ice:0.7,oil:0.0,storm:0.35,lava:0.25,chemical:0.3,urban:2.0}[p.type.id]||1.0;
@@ -3315,6 +3349,10 @@ function computeSupplyRate(p){
   if(bio==='ice')    r.ice=4.0*_szSc;
   if(bio==='desert') r.sand=5.0*_szSc;
   if(bio==='rocky')  r.sand=1.0*_szSc;
+  // Ancient: weathered ruins that erode into sand. Same magnitude as a
+  // desert planet, with no other supply outputs (pop=0 zeroes passengers /
+  // mail upstream).
+  if(bio==='ancient') r.sand=5.0*_szSc;
   if(bio==='lava')   r.molten_ore=5.0*_szSc;
   if(bio==='oil')      r.oil=4.0*_szSc;
   if(bio==='storm')    r.battery=3.0*_szSc;
@@ -3353,6 +3391,10 @@ function computeSupplyRate(p){
 // Cargo demand rates (units per stardate)
 function computeDemandRate(p){
   const r={}, bio=p.type.id, pop=p.population||0;
+  // Ancient ruin-worlds are uninhabited and demand nothing — no consumers,
+  // no industry. Short-circuit so even station-built floor logic below
+  // doesn't synthesise demand entries.
+  if(bio==='ancient') return r;
   const unh=['storm','lava','chemical','oil'].includes(bio);
   // Passengers: demand mirrors supply; resort demands 2× its supply, urban 1.8×
   // (massive city-planet churn — lots of inbound commuters and visitors).
@@ -6280,6 +6322,300 @@ function drawCityscape(sx,sy,sr){
   ctx.drawImage(cache.canvas, sx-half, sy-half, half*2, half*2);
 }
 
+// ── Ancient-ruins skyline (ANCIENT biome) ─────────────────────
+// Greek/Roman-inspired broken columns and arch fragments rooted on the disc,
+// with weathered debris suspended in the halo around the planet. Same bake-
+// once approach as the urban cityscape: build a 720×720 offscreen canvas
+// the first time it's needed, blit it on every subsequent draw.
+let _ancientRuinsCache=null;
+function _buildAncientRuinsCache(){
+  const refR=280, halo=110;
+  const _sc=refR/80;
+  const halfW=refR+halo, W=halfW*2;
+  const cnv=document.createElement('canvas');
+  cnv.width=W; cnv.height=W;
+  const c=cnv.getContext('2d');
+  const cx=halfW, cy=halfW;
+  let _seed=24681357;
+  const rng=()=>{ _seed=(_seed*1103515245+12345)&0x7fffffff; return _seed/0x7fffffff; };
+
+  // Warm sandstone palette
+  const _COL_LIGHT='rgba(228,206,168,0.96)';
+  const _COL_MID  ='rgba(192,166,118,0.94)';
+  const _COL_SHADE='rgba(138,108,72,0.88)';
+  const _COL_DARK ='rgba(86,62,38,0.78)';
+  const _COL_FLOAT='rgba(208,180,138,0.82)';
+
+  // ── Surface ruins clusters (inside disc) ─────────────
+  c.save();
+  c.beginPath(); c.arc(cx,cy,refR-0.5,0,Math.PI*2); c.clip();
+
+  const _nClusters=28+Math.floor(rng()*10);
+  for(let i=0;i<_nClusters;i++){
+    // Anchor clusters near the disc edge so columns "stand up" radially
+    // and read against the sky halo above.
+    const _bAng=rng()*Math.PI*2;
+    const _bR=refR*(0.82+rng()*0.14);
+    const _bx=cx+_bR*Math.cos(_bAng);
+    const _by=cy+_bR*Math.sin(_bAng);
+    // Radial-outward (column "up") + tangent ("right along the platform")
+    const _dx=Math.cos(_bAng), _dy=Math.sin(_bAng);
+    const _tx=-_dy, _ty=_dx;
+
+    // Cluster of 2–5 broken columns rooted on a thin stone platform
+    const _nCols=2+Math.floor(rng()*4);
+    const _colH=(7+rng()*9)*_sc;
+    const _colW=(1.4+rng()*0.6)*_sc;
+    const _gap=(2.4+rng()*0.8)*_sc;
+
+    // Platform/stylobate — a thin band the columns rise from
+    const _platW=_gap*(_nCols-1)+_colW*2.4;
+    const _platH=_colW*0.55;
+    c.fillStyle=_COL_MID;
+    c.beginPath();
+    c.moveTo(_bx-_tx*_platW/2,_by-_ty*_platW/2);
+    c.lineTo(_bx+_tx*_platW/2,_by+_ty*_platW/2);
+    c.lineTo(_bx+_tx*_platW/2+_dx*_platH,_by+_ty*_platW/2+_dy*_platH);
+    c.lineTo(_bx-_tx*_platW/2+_dx*_platH,_by-_ty*_platW/2+_dy*_platH);
+    c.closePath();
+    c.fill();
+
+    // Columns — proper Greek/Roman classical proportions:
+    //   plinth (square base) → fluted shaft → echinus cushion → abacus slab.
+    for(let k=0;k<_nCols;k++){
+      const _ofs=(k-(_nCols-1)/2)*_gap;
+      const _cBaseX=_bx+_tx*_ofs+_dx*_platH;
+      const _cBaseY=_by+_ty*_ofs+_dy*_platH;
+      // Most columns are partly broken — height varies
+      const _h=_colH*(0.35+rng()*0.7);
+      const hw=_colW/2;
+      // Plinth (square base wider than the shaft)
+      const _plW=_colW*1.55, _plH=_colW*0.42;
+      c.fillStyle=_COL_MID;
+      c.beginPath();
+      c.moveTo(_cBaseX-_tx*_plW/2,_cBaseY-_ty*_plW/2);
+      c.lineTo(_cBaseX+_tx*_plW/2,_cBaseY+_ty*_plW/2);
+      c.lineTo(_cBaseX+_tx*_plW/2+_dx*_plH,_cBaseY+_ty*_plW/2+_dy*_plH);
+      c.lineTo(_cBaseX-_tx*_plW/2+_dx*_plH,_cBaseY-_ty*_plW/2+_dy*_plH);
+      c.closePath();
+      c.fill();
+      // Shaft sits on the plinth
+      const _sBaseX=_cBaseX+_dx*_plH, _sBaseY=_cBaseY+_dy*_plH;
+      const _topX=_sBaseX+_dx*_h,     _topY=_sBaseY+_dy*_h;
+      c.fillStyle=(k%2===0)?_COL_LIGHT:_COL_SHADE;
+      c.beginPath();
+      c.moveTo(_sBaseX-_tx*hw,_sBaseY-_ty*hw);
+      c.lineTo(_sBaseX+_tx*hw,_sBaseY+_ty*hw);
+      c.lineTo(_topX+_tx*hw,_topY+_ty*hw);
+      c.lineTo(_topX-_tx*hw,_topY-_ty*hw);
+      c.closePath();
+      c.fill();
+      // Fluting — 3 thin dark vertical grooves down the shaft
+      c.fillStyle=_COL_DARK;
+      for(let _f=-1;_f<=1;_f++){
+        const _fo=_f*_colW*0.30, _fw=_colW*0.09;
+        const _fbx=_sBaseX+_tx*_fo, _fby=_sBaseY+_ty*_fo;
+        const _ftx=_topX+_tx*_fo,   _fty=_topY+_ty*_fo;
+        c.beginPath();
+        c.moveTo(_fbx-_tx*_fw/2,_fby-_ty*_fw/2);
+        c.lineTo(_fbx+_tx*_fw/2,_fby+_ty*_fw/2);
+        c.lineTo(_ftx+_tx*_fw/2,_fty+_ty*_fw/2);
+        c.lineTo(_ftx-_tx*_fw/2,_fty-_ty*_fw/2);
+        c.closePath();
+        c.fill();
+      }
+      // Capital: echinus cushion + abacus slab on ~75% of columns
+      if(rng()<0.75){
+        const capW=_colW*1.45, capH=_colW*0.42;
+        c.fillStyle=_COL_LIGHT;
+        c.beginPath();
+        c.moveTo(_topX-_tx*capW/2,_topY-_ty*capW/2);
+        c.lineTo(_topX+_tx*capW/2,_topY+_ty*capW/2);
+        c.lineTo(_topX+_tx*capW/2+_dx*capH,_topY+_ty*capW/2+_dy*capH);
+        c.lineTo(_topX-_tx*capW/2+_dx*capH,_topY-_ty*capW/2+_dy*capH);
+        c.closePath();
+        c.fill();
+        const abW=capW*1.22, abH=capH*0.55;
+        const _abX=_topX+_dx*capH, _abY=_topY+_dy*capH;
+        c.fillStyle=_COL_MID;
+        c.beginPath();
+        c.moveTo(_abX-_tx*abW/2,_abY-_ty*abW/2);
+        c.lineTo(_abX+_tx*abW/2,_abY+_ty*abW/2);
+        c.lineTo(_abX+_tx*abW/2+_dx*abH,_abY+_ty*abW/2+_dy*abH);
+        c.lineTo(_abX-_tx*abW/2+_dx*abH,_abY-_ty*abW/2+_dy*abH);
+        c.closePath();
+        c.fill();
+      }
+    }
+
+    // Architrave / broken lintel — a horizontal beam fragment above ~half
+    // the clusters, often broken short on the right side.
+    if(rng()<0.55 && _nCols>=2){
+      const _spanFrac=0.55+rng()*0.4;
+      const _archX0=_bx-_tx*_platW/2*_spanFrac+_dx*(_platH+_colH);
+      const _archY0=_by-_ty*_platW/2*_spanFrac+_dy*(_platH+_colH);
+      const _archX1=_bx+_tx*_platW/2*_spanFrac+_dx*(_platH+_colH);
+      const _archY1=_by+_ty*_platW/2*_spanFrac+_dy*(_platH+_colH);
+      const _ah=_colW*0.7;
+      c.fillStyle=_COL_SHADE;
+      c.beginPath();
+      c.moveTo(_archX0,_archY0);
+      c.lineTo(_archX1,_archY1);
+      c.lineTo(_archX1+_dx*_ah,_archY1+_dy*_ah);
+      c.lineTo(_archX0+_dx*_ah,_archY0+_dy*_ah);
+      c.closePath();
+      c.fill();
+    }
+  }
+
+  // ── Temple of Jupiter ────────────────────────────────
+  // A single recognisable classical-temple front near the centre of the
+  // disc, positioned just above and to the left. Drawn upright in canvas
+  // space (not radial) so the silhouette reads cleanly as a temple.
+  {
+    const _tcx=cx-refR*0.16, _tcy=cy-refR*0.20;
+    const _tw=refR*0.36, _th=refR*0.32;
+    // Stepped podium (crepidoma) — three stacked slabs
+    const _pdH=_th*0.07;
+    for(let _s=0;_s<3;_s++){
+      const _sw=_tw*(1.0-_s*0.06);
+      const _sy=_tcy+_th*0.40-_pdH*_s;
+      c.fillStyle=_s===0?_COL_SHADE:(_s===1?_COL_MID:_COL_LIGHT);
+      c.fillRect(_tcx-_sw/2,_sy,_sw,_pdH);
+    }
+    // Columns — 6 across, sitting on the podium
+    const _nCol=6;
+    const _colSpan=_tw*0.80;
+    const _colWT=_colSpan/(_nCol*2.2);
+    const _colHT=_th*0.46;
+    const _colTopY=_tcy+_th*0.40-_pdH*3-_colHT;
+    const _colBotY=_tcy+_th*0.40-_pdH*3;
+    for(let _k=0;_k<_nCol;_k++){
+      const _xC=_tcx-_colSpan/2+(_k+0.5)*(_colSpan/_nCol);
+      // Shaft
+      c.fillStyle=_COL_LIGHT;
+      c.fillRect(_xC-_colWT/2,_colTopY,_colWT,_colHT);
+      // Right-side shadow
+      c.fillStyle=_COL_SHADE;
+      c.fillRect(_xC+_colWT*0.18,_colTopY,_colWT*0.32,_colHT);
+      // Fluting (two thin dark grooves)
+      c.fillStyle=_COL_DARK;
+      c.fillRect(_xC-_colWT*0.18,_colTopY,_colWT*0.07,_colHT);
+      c.fillRect(_xC+_colWT*0.06,_colTopY,_colWT*0.07,_colHT);
+      // Capital abacus (small slab atop each column)
+      c.fillStyle=_COL_LIGHT;
+      c.fillRect(_xC-_colWT*0.75,_colTopY-_th*0.035,_colWT*1.5,_th*0.035);
+      // Plinth at base of each column
+      c.fillStyle=_COL_MID;
+      c.fillRect(_xC-_colWT*0.65,_colBotY-_th*0.025,_colWT*1.3,_th*0.025);
+    }
+    // Entablature (architrave + frieze band across the top of the columns)
+    const _entH=_th*0.11;
+    const _entY=_colTopY-_th*0.035-_entH;
+    c.fillStyle=_COL_MID;
+    c.fillRect(_tcx-_tw*0.44,_entY,_tw*0.88,_entH);
+    // Architrave shadow line
+    c.fillStyle=_COL_SHADE;
+    c.fillRect(_tcx-_tw*0.44,_entY+_entH*0.58,_tw*0.88,_entH*0.10);
+    // Dentil band along the underside of the frieze
+    c.fillStyle=_COL_DARK;
+    for(let _d=0;_d<15;_d++){
+      c.fillRect(_tcx-_tw*0.42+_d*(_tw*0.058),_entY+_entH*0.72,_tw*0.030,_entH*0.22);
+    }
+    // Triangular pediment on top of the entablature
+    const _pedH=_th*0.21;
+    c.fillStyle=_COL_LIGHT;
+    c.beginPath();
+    c.moveTo(_tcx-_tw*0.46,_entY);
+    c.lineTo(_tcx+_tw*0.46,_entY);
+    c.lineTo(_tcx,_entY-_pedH);
+    c.closePath();
+    c.fill();
+    // Pediment outline shadow (raking cornice)
+    c.strokeStyle=_COL_SHADE; c.lineWidth=Math.max(1.0,_sc*0.5);
+    c.beginPath();
+    c.moveTo(_tcx-_tw*0.46,_entY);
+    c.lineTo(_tcx,_entY-_pedH);
+    c.lineTo(_tcx+_tw*0.46,_entY);
+    c.stroke();
+    // Tympanum shading (inset triangle, slightly darker, to suggest depth)
+    c.fillStyle=_COL_MID;
+    c.beginPath();
+    c.moveTo(_tcx-_tw*0.38,_entY-_pedH*0.10);
+    c.lineTo(_tcx+_tw*0.38,_entY-_pedH*0.10);
+    c.lineTo(_tcx,_entY-_pedH*0.82);
+    c.closePath();
+    c.fill();
+    // Central acroterion ornament at the pediment apex
+    c.fillStyle=_COL_LIGHT;
+    c.fillRect(_tcx-_tw*0.018,_entY-_pedH-_th*0.030,_tw*0.036,_th*0.030);
+    // Cella wall hint visible between the back columns (darker rectangle)
+    c.fillStyle=_COL_DARK;
+    c.fillRect(_tcx-_colSpan*0.18,_colTopY+_colHT*0.10,_colSpan*0.36,_colHT*0.55);
+  }
+
+  c.restore();
+
+  // ── Floating debris (in halo around the disc) ────────
+  // Stone fragments and broken pediments tumbling outside the disc edge,
+  // suggesting the ruins are slowly drifting apart in low gravity.
+  const _nDebris=44+Math.floor(rng()*22);
+  for(let i=0;i<_nDebris;i++){
+    const _dAng=rng()*Math.PI*2;
+    const _dR=refR+6+rng()*halo*0.75;
+    const _ddx=cx+_dR*Math.cos(_dAng);
+    const _ddy=cy+_dR*Math.sin(_dAng);
+    const _ds=(1.8+rng()*4.0)*_sc;
+    const _rot=rng()*Math.PI*2;
+    c.save();
+    c.translate(_ddx,_ddy);
+    c.rotate(_rot);
+    c.fillStyle=_COL_FLOAT;
+    const _shape=rng();
+    if(_shape<0.62){
+      // Column fragment (tall rectangle)
+      c.fillRect(-_ds*0.32,-_ds*1.3,_ds*0.64,_ds*2.6);
+    } else if(_shape<0.85){
+      // Broken Roman roof awning fragment — gabled eave with a horizontal
+      // cornice band on top, sloped tiled underside, and small dentil teeth.
+      // Sloped roof slab (upper triangular wedge)
+      c.beginPath();
+      c.moveTo(-_ds*1.05,-_ds*0.45);
+      c.lineTo(_ds*1.05,-_ds*0.45);
+      c.lineTo(_ds*0.10,-_ds*1.30);
+      c.closePath();
+      c.fill();
+      // Eave cornice band (horizontal slab below the slope)
+      c.fillStyle=_COL_MID;
+      c.fillRect(-_ds*1.25,-_ds*0.45,_ds*2.5,_ds*0.32);
+      // Shadow line under the cornice
+      c.fillStyle=_COL_SHADE;
+      c.fillRect(-_ds*1.25,-_ds*0.13,_ds*2.5,_ds*0.08);
+      // Dentil teeth — small rectangles hanging from the underside
+      c.fillStyle=_COL_DARK;
+      for(let _d=-2;_d<=2;_d++){
+        c.fillRect(_d*_ds*0.42-_ds*0.10,-_ds*0.05,_ds*0.20,_ds*0.22);
+      }
+      // Restore float colour for any remaining debris pieces
+      c.fillStyle=_COL_FLOAT;
+    } else {
+      // Chunky rectangular block (cornice fragment)
+      c.fillRect(-_ds*0.9,-_ds*0.5,_ds*1.8,_ds);
+    }
+    c.restore();
+  }
+
+  _ancientRuinsCache={canvas:cnv, refR:refR, halfW:halfW};
+}
+function drawAncientRuins(sx,sy,sr){
+  if(sr<3) return;
+  if(!_ancientRuinsCache) _buildAncientRuinsCache();
+  const cache=_ancientRuinsCache;
+  const scale=sr/cache.refR;
+  const half=cache.halfW*scale;
+  ctx.drawImage(cache.canvas, sx-half, sy-half, half*2, half*2);
+}
+
 // ── foundry building draw ─────────────────────────────────────
 function drawFoundryBuilding(sx,sy,sr,angle,ssz,smelting=false,kind=''){
   const rx=sx+Math.cos(angle)*sr, ry=sy+Math.sin(angle)*sr;
@@ -6697,7 +7033,8 @@ function drawTrainsPanel(){
     const carScale=STRIP_H/CAR_H;
     const carPW=CAR_W*carScale; // base width; engine types may be wider
     const playerTrains=trains.reduce((a,t,i)=>(t.isPlayer&&a.push({t,i}),a),[]);
-    const panelContentH=playerTrains.length*ROW_H;
+    // +1 row at the end for the "Add new train" pseudo-slot
+    const panelContentH=(playerTrains.length+1)*ROW_H;
     const panelMaxScroll=Math.max(0,panelContentH-panelViewH);
     panelScroll=Math.max(0,Math.min(panelMaxScroll,panelScroll));
     ctx.save(); ctx.beginPath(); ctx.rect(px,TOP_H,PANEL_W,panelViewH); ctx.clip();
@@ -6802,9 +7139,34 @@ function drawTrainsPanel(){
           ctx.fillText(Math.round(prog*100)+'%',W-5,by+bh+4);
         }
       }
-      if(ri<playerTrains.length-1){
-        ctx.strokeStyle='rgba(40,80,160,0.25)'; ctx.lineWidth=1;
-        ctx.beginPath(); ctx.moveTo(px+6,ry+ROW_H-2); ctx.lineTo(W-6,ry+ROW_H-2); ctx.stroke();
+      // Divider after every train row — the pseudo "Add new train" slot
+      // always follows, so the last real train also gets a divider below it.
+      ctx.strokeStyle='rgba(40,80,160,0.25)'; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.moveTo(px+6,ry+ROW_H-2); ctx.lineTo(W-6,ry+ROW_H-2); ctx.stroke();
+    }
+    // "Add new train" pseudo-slot — sits after the last train. Centered name
+    // text, soft accent color, brightens on hover. Click routes to the Train
+    // Builder via openTrainBuilder().
+    {
+      const _addRi=playerTrains.length;
+      const _addRy=TOP_H+_addRi*ROW_H-panelScroll;
+      // Only register bounds (and draw the highlight) when the slot is at least
+      // partially visible inside the panel viewport.
+      if(_addRy+ROW_H>TOP_H && _addRy<GH){
+        if(_addTrainPanelHover){
+          ctx.fillStyle='rgba(80,140,255,0.10)';
+          ctx.fillRect(px+2,_addRy-1,PANEL_W-4,ROW_H-2);
+          ctx.strokeStyle='rgba(80,160,255,0.30)'; ctx.lineWidth=1;
+          ctx.strokeRect(px+2,_addRy-1,PANEL_W-4,ROW_H-2);
+        }
+        ctx.font='bold 9px Orbitron,sans-serif';
+        ctx.textAlign='center'; ctx.textBaseline='middle';
+        ctx.fillStyle=_addTrainPanelHover?'rgba(180,220,255,1.0)':'rgba(130,180,240,0.80)';
+        ctx.fillText('+ Add new train',px+PANEL_W/2,_addRy+ROW_H/2);
+        ctx.textBaseline='alphabetic';
+        _addTrainPanelBounds={x:px+2,y:_addRy-1,w:PANEL_W-4,h:ROW_H-2};
+      } else {
+        _addTrainPanelBounds=null;
       }
     }
     ctx.restore();
@@ -6858,6 +7220,7 @@ function drawTrainsPanel(){
       drawPlanet(vizCX,rowMidY,VIZ_R,p.type,p.ring,VIZ_GM,undefined,undefined,!!p.ring,p.flowerPositions||null);
       // Urban cityscape drawn BEFORE station/structures so those render on top.
       if(p.type.id==='urban') drawCityscape(vizCX,rowMidY,VIZ_R);
+      else if(p.type.id==='ancient') drawAncientRuins(vizCX,rowMidY,VIZ_R);
       if(p.hasGold&&p.goldRevealed) _drawGoldPatch(vizCX,rowMidY,VIZ_R,p.goldPatch);
       if(p.hasDiamond&&p.diamondRevealed) _drawDiamondPatch(vizCX,rowMidY,VIZ_R,p.diamondPatch);
       drawPlanetStation(vizCX,rowMidY,VIZ_R,0,VIZ_R,p.isAlienRelic,p.hasLargeStation||false,null,p.hasTerminal||false);
@@ -9625,7 +9988,13 @@ function drawFinancesPopup(){
   // ── File-folder tabs ─────────────────────────────────────────
   // Tabs sit just below the title divider; the active tab "merges" into the
   // content body below, the inactive ones look slightly receded.
-  const _tabs=[{id:'financials',label:'FINANCIALS'},{id:'loans',label:'LOANS'},{id:'versus',label:'VS RIVAL'}];
+  // "VS RIVAL" tab is only shown once the rival corp has been founded
+  // (_aiCorp is null until then). Defensive flip in case the player was
+  // somehow viewing the versus tab when the corp went away (e.g. save loaded
+  // with no rival).
+  const _tabs=[{id:'financials',label:'FINANCIALS'},{id:'loans',label:'LOANS'}];
+  if(_aiCorp) _tabs.push({id:'versus',label:'VS RIVAL'});
+  else if(_financeTab==='versus') _financeTab='financials';
   const _tabY=py+40, _tabH=22, _tabW=110, _tabGap=6, _tabStartX=px+14;
   _financeTabBounds=[];
   const _tabBaseY=_tabY+_tabH; // baseline (top of the table panel)
@@ -10082,6 +10451,46 @@ function _drawSpeedTip(){
   ctx.restore();
 }
 
+function _drawBuyTrainCallout(){
+  if(activePopup!=='trains') return;
+  if(!_buyTrainTipStartMs) return;
+  if(!trainsPopupAddBounds) return;
+  const _elpMs=Date.now()-_buyTrainTipStartMs;
+  const TOTAL=12000, FADE_IN=500, FADE_OUT=2000;
+  if(_elpMs>=TOTAL){ _buyTrainTipStartMs=0; return; }
+  let _a;
+  if(_elpMs<FADE_IN) _a=_elpMs/FADE_IN;
+  else if(_elpMs>TOTAL-FADE_OUT) _a=(TOTAL-_elpMs)/FADE_OUT;
+  else _a=1;
+  if(_a<=0) return;
+  const _ab=trainsPopupAddBounds;
+  const _txt='Click here to purchase a second train';
+  ctx.save();
+  ctx.font='9px "Exo 2",sans-serif';
+  const _tw=ctx.measureText(_txt).width;
+  const _pad=10, _bH=26, _bR=6, _tailH=9;
+  const _bW=_tw+_pad*2;
+  const _tipX=_ab.x+_ab.w/2;
+  const _tipY=_ab.y+_ab.h+3;       // anchor BELOW the "+" button
+  let _bx=Math.round(_tipX-_bW/2);
+  if(_bx<6) _bx=6;
+  if(_bx+_bW>W-6) _bx=W-6-_bW;
+  const _by=_tipY+_tailH;          // bubble sits below the tail
+  const _tailX=Math.max(_bx+_bR+8,Math.min(Math.round(_tipX),_bx+_bW-_bR-8));
+  ctx.globalAlpha=_a;
+  ctx.shadowColor='rgba(0,80,180,0.55)'; ctx.shadowBlur=8;
+  ctx.fillStyle='rgba(25,155,255,0.97)';
+  ctx.beginPath(); ctx.roundRect(_bx,_by,_bW,_bH,_bR); ctx.fill();
+  // Tail: base sits along the bubble's top edge, point pokes UP toward the "+"
+  ctx.beginPath(); ctx.moveTo(_tailX-7,_by); ctx.lineTo(_tailX+7,_by); ctx.lineTo(_tailX,_tipY); ctx.closePath(); ctx.fill();
+  ctx.shadowBlur=0;
+  ctx.fillStyle='#000000';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(_txt,_bx+_bW/2,_by+_bH/2);
+  ctx.textBaseline='alphabetic';
+  ctx.restore();
+}
+
 function _drawZoomCallout(){
   if(gs!=='galaxy'||!galaxy) return;
   // Trigger once on a fresh game after 0.02 sd, when no popup is open
@@ -10177,6 +10586,10 @@ function updateMissions(dtSd){
   // upgrade_station intro: 10 real-time seconds after produce_iron completes
   if(_produceIronTimerMs>0&&Date.now()-_produceIronTimerMs>=10000&&!_missionPending('upgrade_station')){
     pendingMissionIntros.push({defId:'upgrade_station',readySd:stardate});
+  }
+  // buy_second_train intro: triggered at stardate 829.25 if player still has only one train
+  if(stardate>=829.25&&trains.filter(t=>t.isPlayer).length<2&&!_missionPending('buy_second_train')){
+    pendingMissionIntros.push({defId:'buy_second_train',readySd:stardate});
   }
   // design_better_train intro: arm timer once first steel produced; fire 10 real-time seconds later.
   // The timer self-rearms on load (since it's not persisted) so it survives save/load cycles.
@@ -10651,7 +11064,8 @@ function drawPokedex(){
   ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
   ctx.fillStyle='#4af'; ctx.fillText('PLANET REGISTRY',px+pw/2,py+21);
   ctx.font='10px "Exo 2",sans-serif'; ctx.textAlign='right';
-  ctx.fillStyle='rgba(90,130,190,0.55)';
+  popupState.escBounds={x:px+pw-88,y:py+11,w:78,h:14};
+  ctx.fillStyle=popupState.escHover?'rgba(255,255,255,0.92)':'rgba(90,130,190,0.55)';
   ctx.fillText('[ESC] close',px+pw-10,py+21);
   // Sort selector
   ctx.textAlign='left'; ctx.font='10px "Exo 2",sans-serif';
@@ -10767,7 +11181,8 @@ function drawStarRegistry(){
   ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
   ctx.fillStyle='#ffc060'; ctx.fillText('STAR REGISTRY',px+pw/2,py+21);
   ctx.font='10px "Exo 2",sans-serif'; ctx.textAlign='right';
-  ctx.fillStyle='rgba(180,130,60,0.55)';
+  popupState.escBounds={x:px+pw-88,y:py+11,w:78,h:14};
+  ctx.fillStyle=popupState.escHover?'rgba(255,255,255,0.92)':'rgba(180,130,60,0.55)';
   ctx.fillText('[ESC] close',px+pw-10,py+21);
   ctx.textAlign='left'; ctx.font='10px "Exo 2",sans-serif';
   ctx.fillStyle='rgba(160,120,60,0.6)'; ctx.fillText('SORT:',px+10,py+42);
@@ -11800,6 +12215,7 @@ function drawStarDetailPopup(){
     if(_sp2Vis){
       drawPlanet(pcx2,stripMidY,pr,p.type,p.ring,isXXL?XXL_GM:2.0,undefined,undefined,false,p.flowerPositions||null);
       if(p.type.id==='urban'&&pr>=3) drawCityscape(pcx2,stripMidY,pr);
+      else if(p.type.id==='ancient'&&pr>=3) drawAncientRuins(pcx2,stripMidY,pr);
       if(p.hasGold&&p.goldRevealed&&pr>3) _drawGoldPatch(pcx2,stripMidY,pr,p.goldPatch);
       if(p.hasDiamond&&p.diamondRevealed&&pr>3) _drawDiamondPatch(pcx2,stripMidY,pr,p.diamondPatch);
       if(p.hasStation){
@@ -12846,6 +13262,7 @@ function drawPlanetDetailPopup(){
     drawPlanet(pcx,pcy,pr,p.type,p.ring,4.5,undefined,undefined,_ppras,p.flowerPositions||null);
     // Urban cityscape drawn BEFORE station/structures so those render on top.
     if(p.type.id==='urban') drawCityscape(pcx,pcy,pr);
+    else if(p.type.id==='ancient') drawAncientRuins(pcx,pcy,pr);
     if(p.hasGold&&p.goldRevealed) _drawGoldPatch(pcx,pcy,pr,p.goldPatch);
     if(p.hasDiamond&&p.diamondRevealed) _drawDiamondPatch(pcx,pcy,pr,p.diamondPatch);
     if(p.hasStation) drawPlanetStation(pcx,pcy,pr,p.stationAngle||0,pr,p.isAlienRelic,p.hasLargeStation||false,null,p.hasTerminal||false);
@@ -13920,7 +14337,9 @@ function drawTrainsPopup(){
   ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
   ctx.fillStyle='#fa8'; ctx.fillText('TRAINS',px+pw/2,py+21);
   ctx.font='10px "Exo 2",sans-serif'; ctx.textAlign='right';
-  ctx.fillStyle='rgba(90,130,190,0.55)'; ctx.fillText('[T] close  ·  scroll to browse',px+pw-10,py+21);
+  popupState.escBounds={x:px+pw-88,y:py+11,w:78,h:14};
+  ctx.fillStyle=popupState.escHover?'rgba(255,255,255,0.92)':'rgba(90,130,190,0.55)';
+  ctx.fillText('[ESC] close',px+pw-10,py+21);
   // + button
   const abx=px+10, aby=py+9, abw=26, abh=18;
   trainsPopupAddBounds={x:abx,y:aby,w:abw,h:abh};
@@ -14468,6 +14887,7 @@ function drawGalaxy(ts,dt){
     // Urban cityscape drawn BEFORE clouds/station/structures so those render
     // on top of the buildings (matches the bottom-info-bar render order).
     if(p.type.id==='urban'&&sr>2) drawCityscape(sx,sy,sr);
+    else if(p.type.id==='ancient'&&sr>2) drawAncientRuins(sx,sy,sr);
     if(p.hasGold&&p.goldRevealed&&sr>3) _drawGoldPatch(sx,sy,sr,p.goldPatch,ORBIT_TIERS[p.size]['LOW']*cam.scale*0.88);
     if(p.hasDiamond&&p.diamondRevealed&&sr>3) _drawDiamondPatch(sx,sy,sr,p.diamondPatch,ORBIT_TIERS[p.size]['LOW']*cam.scale*0.88);
     if(p.clouds&&sr>4) drawPlanetClouds(sx,sy,sr,p);
@@ -14995,6 +15415,7 @@ function drawGalaxy(ts,dt){
       if(_pVis2){
         drawPlanet(cx,barCY,pr,p.type,p.ring,isXXL?XXL_GM:2.0,undefined,undefined,false,p.flowerPositions||null);
         if(p.type.id==='urban'&&pr>=3) drawCityscape(cx,barCY,pr);
+        else if(p.type.id==='ancient'&&pr>=3) drawAncientRuins(cx,barCY,pr);
         if(p.hasGold&&p.goldRevealed&&pr>3) _drawGoldPatch(cx,barCY,pr,p.goldPatch);
         if(p.hasDiamond&&p.diamondRevealed&&pr>3) _drawDiamondPatch(cx,barCY,pr,p.diamondPatch);
         if(p.hasStation){
@@ -15050,6 +15471,7 @@ function drawGalaxy(ts,dt){
       if(_bras) drawPlanetRing(0,_pCy,pDR,p.ring,false);
       drawPlanet(0,_pCy,pDR,p.type,p.ring,pGM,undefined,undefined,_bras,p.flowerPositions||null);
       if(p.type.id==='urban') drawCityscape(0,_pCy,pDR);
+      else if(p.type.id==='ancient') drawAncientRuins(0,_pCy,pDR);
       if(p.hasGold&&p.goldRevealed) _drawGoldPatch(0,_pCy,pDR,p.goldPatch);
       if(p.hasDiamond&&p.diamondRevealed) _drawDiamondPatch(0,_pCy,pDR,p.diamondPatch);
       if(p.hasStation) drawPlanetStation(0,_pCy,pDR,0,pDR,p.isAlienRelic,p.hasLargeStation||false,null,p.hasTerminal||false);
@@ -15428,6 +15850,7 @@ function drawGalaxy(ts,dt){
   drawPlanetDetailPopup();
   drawStarDetailPopup();
   drawTrainsPopup();
+  _drawBuyTrainCallout();
   drawTrainBuilderPopup();
   // Color picker renders on top of all popups
   if(colorPickerState&&activePopup!=='train') drawColorPickerPopup();
@@ -15583,6 +16006,8 @@ function panelClick(sx,sy){
   const ROW_H=82;
   const playerTrains=trains.reduce((a,t,i)=>(t.isPlayer&&a.push({t,i}),a),[]);
   const ri=Math.floor((sy-TOP_H+panelScroll)/ROW_H);
+  // "Add new train" pseudo-slot at index playerTrains.length — opens builder.
+  if(ri===playerTrains.length){ openTrainBuilder(); return; }
   if(ri<0||ri>=playerTrains.length) return;
   const {t:train,i:ti}=playerTrains[ri];
   if(routeHerePending){
@@ -15619,6 +16044,8 @@ function panelDblClick(sx,sy){
     const playerTrains=trains.reduce((a,t,i)=>(t.isPlayer&&a.push({t,i}),a),[]);
     const ROW_H=82;
     const ri=Math.floor((sy-TOP_H+panelScroll)/ROW_H);
+    // "Add new train" pseudo-slot — open builder on dblclick too.
+    if(ri===playerTrains.length){ openTrainBuilder(); return; }
     if(ri<0||ri>=playerTrains.length) return;
     const {i:ti}=playerTrains[ri];
     activePopup='train'; popupState={trainIdx:ti};
@@ -16402,9 +16829,12 @@ canvas.addEventListener('mousemove',e=>{
     // Info bar star panel planet strip
     _starPanelPlanetHover=-1;
     for(let _si=0;_si<starPanelPlanetBounds.length;_si++){const _sb=starPanelPlanetBounds[_si];if(cp.x>=_sb.x&&cp.x<=_sb.x+_sb.w&&cp.y>=_sb.y&&cp.y<=_sb.y+_sb.h){_starPanelPlanetHover=_si;break;}}
-    if(_corpHover||_creditsHover||_panelTabHover||_speedLeftHover||_speedRightHover||_routeHereBtnHover||_assignBtnHover||_cancelRouteBtnHover||_planetStarNameHover||_starPanelPlanetHover>=0||_financeTakeLoanHover||(_financeLoanHover&&!(_financeLoanPaneBounds||[]).find(b=>b.id===_financeLoanHover)?.locked)||(_financeRepayBtnHover>=0&&(_financeRepayBtnBounds||[])[_financeRepayBtnHover]?.affordable)) canvas.style.cursor='pointer';
+    // Right-panel "Add new train" pseudo-slot hover (Trains tab only — bounds
+    // are nulled when scrolled out of view or when the Stations tab is active)
+    _addTrainPanelHover=!!(panelTab==='trains'&&_addTrainPanelBounds&&cp.x>=_addTrainPanelBounds.x&&cp.x<=_addTrainPanelBounds.x+_addTrainPanelBounds.w&&cp.y>=_addTrainPanelBounds.y&&cp.y<=_addTrainPanelBounds.y+_addTrainPanelBounds.h);
+    if(_corpHover||_creditsHover||_panelTabHover||_speedLeftHover||_speedRightHover||_routeHereBtnHover||_assignBtnHover||_cancelRouteBtnHover||_planetStarNameHover||_starPanelPlanetHover>=0||_addTrainPanelHover||_financeTakeLoanHover||(_financeLoanHover&&!(_financeLoanPaneBounds||[]).find(b=>b.id===_financeLoanHover)?.locked)||(_financeRepayBtnHover>=0&&(_financeRepayBtnBounds||[])[_financeRepayBtnHover]?.affordable)) canvas.style.cursor='pointer';
     else canvas.style.cursor='default';
-  } else { _corpHover=false; _creditsHover=false; _panelTabHover=null; _speedLeftHover=false; _speedRightHover=false; _routeHereBtnHover=false; _assignBtnHover=false; _cancelRouteBtnHover=false; _planetStarNameHover=false; _starPanelPlanetHover=-1; }
+  } else { _corpHover=false; _creditsHover=false; _panelTabHover=null; _speedLeftHover=false; _speedRightHover=false; _routeHereBtnHover=false; _assignBtnHover=false; _cancelRouteBtnHover=false; _planetStarNameHover=false; _starPanelPlanetHover=-1; _addTrainPanelHover=false; }
   // Hover tracking for bottom hint bar + chat log
   if(gs==='galaxy'){
     let _hh=null;
@@ -17374,6 +17804,21 @@ canvas.addEventListener('mouseup',e=>{
                   if(!et._engineHistory) et._engineHistory=[{type:_oldEng||'engine_constellation',startSd:et.carPurchaseSd[0]||stardate}];
                   et._engineHistory.push({type:_newEng, startSd:stardate});
                 }
+                // GA: only fire train_edited if the composition actually changed.
+                // Compares the in/out car arrays in order — same set, different
+                // ordering still counts as an edit (player rearranged cars).
+                const _compChanged=oldCars.length!==builtCars.length||oldCars.some((c,i)=>c!==builtCars[i]);
+                if(_compChanged){
+                  _ga('train_edited',{
+                    old_engine:_oldEng||'unknown',
+                    new_engine:_newEng||'unknown',
+                    engine_changed:_oldEng!==_newEng,
+                    old_car_count:oldCars.length,
+                    new_car_count:builtCars.length,
+                    edit_cost:_editCost||0,
+                    sd:Math.floor(stardate),
+                  });
+                }
               }
               activePopup='train'; popupState={trainIdx:s.editTrainIdx}; trainBuilderState=null;
             } else {
@@ -17598,11 +18043,20 @@ canvas.addEventListener('mouseup',e=>{
       const [wx,wy]=s2w(cp.x,cp.y);
       for(const p of galaxy.planets){
         if(Math.hypot(wx-p.x,wy-p.y)<Math.max(p.radius,20/cam.scale)){
+          // If the dblclicked planet is the currently-selected (tracked) one,
+          // restore the camera lock that mousedown cleared — opening the
+          // planet popup shouldn't break a pre-existing camera lock. The
+          // mousedown handler clears `tracking` but leaves `trackingOffset`
+          // untouched, so simply flipping `tracking` back to true resumes the
+          // lock with the same relative offset.
+          if(sel&&sel.type==='planet'&&sel.data===p) tracking=true;
           activePopup='planet'; popupState={planet:p}; updateCargoSupplyDemand(0); return;
         }
       }
       for(const s of galaxy.stars){
         if(Math.hypot(wx-s.x,wy-s.y)<Math.max(s.radius,30/cam.scale)){
+          // Same camera-lock preservation for stars
+          if(sel&&sel.type==='star'&&sel.data===s) tracking=true;
           activePopup='star'; popupState={star:s}; return;
         }
       }
@@ -17812,6 +18266,13 @@ document.addEventListener('keydown',e=>{
     if(e.key==='t'||e.key==='T'){
       activePopup=activePopup==='trains'?null:'trains';
       if(activePopup==='trains') popupState={scroll:0};
+      // First time the player opens the Trains window via the T key, show a
+      // blue callout bubble pointing at the "+" button. Skipped if they
+      // already have ≥2 player trains (no need to nudge them).
+      if(activePopup==='trains'&&!_buyTrainTipShown&&trains&&trains.filter(t=>t.isPlayer).length<2){
+        _buyTrainTipShown=true;
+        _buyTrainTipStartMs=Date.now();
+      }
       return;
     }
     if(e.key==='m'||e.key==='M'){
@@ -18093,6 +18554,7 @@ function _restoreFromSave(save){
   _sensorUpgradeActive=!!save._sensorUpgradeActive; _stationCostDiscount=save._stationCostDiscount||0;
   _galaxyCensusTimerMs=0; // timer resets on load; updateMissions() will re-arm if needed
   _hasZoomed=true; // loaded games have played before — suppress the zoom callout hint
+  _buyTrainTipStartMs=0; _buyTrainTipShown=true; // suppress buy-train callout on loaded games
   _newspaper=null; // never show newspaper immediately on load
   _newspaperLastSd=save._newspaperLastSd||Math.floor(save.stardate);
   _paperIdx=save._paperIdx??randInt(0,_PAPER_NAMES.length-1);
@@ -18492,7 +18954,7 @@ function startGame(){
   clampCamera();
   sel={type:'car',data:{trainIdx:0,carIdx:0,car:trains[0].cars[0]}}; routeStops=[]; tracking=true; trackingOffset={x:0,y:0}; assignPending=false; routeHerePending=false; _chatLog=[]; _chatLogHover=false; _chatLogHoverA=0; _chatLogLastDrawMs=0;
   _chatMsg(corpName+' founded.','rgba(255,230,120,1)',8000);
-  activePopup=null; popupState={}; gameSpeedIdx=SPEED_DEFAULT_IDX; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _produceIronTimerMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _hasZoomed=false;
+  activePopup=null; popupState={}; gameSpeedIdx=SPEED_DEFAULT_IDX; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _produceIronTimerMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _hasZoomed=false; _buyTrainTipStartMs=0; _buyTrainTipShown=false;
   _newspaper=null; _newspaperLastSd=829; _newspaperPrevSpeed=0; _newspaperNextHover=false; _newspaperNextBounds=null; _newspaperPrevHover=false; _newspaperPrevBounds=null; _newspaperArchive=[]; _newspaperViewIdx=null; _paperMajorUsed=[]; _paperMinorUsed=[]; _paperLayout=0; _paperIssueNum=0; _paperIdx=randInt(0,_PAPER_NAMES.length-1); _newsEventLog=[]; _newsSnapshot=null;
   _speedLeftHover=false; _speedRightHover=false; _panelTabHover=null; _routeHereBtnHover=false; _assignBtnHover=false; _cancelRouteBtnHover=false; _planetStarNameHover=false; _starPanelPlanetHover=-1; _trainAddHover=false; _trainRowHover=-1; _pokedexSortHover=false; _pokedexRowHover=-1; _starRegistrySortHover=false; _starRegistryRowHover=-1; _goldOkHover=false; _diamondOkHover=false; _carUnlockOkHover=false; _quitYesHover=false; _quitNoHover=false; _saveGameBtnHover=false; _startBtnHover=false; _loadBtnHover=false; _htpBtnHover=false; _htpDotHover=-1; _htpSkipHover=false; pokedexRowBounds=[]; starRegistryRowBounds=[]; loadBtnBounds=null; saveGameBtnBounds=null;
   fogPoints=[]; fogGridSet=new Set(); fogCanvas=null;
@@ -18519,7 +18981,7 @@ function startGame(){
   _sensorUpgradeActive=false; _stationCostDiscount=0; _galaxyCensusTimerMs=0; _sandstormCheckSd=0; _bhResearchCheckSd=0;
   missions=[]; _recomputeMissionTargets();
   _gameStartSd=stardate;
-  pendingMissionIntros=MISSION_DEFS.filter(def=>!def.prerequisite&&def.id!=='build_foundry'&&def.id!=='dispose_hazmat'&&def.id!=='lost_colony'&&def.id!=='seeking_home'&&def.id!=='create_route'&&def.id!=='find_molten_ore'&&def.id!=='research_royal_car'&&def.id!=='colony_train'&&def.id!=='spread_the_seed'&&def.id!=='famine'&&def.id!=='outbreak'&&def.id!=='stellar_cartography'&&def.id!=='galaxy_census'&&def.id!=='sandstorm_relief'&&def.id!=='bh_research'&&def.id!=='design_better_train').map(def=>({defId:def.id,readySd:_gameStartSd+(def.startsAfter||0)}));
+  pendingMissionIntros=MISSION_DEFS.filter(def=>!def.prerequisite&&def.id!=='build_foundry'&&def.id!=='dispose_hazmat'&&def.id!=='lost_colony'&&def.id!=='seeking_home'&&def.id!=='create_route'&&def.id!=='find_molten_ore'&&def.id!=='research_royal_car'&&def.id!=='colony_train'&&def.id!=='spread_the_seed'&&def.id!=='famine'&&def.id!=='outbreak'&&def.id!=='stellar_cartography'&&def.id!=='galaxy_census'&&def.id!=='sandstorm_relief'&&def.id!=='bh_research'&&def.id!=='design_better_train'&&def.id!=='buy_second_train').map(def=>({defId:def.id,readySd:_gameStartSd+(def.startsAfter||0)}));
   financeLedger=[]; _ledgerSummary={totalRevenue:0,totalCost:0,totalInterest:0}; purchaseLedger=[]; corpValueHistory={}; corpStatsHistory={}; aiCorpStatsHistory={}; _financeScrollY=0; _financeBreakdown='stardate'; _financeDropdownOpen=false; _versusMetric='value'; _versusDropdownOpen=false;
   loans=[]; _loanCounter=0; _financeTab='financials'; _financeLoanSelected='small'; _financeLoanHover=null; _financeTakeLoanHover=false;
   // Fresh pool of issuer names per game; assign one to each loan tier
