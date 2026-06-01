@@ -235,6 +235,8 @@ const WORLD_H  = 153600;
 //   car_unlocked               {car_type, cargo, sd}
 //   mission_complete           {mission_id, mission_name, sd}
 //   engine_unlocked            {engine, sd}
+//   train_revenue_logged       {train_name, planet, revenue, unload_count, sd}
+//   newspaper_shown            {sd, issue_num, layout}
 const _GA_MEASUREMENT_ID='G-66HLBD45ZX';
 const _gaSessionStartMs=Date.now();
 // Stable random client_id for this page load. GA uses this to group events
@@ -693,13 +695,29 @@ const MISSION_DEFS=[
    startsAfter:2.0,
    objectives:[
      {id:'stations_7',            text:'Build stations on 7 or more planets'},
-     {id:'trains_profitable_1sd', text:'Have 5 or more trains running profitable repeating routes for at least 1 S.D.'},
+     {id:'trains_profitable_1sd', text:'Have 5 or more trains whose revenue exceeded maintenance costs within the last 1 S.D.'},
    ],
    details:"Prove your corporation\'s reach and long-term stability. Expand your rail network and keep profitable trains running — bulk construction discounts await those who demonstrate lasting enterprise.",
    reward:null, rewardText:'−10% Station Cost', timeLimit:null,
    checkObj:(oid,m)=>{
      if(oid==='stations_7') return !!(galaxy&&galaxy.planets.filter(p=>p.playerBuiltStation||p.isStarter).length>=7);
-     if(oid==='trains_profitable_1sd') return !!(trains.filter(t=>t.isPlayer&&t.route?.isLoop&&(t.totalRevenue||0)>0&&(stardate-(t._routeStartSd||stardate))>=1.0).length>=5);
+     if(oid==='trains_profitable_1sd'){
+       // Count player trains whose NET 1-SD log sum is positive — i.e.
+       // cargo revenue earned in the last stardate exceeds maintenance
+       // (repair) costs incurred over the same window. `_revLog` holds
+       // positive entries for revenue commits and negative entries for
+       // maintenance charges, pruned to the rolling window inline at
+       // each push site in updateTrain.
+       let _n=0;
+       for(const t of trains){
+         if(!t.isPlayer||!t._revLog||!t._revLog.length) continue;
+         while(t._revLog.length&&stardate-t._revLog[0].sd>1.0) t._revLog.shift();
+         let _net=0;
+         for(const _e of t._revLog) _net+=_e.rev;
+         if(_net>0){ _n++; if(_n>=5) break; }
+       }
+       return _n>=5;
+     }
      return false;
    }},
   {id:'bh_research',
@@ -3547,7 +3565,7 @@ function _processCargoQueue(t, p){
         if(_corp?.secondaryPerk?.cat==='cargo_rev'&&_corp.secondaryPerk.cargo==='hazmat') _ceoM*=1+_corp.secondaryPerk.val/100;
         const rev=Math.round(_base*_dM*_shM*_ceoM);
         if(t.isPlayer) credits+=rev; else if(_aiCorp){_aiCorp.credits+=rev;_aiCorp.totalRevenue+=rev;}
-        if(rev>0&&t.isPlayer){const[_cfx,_cfy]=getTrainCarPos(t,i);spawnCreditFloat(_cfx,_cfy,rev);pendingCreditDeltas.push({timer:30,amount:rev});t.totalRevenue=(t.totalRevenue||0)+rev;financeLedger.push({sd:stardate,revenue:rev,cost:0,cargoType:'hazmat',trainName:t.name,planetId:null,starId:p.starId});}
+        if(rev>0&&t.isPlayer){const[_cfx,_cfy]=getTrainCarPos(t,i);spawnCreditFloat(_cfx,_cfy,rev);pendingCreditDeltas.push({timer:30,amount:rev});t.totalRevenue=(t.totalRevenue||0)+rev;financeLedger.push({sd:stardate,revenue:rev,cost:0,cargoType:'hazmat',trainName:t.name,planetId:null,starId:p.starId});if(!t._revLog)t._revLog=[];t._revLog.push({sd:stardate,rev});while(t._revLog.length&&stardate-t._revLog[0].sd>1.0)t._revLog.shift();}
         else if(rev>0&&!t.isPlayer){t.totalRevenue=(t.totalRevenue||0)+rev;}
         _totalHazmatIncinerated+=1; // one full hazmat car = 1 unit incinerated
         {const _hzStar=galaxy.stars[p.starId]; if(_hzStar) _hzStar.hazmatIncinerated=(_hzStar.hazmatIncinerated||0)+1;}
@@ -3558,7 +3576,7 @@ function _processCargoQueue(t, p){
         const src=t.carCargoSource?.[i]!=null?galaxy.planets[t.carCargoSource[i]]:null;
         const rev=computeCargoRevenue(t.cars[i],cargo,p,src);
         if(t.isPlayer) credits+=rev; else if(_aiCorp){_aiCorp.credits+=rev;_aiCorp.totalRevenue+=rev;}
-        if(rev>0&&t.isPlayer){const[_cfx,_cfy]=getTrainCarPos(t,i);spawnCreditFloat(_cfx,_cfy,rev);pendingCreditDeltas.push({timer:30,amount:rev});t.totalRevenue=(t.totalRevenue||0)+rev;financeLedger.push({sd:stardate,revenue:rev,cost:0,cargoType:cargo,trainName:t.name,planetId:p.id,starId:p.starId});}
+        if(rev>0&&t.isPlayer){const[_cfx,_cfy]=getTrainCarPos(t,i);spawnCreditFloat(_cfx,_cfy,rev);pendingCreditDeltas.push({timer:30,amount:rev});t.totalRevenue=(t.totalRevenue||0)+rev;financeLedger.push({sd:stardate,revenue:rev,cost:0,cargoType:cargo,trainName:t.name,planetId:p.id,starId:p.starId});if(!t._revLog)t._revLog=[];t._revLog.push({sd:stardate,rev});while(t._revLog.length&&stardate-t._revLog[0].sd>1.0)t._revLog.shift();}
         else if(rev>0&&!t.isPlayer){t.totalRevenue=(t.totalRevenue||0)+rev;}
         // Log AI cargo delivery for newspaper (throttled to ~1 per 0.3 SD to avoid flooding)
         if(rev>0&&!t.isPlayer&&_aiCorp&&(stardate-(_aiCorp._lastCargoLogSd||0))>0.3){
@@ -3732,7 +3750,10 @@ function _processCargoQueue(t, p){
     if(!t.cargoQueue.length){
       if(t._hazmatStarDump){ t._hazmatStarDump=false; t.cargoPhase=null; }
       else{
-        if(t.isPlayer&&(t._unloadCount||0)>=1) _chatMsgSegs([{text:(t.name||'Train')+' arrived at '+(p.name||'planet')+': ',color:'rgba(140,210,255,0.85)'},{text:'+'+_fmtCr(t._unloadRevenue||0)+' credits',color:'rgba(100,225,145,0.92)'}]);
+        if(t.isPlayer&&(t._unloadCount||0)>=1){
+          _chatMsgSegs([{text:(t.name||'Train')+' arrived at '+(p.name||'planet')+': ',color:'rgba(140,210,255,0.85)'},{text:'+'+_fmtCr(t._unloadRevenue||0)+' credits',color:'rgba(100,225,145,0.92)'}]);
+          _ga('train_revenue_logged',{train_name:t.name||'Train', planet:p.name||'planet', revenue:Math.round(t._unloadRevenue||0), unload_count:t._unloadCount||0, sd:Math.floor(stardate)});
+        }
         t._unloadRevenue=0; t._unloadCount=0;
         _startLoadPhase(t,p);
       }
@@ -7566,6 +7587,11 @@ function updateTrain(t, dt){
         // orbit-phase departure block inline here so the transit starts on the
         // same frame the segment unblocked.
         r.arrivalOrbitR=_avail.orbitR; r.arrivalOrbitTier=_avail.tier;
+        // Sync the per-stop orbit radius the route-line renderer reads, so
+        // the visualised line tracks the orbit the train is actually
+        // transiting to (vs. the orbit that was free when the route was
+        // first created, which may since have been claimed by another train).
+        if(r.stopOrbitR) r.stopOrbitR[r.toIdx]=_avail.orbitR;
         const _lt=computeLiveTangent(_fbP, _tbP, t.orbitR, r.arrivalOrbitR);
         const _snapAngle=_lt?_lt.tanAngle:r.departAngle;
         const _k=Math.round((t.angle-_snapAngle)/(Math.PI*2));
@@ -7665,6 +7691,12 @@ function updateTrain(t, dt){
             financeLedger.push({sd:stardate,revenue:0,cost:_rCost,cargoType:'maintenance',trainName:t.name,planetId:_cpl.id,starId:_cpl.starId});
             const[_mx,_my]=getTrainCarPos(t,0);
             spawnCreditFloat(_mx,_my,-_rCost);
+            // Record the maintenance hit as a negative entry in the rolling
+            // revenue log so the corporate_expansion mission can count net
+            // (revenue minus repair costs) over the 1-SD window.
+            if(!t._revLog) t._revLog=[];
+            t._revLog.push({sd:stardate, rev:-_rCost});
+            while(t._revLog.length&&stardate-t._revLog[0].sd>1.0) t._revLog.shift();
           }
         }
         // AI trains: silent free repair (no credit deduction)
@@ -7734,6 +7766,11 @@ function updateTrain(t, dt){
         const avail=getAvailableOrbitTier(r.stops[r.toIdx],t);
         if(!avail){ r.phase='waiting'; r.orbitSpun=0; return; }
         r.arrivalOrbitR=avail.orbitR; r.arrivalOrbitTier=avail.tier;
+        // Sync the per-stop orbit radius the route-line renderer reads, so
+        // the visualised line tracks the orbit the train is actually
+        // transiting to (vs. the orbit that was free when the route was
+        // first created, which may since have been claimed by another train).
+        if(r.stopOrbitR) r.stopOrbitR[r.toIdx]=avail.orbitR;
         const toP=_gp(r.stops[r.toIdx]);
         const lt=computeLiveTangent(fromP, toP, t.orbitR, r.arrivalOrbitR);
         if(transitPathBlocked(fromP,toP,t.orbitR,r.arrivalOrbitR,t)){
@@ -9932,8 +9969,8 @@ function _drawZoomCallout(){
 // Split-throttle design:
 //   • Intro-gate scans (mission-trigger conditions like "did the player visit
 //     a rocky planet", "total hazmat produced >= 2") run at most once per
-//     0.05 SD. They scan galaxy.planets / trains and govern slow-moving
-//     world state; this cadence keeps intros feeling responsive (~75 ms at
+//     0.01 SD. They scan galaxy.planets / trains and govern slow-moving
+//     world state; this cadence makes intros feel near-instant (~15 ms at
 //     1× speed) without per-frame full-galaxy scans.
 //   • The active-mission objective sweep runs EVERY FRAME so that completing
 //     an objective (or a whole mission) feels instant. The per-objective
@@ -9942,7 +9979,7 @@ let _missionTickAcc=0;
 function updateMissions(dtSd){
   if(!galaxy) return;
   _missionTickAcc+=dtSd||0;
-  const _doIntroGates=_missionTickAcc>=0.05;
+  const _doIntroGates=_missionTickAcc>=0.01;
   if(_doIntroGates) _missionTickAcc=0;
   if(_doIntroGates){
   // Unlock "Build a Foundry" on whichever triggers first:
@@ -10185,7 +10222,20 @@ function drawMissionsPopup(){
     // would include alien-relic stations, and the trains filter without
     // `t.isPlayer` would include the AI rival's fleet.
     if(objId==='stations_7')           return galaxy?{cur:Math.min(galaxy.planets.filter(p=>p.playerBuiltStation||p.isStarter).length,7), max:7, label:'Stations built'}:null;
-    if(objId==='trains_profitable_1sd') return {cur:Math.min(trains.filter(t=>t.isPlayer&&t.route?.isLoop&&(t.totalRevenue||0)>0&&(stardate-(t._routeStartSd||stardate))>=1.0).length,5), max:5, label:'Profitable trains'};
+    if(objId==='trains_profitable_1sd'){
+      // Match the rolling-window NET-profit logic from checkObj above —
+      // count trains where revenue earned exceeds maintenance costs across
+      // the last 1 SD (sum of {sd,rev} entries in _revLog > 0).
+      let _pn=0;
+      for(const t of trains){
+        if(!t.isPlayer||!t._revLog||!t._revLog.length) continue;
+        while(t._revLog.length&&stardate-t._revLog[0].sd>1.0) t._revLog.shift();
+        let _net=0;
+        for(const _e of t._revLog) _net+=_e.rev;
+        if(_net>0) _pn++;
+      }
+      return {cur:Math.min(_pn,5), max:5, label:'Profitable trains'};
+    }
     if(objId==='deliver_5_chemical')   return {cur:Math.min(m._chemicalDeliveries||0,5), max:5, label:'Chemical delivered'};
     if(objId==='deliver_10_steel_home')   return {cur:Math.min(m._homeSteelDelivered  ||0,20), max:20, label:'Steel delivered'};
     if(objId==='deliver_10_battery_home') return {cur:Math.min(m._homeBatteryDelivered||0,20), max:20, label:'Batteries delivered'};
@@ -14814,23 +14864,31 @@ function drawGalaxy(ts,dt){
     const _ibPVis=visitedPlanetIds.has(p.id);
     // ── Planet visualization: center at x=0, bleeds off left edge ──
     const pDR=80, pGM=3.0; // display radius + glow multiplier
+    // Lift the planet visualization (and only the visualization — every text
+    // row keeps its existing baseline) when the planet sports a Large
+    // Station or Terminal upgrade. The tall central pillar of those
+    // structures gets rooted at the planet centre's y; the lift shoves the
+    // pillar up into the gap between the name row (baseline GH+22) and the
+    // "Type:" row (baseline GH+40) so it doesn't obscure the type text.
+    const _bigStation=!!(p.hasLargeStation||p.hasTerminal);
+    const _pCy=GH+BAR_H/2-(_bigStation?9:0);
     ctx.save();
     ctx.beginPath(); ctx.rect(0,GH,W-PANEL_W,BAR_H); ctx.clip();
     if(_ibPVis){
       const _bras=p.ring&&p.hasStation;
-      if(_bras) drawPlanetRing(0,GH+BAR_H/2,pDR,p.ring,false);
-      drawPlanet(0,GH+BAR_H/2,pDR,p.type,p.ring,pGM,undefined,undefined,_bras,p.flowerPositions||null);
-      if(p.type.id==='urban') drawCityscape(0,GH+BAR_H/2,pDR);
-      if(p.hasGold&&p.goldRevealed) _drawGoldPatch(0,GH+BAR_H/2,pDR,p.goldPatch);
-      if(p.hasDiamond&&p.diamondRevealed) _drawDiamondPatch(0,GH+BAR_H/2,pDR,p.diamondPatch);
-      if(p.hasStation) drawPlanetStation(0,GH+BAR_H/2,pDR,0,pDR,p.isAlienRelic,p.hasLargeStation||false,null,p.hasTerminal||false);
-      if(_bras) drawPlanetRing(0,GH+BAR_H/2,pDR,p.ring,true);
+      if(_bras) drawPlanetRing(0,_pCy,pDR,p.ring,false);
+      drawPlanet(0,_pCy,pDR,p.type,p.ring,pGM,undefined,undefined,_bras,p.flowerPositions||null);
+      if(p.type.id==='urban') drawCityscape(0,_pCy,pDR);
+      if(p.hasGold&&p.goldRevealed) _drawGoldPatch(0,_pCy,pDR,p.goldPatch);
+      if(p.hasDiamond&&p.diamondRevealed) _drawDiamondPatch(0,_pCy,pDR,p.diamondPatch);
+      if(p.hasStation) drawPlanetStation(0,_pCy,pDR,0,pDR,p.isAlienRelic,p.hasLargeStation||false,null,p.hasTerminal||false);
+      if(_bras) drawPlanetRing(0,_pCy,pDR,p.ring,true);
     } else {
       // Blacked-out disc
       ctx.fillStyle='rgba(4,6,16,0.97)';
-      ctx.beginPath(); ctx.arc(0,GH+BAR_H/2,pDR,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(0,_pCy,pDR,0,Math.PI*2); ctx.fill();
       ctx.strokeStyle='rgba(50,70,120,0.3)'; ctx.lineWidth=1;
-      ctx.beginPath(); ctx.arc(0,GH+BAR_H/2,pDR,0,Math.PI*2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(0,_pCy,pDR,0,Math.PI*2); ctx.stroke();
     }
     ctx.restore();
     const textX=Math.round(pDR*pGM*0.5); // ~120px — halfway through glow
@@ -17650,6 +17708,10 @@ function _buildSaveObject(){
     _cargoCheckedThisStop:t._cargoCheckedThisStop,
     _hazmatStarDump:t._hazmatStarDump||false,
     _routeStartSd:t._routeStartSd||null,
+    // Rolling-1-SD revenue log used by the corporate_expansion mission's
+    // "profitable trains" objective. Pruned at every cargo-revenue commit
+    // so it never grows beyond ~1 SD of entries — cheap to persist.
+    _revLog:t._revLog||null,
     route:t.route||null,
     queuedRoute:t.queuedRoute||null,
     _detourPermanentRoute:t._detourPermanentRoute||null,
@@ -17906,6 +17968,7 @@ function _restoreFromSave(save){
     })),
     cargoPhase:t.cargoPhase||null, cargoQueue:t.cargoQueue||[], cargoTimer:t.cargoTimer||0,
     _routeStartSd:t._routeStartSd||null,
+    _revLog:Array.isArray(t._revLog)?t._revLog:[],
     route:t.route||null,
     queuedRoute:t.queuedRoute||null,
     _detourPermanentRoute:t._detourPermanentRoute||null,
@@ -19000,6 +19063,7 @@ function loop(ts){
       _newspaperLastSd=Math.floor(stardate);
       _newspaperPrevSpeed=gameSpeedIdx;
       gameSpeedIdx=SPEED_DEFAULT_IDX;
+      _ga('newspaper_shown',{sd:Math.floor(stardate), issue_num:_paperIssueNum||0, layout:_paperLayout||0});
     }
     drawGalaxy(ts,dt);
   }
