@@ -1751,7 +1751,17 @@ function _generateBankNames(){
 let _bankNames=[];                         // pool of 10 issuer names regenerated per game
 let _loanIssuers={small:'',medium:'',large:''}; // tier id → issuer name assigned at game start
 // UI state for the new Corporate Finances tab system.
-let _financeTab='financials'; // 'financials' | 'loans'
+let _financeTab='financials'; // 'financials' | 'loans' | 'versus'
+// Versus chart (Corp Finances "VS RIVAL" tab):
+// per-SD snapshot of multi-metric state for both player + AI corp, used by
+// the line-chart drawer. Kept to ~15 SD of history so the rolling 10-SD
+// window display has 1 SD of headroom for new SDs to slot in.
+let _versusMetric='value';     // 'value'|'credits'|'revenue'|'costs'|'stations'|'trains'
+let _versusDropdownOpen=false;
+let _versusDropdownBounds=null;
+let _versusDropdownOptBounds=[];
+let corpStatsHistory={};       // {sdFloor: {value,credits,revenue,costs,stations,trains}}
+let aiCorpStatsHistory={};     // same shape, only populated when _aiCorp exists at SD-tick
 let _financeTabBounds=[];
 let _financeLoanPaneBounds=[]; // [{id,x,y,w,h,disabled}]
 let _financeLoanHover=null;     // id of pane currently hovered (for tooltip)
@@ -9220,6 +9230,162 @@ function drawCeoHirePopup(){
 // Renders the Loans tab inside the Corporate Finances popup. Three loan-tier panes laid
 // out horizontally beneath the tab strip; locked tiers (Medium until SD 835, Large until
 // SD 845) render greyed-out and reveal an explanatory tooltip on hover. Selecting an
+// VS RIVAL: line chart of selected metric over the rolling last 10 stardates,
+// player vs. AI corp. History is recorded by the SD-tick site in the game loop;
+// the current SD reads live values so the most recent point updates in
+// real-time as the popup is open. Dropdown lets the user switch metrics.
+const _VERSUS_METRICS=[
+  {key:'value',    label:'Corp. Value',    fmt:_v=>_fmtCr(Math.round(_v))},
+  {key:'credits',  label:'Credits',        fmt:_v=>_fmtCr(Math.round(_v))},
+  {key:'revenue',  label:'Total Revenue',  fmt:_v=>_fmtCr(Math.round(_v))},
+  {key:'costs',    label:'Total Costs',    fmt:_v=>_fmtCr(Math.round(_v))},
+  {key:'stations', label:'# of Stations',  fmt:_v=>String(Math.round(_v))},
+  {key:'trains',   label:'# of Trains',    fmt:_v=>String(Math.round(_v))},
+];
+function _versusLiveValue(which){
+  // which: 'player' | 'ai'. Returns the live (current SD, mid-flight) value
+  // for the currently-selected metric. Falls back to 0 when AI is requested
+  // and there is no rival corporation in this game.
+  const _m=_versusMetric;
+  if(which==='player'){
+    if(_m==='value'){const _cv=_corpAssets(); return _cv.liquid+_cv.trainVal+_cv.stationVal+_cv.upgradeVal;}
+    if(_m==='credits') return credits;
+    if(_m==='revenue'){let _s=_ledgerSummary?.totalRevenue||0; for(const _e of financeLedger)_s+=_e.revenue||0; return _s;}
+    if(_m==='costs'  ){let _s=_ledgerSummary?.totalCost||0;    for(const _e of financeLedger)_s+=_e.cost||0;    return _s;}
+    if(_m==='stations') return galaxy.planets.filter(p=>p.playerBuiltStation||p.isStarter).length;
+    if(_m==='trains'  ) return trains.filter(t=>t.isPlayer).length;
+    return 0;
+  }
+  if(!_aiCorp) return 0;
+  if(_m==='value'   ) return _aiComputeNetWorth();
+  if(_m==='credits' ) return _aiCorp.credits;
+  if(_m==='revenue' ) return _aiCorp.totalRevenue||0;
+  if(_m==='costs'   ) return _aiCorp.totalCosts||0;
+  if(_m==='stations') return _aiCorp.stationsBuilt||0;
+  if(_m==='trains'  ) return _aiCorp.trainIndices.length;
+  return 0;
+}
+function _drawFinancesVersusTab(px,py,pw,ph,_tabBaseY){
+  const _curSd=Math.floor(stardate);
+  // Metric dropdown — sits in the same row, mirrors the FINANCIALS-tab control.
+  const _ddX=px+pw-202, _ddY=_tabBaseY+10, _ddW=180, _ddH=20;
+  ctx.font='9px "Exo 2",sans-serif'; ctx.textAlign='right'; ctx.fillStyle='rgba(100,155,120,0.65)';
+  ctx.fillText('METRIC',_ddX-6,_ddY+13);
+  ctx.fillStyle='rgba(18,40,26,0.9)'; ctx.fillRect(_ddX,_ddY,_ddW,_ddH);
+  ctx.strokeStyle='rgba(60,180,100,0.6)'; ctx.lineWidth=1; ctx.strokeRect(_ddX,_ddY,_ddW,_ddH);
+  const _selMet=_VERSUS_METRICS.find(m=>m.key===_versusMetric)||_VERSUS_METRICS[0];
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left'; ctx.fillStyle='#c0ffd0';
+  ctx.fillText(_selMet.label.toUpperCase(),_ddX+8,_ddY+14);
+  ctx.textAlign='right'; ctx.fillText('▾',_ddX+_ddW-8,_ddY+14);
+  _versusDropdownBounds={x:_ddX,y:_ddY,w:_ddW,h:_ddH};
+
+  // Header / title — left side of same row
+  ctx.font='bold 12px Orbitron,sans-serif'; ctx.textAlign='left';
+  ctx.fillStyle='rgba(160,225,180,0.92)';
+  ctx.fillText('PLAYER vs RIVAL',px+14,_ddY+15);
+
+  // Bail out cleanly when no rival exists — still render the dropdown so the
+  // user can browse metrics if a rival later joins.
+  if(!_aiCorp){
+    ctx.font='italic 11px "Exo 2",sans-serif'; ctx.fillStyle='rgba(120,170,140,0.55)'; ctx.textAlign='center';
+    ctx.fillText('No rival corporation in this game — start one from the AI Select screen.',px+pw/2,py+ph/2);
+    _drawVersusDropdownOptions(_ddX,_ddY,_ddW,_ddH);
+    return;
+  }
+
+  // ── Build the SD axis (last 10 SDs ending at the current one) ──
+  const _sds=[]; for(let _s=_curSd-10;_s<=_curSd;_s++) if(_s>=0) _sds.push(_s);
+  // Pull the per-SD value (history, falling back to 0) — except the current
+  // SD which reads live so the chart's right-most point ticks up in real
+  // time as the player is watching.
+  const _readP=_s=>(_s===_curSd?_versusLiveValue('player'):((corpStatsHistory[_s]&&corpStatsHistory[_s][_versusMetric])||0));
+  const _readA=_s=>(_s===_curSd?_versusLiveValue('ai')    :((aiCorpStatsHistory[_s]&&aiCorpStatsHistory[_s][_versusMetric])||0));
+  const _pVals=_sds.map(_readP);
+  const _aVals=_sds.map(_readA);
+
+  // ── Chart area ──
+  const _cX=px+58, _cY=_ddY+_ddH+22, _cW=pw-78, _cH=py+ph-_cY-34;
+
+  // Y-axis range with a smidge of padding so points don't sit on the frame.
+  let _maxY=Math.max(1,..._pVals,..._aVals);
+  let _minY=Math.min(0,..._pVals,..._aVals);
+  const _yPad=Math.max(1,(_maxY-_minY)*0.12);
+  _maxY+=_yPad; if(_minY>0) _minY=0;
+  if(_maxY===_minY) _maxY=_minY+1;
+
+  // Axes + gridlines + Y-tick labels
+  ctx.strokeStyle='rgba(60,140,90,0.55)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(_cX,_cY); ctx.lineTo(_cX,_cY+_cH); ctx.lineTo(_cX+_cW,_cY+_cH); ctx.stroke();
+  ctx.font='8px "Exo 2",sans-serif'; ctx.textAlign='right'; ctx.fillStyle='rgba(140,200,160,0.70)';
+  for(let _ti=0;_ti<=5;_ti++){
+    const _vy=_cY+_cH-(_cH*_ti/5);
+    const _vv=_minY+(_maxY-_minY)*_ti/5;
+    ctx.fillText(_selMet.fmt(_vv),_cX-4,_vy+3);
+    ctx.strokeStyle='rgba(60,140,90,0.15)';
+    ctx.beginPath(); ctx.moveTo(_cX,_vy); ctx.lineTo(_cX+_cW,_vy); ctx.stroke();
+  }
+
+  // X-axis SD labels (every SD, smaller spacing if there are many points)
+  ctx.textAlign='center';
+  const _xStep=_sds.length>1?(_cW/(_sds.length-1)):0;
+  for(let _si=0;_si<_sds.length;_si++){
+    const _vx=_cX+_xStep*_si;
+    ctx.fillStyle='rgba(140,200,160,0.65)';
+    ctx.fillText('SD '+_sds[_si],_vx,_cY+_cH+12);
+  }
+
+  // Line plot helper
+  const _toXY=(idx,v)=>[_cX+_xStep*idx,_cY+_cH-(_cH*((v-_minY)/(_maxY-_minY)))];
+  const _plot=(vals,strokeCol,fillCol)=>{
+    ctx.strokeStyle=strokeCol; ctx.lineWidth=2;
+    ctx.beginPath();
+    let _first=true;
+    for(let _si=0;_si<_sds.length;_si++){
+      const _v=vals[_si]; if(_v==null) continue;
+      const [_vx,_vy]=_toXY(_si,_v);
+      if(_first){ ctx.moveTo(_vx,_vy); _first=false; } else ctx.lineTo(_vx,_vy);
+    }
+    ctx.stroke();
+    ctx.fillStyle=fillCol;
+    for(let _si=0;_si<_sds.length;_si++){
+      const _v=vals[_si]; if(_v==null) continue;
+      const [_vx,_vy]=_toXY(_si,_v);
+      ctx.beginPath(); ctx.arc(_vx,_vy,3,0,Math.PI*2); ctx.fill();
+    }
+  };
+  _plot(_pVals,'rgba(80,180,255,0.95)','rgba(80,180,255,1)');
+  _plot(_aVals,'rgba(255,170,60,0.95)','rgba(255,170,60,1)');
+
+  // Legend inside the chart, top-right corner
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
+  const _lgX=_cX+_cW-148, _lgY=_cY+8;
+  ctx.fillStyle='rgba(10,22,16,0.78)'; ctx.fillRect(_lgX-6,_lgY-3,148,28);
+  ctx.strokeStyle='rgba(60,140,90,0.35)'; ctx.strokeRect(_lgX-6,_lgY-3,148,28);
+  ctx.fillStyle='rgba(80,180,255,1)'; ctx.fillRect(_lgX,_lgY+1,10,3);
+  ctx.fillStyle='rgba(200,230,255,0.95)';
+  {let _pn=(corpName||'YOU'); while(ctx.measureText(_pn).width>108) _pn=_pn.slice(0,-1); ctx.fillText(_pn,_lgX+16,_lgY+5);}
+  ctx.fillStyle='rgba(255,170,60,1)'; ctx.fillRect(_lgX,_lgY+15,10,3);
+  ctx.fillStyle='rgba(255,220,170,0.95)';
+  {let _an=(_aiCorp.name||'RIVAL'); while(ctx.measureText(_an).width>108) _an=_an.slice(0,-1); ctx.fillText(_an,_lgX+16,_lgY+19);}
+
+  // Dropdown options last so they overlay the chart cleanly.
+  _drawVersusDropdownOptions(_ddX,_ddY,_ddW,_ddH);
+}
+function _drawVersusDropdownOptions(_ddX,_ddY,_ddW,_ddH){
+  _versusDropdownOptBounds=[];
+  if(!_versusDropdownOpen) return;
+  for(let _oi=0;_oi<_VERSUS_METRICS.length;_oi++){
+    const _oy=_ddY+_ddH+_oi*_ddH;
+    const _isAct=_VERSUS_METRICS[_oi].key===_versusMetric;
+    ctx.fillStyle=_isAct?'rgba(40,120,65,0.95)':'rgba(14,32,20,0.97)';
+    ctx.fillRect(_ddX,_oy,_ddW,_ddH);
+    ctx.strokeStyle='rgba(60,180,100,0.4)'; ctx.lineWidth=1; ctx.strokeRect(_ddX,_oy,_ddW,_ddH);
+    ctx.font='bold 9px Orbitron,sans-serif'; ctx.fillStyle=_isAct?'#c0ffd0':'rgba(140,200,160,0.8)'; ctx.textAlign='left';
+    ctx.fillText(_VERSUS_METRICS[_oi].label.toUpperCase(),_ddX+8,_oy+14);
+    _versusDropdownOptBounds.push({x:_ddX,y:_oy,w:_ddW,h:_ddH,key:_VERSUS_METRICS[_oi].key});
+  }
+}
+
 // available tier expands details (first payment due/amount) and a Take Loan button.
 function _drawFinancesLoansTab(px,py,pw,ph,_tabBaseY){
   _financeLoanPaneBounds=[];
@@ -9459,7 +9625,7 @@ function drawFinancesPopup(){
   // ── File-folder tabs ─────────────────────────────────────────
   // Tabs sit just below the title divider; the active tab "merges" into the
   // content body below, the inactive ones look slightly receded.
-  const _tabs=[{id:'financials',label:'FINANCIALS'},{id:'loans',label:'LOANS'}];
+  const _tabs=[{id:'financials',label:'FINANCIALS'},{id:'loans',label:'LOANS'},{id:'versus',label:'VS RIVAL'}];
   const _tabY=py+40, _tabH=22, _tabW=110, _tabGap=6, _tabStartX=px+14;
   _financeTabBounds=[];
   const _tabBaseY=_tabY+_tabH; // baseline (top of the table panel)
@@ -9501,6 +9667,11 @@ function drawFinancesPopup(){
 
   if(_financeTab==='loans'){
     _drawFinancesLoansTab(px,py,pw,ph,_tabBaseY);
+    ctx.restore();
+    return;
+  }
+  if(_financeTab==='versus'){
+    _drawFinancesVersusTab(px,py,pw,ph,_tabBaseY);
     ctx.restore();
     return;
   }
@@ -16504,7 +16675,7 @@ canvas.addEventListener('mouseup',e=>{
         // so its first-payment details + Take Loan button are visible without an extra click.
         for(const _tb of (_financeTabBounds||[])){
           if(cp.x>=_tb.x&&cp.x<=_tb.x+_tb.w&&cp.y>=_tb.y&&cp.y<=_tb.y+_tb.h){
-            _financeTab=_tb.id; _financeDropdownOpen=false;
+            _financeTab=_tb.id; _financeDropdownOpen=false; _versusDropdownOpen=false;
             _financeLoanSelected=(_tb.id==='loans'?'small':null);
             return;
           }
@@ -16561,6 +16732,17 @@ canvas.addEventListener('mouseup',e=>{
             if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ _financeBreakdown=b.key; _financeDropdownOpen=false; _financeScrollY=0; return; }
           }
           _financeDropdownOpen=false; return;
+        }
+        // VS RIVAL tab — metric dropdown toggle + option select.
+        if(_financeTab==='versus'&&_versusDropdownBounds){
+          const b=_versusDropdownBounds;
+          if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ _versusDropdownOpen=!_versusDropdownOpen; return; }
+        }
+        if(_versusDropdownOpen){
+          for(const b of _versusDropdownOptBounds){
+            if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ _versusMetric=b.key; _versusDropdownOpen=false; return; }
+          }
+          _versusDropdownOpen=false; return;
         }
         return;
       }
@@ -17665,7 +17847,14 @@ function _buildSaveObject(){
   // Also rounds the high-frequency float fields (x, y, orbit*, stationAngle,
   // structure angles) to 5 decimals.
   const savePlanets=galaxy.planets.map(p=>{
-    const {clouds,supplyRate,demandRate,economicHealth,flowerPositions,...rest}=p;
+    // Strip runtime-only caches that won't survive JSON serialization:
+    //   • clouds / supplyRate / demandRate / economicHealth / flowerPositions
+    //     — regenerated from biome + dev level + seeds on load.
+    //   • _upgSet / _upgSetLen — Set is the cache shape used by _pUpg(); a
+    //     JSON round-trip would turn _upgSet into a plain object that
+    //     passes _pUpg's truthiness gate but throws on `.has(...)`.
+    //   • _top4Supply / _top4Demand / _top4Stamp — Stations-tab top-N cache.
+    const {clouds,supplyRate,demandRate,economicHealth,flowerPositions,_upgSet,_upgSetLen,_top4Supply,_top4Demand,_top4Stamp,...rest}=p;
     const out={...rest, type:{id:p.type.id}};
     // Round low-precision-OK floats in place.
     out.x=_r5(out.x); out.y=_r5(out.y);
@@ -17785,7 +17974,7 @@ function _buildSaveObject(){
     _steelProdLog,
     _sensorUpgradeActive, _stationCostDiscount, _sandstormCheckSd, _bhResearchCheckSd,
     _totalPassengersDelivered, _totalHazmatIncinerated,
-    trainyard, financeLedger:_trimmedFinance, _ledgerSummary:_builtLedgerSummary, purchaseLedger, corpValueHistory, _corp, _ceoHireCandidates,
+    trainyard, financeLedger:_trimmedFinance, _ledgerSummary:_builtLedgerSummary, purchaseLedger, corpValueHistory, corpStatsHistory, aiCorpStatsHistory, _corp, _ceoHireCandidates,
     creditSnapshots, lastCreditSnapshotSd,
     galaxy:{homeStarId:galaxy.homeStarId, origenId:galaxy.origenId, blackHoles:galaxy.blackHoles, colonyTrainDestId:galaxy.colonyTrainDestId??null, faminePlanetId:galaxy.faminePlanetId??null, outbreakPlanetId:galaxy.outbreakPlanetId??null, bhResearchPlanetId:galaxy.bhResearchPlanetId??null, bhResearchPlanetIds:galaxy.bhResearchPlanetIds??[], stars:saveStars, planets:savePlanets, nebulas:(galaxy.nebulas||[]).map(n=>({x:_r5(n.x),y:_r5(n.y),rx:n.rx,ry:n.ry,rot:_r5(n.rot),colorIdx:n.colorIdx,secondaryColorIdx:n.secondaryColorIdx,seed:n.seed,name:n.name}))},
     trains:saveTrains,
@@ -17821,6 +18010,13 @@ function _restoreFromSave(save){
   const planets=sg.planets.map(p=>{
     const ptype=PTYPES.find(t=>t.id===p.type.id)||PTYPES[0];
     const rp={...p, type:ptype};
+    // Scrub runtime-only caches that legacy saves may have serialized as
+    // plain objects (Set / Array shapes don't survive JSON). `_pUpg()`'s
+    // truthiness check would otherwise treat a `{}` here as a valid cache
+    // and throw on .has(); same hazard for the Stations-tab top-N cache.
+    // Always null these on load — they rebuild lazily on first access.
+    rp._upgSet=undefined; rp._upgSetLen=undefined;
+    rp._top4Supply=undefined; rp._top4Demand=undefined; rp._top4Stamp=undefined;
     // Re-attach biome-specific procedural fields that are stripped from saves:
     //   resort/agri/oil → _b (landmasses/swatches); storm → _b (lightning bolts);
     //   any biome → _mtn (mountain ridges).
@@ -17909,6 +18105,7 @@ function _restoreFromSave(save){
   _sandstormCheckSd=save._sandstormCheckSd||0; _bhResearchCheckSd=save._bhResearchCheckSd||0;
   _totalPassengersDelivered=save._totalPassengersDelivered||0; _totalHazmatIncinerated=save._totalHazmatIncinerated||0;
   trainyard=save.trainyard||{}; financeLedger=save.financeLedger||[]; _ledgerSummary=save._ledgerSummary||{totalRevenue:0,totalCost:0,totalInterest:0}; purchaseLedger=save.purchaseLedger||[]; corpValueHistory=save.corpValueHistory||{};
+  corpStatsHistory=save.corpStatsHistory||{}; aiCorpStatsHistory=save.aiCorpStatsHistory||{};
   // Migrate old trainyard format {type: count} → {type: [carRecord]} so the
   // record-based code paths can read it uniformly. Old saves' anonymous yard
   // cars become empty-record entries (no preserved stats, fresh on restore).
@@ -18323,7 +18520,7 @@ function startGame(){
   missions=[]; _recomputeMissionTargets();
   _gameStartSd=stardate;
   pendingMissionIntros=MISSION_DEFS.filter(def=>!def.prerequisite&&def.id!=='build_foundry'&&def.id!=='dispose_hazmat'&&def.id!=='lost_colony'&&def.id!=='seeking_home'&&def.id!=='create_route'&&def.id!=='find_molten_ore'&&def.id!=='research_royal_car'&&def.id!=='colony_train'&&def.id!=='spread_the_seed'&&def.id!=='famine'&&def.id!=='outbreak'&&def.id!=='stellar_cartography'&&def.id!=='galaxy_census'&&def.id!=='sandstorm_relief'&&def.id!=='bh_research'&&def.id!=='design_better_train').map(def=>({defId:def.id,readySd:_gameStartSd+(def.startsAfter||0)}));
-  financeLedger=[]; _ledgerSummary={totalRevenue:0,totalCost:0,totalInterest:0}; purchaseLedger=[]; corpValueHistory={}; _financeScrollY=0; _financeBreakdown='stardate'; _financeDropdownOpen=false;
+  financeLedger=[]; _ledgerSummary={totalRevenue:0,totalCost:0,totalInterest:0}; purchaseLedger=[]; corpValueHistory={}; corpStatsHistory={}; aiCorpStatsHistory={}; _financeScrollY=0; _financeBreakdown='stardate'; _financeDropdownOpen=false; _versusMetric='value'; _versusDropdownOpen=false;
   loans=[]; _loanCounter=0; _financeTab='financials'; _financeLoanSelected='small'; _financeLoanHover=null; _financeTakeLoanHover=false;
   // Fresh pool of issuer names per game; assign one to each loan tier
   _bankNames=_generateBankNames();
@@ -18815,7 +19012,30 @@ function loop(ts){
     // CEO salary + candidate re-roll — once per whole stardate crossed (X.00)
     if(_corp&&galaxy&&Math.floor(stardate)>Math.floor(_sdBefore)){
       // Record corp value at end of the completed stardate (before salary deduction)
-      {const _cv=_corpAssets(); corpValueHistory[Math.floor(_sdBefore)]=_cv.liquid+_cv.trainVal+_cv.stationVal+_cv.upgradeVal;}
+      {const _cv=_corpAssets(); corpValueHistory[Math.floor(_sdBefore)]=_cv.liquid+_cv.trainVal+_cv.stationVal+_cv.upgradeVal;
+      // Also record a full multi-metric snapshot for the VS RIVAL chart on
+      // the Corp Finances popup. Pruned to ~15 SD so the rolling 10-SD
+      // display always has fresh data without unbounded growth.
+      const _sdF=Math.floor(_sdBefore);
+      let _ledgRev=_ledgerSummary?.totalRevenue||0, _ledgCost=_ledgerSummary?.totalCost||0;
+      for(const _le of financeLedger){ _ledgRev+=_le.revenue||0; _ledgCost+=_le.cost||0; }
+      corpStatsHistory[_sdF]={
+        value:_cv.liquid+_cv.trainVal+_cv.stationVal+_cv.upgradeVal,
+        credits, revenue:_ledgRev, costs:_ledgCost,
+        stations:galaxy.planets.filter(p=>p.playerBuiltStation||p.isStarter).length,
+        trains:trains.filter(t=>t.isPlayer).length,
+      };
+      if(_aiCorp){
+        aiCorpStatsHistory[_sdF]={
+          value:_aiComputeNetWorth(),
+          credits:_aiCorp.credits, revenue:_aiCorp.totalRevenue||0, costs:_aiCorp.totalCosts||0,
+          stations:_aiCorp.stationsBuilt||0,
+          trains:_aiCorp.trainIndices.length,
+        };
+      }
+      for(const _kk of Object.keys(corpStatsHistory))   if(+_kk<_sdF-15) delete corpStatsHistory[_kk];
+      for(const _kk of Object.keys(aiCorpStatsHistory)) if(+_kk<_sdF-15) delete aiCorpStatsHistory[_kk];
+      }
       const _sal=_corp.ceoSalary||10000;
       credits=Math.max(0,credits-_sal);
       pendingCreditDeltas.push({timer:30,amount:-_sal});
