@@ -7,6 +7,10 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Exo+2:wght@300;400;600;700&family=UnifrakturMaguntia&display=swap" rel="stylesheet">
+<!-- (Google Analytics 4 events are sent directly via the in-game `_ga()`
+     helper using the Measurement Protocol. No gtag.js snippet needed
+     here — gtag's cookie pipeline doesn't work in itch.io's cross-origin
+     iframe so we bypass it. See `_ga()` in the JS for details.) -->
 <style>
   *{margin:0;padding:0;box-sizing:border-box;}
   body{background:#000;display:flex;justify-content:center;align-items:center;height:100vh;overflow:hidden;}
@@ -206,20 +210,24 @@ const WORLD_W  = 204800;
 const WORLD_H  = 153600;
 
 // ── Google Analytics custom-event helper ─────────────────────────────────
-// Forwards in-game events to the host page's GA4 tag via `window.gtag()`.
-// Silently no-ops when gtag isn't present (local dev, ad-blocked sessions,
-// file:// URLs) so the game keeps running. Event names follow GA4 conventions
-// (lowercase letters/digits/underscores, ≤40 chars). Custom params are
-// arbitrary; register them as Custom Dimensions in GA4 → Admin → Custom
-// Definitions if you want to filter/group by them in standard reports
-// (Realtime + DebugView work without registration).
+// Sends events directly to GA4's Measurement Protocol via fetch(), bypassing
+// gtag entirely. We initially tried calling window.gtag() but in itch.io's
+// cross-origin iframe context the browser blocks gtag's cookie writes and
+// gtag silently aborts every event ("Unable to set cookie / Event
+// processing aborted during storage" / "Sending event to undefined").
+// fetch() POST directly to /g/collect avoids the whole cookie pipeline —
+// each event becomes one HTTP request with an in-memory client_id.
+//
+// Trade-off: no user/session continuity (every page-load is a "new user"
+// in GA's eyes), but event counts and event-parameter analysis work
+// perfectly, which is all we need for milestone tracking.
 //
 // Auto-injected param on EVERY event:
 //   session_seconds            integer real-time seconds since the script
-//                              first evaluated (= title screen load, i.e.
-//                              the moment the page first rendered).
+//                              first evaluated (= title screen load).
 //
 // Events sent (extra params in {parens}):
+//   game_start                 {corp, ai_difficulty, sd}
 //   station_built              {biome, planet, sd, credits}
 //   station_upgraded_large     {biome, planet, sd}
 //   station_upgraded_terminal  {biome, planet, sd}
@@ -227,14 +235,37 @@ const WORLD_H  = 153600;
 //   car_unlocked               {car_type, cargo, sd}
 //   mission_complete           {mission_id, mission_name, sd}
 //   engine_unlocked            {engine, sd}
-//   game_start                 {corp, ai_difficulty, sd}
+const _GA_MEASUREMENT_ID='G-66HLBD45ZX';
 const _gaSessionStartMs=Date.now();
+// Stable random client_id for this page load. GA uses this to group events
+// into a "user" — with storage disabled we can't persist it, so each tab
+// counts as one user, but events from the same tab cluster correctly.
+const _gaClientId=Math.floor(Math.random()*1e10)+'.'+Math.floor(Date.now()/1000);
 function _ga(name, params){
   try {
-    if(typeof gtag!=='function') return;
     const _p=params?Object.assign({},params):{};
     _p.session_seconds=Math.floor((Date.now()-_gaSessionStartMs)/1000);
-    gtag('event', name, _p);
+    // Build the Measurement Protocol v2 POST body. String params get the
+    // `ep.` prefix; numeric params get `epn.` for proper typing in GA's
+    // ingestion pipeline.
+    const _kv=[
+      'v=2',
+      'tid='+encodeURIComponent(_GA_MEASUREMENT_ID),
+      'cid='+encodeURIComponent(_gaClientId),
+      'en='+encodeURIComponent(name),
+      '_s=1',
+    ];
+    for(const _k in _p){
+      const _v=_p[_k];
+      const _pfx=(typeof _v==='number')?'epn.':'ep.';
+      _kv.push(_pfx+encodeURIComponent(_k)+'='+encodeURIComponent(_v));
+    }
+    const _url='https://www.google-analytics.com/g/collect?'+_kv.join('&');
+    // POST with no body + keepalive so events still fire even if the user
+    // closes the tab a moment later. mode:'no-cors' because GA's collect
+    // endpoint doesn't return CORS headers; we don't need to read the
+    // response anyway (GA returns 204 on success).
+    fetch(_url, {method:'POST', mode:'no-cors', keepalive:true}).catch(()=>{});
   } catch(_) {}
 }
 
@@ -388,8 +419,13 @@ const MISSION_DEFS=[
    details:"There's a whole galaxy out there waiting to be explored. Start by sending a train to a nearby planet.",
    reward:1000, timeLimit:null,
    checkObj:(oid,m)=>{
-     if(oid==='select_planet') return !!(sel&&sel.type==='planet');
-     if(oid==='route_train')   return !!(m._trainRouted);
+     // Pre-completion: if any player train has already been routed somewhere
+     // (has an active route OR has accumulated any distance moving between
+     // planets) then this whole tutorial mission auto-passes. Prevents the
+     // intro from feeling stale when the player has already explored.
+     const _alreadyExplored=galaxy&&trains.some(t=>t.isPlayer&&(t.route||(t.totalDist||0)>1000));
+     if(oid==='select_planet') return _alreadyExplored||!!(sel&&sel.type==='planet');
+     if(oid==='route_train')   return _alreadyExplored||!!(m._trainRouted);
      return false;
    }},
   {id:'create_route',
@@ -403,9 +439,14 @@ const MISSION_DEFS=[
    details:"A repeating route keeps your trains busy automatically — no need to redirect them after each delivery.",
    reward:2000, timeLimit:null,
    checkObj:(oid,m)=>{
-     if(oid==='sel_start')    return !!(routeStops.length>=1&&sel&&sel.type==='planet');
-     if(oid==='shift_click')  return routeStops.length>=2;
-     if(oid==='assign_train') return !!(m._routeAssigned);
+     // Pre-completion: if any player train already has an assigned loop
+     // route with ≥ 2 stops, all three objectives auto-pass. Players who
+     // already figured out routes shouldn't have to "re-do" them for the
+     // tutorial mission to recognise the work.
+     const _hasLoopRoute=galaxy&&trains.some(t=>t.isPlayer&&t.route&&t.route.isLoop&&(t.route.stops||[]).length>=2);
+     if(oid==='sel_start')    return _hasLoopRoute||!!(routeStops.length>=1&&sel&&sel.type==='planet');
+     if(oid==='shift_click')  return _hasLoopRoute||routeStops.length>=2;
+     if(oid==='assign_train') return _hasLoopRoute||!!(m._routeAssigned);
      return false;
    }},
   {id:'find_molten_ore',
@@ -9888,19 +9929,22 @@ function _drawZoomCallout(){
   ctx.restore();
 }
 
-// Accumulator so updateMissions runs at most once per 0.1 SD instead of every
-// rendered frame. The mission system's intro-gate checks and per-objective
-// sweep scan galaxy.planets and trains[] — at mid/late game with many active
-// missions this is the single biggest hot loop. All conditions advance from
-// either delivery events (which fire immediately at the unload site) or
-// slow-moving world state (planet visits, station counts), so a ~150ms
-// detection lag at 1× speed is imperceptible.
+// Split-throttle design:
+//   • Intro-gate scans (mission-trigger conditions like "did the player visit
+//     a rocky planet", "total hazmat produced >= 2") run at most once per
+//     0.05 SD. They scan galaxy.planets / trains and govern slow-moving
+//     world state; this cadence keeps intros feeling responsive (~75 ms at
+//     1× speed) without per-frame full-galaxy scans.
+//   • The active-mission objective sweep runs EVERY FRAME so that completing
+//     an objective (or a whole mission) feels instant. The per-objective
+//     `checkObj` calls are cheap relative to the intro-gate scans.
 let _missionTickAcc=0;
 function updateMissions(dtSd){
   if(!galaxy) return;
   _missionTickAcc+=dtSd||0;
-  if(_missionTickAcc<0.1) return;
-  _missionTickAcc=0;
+  const _doIntroGates=_missionTickAcc>=0.05;
+  if(_doIntroGates) _missionTickAcc=0;
+  if(_doIntroGates){
   // Unlock "Build a Foundry" on whichever triggers first:
   // (1) "Find Molten Ore" completed, (2) any rocky/desert planet visited, (3) 0.5 sd elapsed
   if(!_missionPending('build_foundry')){
@@ -9981,6 +10025,7 @@ function updateMissions(dtSd){
       }
     }
   }
+  } // end of throttled intro-gate block — active-mission sweep below runs every frame
   if(!missions.length) return;
   for(const m of missions){
     if(m.status!=='active') continue;
@@ -16512,12 +16557,17 @@ canvas.addEventListener('mouseup',e=>{
         if(_newMissionAcceptBounds){const b=_newMissionAcceptBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
           const def=popupState.newMissionDef;
           if(def&&!missions.some(mx=>mx.id===def.id)){
+            // Honour the intro popup's pre-completion analysis: any objective
+            // it flagged as already-satisfied starts in done:true state so the
+            // mission doesn't need to wait a full updateMissions tick to flip
+            // it. Falls back to all-false when no precomputed set is present.
+            const _preDone=popupState.preCompletedObjIds||new Set();
             missions.push({id:def.id,name:def.name,imageType:def.imageType,imageKey:def.imageKey||null,
               objectives:def.objectives.map(o=>{
                 let _txt=o.text;
                 if(_txt.includes('{SOURCE}')&&popupState.sourcePlanetId!=null){const _sp3=_gp(popupState.sourcePlanetId);if(_sp3)_txt=_txt.replace('{SOURCE}',_sp3.name);}
                 if(_txt.includes('{TARGET}')&&popupState.targetPlanetId!=null){const _tp3=_gp(popupState.targetPlanetId);if(_tp3)_txt=_txt.replace('{TARGET}',_tp3.name);}
-                return {id:o.id,text:_txt,done:false};
+                return {id:o.id,text:_txt,done:_preDone.has(o.id)};
               }),
               details:(()=>{let _d=def.details||'';
                 if(_d.includes('{SOURCE}')&&popupState.sourcePlanetId!=null){const _sp5=_gp(popupState.sourcePlanetId);if(_sp5)_d=_d.replace(/\{SOURCE\}/g,_sp5.name);}
