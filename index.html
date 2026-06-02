@@ -427,8 +427,9 @@ const MISSION_DEFS=[
    imageType:'planet_type', imageKey:'lava',
    startsAfter:0,
    objectives:[
-     {id:'select_planet', text:'Click on a nearby planet to select it'},
-     {id:'route_train',   text:"Then click 'ROUTE TRAIN HERE' and select a train to send there."},
+     {id:'select_planet',  text:'CLICK on a nearby planet with a STATION to select it'},
+     {id:'click_route_btn',text:'Then CLICK on "ROUTE TRAIN HERE" in the bottom panel'},
+     {id:'click_train',    text:'Then CLICK on a TRAIN to send on a ONE-WAY ROUTE to that planet'},
    ],
    details:"There's a whole galaxy out there waiting to be explored. Start by sending a train to a nearby planet.",
    reward:1000, timeLimit:null,
@@ -438,17 +439,18 @@ const MISSION_DEFS=[
      // planets) then this whole tutorial mission auto-passes. Prevents the
      // intro from feeling stale when the player has already explored.
      const _alreadyExplored=galaxy&&trains.some(t=>t.isPlayer&&(t.route||(t.totalDist||0)>1000));
-     if(oid==='select_planet') return _alreadyExplored||!!(sel&&sel.type==='planet');
-     if(oid==='route_train')   return _alreadyExplored||!!(m._trainRouted);
+     if(oid==='select_planet')   return _alreadyExplored||!!(sel&&sel.type==='planet');
+     if(oid==='click_route_btn') return _alreadyExplored||!!(m._routeBtnClicked||m._trainRouted);
+     if(oid==='click_train')     return _alreadyExplored||!!(m._trainRouted);
      return false;
    }},
   {id:'create_route',
    name:'Create a repeating train route',
    imageType:'route_preview', imageKey:null,
    objectives:[
-     {id:'sel_start',    text:'CLICK on a PLANET (or a TRAIN orbiting a PLANET) where you\'d like the repeating ROUTE to begin'},
+     {id:'sel_start',    text:'CLICK on a PLANET (or a TRAIN orbiting a PLANET) where you\'d like the REPEATING ROUTE to begin'},
      {id:'shift_click',  text:'SHIFT+CLICK additional planets in the order you\'d like them to be visited'},
-     {id:'assign_train', text:'CLICK "ASSIGN TO TRAIN" and select a train to run the ROUTE.'},
+     {id:'assign_train', text:'When you\'re satisfied with your route, click "ASSIGN TO TRAIN" and then select a TRAIN to run the ROUTE'},
    ],
    details:"A repeating route keeps your trains busy automatically — no need to redirect them after each delivery.",
    reward:2000, timeLimit:null,
@@ -1571,7 +1573,14 @@ let _popupCooldownUntil=0; // real-time ms: next pending popup won't show until 
 let _prevHadPopup=false;   // tracks activePopup truthy→falsy transition for cooldown
 let _missionTipStartMs=0;    // real-time ms when the [M] missions callout bubble was triggered (0=inactive)
 let _speedTipStartMs=0;      // real-time ms when the speed-button callout bubble was triggered (0=inactive)
-let _speedTipSuppressed=false; // true once the player has clicked the increase-speed arrow at least once
+let _speedTipSuppressed=false; // true once the player has clicked either speed arrow at least once
+// Periodic re-introduction state. The bubble first appears 30s after the
+// galaxy view loads; subsequent shows happen at doubling intervals (60s,
+// 120s, 240s, …) measured from the end of the previous show. Suppressed
+// permanently once the player adjusts the game speed (either arrow).
+let _speedTipNextRealMs=0;   // real-time ms when the next periodic show should begin (0=none scheduled)
+let _speedTipShownCount=0;   // number of completed shows so far (drives doubling interval)
+let _speedTipFadeOutStartMs=0; // when set, drives a forced 1-second linear fade-out (triggered by speed-arrow click while bubble is showing)
 let _zoomCalloutStartMs=0;   // real-time ms when zoom hint callout was triggered (0=not yet, <0=done/suppressed)
 let _hasZoomed=false;        // true once the player first uses the scroll wheel to zoom
 let _buyTrainTipStartMs=0;   // real-time ms when "Click here to purchase a second train" callout was triggered (0=inactive)
@@ -1588,7 +1597,7 @@ const _PLAYER_OPENED_POPUPS=new Set([
 ]);
 let _missionTipFired=false;  // M-tip is one-shot once 4th mission has been accepted
 // New-game tutorial bubble chain (zoom out → double click lava planet → build station)
-let _tutorialPhase='inactive'; // 'inactive'|'pre_zoom'|'zoom_out'|'double_click'|'build_station'|'done'
+let _tutorialPhase='inactive'; // 'inactive'|'pre_zoom'|'look_around'|'look_around_pause'|'zoom_out'|'double_click'|'build_station'|'done'
 let _tutorialPhaseStartMs=0;   // real-time ms when the current phase started
 let _tutorialFadeOutStartMs=0; // real-time ms when the current bubble began fading out (0 = not yet)
 let _tutorialLavaPlanetId=-1;  // planet id of the lava planet in Orijen's home system
@@ -1597,6 +1606,7 @@ let _createRouteTimerMs=0; // real-time ms when player first visited a non-home-
 let _visitPlanetCompletedMs=0; // (legacy) real-time ms when visit_planet mission completed. Superseded by _tutorialDoneMs but kept reset for save compat.
 let _tutorialDoneMs=0;         // real-time ms when the tutorial chain reached 'done' — arms the 1 s create_route intro
 let _crTutorialDoneMs=0;       // real-time ms when the create_route tutorial chain reached 'all_done' — arms buy_second_train (10 s) and build_foundry (40 s) intros
+let _crTrainPreselected=false; // true if a train was already selected when the create_route tutorial chain started (drives the blue companion bubble in cr_click_orijen / cr_shift_click_other)
 // First-time "MED/HIGH orbit" callout — one-shot per career. Fires when a
 // player train completes a transit into MED or HIGH orbit (vs the default
 // LOW). Snaps the camera onto the planet, zooms to fit the entire HIGH
@@ -4564,10 +4574,16 @@ function generateGalaxy(){
     let orbitR=star.radius*1.8+400;
     // Each star has a dominant orbit direction; 98% of planets follow it
     const dominantDir=Math.random()<0.5?1:-1;
-    // Track the home-system lava planet's angle so Orijen (next iteration) can
-    // be placed within ±30° of it — keeps the two anchor worlds visually close
-    // on the player's very first frame in galaxy view.
-    let _homeLavaAngle=null;
+    // Home-system anchors: Orijen starts at a deterministic angle so the
+    // very first frame of every new game frames the tutorial consistently.
+    // The angle depends on the home star's dominant orbit direction —
+    //   dominantDir = +1 (CW, angle increases in screen-y-down coords)
+    //                 → 9 o'clock (angle = π) so Orijen drifts downward
+    //                   toward 6pm as the clock ticks forward.
+    //   dominantDir = -1 (CCW) → 3 o'clock (angle = 0).
+    // The home-system LAVA planet (HOME_BIOMES index 0) is then placed
+    // within ±30° of Orijen's anchor angle for tutorial proximity.
+    const _homeOrijenAngle=isHome?((dominantDir>0)?Math.PI:0):0;
     for(let i=0;i<np;i++){
       const isStarter=(isHome&&i===1); // Orijen sits at HOME_BIOMES index 1
       // Orijen is always L (home planet). The HOME_BIOMES index-0 lava is
@@ -4581,14 +4597,19 @@ function generateGalaxy(){
       if(!isHome&&orbitR>orbitCap) break;        // non-home cap is permissive break
       if(orbitR+pr>boundLimit) break; // orbit would exit world boundary
       let angle=rand(0,Math.PI*2);
-      // Orijen (home index 1) starts within ±30° of the home-system lava
-      // planet (home index 0) for the tutorial.
-      if(isHome&&i===1&&_homeLavaAngle!=null){
-        angle=_homeLavaAngle+(Math.random()*2-1)*(Math.PI/6);
+      if(isHome&&i===0){
+        // Lava (home index 0) — placed within ±30° of Orijen's anchor.
+        angle=_homeOrijenAngle+(Math.random()*2-1)*(Math.PI/6);
+      } else if(isHome&&i===1){
+        // Orijen (home index 1) — deterministic 9pm (CW) / 3pm (CCW).
+        angle=_homeOrijenAngle;
       }
-      // Kepler-inspired speed: closer planets orbit faster (v ∝ 1/√r)
-      // 2% chance of retrograde (opposite dominant direction)
-      const dir=(Math.random()<0.02?-dominantDir:dominantDir);
+      // Kepler-inspired speed: closer planets orbit faster (v ∝ 1/√r).
+      // Default 2% chance of retrograde — but the home-system lava and
+      // Orijen ALWAYS follow the dominant direction so the two tutorial
+      // anchor worlds always orbit Gigi Prime the same way.
+      const _forceDominant=(isHome&&(i===0||i===1));
+      const dir=_forceDominant?dominantDir:(Math.random()<0.02?-dominantDir:dominantDir);
       const spd=0.00025*Math.sqrt(800/orbitR)*dir;
       // Home system: biome forced by HOME_BIOMES position. Elsewhere: random.
       const _typeForSlot=isHome
@@ -4651,9 +4672,9 @@ function generateGalaxy(){
       }
       star.planetIds.push(p.id);
       planets.push(p);
-      // Record lava-planet angle so the next iteration (Orijen) can clamp
-      // its starting angle close to it for the new-game tutorial.
-      if(isHome&&i===0) _homeLavaAngle=angle;
+      // (Lava-angle tracking removed — Orijen now uses a deterministic
+      // anchor angle and lava is placed within ±30° of THAT, not the
+      // other way around. See _homeOrijenAngle above.)
       // Tighter post-spacing on home so all 6 fit inside orbitCap.
       orbitR+=pr+(isHome?rand(180,520):rand(200,800));
     }
@@ -10989,15 +11010,44 @@ function _missionPending(id){
 }
 
 function _drawSpeedTip(){
-  if(_speedTipSuppressed) return;
-  if(!_speedTipStartMs) return;
-  const _elpMs=Date.now()-_speedTipStartMs;
-  const TOTAL=12000, FADE_IN=500, FADE_OUT=2000;
-  if(_elpMs>=TOTAL){ _speedTipStartMs=0; return; }
-  let _a;
-  if(_elpMs<FADE_IN) _a=_elpMs/FADE_IN;
-  else if(_elpMs>TOTAL-FADE_OUT) _a=(TOTAL-_elpMs)/FADE_OUT;
-  else _a=1;
+  const _nowMs=Date.now();
+  // Periodic auto-launch: when not suppressed, not currently showing, no
+  // forced fade in progress, and the scheduled wake-up time has arrived,
+  // start a fresh show. First scheduled time is set at galaxy entry to
+  // now+30s; later shows reschedule at 60s / 120s / 240s / ... (doubling)
+  // from the moment the previous show ends.
+  if(!_speedTipSuppressed && !_speedTipStartMs && !_speedTipFadeOutStartMs && _speedTipNextRealMs>0 && _nowMs>=_speedTipNextRealMs){
+    _speedTipStartMs=_nowMs;
+    _speedTipNextRealMs=0;
+  }
+  // Resolve current alpha. Two paths:
+  //   • Forced fade-out (player just adjusted speed) — linear 1s fade,
+  //     overrides any in-flight show.
+  //   • Natural show lifecycle — 500ms fade-in → 9.5s plateau → 2s fade-out,
+  //     then schedule the next doubling interval and stop.
+  let _a=0;
+  if(_speedTipFadeOutStartMs>0){
+    _a=1-(_nowMs-_speedTipFadeOutStartMs)/1000;
+    if(_a<=0){ _speedTipStartMs=0; _speedTipFadeOutStartMs=0; _speedTipNextRealMs=0; return; }
+  } else {
+    if(_speedTipSuppressed) return;
+    if(!_speedTipStartMs) return;
+    const _elpMs=_nowMs-_speedTipStartMs;
+    const TOTAL=12000, FADE_IN=500, FADE_OUT=2000;
+    if(_elpMs>=TOTAL){
+      // Show finished naturally — schedule next at doubling interval.
+      _speedTipStartMs=0;
+      _speedTipShownCount++;
+      if(!_speedTipSuppressed){
+        const _interval=30000*Math.pow(2,_speedTipShownCount); // 60s, 120s, 240s, …
+        _speedTipNextRealMs=_nowMs+_interval;
+      }
+      return;
+    }
+    if(_elpMs<FADE_IN) _a=_elpMs/FADE_IN;
+    else if(_elpMs>TOTAL-FADE_OUT) _a=(TOTAL-_elpMs)/FADE_OUT;
+    else _a=1;
+  }
   if(_a<=0||!speedRightBounds) return;
   const _sb=speedRightBounds;
   const _txt='Click here to increase game speed';
@@ -11145,7 +11195,13 @@ function _drawTutorialChain(stage){
   // Advance / phase-transition logic always runs (idempotently) — both
   // calls compute the same alpha from the same state. Rendering is gated
   // by the _drawBubble / _drawHighlightBox helpers below.
-  const _POPUP_PHASES=new Set(['build_station','supply_demand','train_detail_edit','builder_add_cars','builder_purchase']);
+  // `select_train` lives in the popup-stage set even though no actual popup is
+  // open during it — its bubble + highlight box point at the right-side panel
+  // (Trains row). Rendering in the popup stage means the bubble draws AFTER
+  // drawPanelTabs / drawTopBar, so the yellow bubble can never be partially
+  // hidden behind the Stations/Trains folder tabs that sit at the top of the
+  // panel.
+  const _POPUP_PHASES=new Set(['build_station','supply_demand','select_train','train_detail_edit','builder_add_cars','builder_purchase']);
   const _isPopupPhase=_POPUP_PHASES.has(_tutorialPhase);
   // Popup-stage calls for non-popup phases have nothing to do (no advance
   // either — that already ran in the 'galaxy' call earlier this frame).
@@ -11154,9 +11210,30 @@ function _drawTutorialChain(stage){
   const FADE_MS=1000;
   const _now=Date.now();
   const _elapsed=_now-_tutorialPhaseStartMs;
-  // ── Phase advance: pre_zoom waits 2 s, then enters zoom_out ──
+  // ── Phase advance: pre_zoom waits 2 s, then enters look_around ──
   if(_tutorialPhase==='pre_zoom'){
-    if(_elapsed>=2000){ _tutorialPhase='zoom_out'; _tutorialPhaseStartMs=_now; _tutorialFadeOutStartMs=0; }
+    if(_elapsed>=2000){ _tutorialPhase='look_around'; _tutorialPhaseStartMs=_now; _tutorialFadeOutStartMs=0; }
+    return;
+  }
+  // ── Phase: look_around ─────────────────────────────────────
+  // First tutorial bubble — sits in the same spot as the upcoming ZOOM OUT
+  // bubble. Lifecycle: 1 s fade in (handled by _resolveAlpha), 5 s fully
+  // visible, then arm _tutorialFadeOutStartMs to drive a 1 s fade out, then a
+  // 1 s pause (look_around_pause) before the ZOOM OUT bubble takes over.
+  if(_tutorialPhase==='look_around'){
+    const r=_resolveAlpha();
+    if(r.advanced){ _advanceTo('look_around_pause'); return; }
+    // 1 s fade-in + 5 s plateau = 6 s before we kick the fade-out off.
+    if(_tutorialFadeOutStartMs===0 && _elapsed>=6000) _tutorialFadeOutStartMs=_now;
+    _drawBubble(['CLICK AND DRAG (or use W/A/S/D) to LOOK AROUND'], null, r.alpha);
+    return;
+  }
+  // ── Phase: look_around_pause ───────────────────────────────
+  // Empty 1-second beat between the LOOK AROUND fade-out and the ZOOM OUT
+  // fade-in. No bubble drawn this phase — just a timer that hands off to
+  // zoom_out once elapsed.
+  if(_tutorialPhase==='look_around_pause'){
+    if(_elapsed>=1000){ _tutorialPhase='zoom_out'; _tutorialPhaseStartMs=_now; _tutorialFadeOutStartMs=0; }
     return;
   }
   // ── Helpers ──────────────────────────────────────────────
@@ -11195,9 +11272,15 @@ function _drawTutorialChain(stage){
       _bx=Math.round(_visW/2 - _bW/2);
       _by=Math.round((TOP_H+GH)/2 - _bH/2);
     }
+    // opts.color = 'blue' swaps the caution-yellow palette for the
+    // standard blue callout colors. Defaults to yellow.
+    const _blue = opts && opts.color === 'blue';
+    const _shadowCol = _blue ? 'rgba(0,80,180,0.55)'  : 'rgba(180,140,0,0.55)';
+    const _fillCol   = _blue ? 'rgba(25,155,255,0.97)' : 'rgba(245,200,40,0.97)';
+    const _textCol   = _blue ? '#000000'               : '#1a1308';
     ctx.globalAlpha=alpha;
-    ctx.shadowColor='rgba(180,140,0,0.55)'; ctx.shadowBlur=8;
-    ctx.fillStyle='rgba(245,200,40,0.97)';
+    ctx.shadowColor=_shadowCol; ctx.shadowBlur=8;
+    ctx.fillStyle=_fillCol;
     ctx.beginPath(); ctx.roundRect(_bx,_by,_bW,_bH,_bR); ctx.fill();
     if(_drawTail){
       ctx.beginPath();
@@ -11207,7 +11290,7 @@ function _drawTutorialChain(stage){
         ctx.moveTo(_tailX-7,_by+_bH); ctx.lineTo(_tailX+7,_by+_bH); ctx.lineTo(_tailX,anchorScreen.y-4); ctx.closePath(); ctx.fill();
       }
     }
-    ctx.shadowBlur=0; ctx.fillStyle='#1a1308';
+    ctx.shadowBlur=0; ctx.fillStyle=_textCol;
     ctx.font='10px "Exo 2",sans-serif';
     ctx.textAlign='center'; ctx.textBaseline='middle';
     for(let _i=0;_i<lines.length;_i++) ctx.fillText(lines[_i],_bx+_bW/2,_by+_pad/2+_lh/2+_i*_lh);
@@ -11329,7 +11412,7 @@ function _drawTutorialChain(stage){
       const _ROW_H=82;
       const _rx=W-PANEL_W+2, _ry=TOP_H+1-panelScroll, _rw=PANEL_W-4, _rh=_ROW_H-2;
       _drawHighlightBox(_rx,_ry,_rw,_rh,r.alpha,2);
-      _drawBubble(['DOUBLE CLICK to EDIT YOUR TRAIN'], {x:_rx+_rw/2,y:_ry+_rh}, r.alpha, {below:true});
+      _drawBubble(['DOUBLE CLICK here to','customize your TRAIN'], {x:_rx+_rw/2,y:_ry+_rh}, r.alpha, {below:true});
     }
     return;
   }
@@ -11439,9 +11522,11 @@ function _drawTutorialChain(stage){
     if(_lp){
       const [_sx,_sy]=w2s(_lp.x,_lp.y);
       const _sr=Math.max(8,_lp.radius*cam.scale);
-      // Anchor lifted by an extra ~20px so the bubble stays clearly above
-      // the planet rather than nestling right on top of it.
-      _drawBubble(['CLICK HERE to select another planet with a station'], {x:_sx,y:_sy-_sr-20}, r.alpha);
+      // Anchor sits slightly INSIDE the planet's top rim so that the
+      // bubble's tail tip (which the helper renders at anchor.y - 4)
+      // lands exactly on the planet's edge — bubble appears to be just
+      // barely touching the planet rather than floating well above it.
+      _drawBubble(['CLICK HERE to select another planet with a STATION'], {x:_sx,y:_sy-_sr+4}, r.alpha);
     }
     return;
   }
@@ -11459,7 +11544,12 @@ function _drawTutorialChain(stage){
     if(r.advanced){ _advanceTo('vp_click_train'); return; }
     if(routeHereBtnBounds){
       const _b=routeHereBtnBounds;
-      _drawBubble(['CLICK HERE'], {x:_b.x+_b.w/2,y:_b.y}, r.alpha);
+      // routeHereBtnBounds spans the full right-panel-width info-bar area;
+      // the green-outlined button itself starts 14px below the top of that
+      // region. The helper renders the tail TIP at anchor.y - 4, so we
+      // anchor at _b.y + 18 to put the tip exactly on the top edge of the
+      // green outline.
+      _drawBubble(['CLICK HERE to create a ONE-WAY ROUTE to this planet'], {x:_b.x+_b.w/2,y:_b.y+18}, r.alpha);
     }
     return;
   }
@@ -11475,7 +11565,12 @@ function _drawTutorialChain(stage){
     if(panelTab==='trains' && !activePopup){
       const _ROW_H=82;
       const _rx=W-PANEL_W+2, _ry=TOP_H+1-panelScroll, _rw=PANEL_W-4, _rh=_ROW_H-2;
-      _drawBubble(['CLICK a train to route it','to the selected planet'], {x:_rx+_rw/2,y:_ry+_rh}, r.alpha, {below:true});
+      // Anchor at _ry + 53 — the trains-panel status text ("IN ORBIT /
+      // PARKED" for the top row) draws at baseline ry + 54. The _drawBubble
+      // helper renders the tail tip at anchor.y + 4 in below-placement
+      // mode, so this puts the tip at _ry + 57 — just below the status
+      // text's descender, almost touching it without crossing.
+      _drawBubble(['CLICK on a TRAIN to send it on a ONE-WAY ROUTE to the selected planet'], {x:_rx+_rw/2,y:_ry+53}, r.alpha, {below:true});
     }
     return;
   }
@@ -11505,6 +11600,9 @@ function _drawTutorialChain(stage){
       return;
     }
     if(missions.some(m=>m.id==='create_route'&&m.status==='active')){
+      // Snapshot whether a player train was selected at mission start —
+      // drives the blue companion bubble in the cr_click_* phases below.
+      _crTrainPreselected = !!(sel && sel.type==='car' && sel.data && trains[sel.data.trainIdx]?.isPlayer);
       // If Orijen or the home-system lava planet is already selected, skip
       // past the "click Orijen" bubble straight into the shift-click bubble.
       const _selIsAnchor=sel&&sel.type==='planet'&&sel.data&&
@@ -11539,7 +11637,19 @@ function _drawTutorialChain(stage){
     const _lavaInRoute   = routeStops.some(p=>p&&p.id===_tutorialLavaPlanetId);
     if(_tutorialFadeOutStartMs===0 && _orijenInRoute && _lavaInRoute) _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
-    if(r.advanced){ _advanceTo('cr_assign_btn'); return; }
+    if(r.advanced){ _advanceTo('cr_assign_btn'); _crTrainPreselected=false; return; }
+    // Blue companion bubble — drawn FIRST so the yellow planet bubble
+    // renders on top wherever they overlap. Shown only if a player train
+    // was selected at the create_route mission's start (snapshot taken
+    // when the 'done' phase advanced into this chain).
+    if(_crTrainPreselected){
+      const _selTrain = sel && sel.type==='car' && sel.data ? trains[sel.data.trainIdx] : trains[0];
+      if(_selTrain){
+        const [_tx,_ty]=getTrainCarPos(_selTrain,0);
+        const [_bsx,_bsy]=w2s(_tx,_ty);
+        _drawBubble(['Since your TRAIN is already selected...'], {x:_bsx,y:_bsy-14}, r.alpha, {color:'blue'});
+      }
+    }
     // Pick the OTHER planet (not currently selected). If sel is the lava
     // planet, point at Orijen; otherwise (sel is Orijen or neither), point
     // at the lava planet.
@@ -11549,7 +11659,10 @@ function _drawTutorialChain(stage){
     if(_tp){
       const [_sx,_sy]=w2s(_tp.x,_tp.y);
       const _sr=Math.max(8,_tp.radius*cam.scale);
-      _drawBubble(['SHIFT+CLICK on this planet to add it to the ROUTE'], {x:_sx,y:_sy-_sr-20}, r.alpha);
+      // Anchor sits slightly INSIDE the planet's top rim so the bubble's
+      // tail tip (helper renders at anchor.y - 4) lands on the planet's
+      // edge — bubble appears to be just barely touching the surface.
+      _drawBubble(['SHIFT+CLICK on this planet to add it to the REPEATING ROUTE'], {x:_sx,y:_sy-_sr+4}, r.alpha);
     }
     return;
   }
@@ -11577,14 +11690,28 @@ function _drawTutorialChain(stage){
   // temp routes left over from earlier tutorial steps.)
   if(_tutorialPhase==='cr_click_train'){
     if(_elapsed<50 && !activePopup) panelTab='trains';
-    const _routeAssigned = trains.some(t=>t.isPlayer && t.route && !t.route.isTempRoute && t.route.stops && t.route.stops.length>=2);
+    // Detect route-assignment via multiple signals:
+    // (1) train.route is the real (non-temp) loop route — happens when the train was
+    //     already at the first stop.
+    // (2) train.queuedRoute is the real route — happens when the train was mid-transit
+    //     or not at the first stop (assignRouteToTrain stashes the real route behind a
+    //     temp connecting leg). The temp leg has isTempRoute:true, the real one doesn't.
+    // (3) Fallback: the create_route mission's _routeAssigned flag (set by
+    //     assignRouteToTrain at the end). Catches anything the above two miss.
+    const _crMm=missions.find(mx=>mx.id==='create_route'&&mx.status==='active');
+    const _routeAssigned =
+      (_crMm && _crMm._routeAssigned) ||
+      trains.some(t=>t.isPlayer && (
+        (t.route        && !t.route.isTempRoute        && t.route.stops        && t.route.stops.length>=2) ||
+        (t.queuedRoute  && !t.queuedRoute.isTempRoute  && t.queuedRoute.stops  && t.queuedRoute.stops.length>=2)
+      ));
     if(_tutorialFadeOutStartMs===0 && _routeAssigned) _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
     if(r.advanced){ _tutorialPhase='all_done'; if(!_crTutorialDoneMs) _crTutorialDoneMs=_now; return; }
     if(panelTab==='trains'){
       const _ROW_H=82;
       const _rx=W-PANEL_W+2, _ry=TOP_H+1-panelScroll, _rw=PANEL_W-4, _rh=_ROW_H-2;
-      _drawBubble(['CLICK on a TRAIN to assign the ROUTE to it'], {x:_rx+_rw/2,y:_ry+_rh}, r.alpha, {below:true});
+      _drawBubble(['CLICK on a TRAIN to assign the ROUTE'], {x:_rx+_rw/2,y:_ry+_rh}, r.alpha, {below:true});
     }
     return;
   }
@@ -16114,12 +16241,15 @@ function drawGalaxy(ts,dt){
       ctx.save();
       const fs=Math.min(14,Math.max(10,sr*.38));
       ctx.font=`${fs}px "Exo 2",sans-serif`; ctx.textAlign='center';
+      // textBaseline='top' makes the y-coord we pass to fillText the TOP
+      // edge of the label box (rather than the alphabetic baseline, which
+      // shifts with font size). With that baseline, a constant pixel
+      // offset gives a constant pixel gap between the planet's bottom rim
+      // (sy + sr) and the label's top — independent of zoom, font size,
+      // or planet size. ctx.save()/restore() rolls textBaseline back.
+      ctx.textBaseline='top';
       ctx.fillStyle=p.isStarter?'rgba(255,210,80,0.9)':'rgba(170,205,255,0.8)';
-      // push label below station track ring (outer edge = sr + ssz*0.14) when station present
-      let _stOff=p.hasStation?Math.max(14,SIZE_R['M']*cam.scale*0.16+6):14;
-      // Larger planets (M / L / XL / XXL) get an extra 5px so their bigger
-      // halos don't crowd the label. XS / S keep the tighter spacing.
-      if(p.size==='M'||p.size==='L'||p.size==='XL'||p.size==='XXL') _stOff+=5;
+      const _stOff=5; // constant slim buffer below the planet rim
       ctx.fillText(p.name,sx,sy+sr+_stOff);
       ctx.restore();
     }
@@ -16519,9 +16649,32 @@ function drawGalaxy(ts,dt){
       assignBtnBounds=null;
     }
   } else if(!sel){
-    ctx.textAlign='center'; ctx.fillStyle='rgba(90,140,200,0.52)';
-    ctx.font='12px "Exo 2",sans-serif';
-    ctx.fillText('Click a planet, star, or train car to inspect',W/2,GH+26);
+    // No selection — show 4 column quick-reference of core controls/mechanics.
+    // Same Exo 2 family + soft-blue palette as the old "Click a planet…" hint.
+    ctx.save(); ctx.textAlign='left';
+    const _colTitles=['REPEATING ROUTES','BUY / EDIT TRAINS','UPGRADE PLANETS','ZOOM & SPEED'];
+    const _colBullets=[
+      ['CLICK a PLANET to set the start','SHIFT+CLICK more planets to add stops','"ASSIGN TO TRAIN" then pick a train'],
+      ['Press "T" to open the Trains panel','Click "+" to buy a new train','Double-click a train to edit its cars'],
+      ['Double-click a planet for details','Build a STATION, then add UPGRADES','Refine cargo & boost supply output'],
+      ['Mouse wheel zooms in / out','WASD or arrow keys pan the camera','+ / − adjust speed, SPACE pauses'],
+    ];
+    const _availW=W-PANEL_W;
+    const _colW=Math.floor((_availW-8)/4);
+    for(let _ci=0;_ci<4;_ci++){
+      const _cx=8+_ci*_colW;
+      // Column title — bold, slightly brighter than the bullets so it reads as a header.
+      ctx.font='bold 9px "Exo 2",sans-serif';
+      ctx.fillStyle='rgba(130,180,230,0.72)';
+      ctx.fillText(_colTitles[_ci],_cx,GH+15);
+      // Bullets — same soft blue as the old hint text.
+      ctx.font='9px "Exo 2",sans-serif';
+      ctx.fillStyle='rgba(90,140,200,0.55)';
+      for(let _bi=0;_bi<_colBullets[_ci].length;_bi++){
+        ctx.fillText('• '+_colBullets[_ci][_bi],_cx,GH+30+_bi*13);
+      }
+    }
+    ctx.restore();
   } else if(sel.type==='star'){
     const s=sel.data;
     const _ibSVis=revealedStarIds.has(s.id);
@@ -17490,8 +17643,9 @@ function routeTrainHere(train, destPlanet){
   if(!train||!destPlanet) return;
   // Flag active visit_planet mission objective
   {const _vpM=missions.find(mx=>mx.id==='visit_planet'&&mx.status==='active'); if(_vpM) _vpM._trainRouted=true;}
-  // First time routing a train: show the speed-up callout bubble
-  if(_speedTipStartMs===0) _speedTipStartMs=Date.now();
+  // (The speed-up callout is now driven by a periodic timer scheduled at
+  // galaxy entry — see `_drawSpeedTip()` and `_speedTipNextRealMs`. No
+  // per-route-assignment trigger needed any more.)
   // Warn if direct leg exceeds engine range
   const _rthSrc=_gp(train.planetId);
   if(_rthSrc){
@@ -18079,7 +18233,12 @@ canvas.addEventListener('mousemove',e=>{
   dragDist=Math.hypot(dx,dy);
   cam.x=dragCam.x-dx/cam.scale;
   cam.y=dragCam.y-dy/cam.scale;
-  starPan.x=dragStarPan.x+dx; starPan.y=dragStarPan.y+dy;
+  // Parallax: drag right (dx>0) moves cam LEFT in world, so world objects shift
+  // RIGHT on screen. Stars must shift right too (slower). The draw formula
+  // `(bx - starPan.x*depth)` means stars shift RIGHT when starPan.x DECREASES,
+  // so subtract dx. (Sign matches the tracking branch's
+  // `starPan.x -= (oldCam.x - cam.x)*cam.scale`, which simplifies to -dx here.)
+  starPan.x=dragStarPan.x-dx; starPan.y=dragStarPan.y-dy;
   clampCamera();
 });
 canvas.addEventListener('mouseup',e=>{
@@ -19141,13 +19300,23 @@ canvas.addEventListener('mouseup',e=>{
     }
 
     // ── speed arrows ─────────────────────────────────────────
+    // Either arrow click suppresses the educational speed-tip bubble for the
+    // rest of this game. If the bubble is currently on screen, fall into a
+    // forced 1-second linear fade-out (handled in _drawSpeedTip).
     if(speedLeftBounds&&cp.x>=speedLeftBounds.x&&cp.x<=speedLeftBounds.x+speedLeftBounds.w&&cp.y>=speedLeftBounds.y&&cp.y<=speedLeftBounds.y+speedLeftBounds.h){
-      gameSpeedIdx=Math.max(0,gameSpeedIdx-1); return;
+      gameSpeedIdx=Math.max(0,gameSpeedIdx-1);
+      if(!_speedTipSuppressed){
+        _speedTipSuppressed=true; _speedTipNextRealMs=0;
+        if(_speedTipStartMs && !_speedTipFadeOutStartMs) _speedTipFadeOutStartMs=Date.now();
+      }
+      return;
     }
     if(speedRightBounds&&cp.x>=speedRightBounds.x&&cp.x<=speedRightBounds.x+speedRightBounds.w&&cp.y>=speedRightBounds.y&&cp.y<=speedRightBounds.y+speedRightBounds.h){
       gameSpeedIdx=Math.min(SPEED_OPTS.length-1,gameSpeedIdx+1);
-      // Player has used the increase-speed button — suppress the callout bubble for the rest of this game
-      _speedTipSuppressed=true; _speedTipStartMs=0;
+      if(!_speedTipSuppressed){
+        _speedTipSuppressed=true; _speedTipNextRealMs=0;
+        if(_speedTipStartMs && !_speedTipFadeOutStartMs) _speedTipFadeOutStartMs=Date.now();
+      }
       return;
     }
 
@@ -19212,7 +19381,12 @@ canvas.addEventListener('mouseup',e=>{
     if(routeHereBtnBounds){const b=routeHereBtnBounds;
       if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
         routeHerePending=!routeHerePending; assignPending=false;
-        if(routeHerePending) panelTab='trains'; return;
+        if(routeHerePending){
+          panelTab='trains';
+          const _vpM2=missions.find(mx=>mx.id==='visit_planet'&&mx.status==='active');
+          if(_vpM2) _vpM2._routeBtnClicked=true;
+        }
+        return;
       }
     }
     // ── planet details button (bottom info bar) ───────────────
@@ -19787,6 +19961,8 @@ function _restoreFromSave(save){
   _galaxyCensusTimerMs=0; // timer resets on load; updateMissions() will re-arm if needed
   _hasZoomed=true; // loaded games have played before — suppress the zoom callout hint
   _buyTrainTipStartMs=0; _buyTrainTipShown=true; // suppress buy-train callout on loaded games
+  // Loaded games have played before — treat speed-tip as permanently suppressed.
+  _speedTipSuppressed=true; _speedTipStartMs=0; _speedTipNextRealMs=0; _speedTipFadeOutStartMs=0;
   _missionTipFired=true; _missionTipStartMs=0;   // suppress M-tip on loaded games
   _firstNonLowOrbitFired=true; _orbitHintStartMs=0; _orbitHintPlanetId=-1; // suppress orbit-hint on loaded games
   _prevActivePopupForSfx=null;
@@ -20207,7 +20383,7 @@ function startGame(){
   // runs at title PLAY, BEFORE the player picks their corp name in corpsetup,
   // so corpName is still the default placeholder at this point. It fires at
   // the fadein → galaxy transition instead (same as the game_start GA event).
-  activePopup=null; popupState={}; gameSpeedIdx=SPEED_DEFAULT_IDX; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _produceIronTimerMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _hasZoomed=false; _buyTrainTipStartMs=0; _buyTrainTipShown=false; _prevActivePopupForSfx=null; _missionTipFired=false; _visitPlanetCompletedMs=0; _tutorialDoneMs=0; _crTutorialDoneMs=0; _firstNonLowOrbitFired=false; _orbitHintStartMs=0; _orbitHintPlanetId=-1;
+  activePopup=null; popupState={}; gameSpeedIdx=SPEED_DEFAULT_IDX; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _produceIronTimerMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _hasZoomed=false; _buyTrainTipStartMs=0; _buyTrainTipShown=false; _prevActivePopupForSfx=null; _missionTipFired=false; _visitPlanetCompletedMs=0; _tutorialDoneMs=0; _crTutorialDoneMs=0; _firstNonLowOrbitFired=false; _orbitHintStartMs=0; _orbitHintPlanetId=-1; _crTrainPreselected=false;
   _newspaper=null; _newspaperLastSd=829; _newspaperPrevSpeed=0; _newspaperNextHover=false; _newspaperNextBounds=null; _newspaperPrevHover=false; _newspaperPrevBounds=null; _newspaperArchive=[]; _newspaperViewIdx=null; _paperMajorUsed=[]; _paperMinorUsed=[]; _paperLayout=0; _paperIssueNum=0; _paperIdx=randInt(0,_PAPER_NAMES.length-1); _newsEventLog=[]; _newsSnapshot=null;
   _speedLeftHover=false; _speedRightHover=false; _panelTabHover=null; _routeHereBtnHover=false; _assignBtnHover=false; _cancelRouteBtnHover=false; _planetStarNameHover=false; _starPanelPlanetHover=-1; _trainAddHover=false; _trainRowHover=-1; _pokedexSortHover=false; _pokedexRowHover=-1; _starRegistrySortHover=false; _starRegistryRowHover=-1; _goldOkHover=false; _diamondOkHover=false; _carUnlockOkHover=false; _quitYesHover=false; _quitNoHover=false; _saveGameBtnHover=false; _startBtnHover=false; _loadBtnHover=false; _htpBtnHover=false; _htpDotHover=-1; _htpSkipHover=false; pokedexRowBounds=[]; starRegistryRowBounds=[]; loadBtnBounds=null; saveGameBtnBounds=null;
   fogPoints=[]; fogGridSet=new Set(); fogCanvas=null;
@@ -20867,6 +21043,16 @@ function loop(ts){
       if(_tutorialPhase==='inactive'&&_tutorialLavaPlanetId>=0){
         _tutorialPhase='pre_zoom'; _tutorialPhaseStartMs=Date.now(); _tutorialFadeOutStartMs=0;
       }
+      // Arm the periodic speed-tip callout. First show fires 30s from now
+      // unless the player has already adjusted the speed (suppressed flag
+      // would have to have been set externally, which doesn't happen in a
+      // fresh new-game flow but the guard is cheap insurance).
+      if(!_speedTipSuppressed){
+        _speedTipNextRealMs=Date.now()+30000;
+        _speedTipShownCount=0;
+        _speedTipStartMs=0;
+        _speedTipFadeOutStartMs=0;
+      }
     }
   } else if(gs==='galaxy'){
     _invalidateOccOrbit(); for(const t of trains) updateTrain(t,dtG);
@@ -20892,10 +21078,18 @@ function loop(ts){
       if(_wsdDx||_wsdDy){
         if(_wsdDx&&_wsdDy){_wsdDx*=0.7071;_wsdDy*=0.7071;}
         const _PAN_PX_FRAME=10; // screen pixels per ~60-fps frame
+        const _wsdPx=cam.x,_wsdPy=cam.y;
         cam.x += _wsdDx*_PAN_PX_FRAME*dt/cam.scale;
         cam.y += _wsdDy*_PAN_PX_FRAME*dt/cam.scale;
         tracking=false;
         clampCamera();
+        // Parallax: mirror the tracking branch's starPan update so WASD/arrow
+        // panning shifts the background stars at the same rate as drag-panning
+        // (and follow-cam). Drag updates starPan from a screen-pixel delta;
+        // here we convert the world-space cam delta to screen pixels via
+        // cam.scale, same as the tracking branch at line ~21041.
+        starPan.x-=(_wsdPx-cam.x)*cam.scale;
+        starPan.y-=(_wsdPy-cam.y)*cam.scale;
       }
       // Up/Down arrows: steady zoom around screen center while held. Rate is
       // ~1.015 per 60-fps frame (≈ ×2.4 per real second), tuned to feel
@@ -20933,7 +21127,7 @@ function loop(ts){
             _famineDeliveries:0,_medicalDeliveries:0,_sandDeliveries:0,_longHaulDone:false,_chemicalDeliveries:0,
             _homeSteelDelivered:0,_homeBatteryDelivered:0,_homeOilDelivered:0,
             _rockyDelivered:false,_colonistsLoaded:false,
-            _colonistsDelivered:false,_routeAssigned:false,_trainRouted:false,
+            _colonistsDelivered:false,_routeAssigned:false,_trainRouted:false,_routeBtnClicked:false,
             _origenPassengersCount:_totalPassengersDelivered
           };
           const _preCompObjIds=new Set(_nmDef.objectives.filter(o=>_nmDef.checkObj(o.id,_tmpM)).map(o=>o.id));
