@@ -478,7 +478,7 @@ const MISSION_DEFS=[
    name:'Create a repeating train route',
    imageType:'route_preview', imageKey:null,
    objectives:[
-     {id:'sel_start',    text:'CLICK on a planet where you\'d like the ROUTE to begin'},
+     {id:'sel_start',    text:'CLICK on a PLANET (or a TRAIN orbiting a PLANET) where you\'d like the repeating ROUTE to begin'},
      {id:'shift_click',  text:'SHIFT+CLICK additional planets in the order you\'d like them to be visited'},
      {id:'assign_train', text:'CLICK "ASSIGN TO TRAIN" and select a train to run the ROUTE.'},
    ],
@@ -2946,30 +2946,152 @@ function hex2rgba(h,a){ const [r,g,b]=hexRGB(h); return `rgba(${r},${g},${b},${a
 
 // ── name generators ──────────────────────────────────────────
 const PLANET_PFXS=[
-  'Aelth','Aeron','Agrath','Aldris','Aleph','Althar','Andrel','Anthos','Aqueth','Arcen',
-  'Ardis','Arkon','Arthos','Astrel','Athos','Axion','Azaron','Belkor','Brynath','Cadrel',
-  'Calyx','Carnoth','Celara','Cerion','Corveth','Cryos','Daelos','Dhalim','Dorcan','Draken',
-  'Drenith','Emblath','Enthis','Ephron','Evaris','Exion','Faeron','Falvith','Galvox','Geist',
-  'Graxis','Haldor','Hydros','Ilveth','Inferis','Ionoth','Irkon','Kaeron','Kaldris','Kastor',
-  'Kivron','Kordan','Kraxis','Laeron','Lethis','Lithon','Lorion','Lumineth','Lunaris','Maeldor',
-  'Maldon','Methon','Mirion','Mythis','Naeris','Narok','Nephon','Noctis','Noveth','Obrath',
-  'Omnith','Oxion','Phaeron','Photon','Pyrion','Raedon','Rekton','Rhodis','Saevon','Salkon',
-  'Savron','Sekton','Seldon','Septis','Sethos','Shivros','Sindris','Skaldor','Solkon','Sorvon',
-  'Straldon','Taekon','Tarnon','Tekton','Tempris','Thaedon','Thyron','Toldon','Torvon','Traedon',
-  'Traxis','Typhon','Uldris','Ulphon','Valdis','Valkron','Velkon','Vexon','Volkon','Vorthos',
-  'Xaedon','Xalkon','Xindris','Xirkon','Yuldris','Zaedon','Zalkon','Zerkon','Zilkon','Zovrath',
+  // A
+  'Aelth','Aeron','Agrath','Aldris','Aleph','Altair','Althar','Andrel','Anthos','Antos',
+  'Aqueth','Arcen','Ardis','Argus','Arkon','Arthos','Astrel','Athos','Atrea','Audet',
+  'Avenal','Axion','Azaron','Azati',
+  // B – C
+  'Belkor','Brynath','Cadrel','Caldonia','Calder','Calyx','Carnoth','Celara','Cerion',
+  'Cheron','Corveth','Cryos',
+  // D
+  'Daelos','Deneb','Denobula','Dhalim','Ditalix','Dorcan','Draken','Draxx','Drenith',
+  // E
+  'Ekos','Elba','Eldaril','Emblath','Enthis','Ephron','Evaris','Excalabia','Exion','Exo',
+  // F – G
+  'Faeron','Falvith','Farias','Galvox','Garon','Gault','Geist','Gideon','Graxis',
+  // H – I
+  'Haldor','Hydros','Ilveth','Inferis','Ionoth','Irkon',
+  // K – L
+  'Kaeron','Kaldris','Kastor','Kivron','Kordan','Kraxis','Laeron','Lethis','Lithon',
+  'Lorion','Lumineth','Lunaris',
+  // M – N
+  'Maeldor','Maldon','Methon','Mirion','Mythis','Naeris','Narok','Nephon','Noctis','Noveth',
+  // O – P
+  'Obrath','Omnith','Oxion','Pentarus','Phaeron','Photon','Pyrion',
+  // R
+  'Raedon','Rakkal','Rekton','Reza','Rhodis',
+  // S
+  'Saevon','Salkon','Savron','Sekton','Seldon','Septis','Sethos','Shivros','Sindris',
+  'Skaldor','Solkon','Sorvon','Straldon',
+  // T
+  'Taekon','Tarnon','Tekton','Tellar','Tempris','Thaedon','Thyron','Toldon','Torvon',
+  'Traedon','Traxis','Typhon',
+  // U – V
+  'Uldris','Ulphon','Valdis','Valkron','Velkon','Vexon','Volkon','Vorthos',
+  // X (kept just one starting-X entry — the previous Xaedon / Xalkon / Xirkon were dropped)
+  'Xindris',
+  // Y – Z
+  'Yuldris','Zaedon','Zalkon','Zerkon','Zilkon','Zovrath',
 ];
 const PLANET_SFXS=[
   'a','an','ar','as','ath','ax','el','en','eth','ia',
   'il','in','ion','is','ix','on','or','os','ra','um','us','von','yx','zan','dor',
 ];
-function makeName(){
-  return pick(PLANET_PFXS)+pick(PLANET_SFXS);
-}
+// ── Star name generation ──────────────────────────────────────
+// Broad base-name pool: Greek/Latin constellations + named stars + mythology
+// + a few catalog-style designations. Each star always gets one base; ~10%
+// of stars get a rare prefix tagged on (Astra, Vega…), ~10% get a rare
+// suffix instead (Prime, Nexus…) — they're mutually exclusive. Only ~5%
+// also pick up a 3-digit catalog number (was 100% in the previous version).
+const _STAR_BASE_NAMES=[
+  // Constellations
+  'Andromeda','Aquarius','Aquila','Aries','Auriga','Bootes','Cassiopeia',
+  'Centauri','Cetus','Circinus','Columba','Corvus','Crux','Cygnus','Delphinus',
+  'Draco','Eridanus','Fornax','Gemini','Hercules','Hydra','Indus','Lacerta',
+  'Leo','Lepus','Libra','Lupus','Lynx','Lyra','Norma','Octans','Ophiuchus',
+  'Orion','Pavo','Pegasus','Perseus','Phoenix','Pisces','Puppis','Pyxis',
+  'Sagitta','Sagittarius','Scorpius','Sculptor','Scutum','Serpens','Sextans',
+  'Taurus','Triangulum','Tucana','Ursa','Vela','Virgo','Volans','Vulpecula',
+  // Named stars
+  'Alcor','Aldebaran','Algol','Alkaid','Almach','Alnilam','Alphard','Altair',
+  'Antares','Arcturus','Atlas','Bellatrix','Betelgeuse','Canopus','Capella',
+  'Caph','Castor','Deneb','Denebola','Diphda','Dubhe','Elnath','Fomalhaut',
+  'Gomeisa','Hamal','Izar','Kochab','Markab','Megrez','Menkalinan','Menkar',
+  'Merak','Mintaka','Mira','Mirach','Mirfak','Mizar','Nashira','Phecda',
+  'Pleione','Pollux','Procyon','Regulus','Rigel','Sabik','Saiph','Scheat',
+  'Schedar','Sheliak','Spica','Tarazed','Taygeta','Thuban','Unukalhai',
+  'Vindemia','Wezen','Yildun','Zaurak',
+  // Mythology — Greek (real solar-system planets Mars, Mercury, Neptune,
+  // Saturn, Uranus, Venus, and Earth are intentionally excluded so they
+  // never appear as in-game star names. They can still appear as PLANET
+  // names via the dedicated real-planet list below, but only with a
+  // mandatory "New" / "San" / "Free" / "Las" prefix. Gaia is back in
+  // because it's both a Greek mythological figure and a personification
+  // of Earth — it can show up as either a star or as a prefixed planet.)
+  'Apollo','Artemis','Athena','Atlas','Boreas','Calliope','Charon','Cronus',
+  'Daedalus','Diana','Eos','Erebus','Eros','Gaia','Helios','Hera','Hermes',
+  'Hestia','Hyperion','Iris','Janus','Juno','Luna','Minerva',
+  'Morpheus','Muse','Nyx','Pallas','Pandora','Persephone',
+  'Selene','Tethys','Titan','Triton','Vesta','Zephyr','Zeus',
+  // Norse / other mythology
+  'Asgard','Bifrost','Freya','Heimdall','Hod','Idun','Loki','Mimir','Njord',
+  'Odin','Sif','Skadi','Thor','Tyr','Valhalla','Vidar','Yggdrasil',
+  // Made-up but plausible
+  'Aeternus','Astralis','Caelestia','Caelum','Cosmos','Empyrean','Ethereus',
+  'Galaxia','Infinitas','Lumen','Lumina','Nebula','Noctis','Solaris',
+  'Stellaris','Umbra','Aurora','Boreal','Crepus','Helia','Selene','Vesper',
+  // Catalog-style — these read like Kepler / Trappist / Gliese designations
+  'Kepler','Gliese','Trappist','Tycho','Hubble','Webb','Halley','Cassini',
+  'Galileo','Herschel','Brahe','Copernicus','Lemaitre','Sagan','Hawking',
+];
+const _STAR_RARE_PFXS=[
+  'Astra','Vega','Lyr','Nova','Sol','Helio','Orion','Cygnus','Altair',
+  'Sirius','Polaris','Draco','Phoenix','Arctur','Vesper','Eos','Hyperion',
+  'Zenith','Meridian','Aether',
+];
+const _STAR_RARE_SFXS=[
+  'Prime','Major','Minor','Alpha','Beta','Gamma','Delta','Epsilon','Theta',
+  'Sigma','Terminus','Nexus','Gate','Haven',
+];
 function makeStarName(){
-  const pfx=['Sol','Tau','Ara','Lyr','Cep','Per','Sgr','Ori','Peg','Her','Vega','Sirius','Rigel','Kepler','Proxima'];
-  const sfx=[' Major',' Minor',' Prime',' Ultima','','-A','-B'];
-  return pick(pfx)+pick(sfx)+' '+String(randInt(1,999)).padStart(3,'0');
+  let base=pick(_STAR_BASE_NAMES);
+  const _mod=Math.random();
+  if(_mod<0.10)      base=pick(_STAR_RARE_PFXS)+' '+base;        // ~10% prefix
+  else if(_mod<0.20) base=base+' '+pick(_STAR_RARE_SFXS);        // ~10% suffix
+  // 3-digit catalog number is now rare (5%) instead of always-on.
+  if(Math.random()<0.05) base=base+' '+String(randInt(1,999)).padStart(3,'0');
+  return base;
+}
+
+// ── Planet name generation ────────────────────────────────────
+// Base = existing PLANET_PFX + PLANET_SFX combo. Optional rare modifiers:
+//   • ~5% city-style prefix (New / San / Free / Las)
+//   • ~4% Roman numeral suffix derived from orbit position (planets in
+//     orbits ≥ 2 only — orbit 1 doesn't typically get "I"), OR
+//   • ~4% locality suffix (Haven / Gate / Station / …)
+// Numeral and locality suffixes are mutually exclusive; the city prefix is
+// independent of either suffix.
+const _PLANET_CITY_PFXS=['New','San','Free','Las'];
+const _PLANET_LOCALITY_SFXS=['Haven','Gate','Station','Terminal','Colony','Outpost','Landing','Reach'];
+const _ROMAN_NUMERALS=['','I','II','III','IV','V','VI','VII','VIII','IX','X','XI','XII'];
+// Real solar-system planet (and dwarf-planet) names. When one is drawn it
+// MUST get a city-style prefix attached so that the in-game world reads as
+// a colony / outpost named after the original (e.g. "New Mars", "Free
+// Venus") rather than colliding with the real planet name.
+const _REAL_PLANET_NAMES=['Earth','Gaia','Mars','Venus','Mercury','Jupiter','Saturn','Uranus','Neptune','Pluto'];
+function makeName(orbitIdx){
+  // ~4% chance of basing the name on a real solar-system planet (with the
+  // mandatory disambiguating city prefix). Locality / Roman-numeral suffix
+  // can still be appended afterwards.
+  if(Math.random()<0.04){
+    let name=pick(_PLANET_CITY_PFXS)+' '+pick(_REAL_PLANET_NAMES);
+    const _rs=Math.random();
+    if(_rs<0.20 && orbitIdx>=2 && orbitIdx<=12){
+      name=name+' '+_ROMAN_NUMERALS[orbitIdx];
+    } else if(_rs<0.40){
+      name=name+' '+pick(_PLANET_LOCALITY_SFXS);
+    }
+    return name;
+  }
+  let name=pick(PLANET_PFXS)+pick(PLANET_SFXS);
+  if(Math.random()<0.05) name=pick(_PLANET_CITY_PFXS)+' '+name;
+  const _suf=Math.random();
+  if(_suf<0.04 && orbitIdx>=2 && orbitIdx<=12){
+    name=name+' '+_ROMAN_NUMERALS[orbitIdx];
+  } else if(_suf<0.08){
+    name=name+' '+pick(_PLANET_LOCALITY_SFXS);
+  }
+  return name;
 }
 const TRAIN_ADJ=[
   'IRON','SOLAR','LUNAR','CRIMSON','AZURE','VOID','STELLAR','CHROME','SHADOW','GOLDEN',
@@ -4401,6 +4523,25 @@ function _drawNebulas(){
 function generateGalaxy(){
   const stars=[], planets=[];
   let pid=0;
+  // Tracks every name handed out this generation. Stars and planets share
+  // this Set so a star and a planet never end up with the same name. The
+  // home-star / starter-planet names ("Gigi Prime" / "Orijen") are
+  // pre-seeded below so the random generators won't accidentally reuse
+  // them. Retries pull a fresh name from the generator; on the very
+  // unlikely event we exhaust 60 attempts, we fall back to numeric
+  // disambiguation so generation never deadlocks.
+  const _usedNames=new Set(['Gigi Prime','Orijen']);
+  const _uniqueFrom=gen=>{
+    for(let _t=0;_t<60;_t++){
+      const _n=gen();
+      if(!_usedNames.has(_n)){ _usedNames.add(_n); return _n; }
+    }
+    // Disambiguation fallback — append a small integer until it's free.
+    let _base=gen(), _sfx=2;
+    while(_usedNames.has(_base+' '+_sfx)) _sfx++;
+    const _final=_base+' '+_sfx;
+    _usedNames.add(_final); return _final;
+  };
 
   // Place 4 black holes before any stars — one per new quadrant — so stars can avoid them.
   // New quadrants: signs [+x,+y], [-x,+y], [-x,-y], [+x,-y]
@@ -4426,7 +4567,7 @@ function generateGalaxy(){
     if(_blackHoles.some(b=>Math.hypot(b.x-x,b.y-y)<b.radius+sr+9000)) continue; // clear of all event horizons
     const cn=pickStarColor(sz);
     stars.push({id:stars.length, x, y, size:sz, radius:sr,
-                colorName:cn, color:STAR_COLORS[cn], name:makeStarName(), planetIds:[]});
+                colorName:cn, color:STAR_COLORS[cn], name:_uniqueFrom(makeStarName), planetIds:[]});
   }
 
   // Home star = closest to galaxy centre (0,0)
@@ -4461,7 +4602,11 @@ function generateGalaxy(){
     let _homeLavaAngle=null;
     for(let i=0;i<np;i++){
       const isStarter=(isHome&&i===1); // Orijen sits at HOME_BIOMES index 1
-      const sz=(isStarter?'L':pickSize()), pr=SIZE_R[sz];
+      // Orijen is always L (home planet). The HOME_BIOMES index-0 lava is
+      // always M (tutorial requires it for the build-station chain — a
+      // consistent size keeps station-cost / station-upgrade math stable).
+      // Every other slot picks randomly.
+      const sz=(isStarter?'L':(isHome&&i===0?'M':pickSize())), pr=SIZE_R[sz];
       // Home star uses tighter random spacing so all 6 fit inside orbitCap.
       if(isHome) orbitR+=pr+rand(280,720);
       else       orbitR+=pr+rand(300,1200);
@@ -4487,7 +4632,7 @@ function generateGalaxy(){
         x:star.x+orbitR*Math.cos(angle), y:star.y+orbitR*Math.sin(angle),
         size:sz, radius:pr,
         type:_typeForSlot,
-        name:isStarter?'Orijen':makeName(),
+        name:isStarter?'Orijen':_uniqueFrom(()=>makeName(i+1)),
         isStarter
       };
       _attachBiome(p);
@@ -5716,6 +5861,167 @@ function makeGStars(){
   gStars=[];
   // Generate a large pool; how many are drawn each frame depends on zoom level
   for(let i=0;i<800;i++) gStars.push({bx:rand(0,W),by:rand(0,H),r:rand(.3,2.2),b:rand(.35,1),depth:rand(.03,.38)});
+}
+
+// ── deep nebula background sheet ─────────────────────────────
+// A faint, endlessly-tileable 3-colour nebula that sits BEHIND even the
+// furthest parallax stars. Each map quadrant has its own colour scheme so
+// the player can tell at a glance which quadrant the camera is on; the
+// scheme blends bilinearly with neighbouring quadrants as the camera pans
+// across the boundary lines. The HOME quadrant (where Orijen orbits) is
+// always scheme 0 (dark blue / purple / occasional light blue); the other
+// three quadrants get the remaining schemes in a fixed clockwise rotation.
+const _NEBULA_TILE_SZ=512;
+const _NEBULA_SCHEMES=[
+  // home: dark blue / purple / occasional light blue
+  {name:'home',  base:[6,8,30],   mid:[40,20,70],  accent:[80,140,210]},
+  // dark green / blue / occasional light green
+  {name:'green', base:[8,28,18],  mid:[20,55,70],  accent:[80,200,140]},
+  // dark red / purple / occasional pink
+  {name:'red',   base:[40,8,18],  mid:[60,20,70],  accent:[210,80,160]},
+  // yellow / orange / occasional bright red
+  {name:'amber', base:[60,40,12], mid:[160,80,20], accent:[230,80,40]},
+];
+// Galactic-centre scheme — fades in within ~30,000 AU of (0,0). User spec:
+// bright blue under-layer (background pixels), dark purple over-layer
+// (filament peaks where the noise ridges).
+const _NEBULA_CORE_SCHEME={name:'core', base:[80,140,220], mid:[55,55,150], accent:[40,12,72]};
+const _NEBULA_CORE_RADIUS=30000;   // AU within which the core scheme is fully present
+const _NEBULA_CORE_BLEND_W=10000;  // AU over which it blends out into the quadrant schemes
+let _nebulaTiles=[];               // 4 quadrant canvases
+let _nebulaCoreTile=null;          // central canvas (drawn near origin only)
+// Bake one scheme's tile from a shared grayscale noise field. Pulled out
+// of _buildNebulaTiles so the core scheme reuses the same noise pattern.
+function _bakeNebulaTile(sc, noise, SZ){
+  const c=document.createElement('canvas');
+  c.width=SZ; c.height=SZ;
+  const cx=c.getContext('2d');
+  const img=cx.createImageData(SZ,SZ);
+  for(let i=0;i<SZ*SZ;i++){
+    const n=noise[i];
+    let r,g,b;
+    if(n<0.5){
+      const t=n*2;
+      r=sc.base[0]+(sc.mid[0]-sc.base[0])*t;
+      g=sc.base[1]+(sc.mid[1]-sc.base[1])*t;
+      b=sc.base[2]+(sc.mid[2]-sc.base[2])*t;
+    } else {
+      // accent ramps in non-linearly so it shows up sparsely (only the
+      // brightest noise peaks read as the highlight colour)
+      const t=Math.pow((n-0.5)*2, 2);
+      r=sc.mid[0]+(sc.accent[0]-sc.mid[0])*t;
+      g=sc.mid[1]+(sc.accent[1]-sc.mid[1])*t;
+      b=sc.mid[2]+(sc.accent[2]-sc.mid[2])*t;
+    }
+    const idx=i*4;
+    img.data[idx  ]=Math.floor(r);
+    img.data[idx+1]=Math.floor(g);
+    img.data[idx+2]=Math.floor(b);
+    img.data[idx+3]=255;
+  }
+  cx.putImageData(img,0,0);
+  return c;
+}
+function _buildNebulaTiles(){
+  const SZ=_NEBULA_TILE_SZ;
+  // Smooth multi-octave noise — the "big sheet" look with overlapping
+  // soft blobs of each scheme's three colors peeking through one another.
+  // Every frequency multiplier is an INTEGER so the noise tiles
+  // seamlessly across the SZ × SZ boundary (sin / cos at integer
+  // multiples of 2π/SZ wrap cleanly). No ridge transform — the earlier
+  // "filaments" version replaced this and was reverted.
+  const noise=new Float32Array(SZ*SZ);
+  const f=2*Math.PI/SZ;
+  for(let y=0;y<SZ;y++){
+    for(let x=0;x<SZ;x++){
+      let n=0;
+      n+=Math.sin(x*f*2)         *Math.cos(y*f*2)         *0.50;
+      n+=Math.sin(x*f*3+1.3)     *Math.cos(y*f*4+0.7)     *0.30;
+      n+=Math.sin(x*f*5+2.1)     *Math.cos(y*f*3+1.5)     *0.20;
+      n+=Math.sin(x*f*8+0.5)     *Math.cos(y*f*7+2.0)     *0.10;
+      // Normalize from approximate [-1.1, 1.1] into [0, 1].
+      noise[y*SZ+x]=Math.max(0,Math.min(1,(n+1.1)/2.2));
+    }
+  }
+  _nebulaTiles=[];
+  for(const sc of _NEBULA_SCHEMES) _nebulaTiles.push(_bakeNebulaTile(sc, noise, SZ));
+  _nebulaCoreTile=_bakeNebulaTile(_NEBULA_CORE_SCHEME, noise, SZ);
+}
+// Quadrant index from world coords. 0=(+x,+y), 1=(-x,+y), 2=(-x,-y), 3=(+x,-y)
+function _quadrantIdx(x,y){
+  if(x>=0 && y>=0) return 0;
+  if(x<0  && y>=0) return 1;
+  if(x<0  && y<0)  return 2;
+  return 3;
+}
+function _drawNebulaBackground(){
+  if(!_nebulaTiles.length||!galaxy) return;
+  // Which quadrant is home? Use the home star's position (the planet itself
+  // moves in orbit, but the star is fixed at galaxy generation time).
+  const _orPlanet=galaxy.planets[galaxy.origenId];
+  const _hStar=_orPlanet?galaxy.stars[_orPlanet.starId]:null;
+  const _homeQ=_hStar?_quadrantIdx(_hStar.x,_hStar.y):0;
+  // Bilinear blend weights. Sigmoid gives a soft transition across each
+  // axis (instead of a hard sign flip), so panning across cam.x=0 fades
+  // colours smoothly rather than snapping.
+  const _kx=2/WORLD_W, _ky=2/WORLD_H;
+  const _u=1/(1+Math.exp(-cam.x*_kx)); // 0 at -W, 0.5 at 0, 1 at +W
+  const _v=1/(1+Math.exp(-cam.y*_ky));
+  const _w=[
+    _u*_v,           // q=0 (+,+)
+    (1-_u)*_v,       // q=1 (-,+)
+    (1-_u)*(1-_v),   // q=2 (-,-)
+    _u*(1-_v),       // q=3 (+,-)
+  ];
+  // Map each world-quadrant to a scheme such that the HOME quadrant uses
+  // scheme 0 and the others rotate clockwise.
+  const _qToScheme=q=>((q - _homeQ) % 4 + 4) % 4;
+  // Galactic-centre weight — within _NEBULA_CORE_RADIUS the core scheme
+  // dominates; fades to nothing over _NEBULA_CORE_BLEND_W beyond that. The
+  // quadrant tiles get scaled by (1 - coreW) so the two layers cross-fade.
+  const _camDistFromCentre=Math.hypot(cam.x,cam.y);
+  const _coreW=Math.max(0,Math.min(1,(_NEBULA_CORE_RADIUS+_NEBULA_CORE_BLEND_W-_camDistFromCentre)/_NEBULA_CORE_BLEND_W));
+  // Parallax — the nebula sheet moves at ~half the slowest parallax-star
+  // depth (0.03), so it reads as being even deeper than the farthest stars.
+  const _NEBULA_DEPTH=0.015;
+  const _offX=starPan.x*_NEBULA_DEPTH;
+  const _offY=starPan.y*_NEBULA_DEPTH;
+  const SZ=_NEBULA_TILE_SZ;
+  // Normalize tiling start so the modulo result is in [-SZ, 0]
+  const _startX=Math.floor(((-_offX)%SZ-SZ)%SZ);
+  const _startY=Math.floor(((-_offY)%SZ-SZ)%SZ);
+  // Per-layer alpha cap — lower than the original 0.20 for a fainter sheet
+  // (user requested more transparent).
+  const _ALPHA_CAP=0.13;
+  ctx.save();
+  // Quadrant layers — scaled down by (1 - coreW) so they recede near the centre
+  const _quadrantStrength=1-_coreW;
+  if(_quadrantStrength>0.005){
+    for(let q=0;q<4;q++){
+      const wq=_w[q]*_quadrantStrength;
+      if(wq<=0.005) continue;
+      const tile=_nebulaTiles[_qToScheme(q)];
+      if(!tile) continue;
+      ctx.globalAlpha=wq*_ALPHA_CAP;
+      for(let tx=_startX;tx<W+SZ;tx+=SZ){
+        for(let ty=_startY;ty<H+SZ;ty+=SZ){
+          ctx.drawImage(tile,tx,ty);
+        }
+      }
+    }
+  }
+  // Core layer — drawn ON TOP so its bright-blue base + dark-purple peaks
+  // show through even when quadrant tiles partially overlap.
+  if(_coreW>0.005&&_nebulaCoreTile){
+    ctx.globalAlpha=_coreW*_ALPHA_CAP;
+    for(let tx=_startX;tx<W+SZ;tx+=SZ){
+      for(let ty=_startY;ty<H+SZ;ty+=SZ){
+        ctx.drawImage(_nebulaCoreTile,tx,ty);
+      }
+    }
+  }
+  ctx.globalAlpha=1;
+  ctx.restore();
 }
 
 // ── planet + star draw ───────────────────────────────────────
@@ -7007,21 +7313,40 @@ function drawPlanetStation(sx,sy,sr,angle,ssz,isAlienRelic=false,isLarge=false,l
   ctx.restore();
 }
 
+// Single reusable offscreen canvas for cloud compositing. Avoids per-call
+// allocation while still being able to grow to fit the largest planet.
+let _cloudOffCanvas=null;
 function drawPlanetClouds(cx,cy,r,p){
   if(!p.clouds||r<4) return;
   const shellR=r*1.07;
   const cAngle=p.cloudAngle||0;
   const _CCOL={ocean:'195,222,255',agri:'228,244,210',chemical:'180,230,80',storm:'210,190,255',resort:'242,249,255'};
   const cCol=_CCOL[p.type.id]||'200,220,255';
-  ctx.save();
-  ctx.beginPath(); ctx.arc(cx,cy,shellR*1.13,0,Math.PI*2); ctx.clip();
+  // Offscreen canvas large enough for the cloud shell + the soft-fade halo.
+  // Cloud radial gradients can extend to ~2r in worst case; the mask below
+  // clears anything past r*1.40, so a 1.50r half-size canvas covers all of
+  // the visible cloud area with a small safety margin.
+  const offHalf=Math.ceil(r*1.50);
+  const offSize=offHalf*2;
+  if(!_cloudOffCanvas){
+    _cloudOffCanvas=document.createElement('canvas');
+    _cloudOffCanvas.width=Math.max(offSize,128);
+    _cloudOffCanvas.height=_cloudOffCanvas.width;
+  } else if(_cloudOffCanvas.width<offSize){
+    _cloudOffCanvas.width=offSize;
+    _cloudOffCanvas.height=offSize;
+  }
+  const oc=_cloudOffCanvas.getContext('2d');
+  oc.globalCompositeOperation='source-over';
+  oc.clearRect(0,0,_cloudOffCanvas.width,_cloudOffCanvas.height);
+  const ocx=offHalf, ocy=offHalf;
   for(const c of p.clouds){
     const theta=c.a+cAngle;
     const phi=c.lat*Math.PI*0.44;
     const depth=Math.cos(theta)*Math.cos(phi);
     if(depth<0) continue;
-    const sx=cx+Math.sin(theta)*shellR*Math.cos(phi);
-    const sy=cy-Math.sin(phi)*shellR;
+    const sx=ocx+Math.sin(theta)*shellR*Math.cos(phi);
+    const sy=ocy-Math.sin(phi)*shellR;
     const xsc=Math.max(0.04,Math.cos(theta));
     const sw=c.rw*r*xsc, sh=c.rh*r;
     if(sw<0.6) continue;
@@ -7029,25 +7354,38 @@ function drawPlanetClouds(cx,cy,r,p){
     const al=c.al*edgeFa;
     if(al<0.018) continue;
     // Primary blob
-    ctx.save();
-    ctx.translate(sx,sy); ctx.scale(sw,sh);
-    const g=ctx.createRadialGradient(0,0,0,0,0,1);
+    oc.save();
+    oc.translate(sx,sy); oc.scale(sw,sh);
+    const g=oc.createRadialGradient(0,0,0,0,0,1);
     g.addColorStop(0,`rgba(${cCol},${Math.min(1,al).toFixed(3)})`);
     g.addColorStop(0.40,`rgba(${cCol},${Math.min(1,al*0.28).toFixed(3)})`);
     g.addColorStop(1,`rgba(${cCol},0)`);
-    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(0,0,1,0,Math.PI*2); ctx.fill();
-    ctx.restore();
+    oc.fillStyle=g; oc.beginPath(); oc.arc(0,0,1,0,Math.PI*2); oc.fill();
+    oc.restore();
     // Wispy secondary blob
-    ctx.save();
-    ctx.translate(sx+c.dx*sw,sy+c.dy*sh); ctx.scale(sw*c.sw,sh*c.sh);
-    const g2=ctx.createRadialGradient(0,0,0,0,0,1);
+    oc.save();
+    oc.translate(sx+c.dx*sw,sy+c.dy*sh); oc.scale(sw*c.sw,sh*c.sh);
+    const g2=oc.createRadialGradient(0,0,0,0,0,1);
     const al2=al*c.sa;
     g2.addColorStop(0,`rgba(${cCol},${Math.min(1,al2).toFixed(3)})`);
     g2.addColorStop(1,`rgba(${cCol},0)`);
-    ctx.fillStyle=g2; ctx.beginPath(); ctx.arc(0,0,1,0,Math.PI*2); ctx.fill();
-    ctx.restore();
+    oc.fillStyle=g2; oc.beginPath(); oc.arc(0,0,1,0,Math.PI*2); oc.fill();
+    oc.restore();
   }
-  ctx.restore();
+  // Soft alpha mask — destination-in multiplies cloud alpha by the mask's
+  // alpha. Full keep inside the planet body (radius r); linear fade out to
+  // alpha 0 at r*1.40, replacing the old hard arc clip with a smooth
+  // atmosphere thinning into space.
+  oc.globalCompositeOperation='destination-in';
+  const maskG=oc.createRadialGradient(ocx,ocy,r*1.00,ocx,ocy,r*1.40);
+  maskG.addColorStop(0,'rgba(0,0,0,1)');
+  maskG.addColorStop(1,'rgba(0,0,0,0)');
+  oc.fillStyle=maskG;
+  oc.fillRect(0,0,offSize,offSize);
+  // Composite onto main canvas. Use explicit src/dst rects so the cached
+  // canvas's full size (which may exceed offSize) doesn't leak past the
+  // planet's anchor.
+  ctx.drawImage(_cloudOffCanvas, 0,0, offSize,offSize, cx-ocx,cy-ocy, offSize,offSize);
 }
 
 // ── train status ─────────────────────────────────────────────
@@ -15620,6 +15958,11 @@ function drawGalaxy(ts,dt){
   _sbBounds=[];
   ctx.fillStyle='#04060f'; ctx.fillRect(0,0,W,H);
 
+  // ── deep nebula sheet (drawn FIRST so it's behind the furthest stars) ──
+  // Faint 3-colour cloud that tiles endlessly; the colour scheme blends
+  // smoothly between quadrants as the camera pans. See _drawNebulaBackground.
+  _drawNebulaBackground();
+
   // ── zoom-responsive background stars ─────────────────────────
   {
     const zt=Math.max(0,Math.min(1,(Math.log(cam.scale)-Math.log(MIN_SC))/(Math.log(MAX_SC)-Math.log(MIN_SC))));
@@ -15805,7 +16148,10 @@ function drawGalaxy(ts,dt){
       ctx.font=`${fs}px "Exo 2",sans-serif`; ctx.textAlign='center';
       ctx.fillStyle=p.isStarter?'rgba(255,210,80,0.9)':'rgba(170,205,255,0.8)';
       // push label below station track ring (outer edge = sr + ssz*0.14) when station present
-      const _stOff=p.hasStation?Math.max(12,SIZE_R['M']*cam.scale*0.16+4):12;
+      let _stOff=p.hasStation?Math.max(14,SIZE_R['M']*cam.scale*0.16+6):14;
+      // Larger planets (M / L / XL / XXL) get an extra 5px so their bigger
+      // halos don't crowd the label. XS / S keep the tighter spacing.
+      if(p.size==='M'||p.size==='L'||p.size==='XL'||p.size==='XXL') _stOff+=5;
       ctx.fillText(p.name,sx,sy+sr+_stOff);
       ctx.restore();
     }
@@ -20410,6 +20756,9 @@ function _drawNewspaper(){
 function init(){
   testOrbits();
   buildNebula(); makeStars(); makeTitlePlanets(); makeTrain();
+  // Bake the per-scheme nebula sheet tiles once at init — the cloud
+  // pattern is shared across all four schemes so blending stays seamless.
+  _buildNebulaTiles();
   requestAnimationFrame(loop);
 }
 let lastT=0;
