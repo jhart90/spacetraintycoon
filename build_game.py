@@ -459,9 +459,10 @@ const MISSION_DEFS=[
    imageType:'planet_type', imageKey:'lava',
    startsAfter:0,
    objectives:[
-     {id:'select_planet',  text:'CLICK on a nearby planet with a STATION to select it'},
-     {id:'click_route_btn',text:'Then CLICK on "ROUTE TRAIN HERE" in the bottom panel'},
-     {id:'click_train',    text:'Then CLICK on a TRAIN to send on a ONE-WAY ROUTE to that planet'},
+     {id:'select_planet',    text:'CLICK on a nearby planet with a STATION to select it'},
+     {id:'click_route_btn',  text:'Then CLICK on "ROUTE TRAIN HERE" in the bottom panel'},
+     {id:'click_train',      text:'Then CLICK on a TRAIN to send on a ONE-WAY ROUTE to that planet'},
+     {id:'await_arrival',    text:'WAIT for your TRAIN to LOAD cargo, depart orbit, and transit to another planet'},
    ],
    details:"There's a whole galaxy out there waiting to be explored. Start by sending a train to a nearby planet.",
    reward:1000, timeLimit:null,
@@ -474,6 +475,15 @@ const MISSION_DEFS=[
      if(oid==='select_planet')   return _alreadyExplored||!!(sel&&sel.type==='planet');
      if(oid==='click_route_btn') return _alreadyExplored||!!(m._routeBtnClicked||m._trainRouted);
      if(oid==='click_train')     return _alreadyExplored||!!(m._trainRouted);
+     // await_arrival: gated specifically on a player train entering orbit at
+     // the home-system LAVA planet (Gigi Prime). The arrival hook in
+     // updateTrain only sets _trainArrivedAtTarget when that planet is the
+     // arrival destination. For returning players, allow the existing
+     // visitedPlanetIds membership to count — if a train has been there
+     // before, the objective auto-passes. The loose `_alreadyExplored`
+     // signal (any train moved) is intentionally NOT honored here so the
+     // mission can't complete from arrivals at other planets.
+     if(oid==='await_arrival')   return !!m._trainArrivedAtTarget||(galaxy&&_tutorialLavaPlanetId>=0&&visitedPlanetIds.has(_tutorialLavaPlanetId));
      return false;
    }},
   {id:'create_route',
@@ -7623,6 +7633,12 @@ function getTrainStatus(train){
   if(rph==='orbit'){
     return {text:'IN ORBIT / ON ROUTE', color:'rgba(255,200,60,0.85)'};
   }
+  if(rph==='queueing'){
+    return {text:'QUEUEING FOR STATION', color:'rgba(255,200,60,0.85)'};
+  }
+  if(rph==='descending'){
+    return {text:'DESCENDING', color:'rgba(150,220,255,0.92)'};
+  }
   if(rph==='waiting'){
     return {text:'HOLDING / ON ROUTE', color:'rgba(255,60,60,0.85)'};
   }
@@ -8392,6 +8408,11 @@ function _buildOccOrbitMap(){
       const _dest=t.route.stops[t.route.toIdx];
       _add(_dest,t.route.arrivalOrbitTier,t);
     }
+    // Queueing AND descending trains occupy whatever tier they're CURRENTLY
+    // listed as (t.orbitTier is updated to the descent target the instant a
+    // descent begins, so the occupancy map naturally reflects the claim —
+    // peers see the slot as taken and won't race for it).
+    if(_ph==='queueing'||_ph==='descending') _add(t.planetId,t.orbitTier,t);
   }
   _occOrbitMap=m;
 }
@@ -8412,6 +8433,82 @@ function getAvailableOrbitTier(planetId, excludeTrain){
   if(_free('MED')) return {tier:'MED',orbitR:ORBIT_TIERS[planet.size]['MED']};
   if(_free('HIGH')) return {tier:'HIGH',orbitR:ORBIT_TIERS[planet.size]['HIGH']};
   return null;
+}
+
+// ── Queueing-for-lower-orbit helpers ───────────────────────────
+// A train arriving at a station planet in an orbit tier ABOVE the highest
+// tier the station can service should circle in its arrival tier and watch
+// for the next-lower tier to free up. When it does, the train transitions
+// smoothly down. See updateTrain's `queueing` phase handler for the
+// per-frame logic.
+//
+// Optimal-tier rules (cargo-ops gate at line ~8760):
+//   • TERMINAL upgrade → any tier (LOW/MED/HIGH) services cargo → NEVER queue
+//   • LARGE STATION   → LOW + MED service cargo → queue if currently HIGH
+//   • STATION (basic) → LOW only services cargo → queue if MED or HIGH
+//   • No station      → can't queue (no station to descend toward)
+function _trainTierIsCargoReady(t, p){
+  if(!p||(!p.hasStation&&!p.aiHasStation)) return false;
+  if(p.hasTerminal) return true;
+  if(p.hasLargeStation) return t.orbitTier==='LOW'||t.orbitTier==='MED';
+  return t.orbitTier==='LOW';
+}
+function _shouldQueueForLowerOrbit(t, p){
+  if(!p) return false;
+  if(p.isStarProxy) return false; // star proxies have a different orbit model
+  if(p.hasTerminal) return false; // every tier already serves cargo
+  if(!p.hasStation&&!p.aiHasStation) return false;
+  if(_trainTierIsCargoReady(t, p)) return false;
+  // Only HIGH or MED are queueable starting tiers (LOW is the floor)
+  return t.orbitTier==='MED'||t.orbitTier==='HIGH';
+}
+// One tier down (HIGH→MED, MED→LOW, otherwise null).
+function _nextLowerOrbitTier(tier){
+  if(tier==='HIGH') return 'MED';
+  if(tier==='MED')  return 'LOW';
+  return null;
+}
+// Is the given tier currently free at this planet? Built on the same
+// _occOrbitMap as getAvailableOrbitTier so claims by other queueing /
+// transit / parked trains are honored.
+function _isOrbitTierFree(planetId, tier, excludeTrain){
+  if(!_occOrbitMap) _buildOccOrbitMap();
+  const occ=_occOrbitMap.get(planetId);
+  if(!occ) return true;
+  const claimant=occ[tier];
+  return !claimant||claimant===excludeTrain;
+}
+// Kick off the descent substate. Caller has already verified `nextTier` is
+// the next-lower tier and is currently free. Mutates the train AND route so
+// the next _buildOccOrbitMap pass reads the new tier as claimed (preventing
+// peer races) while t.orbitR keeps the old radius and lerps toward target.
+function _startOrbitDescent(t, r, nextTier){
+  const _qp=_gp(t.planetId);
+  if(!_qp) return false;
+  const _targetR=_qp.isStarProxy
+    ? (nextTier==='LOW'?_qp.starOrbitR:_qp.starOrbitROuter)
+    : ORBIT_TIERS[_qp.size][nextTier];
+  r._queueDescStartR=t.orbitR;
+  r._queueDescTargetR=_targetR;
+  r._queueDescAcc=0;
+  t.orbitTier=nextTier;
+  r.phase='descending';
+  _invalidateOccOrbit();
+  return true;
+}
+// On arrival (or any moment a train needs to drop tier), pick the right
+// initial phase: 'descending' if the next-lower tier is free RIGHT NOW
+// (skip the poll wait), 'queueing' otherwise. Resets _cargoCheckedThisStop
+// so the cargo gate fires once we eventually settle into a cargo-ready tier.
+function _enterQueueOrDescend(t, r){
+  const _nextTier=_nextLowerOrbitTier(t.orbitTier);
+  if(_nextTier && _isOrbitTierFree(t.planetId,_nextTier,t)){
+    _startOrbitDescent(t, r, _nextTier);
+  } else {
+    r.phase='queueing';
+    r._queueAngleAcc=0;
+  }
+  t._cargoCheckedThisStop=false;
 }
 
 // Returns the departure angle — the orbit angle at the external tangent touch point.
@@ -8818,6 +8915,71 @@ function updateTrain(t, dt){
         }
       }
     }
+  } else if(r.phase==='queueing'){
+    // ── Queueing for lower orbit ──────────────────────────────
+    // The train circles at its current tier and polls every 1/32 of an orbit
+    // for the next-lower tier to free up. When the slot opens, the phase
+    // flips directly to 'descending' (via _startOrbitDescent). If the slot
+    // is already free on arrival, _enterQueueOrDescend skips this phase
+    // entirely and routes straight into 'descending'.
+    t.angle-=ORB_SPD*dt;
+    r.orbitSpun+=ORB_SPD*dt;
+    if(t.isPlayer){ t._angleAcc+=ORB_SPD*dt; trackOrbit(t); }
+    r._queueAngleAcc=(r._queueAngleAcc||0)+ORB_SPD*dt;
+    const _CHECK_DA=(Math.PI*2)/32;
+    if(r._queueAngleAcc>=_CHECK_DA){
+      r._queueAngleAcc=0;
+      const _nextTier=_nextLowerOrbitTier(t.orbitTier);
+      if(_nextTier && _isOrbitTierFree(t.planetId,_nextTier,t)){
+        _startOrbitDescent(t, r, _nextTier);
+      }
+    }
+  } else if(r.phase==='descending'){
+    // ── Descending to lower orbit ─────────────────────────────
+    // Smoothly spiral t.orbitR from start → target over one full orbit. A
+    // half-cosine ease (matching first derivative at both endpoints) keeps
+    // the seam invisible. On completion the train either:
+    //   (a) lands at a tier the station can service → enter 'orbit' so the
+    //       cargo gate fires (UNLOADING / LOADING),
+    //   (b) the NEXT lower tier is also already free → chain directly into
+    //       another descent (no queueing pause), or
+    //   (c) otherwise → 'queueing' phase resumes the 1/32-orbit poll.
+    t.angle-=ORB_SPD*dt;
+    r.orbitSpun+=ORB_SPD*dt;
+    if(t.isPlayer){ t._angleAcc+=ORB_SPD*dt; trackOrbit(t); }
+    const _DESC_DA=Math.PI; // half an orbit per descent
+    r._queueDescAcc=(r._queueDescAcc||0)+ORB_SPD*dt;
+    const _u=Math.min(1, r._queueDescAcc/_DESC_DA);
+    const _e=0.5-0.5*Math.cos(_u*Math.PI);
+    t.orbitR=r._queueDescStartR+(r._queueDescTargetR-r._queueDescStartR)*_e;
+    t.orbitGap=CAR_ORB_GAP/t.orbitR;
+    if(_u>=1){
+      t.orbitR=r._queueDescTargetR;
+      t.orbitGap=CAR_ORB_GAP/t.orbitR;
+      r._queueDescAcc=0;
+      if(r.stopOrbitR&&r.fromIdx!=null) r.stopOrbitR[r.fromIdx]=t.orbitR;
+      if(r.stops&&r.toIdx!=null){
+        r.departAngle=computeDepartAngle(_gp(r.stops[r.fromIdx]),r.stops[r.toIdx],t.orbitR,r.stopOrbitR?.[r.toIdx]||t.orbitR);
+      }
+      const _cpQ=_gp(t.planetId);
+      if(_trainTierIsCargoReady(t, _cpQ)){
+        r.phase='orbit'; r.orbitSpun=0; r.minOrbitDone=true;
+        t._cargoCheckedThisStop=false;
+      } else {
+        // Not cargo-ready yet (e.g., HIGH→MED at station-only). Chain
+        // straight into another descent if the next slot is free; else
+        // queue. Mirrors _enterQueueOrDescend so the "instant descend if
+        // free" behavior persists across multi-tier drops.
+        const _next2=_nextLowerOrbitTier(t.orbitTier);
+        if(_next2 && _isOrbitTierFree(t.planetId,_next2,t)){
+          _startOrbitDescent(t, r, _next2);
+        } else {
+          r.phase='queueing';
+          r._queueAngleAcc=0;
+        }
+      }
+      _invalidateOccOrbit();
+    }
   } else { // transit
     const fromP2=_gp(r.stops[r.fromIdx]);
     const toP2=_gp(r.stops[r.toIdx]);
@@ -8899,6 +9061,15 @@ function updateTrain(t, dt){
       t._angleAcc=0; // reset orbit accumulator for new planet
       // Track route segment completion
       if(t.isPlayer){ const sk=r.stops[r.fromIdx]+'_'+r.stops[r.toIdx]; t.routeCounts[sk]=(t.routeCounts[sk]||0)+1; t._segmentCount=(t._segmentCount||0)+1; }
+      // visit_planet mission: a player train just finished a transit segment
+      // (started to enter orbit at another planet). Marks the 4th objective
+      // satisfied — but ONLY when the arrival is at the home-system LAVA
+      // planet (Gigi Prime's lava world). Other destinations don't count;
+      // the mission is the scripted intro to that specific planet.
+      if(t.isPlayer && _tutorialLavaPlanetId>=0 && t.planetId===_tutorialLavaPlanetId){
+        const _vpA=missions.find(mx=>mx.id==='visit_planet'&&mx.status==='active');
+        if(_vpA) _vpA._trainArrivedAtTarget=true;
+      }
       t.orbitR=r.arrivalOrbitR; t.orbitTier=r.arrivalOrbitTier;
       t.orbitGap=CAR_ORB_GAP/t.orbitR;
       t.angle=engineAngleB;
@@ -8936,11 +9107,17 @@ function updateTrain(t, dt){
         // the original park-immediately path when no station is in reach.
         if(r.isTempRoute && r._multiHopDest!=null && t.planetId===r._multiHopDest){
           const _fDstP=_gp(t.planetId);
-          if(_fDstP&&(_fDstP.hasStation||_fDstP.aiHasStation)&&(
+          const _hasSt=_fDstP&&(_fDstP.hasStation||_fDstP.aiHasStation);
+          const _tierOk=_hasSt&&(
                 t.orbitTier==='LOW' ||
                 (t.orbitTier==='MED' &&(_fDstP.hasLargeStation||_fDstP.hasTerminal)) ||
                 (t.orbitTier==='HIGH'&& _fDstP.hasTerminal)
-             )){
+             );
+          // Queueing applies here too: a temp/one-way route ending at a
+          // station planet should circle until a serviceable tier opens, not
+          // immediately give up and park.
+          const _shouldQ=_hasSt&&_shouldQueueForLowerOrbit(t,_fDstP);
+          if(_tierOk || _shouldQ){
             t.route={stops:[t.planetId,t.planetId],isLoop:false,fromIdx:0,toIdx:0,
               phase:'orbit',orbitSpun:0,dir:1,minOrbitDone:true,
               stopOrbitR:[t.orbitR,t.orbitR],_recomputeTimer:0,
@@ -8950,6 +9127,10 @@ function updateTrain(t, dt){
             // Reset so the orbit-phase cargo gate fires _startCargoOps on
             // the very next frame (otherwise the train would skip unload).
             t._cargoCheckedThisStop=false;
+            // If the tier isn't cargo-ready, divert to descending (if a slot
+            // is already free) or queueing (otherwise).
+            if(!_tierOk) _enterQueueOrDescend(t, t.route);
+            _invalidateOccOrbit();
             return;
           }
         }
@@ -8977,17 +9158,26 @@ function updateTrain(t, dt){
           // using normal demand rules before the train goes idle (parked orbit).
           // _cargoCheckedThisStop is already false from departure at the previous stop.
           const _fDstP=_gp(destId);
-          if(_fDstP&&(_fDstP.hasStation||_fDstP.aiHasStation)&&(
+          const _hasSt2=_fDstP&&(_fDstP.hasStation||_fDstP.aiHasStation);
+          const _tierOk2=_hasSt2&&(
                 t.orbitTier==='LOW' ||
                 (t.orbitTier==='MED' &&(_fDstP.hasLargeStation||_fDstP.hasTerminal)) ||
                 (t.orbitTier==='HIGH'&& _fDstP.hasTerminal)
-             )){
+             );
+          // Queueing for multi-hop final arrival — mirrors the temp-route
+          // cancelAfterArrival path above.
+          const _shouldQ2=_hasSt2&&_shouldQueueForLowerOrbit(t,_fDstP);
+          if(_tierOk2 || _shouldQ2){
             t.route={stops:[destId,destId],isLoop:false,fromIdx:0,toIdx:0,
               phase:'orbit',orbitSpun:0,dir:1,minOrbitDone:true,
               stopOrbitR:[t.orbitR,t.orbitR],_recomputeTimer:0,
               isTempRoute:true,cancelAfterArrival:false,
               _multiHopDest:null,_unloadAndPark:true};
-            t.queuedRoute=null; return;
+            t.queuedRoute=null;
+            t._cargoCheckedThisStop=false;
+            if(!_tierOk2) _enterQueueOrDescend(t, t.route);
+            _invalidateOccOrbit();
+            return;
           }
           t.route=null; t.queuedRoute=null; return;
         }
@@ -9022,6 +9212,16 @@ function updateTrain(t, dt){
       r._lockedTanLen=null; r._lockedTanAngle=null;
       r._departExtLen=null; r._arrivalTimer=null; r._blockedTime=0;
       r.departAngle=computeDepartAngle(_gp(r.stops[r.fromIdx]),r.stops[r.toIdx],t.orbitR,r.stopOrbitR[r.toIdx]||t.orbitR);
+      // Queueing-or-descending-for-lower-orbit: if this is a route stop
+      // whose station can't service the arrival tier, route into the right
+      // initial state — DESCENDING if the next-lower slot is free right now,
+      // QUEUEING otherwise. _enterQueueOrDescend handles both branches and
+      // also resets _cargoCheckedThisStop so the gate fires once we settle.
+      {const _arrP=_gp(r.stops[r.fromIdx]);
+       if(_shouldQueueForLowerOrbit(t,_arrP)){
+         _enterQueueOrDescend(t, r);
+         _invalidateOccOrbit();
+       }}
     }
   }
   // Periodically recompute orbit radii for future (not yet locked) stops
@@ -12364,10 +12564,12 @@ function updateMissions(dtSd){
     const _totalHazProd=galaxy.planets.reduce((s,p)=>s+((p.upgradeData?.iron_foundry?.hazmatTotal)||0),0);
     if(_totalHazProd>=2.0) pendingMissionIntros.push({defId:'dispose_hazmat',readySd:stardate});
   }
-  // create_route intro: 1 real-time second after the tutorial chain finishes
-  // (the "Your train is on the way!" callout finishes fading out → tutorial
-  // phase → 'done' → _tutorialDoneMs armed; this gate fires 1 s later).
-  if(_tutorialDoneMs>0&&Date.now()-_tutorialDoneMs>=1000&&!_missionPending('create_route')&&!missions.some(mx=>mx.id==='create_route'&&mx.status==='completed')){
+  // create_route intro: 5 real-time seconds after the visit_planet mission
+  // ACTUALLY completes (the new 4th objective `await_arrival` means the
+  // mission no longer auto-completes on click — it waits for the train to
+  // reach its destination). _visitPlanetCompletedMs is stamped in the
+  // mission-complete block when m.id==='visit_planet' flips to 'completed'.
+  if(_visitPlanetCompletedMs>0&&Date.now()-_visitPlanetCompletedMs>=5000&&!_missionPending('create_route')&&!missions.some(mx=>mx.id==='create_route'&&mx.status==='completed')){
     pendingMissionIntros.push({defId:'create_route',readySd:stardate});
   }
   // upgrade_station intro: 10 real-time seconds after produce_iron completes
@@ -17723,6 +17925,11 @@ function drawGalaxy(ts,dt){
   _drawMissionTip();
   _drawBuyTrainHintCallout();
   _drawSpeedTip();
+  // Red MED/HIGH orbit hint — drawn HERE (pre-popup stage) so it points at a
+  // train on the galaxy view but sits UNDER any popup window the player
+  // happens to open. Previously rendered post-popup, which left it floating
+  // above unrelated windows (Trains list, Planet detail, etc.).
+  _drawOrbitHintCallout();
   // Zoom callout removed per design — `_drawZoomCallout` definition kept
   // dormant in case it's ever wanted again.
 
@@ -17776,7 +17983,8 @@ function drawGalaxy(ts,dt){
   // ran all advance / transition logic this frame.
   _drawTutorialChain('popup');
   _drawVisitHint();
-  _drawOrbitHintCallout();
+  // (_drawOrbitHintCallout moved to the pre-popup callout block above so it
+  // renders BEHIND any open popup window.)
   // Supply/Demand hover tooltip drawn LAST so it floats on top of any
   // tutorial highlight box/bubble that overlaps the same area.
   _drawStationHoverTooltipOverlay();
@@ -20618,9 +20826,12 @@ function _restoreFromSave(save){
   _tutorialDoneMs=0;
   _crTutorialDoneMs=0;
   // If a save was taken AFTER the visit_planet tutorial finished but BEFORE
-  // create_route was introduced, re-arm the 1 s timer now so the intro
-  // fires shortly after load.
+  // create_route was introduced, re-arm the 5 s timer now so the intro
+  // fires shortly after load. Trigger key changed from _tutorialDoneMs to
+  // _visitPlanetCompletedMs (see updateMissions gate).
   const _crIntroduced=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='create_route');
+  const _vpDone=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='visit_planet'&&m.status==='completed');
+  if(_vpDone && !_crIntroduced) _visitPlanetCompletedMs=Date.now();
   if(_tutorialPhase==='done'&&!_crIntroduced) _tutorialDoneMs=Date.now();
   // Same idea for the create_route tutorial: if the chain finished but
   // buy_second_train hasn't fired yet, re-arm its 10 s / 40 s timers now.
@@ -21776,7 +21987,7 @@ function loop(ts){
             _famineDeliveries:0,_medicalDeliveries:0,_sandDeliveries:0,_longHaulDone:false,_chemicalDeliveries:0,
             _homeSteelDelivered:0,_homeBatteryDelivered:0,_homeOilDelivered:0,
             _rockyDelivered:false,_colonistsLoaded:false,
-            _colonistsDelivered:false,_routeAssigned:false,_trainRouted:false,_routeBtnClicked:false,
+            _colonistsDelivered:false,_routeAssigned:false,_trainRouted:false,_routeBtnClicked:false,_trainArrivedAtTarget:false,
             _origenPassengersCount:_totalPassengersDelivered
           };
           const _preCompObjIds=new Set(_nmDef.objectives.filter(o=>_nmDef.checkObj(o.id,_tmpM)).map(o=>o.id));
