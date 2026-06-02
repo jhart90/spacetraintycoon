@@ -1153,6 +1153,9 @@ let starPan={x:0,y:0}, dragStarPan={x:0,y:0};
 const SPEED_OPTS=[0,0.5,1,2,5,10];
 const SPEED_DEFAULT_IDX=2; // 1× — every fresh game / popup-induced slow-down lands here
 let gameSpeedIdx=SPEED_DEFAULT_IDX;
+// Remembers the speed tier in effect at the moment SPACE toggled pause on, so
+// the next SPACE press restores the same speed. Null when not space-paused.
+let _spacePauseResumeIdx=null;
 let speedLeftBounds=null, speedRightBounds=null;
 
 // ─── newspaper system ────────────────────────────────────────────────────────
@@ -9968,13 +9971,23 @@ function drawAncientMessagePopup(){
 
 // Shared paused-state banner. Drawn translucent grey on Orbitron at the
 // supplied screen y (cx defaults to W/2). Used by the quit-confirm popup
-// and by the global gameSpeedIdx===0 (player-paused) render hook.
-function _drawPausedBanner(yCenter,cx){
+// and by the global gameSpeedIdx===0 (player-paused) render hook. Pass
+// `showUnpauseHint=true` to render the "press [SPACE] to unpause" subtitle
+// — only shown for the global player-pause variant, not quit-confirm
+// (which has its own action buttons).
+function _drawPausedBanner(yCenter,cx,showUnpauseHint){
   ctx.save();
   ctx.font='bold 42px Orbitron,sans-serif'; ctx.textAlign='center';
   ctx.shadowColor='rgba(0,0,0,0.75)'; ctx.shadowBlur=12;
   ctx.fillStyle='rgba(200,210,225,0.42)';
-  ctx.fillText('[ GAME PAUSED ]', cx==null?W/2:cx, yCenter);
+  const _cxR=cx==null?W/2:cx;
+  ctx.fillText('[ GAME PAUSED ]', _cxR, yCenter);
+  if(showUnpauseHint){
+    ctx.shadowBlur=8;
+    ctx.font='14px "Exo 2",sans-serif';
+    ctx.fillStyle='rgba(200,210,225,0.55)';
+    ctx.fillText('press [SPACE] to unpause', _cxR, yCenter+28);
+  }
   ctx.restore();
 }
 function drawQuitConfirmPopup(){
@@ -11440,9 +11453,10 @@ function _drawBuyTrainPlusHintCallout(){
     _a = _elp<FADE_IN ? _elp/FADE_IN : 1;
   }
   if(_a<=0) return;
-  // Bubble sits ABOVE the + button with a downward tail. (Mirror of the blue
-  // _drawBuyTrainCallout below the + — different position so the two never
-  // overlap if both end up active.)
+  // Bubble sits BELOW the + button with an upward tail pointing AT it. Below
+  // placement keeps it clear of the top stats bar / panel folder tabs that
+  // sit above the popup header — an above-placement bubble could clip into
+  // or be obscured by the top UI bar at higher zoom levels.
   const _ab=trainsPopupAddBounds;
   const _txt='CLICK the "+" to purchase a NEW TRAIN';
   ctx.save();
@@ -11451,18 +11465,18 @@ function _drawBuyTrainPlusHintCallout(){
   const _pad=12, _bH=28, _bR=7, _tailH=10;
   const _bW=_tw+_pad*2;
   const _tipX=_ab.x+_ab.w/2;
-  const _tipY=_ab.y-3;                 // tail tip just above the + button
+  const _tipY=_ab.y+_ab.h+3;           // tail tip just below the + button
   let _bx=Math.round(_tipX-_bW/2);
   if(_bx<6) _bx=6;
   if(_bx+_bW>W-6) _bx=W-6-_bW;
-  const _by=_tipY-_tailH-_bH;          // bubble sits above the tail
+  const _by=_tipY+_tailH;              // bubble sits below the tail
   const _tailX=Math.max(_bx+_bR+8,Math.min(Math.round(_tipX),_bx+_bW-_bR-8));
   ctx.globalAlpha=_a;
   ctx.shadowColor='rgba(180,140,0,0.55)'; ctx.shadowBlur=8;
   ctx.fillStyle='rgba(245,200,40,0.97)';
   ctx.beginPath(); ctx.roundRect(_bx,_by,_bW,_bH,_bR); ctx.fill();
-  // Downward tail from bubble bottom to just above the + button.
-  ctx.beginPath(); ctx.moveTo(_tailX-7,_by+_bH); ctx.lineTo(_tailX+7,_by+_bH); ctx.lineTo(_tailX,_tipY); ctx.closePath(); ctx.fill();
+  // Upward tail: base along the bubble's top edge, point pokes UP at the +
+  ctx.beginPath(); ctx.moveTo(_tailX-7,_by); ctx.lineTo(_tailX+7,_by); ctx.lineTo(_tailX,_tipY); ctx.closePath(); ctx.fill();
   ctx.shadowBlur=0;
   ctx.fillStyle='#1a1308';
   ctx.textAlign='center'; ctx.textBaseline='middle';
@@ -13068,8 +13082,17 @@ function drawOptionsPopup(){
   ctx.save();
   ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
   ctx.fillStyle='#4af'; ctx.fillText('OPTIONS',px+pw/2,py+21);
-  ctx.font='10px "Exo 2",sans-serif'; ctx.textAlign='right';
-  ctx.fillStyle='rgba(90,130,190,0.55)'; ctx.fillText('[O] close',px+pw-10,py+21);
+  // [ESC] close — hover-overable label that closes the popup. Replaces the
+  // old [O] hint; both keystrokes still toggle Options closed, but only ESC
+  // is advertised since other popups use the same convention.
+  ctx.font='10px "Exo 2",sans-serif';
+  const _optEscTxt='[ESC] close';
+  const _optEscW=ctx.measureText(_optEscTxt).width;
+  const _optEscX=px+pw-10-_optEscW, _optEscY=py+11, _optEscH=14;
+  popupState.optionsEscBounds={x:_optEscX,y:_optEscY,w:_optEscW+4,h:_optEscH};
+  ctx.textAlign='left';
+  ctx.fillStyle=popupState.optionsEscHover?'rgba(180,220,255,0.95)':'rgba(90,130,190,0.55)';
+  ctx.fillText(_optEscTxt,_optEscX,py+21);
   ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(px,py+28); ctx.lineTo(px+pw,py+28); ctx.stroke();
   // ── CONTROLS / HOW TO PLAY button (top option) ──────────────
@@ -13140,28 +13163,39 @@ function drawOptionsPopup(){
 // Esc closes (caught by the catch-all `if(activePopup)` branch in _fireEsc).
 function drawControlsPopup(){
   if(activePopup!=='controls') return;
-  const pw=620, ph=260;
+  const pw=620, ph=300;
   const [px,py]=drawPopupBase(pw,ph,'rgba(80,160,255,0.7)');
   ctx.save();
   ctx.font='bold 13px Orbitron,sans-serif'; ctx.textAlign='center';
   ctx.fillStyle='#7df'; ctx.fillText('CONTROLS / HOW TO PLAY',px+pw/2,py+24);
-  ctx.font='10px "Exo 2",sans-serif'; ctx.textAlign='right';
-  ctx.fillStyle='rgba(90,130,190,0.55)'; ctx.fillText('[ESC] close',px+pw-12,py+24);
+  // [ESC] close — hover-overable label that returns to the Options popup.
+  // Register click bounds for the click handler in galaxyClick.
+  ctx.font='10px "Exo 2",sans-serif';
+  const _ctlEscTxt='[ESC] close';
+  const _ctlEscW=ctx.measureText(_ctlEscTxt).width;
+  const _ctlEscX=px+pw-12-_ctlEscW, _ctlEscY=py+14, _ctlEscH=16;
+  popupState.controlsEscBounds={x:_ctlEscX,y:_ctlEscY,w:_ctlEscW+4,h:_ctlEscH};
+  ctx.textAlign='left';
+  ctx.fillStyle=popupState.controlsEscHover?'rgba(180,220,255,0.95)':'rgba(90,130,190,0.55)';
+  ctx.fillText(_ctlEscTxt,_ctlEscX,py+24);
   ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(px,py+34); ctx.lineTo(px+pw,py+34); ctx.stroke();
   // 4 columns — same content the bottom info bar used to show.
-  const _colTitles=['REPEATING ROUTES','BUY / EDIT TRAINS','UPGRADE PLANETS','ZOOM & SPEED'];
+  const _colTitles=['REPEATING ROUTES','BUY / EDIT TRAINS','UPGRADE PLANETS','CAMERA & SPEED'];
   const _colBullets=[
     ['CLICK a PLANET to set the start','SHIFT+CLICK more planets to add stops','"ASSIGN TO TRAIN" then pick a train'],
     ['Press "T" to open the Trains panel','Click "+" to buy a new train','Double-click a train to edit its cars'],
-    ['Double-click a planet for details','Build a STATION, then add UPGRADES','Refine cargo & boost supply output'],
-    ['Mouse wheel zooms in / out','WASD or arrow keys pan the camera','+ / − adjust speed, SPACE pauses'],
+    ['Double-click a planet for details','Build a STATION, then add UPGRADES','Load and Unload cargo from/to a planet to boost it\'s DEVELOPMENT LEVEL & cargo output'],
+    ['ZOOM IN/OUT with the Mouse Wheel or Arrow Keys',
+     'PAN THE CAMERA by clicking & dragging or by using the W/A/S/D keys',
+     'Adjust GAME SPEED with +/- keys, or SPACE to pause'],
   ];
   ctx.textAlign='left';
   const _innerW=pw-32;
   const _colW=Math.floor(_innerW/4);
   const _colStartY=py+74;
-  const _bulletLH=20;
+  const _LH=14;       // line height within a wrapped bullet
+  const _BULLET_GAP=8;// vertical gap between consecutive bullets
   for(let _ci=0;_ci<4;_ci++){
     const _cx=px+16+_ci*_colW;
     // Column title — slightly larger + brighter than the bullets.
@@ -13172,11 +13206,12 @@ function drawControlsPopup(){
     ctx.strokeStyle='rgba(80,160,255,0.45)'; ctx.lineWidth=1;
     const _ulW=Math.min(ctx.measureText(_colTitles[_ci]).width,_colW-12);
     ctx.beginPath(); ctx.moveTo(_cx,_colStartY+5); ctx.lineTo(_cx+_ulW,_colStartY+5); ctx.stroke();
-    // Bullets
+    // Bullets — running Y position so wrapped lines don't overlap the next bullet.
     ctx.font='11px "Exo 2",sans-serif';
     ctx.fillStyle='rgba(170,210,240,0.82)';
+    let _by=_colStartY+24;
     for(let _bi=0;_bi<_colBullets[_ci].length;_bi++){
-      // Word-wrap each bullet within its column width (col - bullet-glyph indent).
+      // Word-wrap each bullet within its column width (col − bullet-glyph indent).
       const _txt='• '+_colBullets[_ci][_bi];
       const _maxW=_colW-12;
       const _words=_txt.split(' ');
@@ -13188,8 +13223,12 @@ function drawControlsPopup(){
       }
       if(_cur) _wrapped.push(_cur);
       for(let _li=0;_li<_wrapped.length;_li++){
-        ctx.fillText(_wrapped[_li],_cx+(_li===0?0:8),_colStartY+24+_bi*_bulletLH+_li*13);
+        // Indent wrapped continuation lines by 8 so the bullet glyph stays
+        // visually anchored at the start of the bullet.
+        ctx.fillText(_wrapped[_li],_cx+(_li===0?0:8),_by);
+        _by+=_LH;
       }
+      _by+=_BULLET_GAP;
     }
   }
   ctx.restore();
@@ -17678,13 +17717,14 @@ function drawGalaxy(ts,dt){
   // we're not already showing the quit-confirm popup, which draws its own
   // banner above the popup window), render the [GAME PAUSED] watermark in
   // the centre of the canvas.
-  if(gameSpeedIdx===0 && activePopup!=='quitconfirm') _drawPausedBanner(H/2);
+  if(gameSpeedIdx===0 && activePopup!=='quitconfirm') _drawPausedBanner(H/2,null,true);
   // Blue callout bubbles — drawn after all game-canvas UI so they appear above it,
   // and before popup windows so any open popup renders on top.
   _drawMissionTip();
   _drawBuyTrainHintCallout();
   _drawSpeedTip();
-  _drawZoomCallout();
+  // Zoom callout removed per design — `_drawZoomCallout` definition kept
+  // dormant in case it's ever wanted again.
 
   // Tutorial chain — galaxy stage drawn BEFORE popups so bubbles pointing
   // at planets / trains / right-panel UI sit UNDER any popup the player
@@ -18611,7 +18651,17 @@ canvas.addEventListener('mousemove',e=>{
     popupState.missionTrackerToggleHover=!!(_mttb&&cp.x>=_mttb.x&&cp.x<=_mttb.x+_mttb.w&&cp.y>=_mttb.y&&cp.y<=_mttb.y+_mttb.h);
     const _ctlbb=popupState.controlsBtnBounds;
     popupState.controlsBtnHover=!!(_ctlbb&&cp.x>=_ctlbb.x&&cp.x<=_ctlbb.x+_ctlbb.w&&cp.y>=_ctlbb.y&&cp.y<=_ctlbb.y+_ctlbb.h);
-    if(popupState.fogToggleHover||popupState.addCreditsHover||popupState.flowerPlanetHover||popupState.colonyPlanetHover||popupState.rivalBtnHover||popupState.autosaveToggleHover||popupState.missionTrackerToggleHover||popupState.controlsBtnHover) canvas.style.cursor='pointer';
+    const _oeb=popupState.optionsEscBounds;
+    popupState.optionsEscHover=!!(_oeb&&cp.x>=_oeb.x&&cp.x<=_oeb.x+_oeb.w&&cp.y>=_oeb.y&&cp.y<=_oeb.y+_oeb.h);
+    if(popupState.fogToggleHover||popupState.addCreditsHover||popupState.flowerPlanetHover||popupState.colonyPlanetHover||popupState.rivalBtnHover||popupState.autosaveToggleHover||popupState.missionTrackerToggleHover||popupState.controlsBtnHover||popupState.optionsEscHover) canvas.style.cursor='pointer';
+  }
+  // Controls popup — [ESC] close hit detection (lives in its own block since
+  // the Options/Cheats hover detector only runs while those two popups are
+  // open).
+  if(activePopup==='controls'){
+    const _ceb=popupState.controlsEscBounds;
+    popupState.controlsEscHover=!!(_ceb&&cp.x>=_ceb.x&&cp.x<=_ceb.x+_ceb.w&&cp.y>=_ceb.y&&cp.y<=_ceb.y+_ceb.h);
+    if(popupState.controlsEscHover) canvas.style.cursor='pointer';
   }
   // Hover tracking for color picker swatches
   if(colorPickerState&&colorPickerState.swatchBounds){
@@ -19270,6 +19320,22 @@ canvas.addEventListener('mouseup',e=>{
           return;
         }
       }
+      // Controls popup: [ESC] close — clicking returns to the Options popup.
+      if(activePopup==='controls'&&popupState.controlsEscBounds){
+        const b=popupState.controlsEscBounds;
+        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+          activePopup='options'; popupState={};
+          return;
+        }
+      }
+      // Options popup: [ESC] close — clicking closes the popup outright.
+      if(activePopup==='options'&&popupState.optionsEscBounds){
+        const b=popupState.optionsEscBounds;
+        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+          activePopup=null; popupState={};
+          return;
+        }
+      }
       // Options: CONTROLS / HOW TO PLAY button — opens the Controls popup.
       if(activePopup==='options'&&popupState.controlsBtnBounds){
         const b=popupState.controlsBtnBounds;
@@ -19830,7 +19896,7 @@ canvas.addEventListener('mouseup',e=>{
       }
       // Click outside popup → close
       const popupW=activePopup==='pokedex'?460:activePopup==='starregistry'?460:activePopup==='train'?430:activePopup==='planet'?470:activePopup==='star'?520:activePopup==='trains'?580:activePopup==='trainbuilder'?620:activePopup==='quitconfirm'?390:activePopup==='finances'?580:activePopup==='corp'?570:activePopup==='ceohire'?700:activePopup==='car_unlock'?320:activePopup==='car_detail'?460:activePopup==='rival_founded'?460:activePopup==='ancient_message'?520:activePopup==='savemanager'?560:activePopup==='controls'?620:300;
-      const popupH=activePopup==='pokedex'?390:activePopup==='starregistry'?390:activePopup==='train'?430:activePopup==='planet'?416:activePopup==='star'?390:activePopup==='trains'?430:activePopup==='trainbuilder'?444:activePopup==='quitconfirm'?110:activePopup==='options'?240:activePopup==='cheats'?270:activePopup==='finances'?400:activePopup==='corp'?440:activePopup==='ceohire'?370:activePopup==='car_unlock'?230:activePopup==='car_detail'?430:activePopup==='rival_founded'?420:activePopup==='ancient_message'?320:activePopup==='savemanager'?420:activePopup==='controls'?260:130;
+      const popupH=activePopup==='pokedex'?390:activePopup==='starregistry'?390:activePopup==='train'?430:activePopup==='planet'?416:activePopup==='star'?390:activePopup==='trains'?430:activePopup==='trainbuilder'?444:activePopup==='quitconfirm'?110:activePopup==='options'?240:activePopup==='cheats'?270:activePopup==='finances'?400:activePopup==='corp'?440:activePopup==='ceohire'?370:activePopup==='car_unlock'?230:activePopup==='car_detail'?430:activePopup==='rival_founded'?420:activePopup==='ancient_message'?320:activePopup==='savemanager'?420:activePopup==='controls'?300:130;
       const ppx=(W-popupW)/2, ppy=(H-popupH)/2;
       let _outsidePopup=cp.x<ppx||cp.x>ppx+popupW||cp.y<ppy||cp.y>ppy+popupH;
       if(_outsidePopup&&activePopup==='planet'&&popupState._upgradePanelBounds){
@@ -19847,6 +19913,7 @@ canvas.addEventListener('mouseup',e=>{
     // forced 1-second linear fade-out (handled in _drawSpeedTip).
     if(speedLeftBounds&&cp.x>=speedLeftBounds.x&&cp.x<=speedLeftBounds.x+speedLeftBounds.w&&cp.y>=speedLeftBounds.y&&cp.y<=speedLeftBounds.y+speedLeftBounds.h){
       gameSpeedIdx=Math.max(0,gameSpeedIdx-1);
+      _spacePauseResumeIdx=null; // manual speed change clears the SPACE-resume stash
       if(!_speedTipSuppressed){
         _speedTipSuppressed=true; _speedTipNextRealMs=0;
         if(_speedTipStartMs && !_speedTipFadeOutStartMs) _speedTipFadeOutStartMs=Date.now();
@@ -19855,6 +19922,7 @@ canvas.addEventListener('mouseup',e=>{
     }
     if(speedRightBounds&&cp.x>=speedRightBounds.x&&cp.x<=speedRightBounds.x+speedRightBounds.w&&cp.y>=speedRightBounds.y&&cp.y<=speedRightBounds.y+speedRightBounds.h){
       gameSpeedIdx=Math.min(SPEED_OPTS.length-1,gameSpeedIdx+1);
+      _spacePauseResumeIdx=null; // manual speed change clears the SPACE-resume stash
       if(!_speedTipSuppressed){
         _speedTipSuppressed=true; _speedTipNextRealMs=0;
         if(_speedTipStartMs && !_speedTipFadeOutStartMs) _speedTipFadeOutStartMs=Date.now();
@@ -20018,6 +20086,9 @@ function _fireEsc(){
   if(activePopup==='new_mission') return; // must use Accept button — cannot ESC out
   if(activePopup==='quitconfirm'){ activePopup=null; popupState={}; return; }
   if(activePopup==='trainbuilder'){ if(trainBuilderState?.editTrainIdx!=null){ activePopup='train'; popupState={trainIdx:trainBuilderState.editTrainIdx}; } else { activePopup='trains'; popupState={scroll:0}; } trainBuilderState=null; return; }
+  // Controls popup — Esc returns to the Options popup it was opened from
+  // (mirrors the clickable [ESC] label in its top-right corner).
+  if(activePopup==='controls'){ activePopup='options'; popupState={}; return; }
   if(activePopup==='ancient_message'){ pendingAncientPopups.shift(); activePopup=null; popupState={}; return; }
   if(routeHerePending||assignPending){ routeHerePending=false; assignPending=false; return; }
   if(activePopup){ activePopup=null; popupState={}; colorPickerState=null; return; }
@@ -20186,6 +20257,23 @@ document.addEventListener('keydown',e=>{
       return;
     }
     if(e.key==='Escape'){ _fireEsc(); return; }
+    // SPACE — toggle pause. First press: stash the current speed tier and
+    // drop to gameSpeedIdx=0 (the "P" tier, which the game loop reads as
+    // fully paused). Second press: restore the stashed tier. Suppressed
+    // while any popup is open OR a name-edit input has focus so SPACE in
+    // text fields doesn't pause the world. Repeats are ignored so holding
+    // the key doesn't ping-pong every frame.
+    if(e.key===' ' && !e.repeat && !activePopup && nameEditEl.style.display!=='block'){
+      if(_spacePauseResumeIdx!=null){
+        gameSpeedIdx=Math.max(0,Math.min(SPEED_OPTS.length-1, _spacePauseResumeIdx|0));
+        _spacePauseResumeIdx=null;
+      } else {
+        _spacePauseResumeIdx=gameSpeedIdx;
+        gameSpeedIdx=0;
+      }
+      e.preventDefault();
+      return;
+    }
     if(e.key==='p'||e.key==='P'){
       activePopup=activePopup==='pokedex'?null:'pokedex';
       if(activePopup==='pokedex') popupState={scroll:0};
