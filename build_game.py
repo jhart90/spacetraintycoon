@@ -4109,7 +4109,16 @@ function _processCargoQueue(t, p){
         const rev=Math.round(_base*_dM*_shM*_ceoM);
         if(t.isPlayer) credits+=rev; else if(_aiCorp){_aiCorp.credits+=rev;_aiCorp.totalRevenue+=rev;}
         if(rev>0&&t.isPlayer){const[_cfx,_cfy]=getTrainCarPos(t,i);spawnCreditFloat(_cfx,_cfy,rev);pendingCreditDeltas.push({timer:30,amount:rev});t.totalRevenue=(t.totalRevenue||0)+rev;financeLedger.push({sd:stardate,revenue:rev,cost:0,cargoType:'hazmat',trainName:t.name,planetId:null,starId:p.starId});if(!t._revLog)t._revLog=[];t._revLog.push({sd:stardate,rev});while(t._revLog.length&&stardate-t._revLog[0].sd>1.0)t._revLog.shift();}
-        else if(rev>0&&!t.isPlayer){t.totalRevenue=(t.totalRevenue||0)+rev;}
+        else if(rev>0&&!t.isPlayer){
+          t.totalRevenue=(t.totalRevenue||0)+rev;
+          // AI trains: maintain the same rolling _revLog used by the player
+          // so the auto-lock check (>$10K profit in last SD) can read it
+          // uniformly. AI trains don't pay maintenance, so this log is
+          // revenue-only — net profit equals net revenue over the window.
+          if(!t._revLog) t._revLog=[];
+          t._revLog.push({sd:stardate,rev});
+          while(t._revLog.length&&stardate-t._revLog[0].sd>1.0) t._revLog.shift();
+        }
         _totalHazmatIncinerated+=1; // one full hazmat car = 1 unit incinerated
         {const _hzStar=galaxy.stars[p.starId]; if(_hzStar) _hzStar.hazmatIncinerated=(_hzStar.hazmatIncinerated||0)+1;}
         t.carFull[i]=false; if(t.carCargo) t.carCargo[i]=null;
@@ -4120,7 +4129,12 @@ function _processCargoQueue(t, p){
         const rev=computeCargoRevenue(t.cars[i],cargo,p,src);
         if(t.isPlayer) credits+=rev; else if(_aiCorp){_aiCorp.credits+=rev;_aiCorp.totalRevenue+=rev;}
         if(rev>0&&t.isPlayer){const[_cfx,_cfy]=getTrainCarPos(t,i);spawnCreditFloat(_cfx,_cfy,rev);pendingCreditDeltas.push({timer:30,amount:rev});t.totalRevenue=(t.totalRevenue||0)+rev;financeLedger.push({sd:stardate,revenue:rev,cost:0,cargoType:cargo,trainName:t.name,planetId:p.id,starId:p.starId});if(!t._revLog)t._revLog=[];t._revLog.push({sd:stardate,rev});while(t._revLog.length&&stardate-t._revLog[0].sd>1.0)t._revLog.shift();}
-        else if(rev>0&&!t.isPlayer){t.totalRevenue=(t.totalRevenue||0)+rev;}
+        else if(rev>0&&!t.isPlayer){
+          t.totalRevenue=(t.totalRevenue||0)+rev;
+          if(!t._revLog) t._revLog=[];
+          t._revLog.push({sd:stardate,rev});
+          while(t._revLog.length&&stardate-t._revLog[0].sd>1.0) t._revLog.shift();
+        }
         // Log AI cargo delivery for newspaper (throttled to ~1 per 0.3 SD to avoid flooding)
         if(rev>0&&!t.isPlayer&&_aiCorp&&(stardate-(_aiCorp._lastCargoLogSd||0))>0.3){
           _aiCorp._lastCargoLogSd=stardate;
@@ -5557,19 +5571,26 @@ function _initAICorp(){
   const aiTrainIdx=trains.length;
   const aiTrain=makeGalaxyTrain(AI_CORP_NAMES[diff].split(' ')[0]+' No.1',_lavaPlanet?.id||aiHomePlanet.id,'LOW',_t1Cars,false);
   aiTrain.color=AI_CORP_COLOR;
+  // User spec: starter trains 1 and 2 are PERMANENTLY route-locked — the
+  // reassignment / Layer-2 / stuck-detector pathways all honour this flag.
+  aiTrain._aiStarterLocked=true;
   trains.push(aiTrain);
   // Train 2: water hauler — resort → desert (3× water cars for higher throughput)
   const _t2Cars=['engine_constellation','car_passenger','car_mail','car_water_tank','car_water_tank','car_water_tank','caboose'];
   const _t2Idx=trains.length;
   const _t2=makeGalaxyTrain(AI_CORP_NAMES[diff].split(' ')[0]+' No.2',aiHomePlanet.id,'LOW',_t2Cars,false);
   _t2.color=AI_CORP_COLOR;
+  _t2._aiStarterLocked=true;
   trains.push(_t2);
   // Train 3: iron/hazmat hauler — desert → star → other-station. Configured with the
   // iron loadout from day one so the cars are ready when iron supply unlocks.
+  // Marked _aiIronTrain so the refit & routing paths preserve iron/hazmat
+  // cars and force the desert planet into every route assignment.
   const _t3Cars=['engine_constellation','car_iron','car_iron','car_hazmat','car_passenger','car_mail','caboose'];
   const _t3Idx=trains.length;
   const _t3=makeGalaxyTrain(AI_CORP_NAMES[diff].split(' ')[0]+' No.3',_desertPlanet?.id||aiHomePlanet.id,'LOW',_t3Cars,false);
   _t3.color=AI_CORP_COLOR;
+  _t3._aiIronTrain=true;
   trains.push(_t3);
   const aiExtraTrainIndices=[_t2Idx,_t3Idx];
   const ownedPlanetIds=new Set();
@@ -5737,9 +5758,117 @@ function _aiMaintainScriptedSetup(){
   }
 }
 
+// User spec (exploration cycle): every SD, pick 3 unvisited planets within
+// 25,000 SU of an AI station and dispatch ONE non-locked, non-iron train to
+// visit them in succession. After the trip the train returns to its origin
+// AI station; subsequent AI logic will give it a profitable permanent route.
+// The trip is one-shot per SD — only one in-flight exploration train at a
+// time, and the AI never queues a new trip while one is active.
+function _aiMaintainExplorationCycle(){
+  if(!_aiCorp||!galaxy) return;
+  if(!_aiCorp._exploreCycle) _aiCorp._exploreCycle={lastSd:-999, activeTi:-1};
+  const ec=_aiCorp._exploreCycle;
+  // Clear active marker if the assigned train has completed (or been
+  // reassigned away from) its exploration leg. A trip is "complete" when all
+  // stops in the train's route have been visited (added to visitedPlanetIds).
+  if(ec.activeTi>=0){
+    const _et=trains[ec.activeTi];
+    if(!_et || !_et._aiExploringRoute){
+      ec.activeTi=-1;
+    } else {
+      const _stops=_et.route?.stops||[];
+      const _allVisited=_stops.every(pid=>_aiCorp.visitedPlanetIds.has(pid));
+      if(_allVisited){
+        // Trip complete. Clear flag so subsequent AI logic will assign a
+        // profitable permanent route to this train.
+        _et._aiExploringRoute=false;
+        ec.activeTi=-1;
+      }
+    }
+  }
+  // Throttle: once per SD, and never while an exploration is in flight.
+  if(ec.activeTi>=0) return;
+  if(stardate-(ec.lastSd||-999) < 1.0) return;
+  // Pick 3 unvisited planets within 25,000 SU of any AI-station planet.
+  const _EXPLORE_RANGE=25000;
+  const _aiStations=[..._aiCorp.ownedPlanetIds].map(id=>galaxy.planets[id]).filter(Boolean);
+  if(_aiStations.length<1) return;
+  const _candidates=[];
+  for(const p of galaxy.planets){
+    if(!p||p.isStarProxy) continue;
+    if(_aiCorp.visitedPlanetIds.has(p.id)) continue;
+    let _minD=Infinity;
+    for(const s of _aiStations){
+      const _d=Math.hypot(p.x-s.x,p.y-s.y);
+      if(_d<_minD) _minD=_d;
+    }
+    if(_minD<=_EXPLORE_RANGE) _candidates.push({p, d:_minD});
+  }
+  if(_candidates.length<1) return;
+  // Sort by distance from nearest AI station (closest first → cheaper trip).
+  _candidates.sort((a,b)=>a.d-b.d);
+  const _picks=_candidates.slice(0,3).map(c=>c.p);
+  // Choose the trip-runner: any non-locked, non-iron AI train in an idle
+  // phase. Prefer one currently at an AI station so the round trip closes.
+  let _runnerTi=-1, _runnerOrigin=null;
+  for(const ti of _aiCorp.trainIndices){
+    const t=trains[ti]; if(!t) continue;
+    if(t._aiStarterLocked||t._aiIronTrain) continue;
+    if(t.route&&(t.route.phase==='transit'||t.route.phase==='descending')) continue;
+    if(_aiIsRouteLocked(ti)) continue;
+    const _here=galaxy.planets[t.planetId];
+    if(_here&&_here.aiHasStation){ _runnerTi=ti; _runnerOrigin=_here; break; }
+  }
+  if(_runnerTi<0) return;
+  // Build the route: origin → pick1 → pick2 → pick3 → origin.
+  const _route=[_runnerOrigin.id, _picks[0].id];
+  for(let i=1;i<_picks.length;i++) _route.push(_picks[i].id);
+  _route.push(_runnerOrigin.id);
+  // Engine-range pre-check — drop intermediate picks whose distance exceeds
+  // the runner's engine range from the previous stop. Conservative trim.
+  const _engRange=ENGINE_MAX_RANGE[trains[_runnerTi].cars[0]||'engine_constellation']??15000;
+  const _safe=[_route[0]];
+  for(let i=1;i<_route.length;i++){
+    const _from=galaxy.planets[_safe[_safe.length-1]], _to=galaxy.planets[_route[i]];
+    if(!_from||!_to) continue;
+    if(Math.hypot(_from.x-_to.x,_from.y-_to.y)<=_engRange*0.95) _safe.push(_route[i]);
+  }
+  if(_safe.length<2) return;
+  trains[_runnerTi]._aiExploringRoute=true;
+  ec.activeTi=_runnerTi; ec.lastSd=stardate;
+  _aiCorp.actionQueue.push({type:'assign_route', trainIdx:_runnerTi, planetIds:_safe});
+}
+
+// User spec: any AI train OUTSIDE the starter 3 that posts net profit
+// >$10,000 over the rolling 1-SD window is automatically locked into its
+// current route + car setup (same lock flag the starter trains use). Scans
+// the fleet every frame — cheap because _revLog is already pruned to 1 SD.
+function _aiMaintainProfitLocks(){
+  if(!_aiCorp||!galaxy) return;
+  const PROFIT_LOCK_THRESHOLD=10000;
+  for(let i=0;i<_aiCorp.trainIndices.length;i++){
+    if(i<3) continue; // skip starter trains — they already have their permanent locks/iron flag
+    const ti=_aiCorp.trainIndices[i];
+    const t=trains[ti]; if(!t||t._aiStarterLocked) continue;
+    if(!t._revLog||!t._revLog.length) continue;
+    // Prune anything older than 1 SD just in case (idempotent with the
+    // delivery-site prune).
+    while(t._revLog.length&&stardate-t._revLog[0].sd>1.0) t._revLog.shift();
+    let _net=0;
+    for(const _e of t._revLog) _net+=_e.rev;
+    if(_net>PROFIT_LOCK_THRESHOLD){
+      // Lock the train in its current route + car setup.
+      t._aiStarterLocked=true;
+      _chatMsg(_aiCorp.name+' locked '+(t.name||'a train')+' into its profitable route','rgba(120,220,160,0.9)',5000,true);
+    }
+  }
+}
+
 function updateAICorp(dt){
   if(!_aiCorp||!galaxy) return;
   _aiMaintainScriptedSetup();
+  _aiMaintainExplorationCycle();
+  _aiMaintainProfitLocks();
   for(const ti of _aiCorp.trainIndices){
     const t=trains[ti];if(!t) continue;
     _aiCorp.visitedPlanetIds.add(t.planetId);
@@ -5777,6 +5906,9 @@ function updateAICorp(dt){
     for(const ti of _aiCorp.trainIndices){
       if(_pendingByTi.has(ti)) continue;
       const t=trains[ti]; if(!t) continue;
+      // User spec: starter trains 1 & 2 are permanently locked — the stuck
+      // detector never reassigns them.
+      if(t._aiStarterLocked) continue;
       const _curSegs=(t.carSegments&&t.carSegments[0])||0;
       let _tr=_aiCorp._stuckTrack[ti];
       // Initialize / refresh the per-train progress snapshot.
@@ -5985,6 +6117,10 @@ function _aiDecide(){
       if(_activeExplorers<_maxExp){
         for(const ti of _aiCorp.trainIndices){
           const t=trains[ti];if(!t) continue;
+          // User spec: starter trains 1 & 2 are never reassigned (incl. for
+          // exploration). The iron train (No.3) is also exempt — its job is
+          // iron distribution from the foundry, not exploration.
+          if(t._aiStarterLocked||t._aiIronTrain) continue;
           // Allow exploration assignment from any IDLE phase, not just orbit
           // (Iter 12 fix). Trains stuck in waiting/queueing/blocked at a hub
           // are wasted capacity — sending them exploring is always better
@@ -6093,6 +6229,9 @@ function _aiDecide(){
       if(stardate-_lastEval<_swapCooldown) continue;
       const t=trains[ti];
       if(!t) continue;
+      // User spec: never touch starter trains 1 & 2 (locked) — they own their
+      // cars and route forever.
+      if(t._aiStarterLocked) continue;
       if(t.route&&t.route.phase==='transit') continue;
       const _curCars=t.cars||[];
       if(_curCars.length>=10) continue;
@@ -6127,6 +6266,7 @@ function _aiDecide(){
     // get their cars rebalanced to match new routes. Empty waiting/orbit
     // trains also get a priority boost so they're evaluated first.
     const _byStale=_aiCorp.trainIndices
+      .filter(ti=>!trains[ti]?._aiStarterLocked) // user spec: never touch locked starter trains
       .map(ti=>{
         const _t=trains[ti];
         const _last=_aiCorp.carEvalLastSd?.[ti]??-999;
@@ -6154,6 +6294,41 @@ function _aiDecide(){
   if((stardate-(_aiCorp.lastBatchSd||-999))>(_aiCorp.batchCooldown||0)){
     const _bCarCost={engine_constellation:10000,engine_galaxy:20000,car_passenger:5000,car_mail:4000,car_water_tank:8000,car_ore:8000,car_iron:10000,car_oil:9000,caboose:3000};
     let _bBudget=_aiCorp.credits; // simulated remaining credits for this batch
+    // ── ALTERNATING STATION/TRAIN PRIORITY CYCLE (user spec) ──
+    // Every 2 SD, the AI commits to a goal: buy a station (or save for one),
+    // deferring all other purchases except train cars. Once the station
+    // is built, flip to "buy a train to service it" priority. Once that
+    // train is bought, flip back. The 2-SD timer is a forcing function:
+    // if neither goal completes in 2 SD, the AI continues to honour the
+    // active goal — flips only happen on completion (not on timer alone)
+    // so the goal isn't abandoned.
+    if(!_aiCorp._priorityCycle){
+      _aiCorp._priorityCycle='station';
+      _aiCorp._priorityCycleSd=stardate;
+      _aiCorp._priorityCycleStationCount=_aiCorp.stationsBuilt;
+      _aiCorp._priorityCycleTrainCount=_aiCorp.trainIndices.length;
+    }
+    {
+      // Completion detection: did the active goal complete since last batch?
+      if(_aiCorp._priorityCycle==='station' && _aiCorp.stationsBuilt>_aiCorp._priorityCycleStationCount){
+        _aiCorp._priorityCycle='train';
+        _aiCorp._priorityCycleSd=stardate;
+        _aiCorp._priorityCycleTrainCount=_aiCorp.trainIndices.length;
+      } else if(_aiCorp._priorityCycle==='train' && _aiCorp.trainIndices.length>_aiCorp._priorityCycleTrainCount){
+        _aiCorp._priorityCycle='station';
+        _aiCorp._priorityCycleSd=stardate;
+        _aiCorp._priorityCycleStationCount=_aiCorp.stationsBuilt;
+      }
+    }
+    const _cyclePhase=_aiCorp._priorityCycle; // 'station' or 'train'
+    // Allow train-car purchases (swap_cars in Layer 1/2) regardless of phase.
+    // Only the BIG purchases (new station, new train) are gated.
+    const _trainBuyAllowedByCycle = _cyclePhase==='train';
+    const _stationBuyAllowedByCycle = _cyclePhase==='station';
+    // User spec: if AI ever exceeds $150,000 credits, it MUST queue the
+    // priority-phase purchase this batch — bypassing every guardrail. This
+    // prevents AI from hoarding capital that could compound revenue.
+    const _forceBuy = _aiCorp.credits > 150000;
 
     // Priority 1: buy a train — primary revenue driver, queue one per batch.
     // Revenue-per-train guardrail: if the existing fleet's rev/SD-per-train falls below
@@ -6177,11 +6352,16 @@ function _aiDecide(){
     const _hasRoomToBuy=_aiCorp.credits >= 150000 && _trCount<8;
     const _profitGuardOK=_trCount<3||_hasRoomToBuy||_costRecov>=0.20;
     const _buyGuardOK=_trCount<3||_hasRoomToBuy||(_revPerTrainPerSd>=_MIN_REV_PER_TRAIN_PER_SD&&_profitGuardOK);
-    if(diff!=='very_easy'&&_trCount<AI_MAX_TRAINS[diff]&&_buyGuardOK){
+    // Force-buy bypass: when credits > $150K and the cycle phase is 'train',
+    // queue the buy even if _buyGuardOK is false or the affordability buffer
+    // wouldn't otherwise clear. The only remaining check is fleet cap.
+    const _allowTrainBuy = _trainBuyAllowedByCycle && (_buyGuardOK || _forceBuy);
+    if(diff!=='very_easy'&&_trCount<AI_MAX_TRAINS[diff]&&_allowTrainBuy){
       const _bCars=_aiPickTrainComp(diff);
       const _bCost=_bCars.reduce((s,c)=>s+(_bCarCost[c]||4000),0);
       const _bBuf={easy:1.8,normal:1.8,hard:1.8,very_hard:1.1}[diff]||1.8;
-      if(_bBudget>_bCost*_bBuf){
+      const _affordable=_forceBuy ? _bBudget>=_bCost : _bBudget>_bCost*_bBuf;
+      if(_affordable){
         const _bHp=_aiGetHomePlanet();
         if(_bHp){
           _aiCorp.actionQueue.push({type:'buy_train',cars:_bCars,planetId:_bHp.id});
@@ -6223,13 +6403,19 @@ function _aiDecide(){
 
     // Priority 2: build a station — capped so stationsBuilt <= trainCount + 5
     // (prevents capital being drained into stations before trains can compound revenue)
-    if(diff!=='very_easy' && !_stationDeferredForFoundry){
+    // Cycle gate: only queue a station buy when the priority cycle is in
+    // 'station' phase. When in 'train' phase the AI saves for a train.
+    // Force-buy bypass: when credits > $150K and the cycle phase is 'station',
+    // queue the buy even if the affordability buffer wouldn't otherwise clear,
+    // and override the train-count cap by +1 so hoarded capital can't keep the
+    // AI from spending.
+    if(diff!=='very_easy' && !_stationDeferredForFoundry && _stationBuyAllowedByCycle){
       const _bStCost=_stationBuildCost();
       const _bStBuf={easy:1.5,normal:1.5,hard:1.5,very_hard:1.1}[diff]||1.5;
-      // Tight cap: at most ONE station ahead of fleet size. Prevents the AI
-      // from dropping $50k stations that have no train to service them.
-      const _bStCap=Math.min(AI_MAX_STATIONS[diff],_aiCorp.trainIndices.length+1);
-      if(_aiCorp.stationsBuilt<_bStCap&&_bBudget>_bStCost*_bStBuf){
+      const _baseCap=Math.min(AI_MAX_STATIONS[diff],_aiCorp.trainIndices.length+1);
+      const _bStCap=_forceBuy ? Math.min(AI_MAX_STATIONS[diff],_baseCap+1) : _baseCap;
+      const _affordable=_forceBuy ? _bBudget>=_bStCost : _bBudget>_bStCost*_bStBuf;
+      if(_aiCorp.stationsBuilt<_bStCap&&_affordable){
         const _bStTgt=_aiPickStationTarget();
         if(_bStTgt){
           _aiCorp.actionQueue.push({type:'build_station',planetId:_bStTgt.id});
@@ -6309,9 +6495,11 @@ function _aiPickRoute(trainIdx){
   const t=trains[trainIdx];if(!t) return null;
   const engine=t.cars[0]||'engine_constellation';
   const maxRange=ENGINE_MAX_RANGE[engine]??15000;
+  // User spec: AI routes must only target planets the AI/Rival corp has built
+  // a station on (regular, Large, or Terminal — `aiHasStation` covers all
+  // three). Player and neutral stations no longer count as destinations.
   const stPlanets=[];
   for(const pid of _aiCorp.ownedPlanetIds){const p=galaxy.planets[pid];if(p&&p.aiHasStation) stPlanets.push(p);}
-  for(const p of galaxy.planets){if(p.hasStation&&!stPlanets.find(x=>x.id===p.id)&&_aiCorp.visitedPlanetIds.has(p.id)) stPlanets.push(p);}
   // Current route stops for same-route detection
   const _curStops=t.route?.stops;
   if(stPlanets.length<2){
@@ -7310,6 +7498,29 @@ function _aiDoSwapCars(trainIdx,newCars,cost){
 function _aiDoAssignRoute(trainIdx,planetIds){
   if(!_aiCorp||!galaxy) return;
   const t=trains[trainIdx];if(!t||!planetIds||planetIds.length<2) return;
+  // User spec: starter trains 1 and 2 are PERMANENTLY route-locked. Once
+  // they've been given their initial route in _initAICorp, no later AI
+  // pathway (stuck detector, idle reassign, Layer 2 swap) is allowed to
+  // replace it. Their initial-route assignment is queued BEFORE the lock
+  // takes effect (we mark the flag AFTER the initial dispatch processes).
+  if(t._aiStarterLocked && t.route && t.route.stops && t.route.stops.length>=2){
+    return;
+  }
+  // User spec: iron train (No.3) routes must always include the DESERT planet
+  // so its priority is iron distribution from the foundry. If the caller
+  // proposed a route without desert, inject it as the first stop. Route is
+  // also constrained to AI-owned stations within engine range — that's
+  // enforced upstream by _aiPickRoute's stPlanets filter.
+  if(t._aiIronTrain && _aiCorp._scriptedSetup && _aiCorp._scriptedSetup.desertPlanetId!=null){
+    const _dpid=_aiCorp._scriptedSetup.desertPlanetId;
+    if(!planetIds.includes(_dpid)){
+      // Inject desert at the start; close the loop back to desert if the
+      // original route was a loop, otherwise keep it open-ended.
+      const _wasLoop=planetIds[0]===planetIds[planetIds.length-1];
+      const _stops=_wasLoop?planetIds.slice(0,-1):planetIds.slice();
+      planetIds=_wasLoop?[_dpid,..._stops,_dpid]:[_dpid,..._stops];
+    }
+  }
   // ── DEGENERATE-ROUTE GUARD ──
   // Some producers can return planetIds with consecutive duplicates (the
   // 2-stop fallback in _aiPickRoute, the foundry supply route when the
@@ -7474,10 +7685,17 @@ function _aiSetPreDepartureRulesForRoute(t, stops){
 // refit needed.
 function _aiPickCarsForRoute(train, stops){
   if(!galaxy||!stops||stops.length<2) return null;
+  // User spec: starter trains 1 and 2 keep their cars forever. Returning the
+  // existing car list (unchanged) means _aiApplyCarRefit's no-op check skips
+  // any actual mutation.
+  if(train._aiStarterLocked) return (train.cars||[]).slice();
   const _engineMids={engine_constellation:6, engine_galaxy:8, engine_classJ:10, engine_classR:10, engine_N700:10};
   const _engine=(train.cars||[])[0]||'engine_constellation';
   const _maxMid=_engineMids[_engine]||8;
   const _hasCaboose=(train.cars||[]).includes('caboose');
+  // User spec: iron train (No.3) must never drop its iron or hazmat cars.
+  // We seed the refit with the preserved cars before adding new cargo cars.
+  const _ironTrainPreserve=train._aiIronTrain;
   // Score every cargo type by best (src→dst) flow across the route's stops.
   const _byCargo={};
   for(let i=0;i<stops.length;i++){
@@ -7501,6 +7719,14 @@ function _aiPickCarsForRoute(train, stops){
   const _ranked=Object.keys(_byCargo).sort((a,b)=>_byCargo[b]-_byCargo[a]);
   if(!_ranked.length) return null;
   const _newCars=[_engine];
+  // Iron train: preserve every iron + hazmat car the train currently has,
+  // BEFORE picking new cargo cars based on route demand. Duplicates of these
+  // car types are kept (e.g. 2× car_iron stays 2× car_iron).
+  if(_ironTrainPreserve){
+    for(const _c of (train.cars||[])){
+      if(_c==='car_iron' || _c==='car_hazmat') _newCars.push(_c);
+    }
+  }
   for(const c of _ranked){
     if(_newCars.length-1 >= _maxMid) break;
     const _carKey=_AI_CARGO_TO_CAR[c];
@@ -13743,6 +13969,10 @@ function _drawTutorialChain(stage){
   // ── Phase: supply_demand ───────────────────────────────────
   // Yellow box around Supply/Demand pane + bubble. Closes after 10 s
   // visible-time OR popup close, whichever comes first.
+  // Secondary blue callout: starts fading in 3 s after the yellow bubble
+  // has fully faded in (i.e. at _elapsed >= FADE_MS + 3000 = 4000 ms),
+  // points at the Molten Ore supply sprite, and fades out alongside the
+  // yellow bubble (or disappears immediately if the popup closes).
   if(_tutorialPhase==='supply_demand'){
     const _popupOpen=(activePopup==='planet'&&popupState.planet&&popupState.planet.id===_tutorialLavaPlanetId);
     // Start fade-out at 10s after fade-in began (1s fade-in + 10s persist) OR on popup close
@@ -13757,6 +13987,40 @@ function _drawTutorialChain(stage){
       // Bubble anchored to the LEFT edge of the pane, pointing right at it
       const _ax=_b.x, _ay=_b.y+12;
       _drawBubble(['This PLANET supplies [Molten Ore],','and demands a variety of resources'], {x:_ax+30,y:_ay}, r.alpha);
+      // ── Secondary blue HOVER hint ───────────────────────────
+      // 3 s after the yellow bubble finishes fading in, fade in a blue
+      // bubble pointing at the Molten Ore supply sprite. Uses the same
+      // FADE_MS so the two are visually consistent. Fades out alongside
+      // the yellow bubble (and disappears immediately if the popup closes,
+      // which is also what `r.alpha` does because _popupOpen drives both).
+      const _hintDelayMs=FADE_MS+3000; // 1 s yellow fade-in + 3 s plateau
+      let _hintAlpha=0;
+      if(_tutorialFadeOutStartMs>0){
+        _hintAlpha=r.alpha; // share the yellow bubble's fade-out
+      } else if(_elapsed>=_hintDelayMs){
+        _hintAlpha=Math.min(1,(_elapsed-_hintDelayMs)/FADE_MS);
+      }
+      if(_hintAlpha>0){
+        // Find the Molten Ore supply row in the rendered sprite bounds.
+        const _rows=popupState.stationTabRowBounds||[];
+        let _oreRow=null;
+        for(const _row of _rows){
+          if(_row.ctype==='molten_ore' && _row.isSupply){ _oreRow=_row; break; }
+        }
+        if(_oreRow){
+          // Anchor the bubble at the first sprite slot in the strip (left edge).
+          // Sprites draw starting at row.x, with sprW≈18 (matches drawCargoStrip
+          // local sprW). Centring on the first sprite avoids occluding the rest.
+          const _anchorX=_oreRow.x+9; // first sprite centre
+          const _anchorY=_oreRow.y;   // sprite top — bubble will sit above
+          _drawBubble(
+            ['HOVER your cursor over supplied/demanded','resources for details'],
+            {x:_anchorX, y:_anchorY},
+            _hintAlpha,
+            {color:'blue'}
+          );
+        }
+      }
     }
     return;
   }

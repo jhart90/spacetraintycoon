@@ -4,14 +4,14 @@
     "gameStartSd": 829,
     "age": 11,
     "phase": "late",
-    "credits": 650,
-    "totalRevenue": 289650,
-    "totalCosts": 1039000,
-    "netProfit": -749350,
-    "netWorth": 835650,
-    "trainCount": 9,
-    "purchasedTrains": 6,
-    "stationsBuilt": 8,
+    "credits": 746157,
+    "totalRevenue": 189157,
+    "totalCosts": 193000,
+    "netProfit": -3843,
+    "netWorth": 1163157,
+    "trainCount": 4,
+    "purchasedTrains": 1,
+    "stationsBuilt": 4,
     "foundries": 1,
     "trainDetails": [
       {
@@ -20,101 +20,56 @@
         "routePhase": "queueing",
         "cargo": "empty",
         "idleTimer": 0,
-        "assetVal": 43000,
-        "route": "Phaeronax -> Aelthzan -> Seldonos -> Aelthzan"
+        "assetVal": 46000,
+        "route": "Athosis -> Kraxisor"
       },
       {
         "num": 2,
         "isStarter": true,
-        "routePhase": "transit",
+        "routePhase": "queueing",
         "cargo": "empty",
         "idleTimer": 0,
-        "assetVal": 37000,
-        "route": "Aelthzan -> Azaronvon"
+        "assetVal": 46000,
+        "route": "Uldriseth -> Kraxisor"
       },
       {
         "num": 3,
         "isStarter": true,
-        "routePhase": "queueing",
+        "routePhase": "waiting",
         "cargo": "empty",
-        "idleTimer": 0,
-        "assetVal": 37000,
-        "route": "Aelthzan -> Azaronvon"
+        "idleTimer": 2.8,
+        "assetVal": 53000,
+        "route": "Uldriseth -> Athosis -> Kraxisor"
       },
       {
         "num": 4,
         "isStarter": false,
-        "routePhase": "blocked",
-        "cargo": "empty",
-        "idleTimer": 27.5,
-        "assetVal": 44000,
-        "route": "Azaronvon -> Vorthosel"
-      },
-      {
-        "num": 5,
-        "isStarter": false,
-        "routePhase": "queueing",
-        "cargo": "empty",
-        "idleTimer": 0,
-        "assetVal": 40000,
-        "route": "Savronel Colony -> Garonos"
-      },
-      {
-        "num": 6,
-        "isStarter": false,
         "routePhase": "transit",
         "cargo": "empty",
         "idleTimer": 0,
-        "assetVal": 44000,
-        "route": "Azaronvon -> Vorthosel"
-      },
-      {
-        "num": 7,
-        "isStarter": false,
-        "routePhase": "transit",
-        "cargo": "empty",
-        "idleTimer": 0,
-        "assetVal": 77000,
-        "route": "Novethion -> Azaronvon"
-      },
-      {
-        "num": 8,
-        "isStarter": false,
-        "routePhase": "blocked",
-        "cargo": "empty",
-        "idleTimer": 21.5,
-        "assetVal": 59000,
-        "route": "Azaronvon -> Vorthosel -> Savronel Colony"
-      },
-      {
-        "num": 9,
-        "isStarter": false,
-        "routePhase": "blocked",
-        "cargo": "empty",
-        "idleTimer": 19.5,
-        "assetVal": 54000,
-        "route": "Azaronvon -> Seldonos -> Azaronvon -> Seldonos"
+        "assetVal": 72000,
+        "route": "Kraxisor -> Faeronzan"
       }
     ],
     "actionQueue": [],
     "nextTrainCost": 63000,
     "nextTrainThreshold": 69300,
-    "canBuyTrain": false,
-    "credits_vs_threshold": -68650,
+    "canBuyTrain": true,
+    "credits_vs_threshold": 676857,
     "trainCooldownRemaining": 0,
     "lastTrainBuildSd": -999,
-    "canBuyStation": false,
+    "canBuyStation": true,
     "stationCooldownRemaining": 0,
-    "lastStationBuildSd": 838.27,
-    "discoveredStars": 11,
+    "lastStationBuildSd": 839.43,
+    "discoveredStars": 5,
     "exploreTarget": 15,
     "explorationComplete": false,
     "activeExplorers": 0,
-    "idleTrains": 3,
-    "revenuePerSd": 26332,
-    "trainAssetVal": 435000,
-    "stationAssetVal": 400000,
+    "idleTrains": 0,
+    "revenuePerSd": 17196,
+    "trainAssetVal": 217000,
+    "stationAssetVal": 200000,
     "run": 1,
-    "elapsed_s": 31.7
+    "elapsed_s": 23.2
   }
 ]
