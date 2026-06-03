@@ -4141,7 +4141,13 @@ function _processCargoQueue(t, p){
         _bumpSupDem();
         if(!p.devLog) p.devLog=[];
         p.devLog.push({sd:stardate, value:DEV_CARGO_VALUES[cargo]||100, cargo});
-        if(cargo==='passengers'){ if(!p.passengerDeliveries) p.passengerDeliveries=[]; p.passengerDeliveries.push(stardate); _totalPassengersDelivered++;
+        if(cargo==='passengers'){ if(!p.passengerDeliveries) p.passengerDeliveries=[]; p.passengerDeliveries.push(stardate);
+          // _totalPassengersDelivered tracks PLAYER passenger deliveries only —
+          // used by the research_royal_car intro gate and as the mission's
+          // pre-completion snapshot. AI passenger deliveries would otherwise
+          // race the intro trigger and pop the mission before the player has
+          // actually delivered anything.
+          if(t.isPlayer) _totalPassengersDelivered++;
           // Seeking a Way Home: check if this delivery completes the mission objective
           const _shMx=missions.find(mx=>mx.id==='seeking_home'&&mx.status==='active');
           if(t.isPlayer&&_shMx&&p.id===_shMx.targetPlanetId&&src&&src.id===_shMx.sourcePlanetId) _shMx._rockyDelivered=true;
@@ -5625,6 +5631,57 @@ function updateAICorp(dt){
     else if(isWaitingIdle) _aiCorp.idleTimers[ti]=(_aiCorp.idleTimers[ti]||0)+(dt/60)*0.5;
     else _aiCorp.idleTimers[ti]=0;
   }
+  // ── BONUS IMMEDIATE DECISION FOR PARKED + FROZEN AI TRAINS ──
+  // AI trains should never sit in IN ORBIT / PARKED state (route===null)
+  // AND should never be FROZEN on a route (route !== null but no segment
+  // progress in 5+ SD — typically caused by a stuck waiting / queueing /
+  // descending / blocked phase that won't naturally resolve). Outside the
+  // normal tick cadence, scan for either condition every frame and
+  // synchronously force a re-plan. carSegments[0] is the canonical per-
+  // train progress counter (incremented on every transit start), so we
+  // use the stardate at which it last changed to detect freezes.
+  if(!_aiCorp._stuckTrack) _aiCorp._stuckTrack={};
+  if(!_aiCorp.actionQueue.some(a=>a&&a.type==='assign_route')){
+    for(const ti of _aiCorp.trainIndices){
+      const t=trains[ti]; if(!t) continue;
+      const _curSegs=(t.carSegments&&t.carSegments[0])||0;
+      let _tr=_aiCorp._stuckTrack[ti];
+      // Initialize / refresh the per-train progress snapshot.
+      if(!_tr || _tr.segs!==_curSegs || !t.route){
+        _aiCorp._stuckTrack[ti]={segs:_curSegs, lastSd:stardate};
+        _tr=_aiCorp._stuckTrack[ti];
+      }
+      // Parked → re-route immediately, bypassing the lock (a parked
+      // train has nothing in motion to honour).
+      if(!t.route){
+        const _route=_aiPickRoute(ti);
+        if(_route){
+          _aiDoAssignRoute(ti,_route);
+          _aiCorp._stuckTrack[ti]={segs:(t.carSegments&&t.carSegments[0])||0, lastSd:stardate};
+          break;
+        }
+        continue;
+      }
+      // Frozen on route → force re-plan after 5 SD of zero progress.
+      // The 10-SD hard lock-timeout in _aiIsRouteLocked already ensures
+      // the cooldown lifts by then; this layer detects + acts on the
+      // freeze sooner than the cooldown would alone.
+      if((stardate - _tr.lastSd) > 5.0){
+        const _route=_aiPickRoute(ti);
+        if(_route){
+          _aiDoAssignRoute(ti,_route);
+        } else {
+          // Picker can't find a viable route from where the train sits.
+          // Clear the dead route so the parked-train branch above can
+          // try again next frame (and so the train shows IN ORBIT /
+          // PARKED, which the player UI can react to).
+          t.route=null; t.queuedRoute=null; t._cargoCheckedThisStop=false;
+        }
+        _aiCorp._stuckTrack[ti]={segs:(t.carSegments&&t.carSegments[0])||0, lastSd:stardate};
+        break;
+      }
+    }
+  }
   _aiCorp.tickTimer-=dt/60;
   if(_aiCorp.tickTimer>0) return;
   _aiCorp.tickTimer=_aiCorp.tickInterval;
@@ -5648,6 +5705,13 @@ function _aiIsRouteLocked(ti){
   if(!_aiCorp||!_aiCorp.routeAssignSd) return false;
   if(_aiCorp.routeAssignSd[ti]==null) return false;
   const t=trains[ti]; if(!t) return false;
+  // HARD TIMEOUT: regardless of phase or segment count, the lock auto-
+  // releases after 10 SD. Without this, a train that gets stuck in a
+  // phase that doesn't tick carSegments[0] (a blocked path that never
+  // clears, a waiting/queueing phase that deadlocks against another
+  // train's orbit reservation, etc.) would be permanently lock-out from
+  // re-routing because the lock relies on segment progression to lift.
+  if((stardate-_aiCorp.routeAssignSd[ti])>10.0) return false;
   const wasTemp=!!(_aiCorp.routeAssignWasTemp&&_aiCorp.routeAssignWasTemp[ti]);
   if(wasTemp){
     // One-shot trip — locked until the train has come to rest at the last
@@ -5791,6 +5855,16 @@ function _aiDecide(){
         }
       }
     }
+  }
+
+  // P0a: FOUNDRY SUPPLY — top priority once any AI iron_foundry exists.
+  // Continuous re-evaluation: ore from a lava planet + water from the AI's
+  // resort home must always be flowing to the foundry. Diverts idle trains
+  // (with auto-refit of cars) or queues a buy_train for a dedicated supply
+  // train if no existing one can serve. Runs every AI tick so the foundry
+  // bins climb back toward 10/10 as soon as anything goes off the rails.
+  if(diff==='hard'||diff==='very_hard'||diff==='normal'){
+    if(_aiEnsureFoundrySupplyTrains()) return;
   }
 
   // P0b: Cover ALL upgrade logistics — iron_foundry, blast_furnace, glassworks,
@@ -5952,9 +6026,40 @@ function _aiDecide(){
       }
     }
 
+    // ── Foundry-first gate ──
+    // Once the AI has 4 stations and NO iron foundry yet, the very next
+    // capital decision must be the foundry — not a 5th station. The
+    // upgrade picker is already iron-biased (Priority 1 / +60 score
+    // bonus), so when iron_foundry is viable it's almost always the
+    // picker's first choice. If the picker returns iron_foundry, queue it
+    // and skip the station build this batch; if it returns null or some
+    // other upgrade (foundry isn't viable right now — e.g. no desert AI
+    // station, no ore source visited, no iron sink in range), fall
+    // through to the normal station path so the AI doesn't deadlock
+    // waiting for a foundry it can't build.
+    const _hasFoundryNow=galaxy.planets.some(_p=>_p&&_p.aiHasStation&&(_p.upgrades||[]).includes('iron_foundry'));
+    const _foundryFirstActive=_aiCorp.stationsBuilt>=4 && !_hasFoundryNow;
+    let _stationDeferredForFoundry=false;
+    let _upgradeQueuedThisBatch=false;
+    if(_foundryFirstActive && (diff==='normal'||diff==='hard'||diff==='very_hard')){
+      const _ffTgt=_aiPickUpgradeTarget();
+      if(_ffTgt && _ffTgt.upgradeId==='iron_foundry'){
+        const _ffUpDef=UPGRADES.find(u=>u.id==='iron_foundry');
+        const _ffCost=_ffUpDef?.cost||10000;
+        if(_bBudget>=_ffCost){
+          _aiCorp.actionQueue.push({type:'build_upgrade',planetId:_ffTgt.planet.id,
+            upgradeId:'iron_foundry', inputSources:_ffTgt.inputSources,
+            outputPid:_ffTgt.outputPid});
+          _bBudget-=_ffCost;
+          _stationDeferredForFoundry=true;
+          _upgradeQueuedThisBatch=true;
+        }
+      }
+    }
+
     // Priority 2: build a station — capped so stationsBuilt <= trainCount + 5
     // (prevents capital being drained into stations before trains can compound revenue)
-    if(diff!=='very_easy'){
+    if(diff!=='very_easy' && !_stationDeferredForFoundry){
       const _bStCost=_stationBuildCost();
       const _bStBuf={easy:1.5,normal:1.5,hard:1.5,very_hard:1.1}[diff]||1.5;
       const _bStCap=Math.min(AI_MAX_STATIONS[diff],_aiCorp.trainIndices.length+5);
@@ -5994,7 +6099,7 @@ function _aiDecide(){
     // longer it idles. At ≥2 SD without an upgrade, _aiPickUpgradeTarget is
     // considered. After 5 SD the AI will also accept paying the upgrade cost
     // even when the budget buffer would normally hold capital for trains.
-    if(diff==='normal'||diff==='hard'||diff==='very_hard'){
+    if((diff==='normal'||diff==='hard'||diff==='very_hard') && !_upgradeQueuedThisBatch){
       const _sinceUp=stardate-(_aiCorp.lastUpgradeSd||-999);
       if(_sinceUp>=2.0){
         const _bUTgt=_aiPickUpgradeTarget();
@@ -6452,6 +6557,129 @@ function _aiPickUpgradeTarget(){
   return best;
 }
 
+// Dedicated continuous-goal pass for IRON FOUNDRY supply trains. Per the
+// design spec: once an AI foundry exists, the AI must always have:
+//   • Train A: ore from a lava planet → foundry (car_ore equipped)
+//   • Train B: water from the AI's starting resort home → foundry
+//             (car_water_tank equipped)
+// These are CONTINUOUS goals re-evaluated every AI tick — not flag-cached.
+// The check verifies (a) the route geometry covers both ends AND (b) the
+// train has the right cargo car for the job. If an existing train can be
+// diverted, it is (cars get refit automatically via _aiDoAssignRoute). If
+// none can, a dedicated foundry-supply train is purchased even if the
+// general rev-per-train guardrail would normally block it.
+// Returns true if an action was queued or refit was applied.
+function _aiEnsureFoundrySupplyTrains(){
+  if(!_aiCorp||!galaxy) return false;
+  // Collect AI iron foundries.
+  const _foundries=[];
+  for(const pid of _aiCorp.ownedPlanetIds){
+    const p=galaxy.planets[pid];
+    if(p && (p.upgrades||[]).includes('iron_foundry')) _foundries.push(p);
+  }
+  if(!_foundries.length) return false;
+  for(const fp of _foundries){
+    // Build the two supply-leg specs for this foundry.
+    const _aiHome=galaxy.planets[_aiCorp.homePlanetId];
+    // Water source — prefer AI starting resort home. Fall back to nearest
+    // visited resort/ocean if home doesn't supply water for some reason.
+    let _waterSrc=null;
+    if(_aiHome && (_aiHome.supply?.water||0)>0) _waterSrc=_aiHome;
+    if(!_waterSrc){
+      let _bestD=Infinity;
+      for(const q of galaxy.planets){
+        if(!q || q.id===fp.id) continue;
+        if(!_aiCorp.visitedPlanetIds.has(q.id)) continue;
+        if((q.supply?.water||0)<=0) continue;
+        const _d=Math.hypot(q.x-fp.x,q.y-fp.y);
+        if(_d<_bestD){_bestD=_d;_waterSrc=q;}
+      }
+    }
+    // Ore source — any visited LAVA planet that supplies molten_ore.
+    // Prefer biome=lava (per user spec). Long-haul tolerated.
+    let _oreSrc=null;
+    {
+      let _bestD=Infinity;
+      for(const q of galaxy.planets){
+        if(!q || q.id===fp.id) continue;
+        if(!_aiCorp.visitedPlanetIds.has(q.id)) continue;
+        if(q.type?.id!=='lava') continue;
+        if((q.supply?.molten_ore||0)<=0) continue;
+        const _d=Math.hypot(q.x-fp.x,q.y-fp.y);
+        if(_d<_bestD){_bestD=_d;_oreSrc=q;}
+      }
+      // Fallback: ANY visited planet supplying molten_ore (in case no lava
+      // is in the visited set yet).
+      if(!_oreSrc){
+        let _bestD2=Infinity;
+        for(const q of galaxy.planets){
+          if(!q || q.id===fp.id) continue;
+          if(!_aiCorp.visitedPlanetIds.has(q.id)) continue;
+          if((q.supply?.molten_ore||0)<=0) continue;
+          const _d=Math.hypot(q.x-fp.x,q.y-fp.y);
+          if(_d<_bestD2){_bestD2=_d;_oreSrc=q;}
+        }
+      }
+    }
+    const _legs=[
+      {cargo:'molten_ore', carKey:'car_ore',        src:_oreSrc},
+      {cargo:'water',      carKey:'car_water_tank', src:_waterSrc},
+    ];
+    for(const leg of _legs){
+      if(!leg.src) continue; // no usable source for this cargo yet
+      // LIVE coverage check (no cached flag): a leg is served when SOME AI
+      // train's route passes through both endpoints AND the train carries
+      // the matching car. The car check is the critical addition — a
+      // train without car_water_tank can't deliver water no matter how
+      // perfect its route geometry.
+      const _served=_aiCorp.trainIndices.some(ti=>{
+        const t=trains[ti]; if(!t?.route?.stops) return false;
+        const _geoOk = t.route.stops.includes(leg.src.id) && t.route.stops.includes(fp.id);
+        const _carOk = (t.cars||[]).includes(leg.carKey);
+        return _geoOk && _carOk;
+      });
+      if(_served) continue;
+      // Try to divert an idle (orbit-phase) train onto this leg. The car
+      // refit happens automatically inside _aiDoAssignRoute via
+      // _aiPickCarsForRoute, which will pull a car_ore or car_water_tank
+      // into the loadout because the route supplies that cargo at the
+      // source and demands it at the foundry sink.
+      for(const ti of _aiCorp.trainIndices){
+        const t=trains[ti]; if(!t) continue;
+        // Allow orbit / blocked / waiting trains to be diverted; transit
+        // can't be interrupted but the route handler will queue properly
+        // when transit completes.
+        if(t.route && t.route.phase==='transit') continue;
+        // Foundry supply is a top-priority continuous goal — bypass the
+        // re-route cooldown for these specific reassignments.
+        _aiDoAssignRoute(ti,[t.planetId, leg.src.id, fp.id, leg.src.id]);
+        return true;
+      }
+      // No divertible train — queue a buy_train action with a loadout
+      // built specifically for this leg. Engine = engine_galaxy (range +
+      // capacity for long-haul supply runs), cargo car for the leg,
+      // passengers + mail for revenue padding, caboose. Bypasses the
+      // rev-per-train guardrail because foundry throughput trumps general
+      // fleet economics. Honors only the absolute AI_MAX_TRAINS cap.
+      const _bHp=_aiGetHomePlanet();
+      const _diff=_aiCorp.skillLevel;
+      const _atCap=_aiCorp.trainIndices.length>=AI_MAX_TRAINS[_diff];
+      if(_bHp && !_atCap){
+        const _cars=['engine_galaxy', leg.carKey, 'car_passenger', 'car_mail', 'caboose'];
+        const _bCarCost={engine_constellation:10000,engine_galaxy:20000,car_passenger:5000,car_mail:4000,car_water_tank:8000,car_ore:8000,car_iron:10000,caboose:3000};
+        const _cost=_cars.reduce((s,c)=>s+(_bCarCost[c]||4000),0);
+        // Don't queue duplicate buy_train for the same leg this tick.
+        const _dup=_aiCorp.actionQueue.some(a=>a&&a.type==='buy_train'&&Array.isArray(a.cars)&&a.cars.includes(leg.carKey));
+        if(!_dup && _aiCorp.credits>=_cost){
+          _aiCorp.actionQueue.push({type:'buy_train', cars:_cars, planetId:_bHp.id});
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 // Generic version of P0b's foundry-leg coverage. Walks _aiCorp.upgradeObjectives
 // (non-foundry upgrades) and diverts at most one idle train per call to cover
 // an uncovered input or output leg. Mirrors the foundry handler's structure
@@ -6721,6 +6949,23 @@ function _aiDoSwapCars(trainIdx,newCars,cost){
 function _aiDoAssignRoute(trainIdx,planetIds){
   if(!_aiCorp||!galaxy) return;
   const t=trains[trainIdx];if(!t||!planetIds||planetIds.length<2) return;
+  // ── DEGENERATE-ROUTE GUARD ──
+  // Some producers can return planetIds with consecutive duplicates (the
+  // 2-stop fallback in _aiPickRoute, the foundry supply route when the
+  // train sits AT the source, etc.). A zero-distance segment passes the
+  // range validation below (Math.hypot(0,0) < maxRange) but the train
+  // then sits permanently because there's nothing to transit. Collapse
+  // any run of consecutive duplicates to a single occurrence, then bail
+  // if the cleaned route has < 2 distinct stops left.
+  {
+    const _clean=[planetIds[0]];
+    for(let _i=1;_i<planetIds.length;_i++){
+      if(planetIds[_i]!==_clean[_clean.length-1]) _clean.push(planetIds[_i]);
+    }
+    const _distinct=new Set(_clean);
+    if(_clean.length<2 || _distinct.size<2) return;
+    planetIds=_clean;
+  }
   // Clear any stale detour reference so old phantom routes stop being drawn
   t._detourPermanentRoute=null;
   const engine=t.cars[0]||'engine_constellation';
@@ -13745,16 +13990,41 @@ function updateMissions(dtSd){
   if(_steelMissionTimerMs>0&&Date.now()-_steelMissionTimerMs>=10000&&!_missionPending('design_better_train')){
     pendingMissionIntros.push({defId:'design_better_train',readySd:stardate,targetPlanetId:galaxy.origenId});
   }
-  // research_royal_car intro: triggered once 20 passenger units have been delivered
-  if(_totalPassengersDelivered>=20&&!_missionPending('research_royal_car')){
+  // research_royal_car intro: triggered once the PLAYER has delivered 100
+  // passenger units total. (Threshold was 20; raised so the mission lands
+  // as a mid-game research arc rather than an early-game gimme. The counter
+  // is gated to player deliveries in the unload handler, so AI deliveries
+  // can't race the trigger.)
+  if(_totalPassengersDelivered>=100&&!_missionPending('research_royal_car')){
     pendingMissionIntros.push({defId:'research_royal_car',readySd:stardate,targetPlanetId:galaxy.origenId});
   }
-  // stellar_cartography: 2.5 SD elapsed OR 10 real-time seconds after first non-home-star planet visit,
-  // but never before absolute stardate 831.5
+  // stellar_cartography intro: PLAYER must have visited a planet in a 2nd
+  // star system (their home system Gigi Prime doesn't count). Pure player-
+  // action gate — the previous version had a time-based fallback that
+  // fired even when the player hadn't gone anywhere yet.
   if(!_missionPending('stellar_cartography')){
-    const _scTimeUp=(stardate-_gameStartSd)>=2.5;
-    const _scTimerElapsed=_createRouteTimerMs>0&&Date.now()-_createRouteTimerMs>=10000;
-    if((_scTimeUp||_scTimerElapsed)&&stardate>=831.5) pendingMissionIntros.push({defId:'stellar_cartography',readySd:stardate});
+    const _scHomeStar=galaxy.planets[galaxy.origenId]?.starId;
+    const _scVisitedStars=new Set(
+      [...visitedPlanetIds]
+        .map(_pid=>galaxy.planets[_pid]?.starId)
+        .filter(_sid=>_sid!=null && _sid!==_scHomeStar)
+    );
+    if(_scVisitedStars.size>=1) pendingMissionIntros.push({defId:'stellar_cartography',readySd:stardate});
+  }
+  // galactic_distance intro: PLAYER must own 4+ trains. The mission tests
+  // long-haul delivery range, so it lands when the fleet has actually grown
+  // beyond the starter pair.
+  if(!_missionPending('galactic_distance')&&!missions.some(mx=>mx.id==='galactic_distance')){
+    const _gdPlayerTrains=trains.filter(t=>t&&t.isPlayer).length;
+    if(_gdPlayerTrains>=4) pendingMissionIntros.push({defId:'galactic_distance',readySd:stardate});
+  }
+  // corporate_expansion intro: PLAYER must own 4+ stations (counting Orijen
+  // starter station + every player-built station). The mission rewards
+  // continued network growth, so it lands after the player demonstrates
+  // they're scaling.
+  if(!_missionPending('corporate_expansion')&&!missions.some(mx=>mx.id==='corporate_expansion')){
+    const _cePlayerStations=galaxy.planets.filter(p=>p&&(p.playerBuiltStation||p.isStarter)).length;
+    if(_cePlayerStations>=4) pendingMissionIntros.push({defId:'corporate_expansion',readySd:stardate});
   }
   // galaxy_census: arm real-time timer once 15 planets visited; trigger 10s after
   if(_galaxyCensusTimerMs===0&&visitedPlanetIds.size>=15&&!_missionPending('galaxy_census')) _galaxyCensusTimerMs=Date.now();
@@ -19435,21 +19705,76 @@ function drawGalaxy(ts,dt){
     }
   } else if(!sel){
     // No selection — render a very faint two-line "SPACE TRAIN / TYCOON"
-    // watermark inside the bottom bar. Same Orbitron gradient + glow as the
-    // title-screen wordmark, but scaled way down and dimmed via globalAlpha
-    // so it reads as a watermark, not an information panel. The 4-column
-    // quick-reference that used to live here has moved to the dedicated
-    // CONTROLS / HOW TO PLAY popup (opened from the Options popup's top
-    // button). Centering: horizontally across the FULL screen (W/2, not the
-    // info-bar-only width) and vertically at the midpoint of BAR_H, using
-    // textBaseline='middle' so the two lines sit symmetric around centre.
+    // watermark inside the bottom bar, sitting on top of a muted ringed-
+    // planet glyph. Both the planet AND the wordmark are centered on
+    // W/2 (full-screen horizontal centre). The planet's diameter equals
+    // the width of "SPACE TRAIN" (the wider line) so its edges line up
+    // with S and N of the top line, with TYCOON nested inside. Rings
+    // are perfectly horizontal and sit ON the centre baseline so they
+    // double as a separator strip between the two text lines.
+    // Everything below is CLIPPED to the bottom-bar rect (GH → GH+BAR_H)
+    // so neither the disc nor the halo bleeds up into the galaxy view.
     const _cx=W/2;
     const _cy=GH+BAR_H/2;
     const _lineFontPx=15;
     const _lineGap=18;
+    // Measure widths to size the planet
     ctx.save();
-    ctx.globalAlpha=0.18;
-    ctx.shadowColor='#4af'; ctx.shadowBlur=10;
+    ctx.font='bold '+_lineFontPx+'px Orbitron,sans-serif';
+    const _wSpaceTrain=ctx.measureText('SPACE TRAIN').width;
+    ctx.restore();
+    const _planetCx = _cx;                 // centered on W/2
+    const _planetR  = _wSpaceTrain/2;       // diameter = "SPACE TRAIN" width
+    // ── Bar-bounded clip — keeps the disc / halo / rings strictly inside
+    // the info-bar rect so the top of the planet doesn't bleed up into
+    // the galaxy canvas. PANEL_W is excluded too so the right-side
+    // panel keeps a clean edge.
+    ctx.save();
+    ctx.beginPath(); ctx.rect(0,GH,W-PANEL_W,BAR_H); ctx.clip();
+    // ── Muted palette tuned to the bar background (rgba(6,10,26,0.93)).
+    // The planet sits a couple shades lighter and a couple shades bluer,
+    // not a bright silhouette. The whole watermark reads as a textural
+    // detail rather than a foreground element.
+    // Soft halo — a wide, very subtle radial wash. No bright rim peak.
+    const _halo=ctx.createRadialGradient(_planetCx,_cy,_planetR*0.85,_planetCx,_cy,_planetR*1.35);
+    _halo.addColorStop(0.00,'rgba(18,30,58,0.00)');
+    _halo.addColorStop(0.30,'rgba(28,48,90,0.55)');
+    _halo.addColorStop(0.65,'rgba(20,34,68,0.30)');
+    _halo.addColorStop(1.00,'rgba(10,18,42,0.00)');
+    ctx.fillStyle=_halo;
+    ctx.beginPath(); ctx.arc(_planetCx,_cy,_planetR*1.35,0,Math.PI*2); ctx.fill();
+    // ── Ring back-half (top semi-ellipse, behind the planet disc).
+    // Perfectly horizontal (rotation = 0); very thin (ry = _planetR*0.10)
+    // so its full vertical extent fits between the two text lines.
+    const _ringRy=_planetR*0.10;
+    ctx.strokeStyle='rgba(48,72,118,0.55)';
+    ctx.lineWidth=Math.max(1,_planetR*0.05);
+    ctx.beginPath();
+    ctx.ellipse(_planetCx,_cy,_planetR*1.32,_ringRy,0,Math.PI,Math.PI*2);
+    ctx.stroke();
+    // ── Planet silhouette: muted dark navy, only a few steps lighter and
+    // bluer than the bar bg. Thin rim slightly lighter still — enough to
+    // suggest a disc shape without the bright "backlit" highlight.
+    ctx.fillStyle='rgba(22,34,62,0.78)';
+    ctx.beginPath(); ctx.arc(_planetCx,_cy,_planetR,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle='rgba(56,84,138,0.55)';
+    ctx.lineWidth=Math.max(0.75,_planetR*0.018);
+    ctx.beginPath(); ctx.arc(_planetCx,_cy,_planetR-0.5,0,Math.PI*2); ctx.stroke();
+    // ── Ring front-half (bottom semi-ellipse, painted over the disc so
+    // the eye reads the ring as wrapping the planet). Same horizontal
+    // axis as the back-half — the two halves together form one
+    // continuous line at y = _cy, which is exactly where the gap
+    // between SPACE TRAIN (above) and TYCOON (below) sits.
+    ctx.strokeStyle='rgba(58,86,140,0.65)';
+    ctx.lineWidth=Math.max(1,_planetR*0.05);
+    ctx.beginPath();
+    ctx.ellipse(_planetCx,_cy,_planetR*1.32,_ringRy,0,0,Math.PI);
+    ctx.stroke();
+    ctx.restore(); // releases the bar-bounded clip
+    // ── Wordmark text (gradient + dim glow), centered at W/2 ──
+    ctx.save();
+    ctx.globalAlpha=0.55;
+    ctx.shadowColor='#4af'; ctx.shadowBlur=8;
     ctx.font='bold '+_lineFontPx+'px Orbitron,sans-serif';
     ctx.textAlign='center'; ctx.textBaseline='middle';
     const _tg=ctx.createLinearGradient(_cx-100,0,_cx+100,0);
@@ -23808,7 +24133,7 @@ function startGame(){
   _sensorUpgradeActive=false; _stationCostDiscount=0; _galaxyCensusTimerMs=0; _sandstormCheckSd=0; _bhResearchCheckSd=0;
   missions=[]; _recomputeMissionTargets();
   _gameStartSd=stardate;
-  pendingMissionIntros=MISSION_DEFS.filter(def=>!def.prerequisite&&def.id!=='visit_planet'&&def.id!=='build_foundry'&&def.id!=='dispose_hazmat'&&def.id!=='lost_colony'&&def.id!=='seeking_home'&&def.id!=='create_route'&&def.id!=='research_royal_car'&&def.id!=='colony_train'&&def.id!=='spread_the_seed'&&def.id!=='famine'&&def.id!=='outbreak'&&def.id!=='stellar_cartography'&&def.id!=='galaxy_census'&&def.id!=='sandstorm_relief'&&def.id!=='bh_research'&&def.id!=='design_better_train'&&def.id!=='buy_second_train').map(def=>({defId:def.id,readySd:_gameStartSd+(def.startsAfter||0)}));
+  pendingMissionIntros=MISSION_DEFS.filter(def=>!def.prerequisite&&def.id!=='visit_planet'&&def.id!=='build_foundry'&&def.id!=='dispose_hazmat'&&def.id!=='lost_colony'&&def.id!=='seeking_home'&&def.id!=='create_route'&&def.id!=='research_royal_car'&&def.id!=='colony_train'&&def.id!=='spread_the_seed'&&def.id!=='famine'&&def.id!=='outbreak'&&def.id!=='stellar_cartography'&&def.id!=='galaxy_census'&&def.id!=='sandstorm_relief'&&def.id!=='bh_research'&&def.id!=='design_better_train'&&def.id!=='buy_second_train'&&def.id!=='galactic_distance'&&def.id!=='corporate_expansion').map(def=>({defId:def.id,readySd:_gameStartSd+(def.startsAfter||0)}));
   financeLedger=[]; _ledgerSummary={totalRevenue:0,totalCost:0,totalInterest:0}; purchaseLedger=[]; corpValueHistory={}; corpStatsHistory={}; aiCorpStatsHistory={}; _financeScrollY=0; _financeBreakdown='stardate'; _financeDropdownOpen=false; _versusMetric='value'; _versusDropdownOpen=false;
   loans=[]; _loanCounter=0; _financeTab='financials'; _financeLoanSelected='small'; _financeLoanHover=null; _financeTakeLoanHover=false;
   // Fresh pool of issuer names per game; assign one to each loan tier
