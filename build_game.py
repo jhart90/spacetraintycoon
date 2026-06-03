@@ -5533,6 +5533,7 @@ function _initAICorp(){
 
   // Pick the canonical mirror-system planet list (orbit-sorted) so the AI's
   // home assignment + seed stations use the new ordering.
+  // The mirror transform sets biomes in order: [lava, resort, desert, agri, rocky, chemical].
   const aiStarPlanets=galaxy.planets
     .filter(p=>p.starId===aiHomeStar.id)
     .sort((a,b)=>a.orbitRadius-b.orbitRadius);
@@ -5541,30 +5542,45 @@ function _initAICorp(){
   if(!aiHomePlanet){_aiCorp=null;return;}
   // Mirror Orijen's starting development level so the AI home is equally productive
   if(aiHomePlanet.type.id==='resort'&&(aiHomePlanet.devLevel||0)<3) aiHomePlanet.devLevel=3;
-  // VH initial composition for every AI (engine_galaxy + 5 cargo cars).
-  const aiCars=['engine_galaxy','car_passenger','car_water_tank','car_mail','car_ore','car_iron','caboose'];
+  // ── SCRIPTED STARTING STRATEGY ─────────────────────────────────
+  // Per user spec: first 3 stations are resort (home), lava (idx 0), desert (idx 2).
+  // First 3 trains:
+  //   #1: [engine_constellation, passenger, mail, ore, ore, caboose] — lava → desert
+  //   #2: [engine_constellation, passenger, mail, water, water, caboose] — resort → desert
+  //   #3: [engine_constellation, iron, iron, hazmat, passenger, mail, caboose] — desert → star → other-station
+  //       (configured here but with a placeholder route until iron supply becomes available; the
+  //        AI then routes it desert → star (hazmat dispose) → some non-Large station once iron flows)
+  const _lavaPlanet  = aiStarPlanets.find(p=>p.type.id==='lava')   || aiStarPlanets[0];
+  const _desertPlanet= aiStarPlanets.find(p=>p.type.id==='desert') || aiStarPlanets[2];
+  // Train 1: ore hauler — lava → desert
+  const _t1Cars=['engine_constellation','car_passenger','car_mail','car_ore','car_ore','caboose'];
   const aiTrainIdx=trains.length;
-  const aiTrain=makeGalaxyTrain(AI_CORP_NAMES[diff].split(' ')[0]+' No.1',aiHomePlanet.id,'LOW',aiCars,false);
+  const aiTrain=makeGalaxyTrain(AI_CORP_NAMES[diff].split(' ')[0]+' No.1',_lavaPlanet?.id||aiHomePlanet.id,'LOW',_t1Cars,false);
   aiTrain.color=AI_CORP_COLOR;
   trains.push(aiTrain);
-  // VH-style seed fleet: 2 additional free starting trains for every difficulty
-  const aiExtraTrainIndices=[];
-  for(let _ei=0;_ei<2;_ei++){
-    const _et=makeGalaxyTrain(AI_CORP_NAMES[diff].split(' ')[0]+' No.'+(_ei+2),aiHomePlanet.id,'LOW',aiCars,false);
-    _et.color=AI_CORP_COLOR;
-    aiExtraTrainIndices.push(trains.length);trains.push(_et);
-  }
+  // Train 2: water hauler — resort → desert
+  const _t2Cars=['engine_constellation','car_passenger','car_mail','car_water_tank','car_water_tank','caboose'];
+  const _t2Idx=trains.length;
+  const _t2=makeGalaxyTrain(AI_CORP_NAMES[diff].split(' ')[0]+' No.2',aiHomePlanet.id,'LOW',_t2Cars,false);
+  _t2.color=AI_CORP_COLOR;
+  trains.push(_t2);
+  // Train 3: iron/hazmat hauler — desert → star → other-station. Configured with the
+  // iron loadout from day one so the cars are ready when iron supply unlocks.
+  const _t3Cars=['engine_constellation','car_iron','car_iron','car_hazmat','car_passenger','car_mail','caboose'];
+  const _t3Idx=trains.length;
+  const _t3=makeGalaxyTrain(AI_CORP_NAMES[diff].split(' ')[0]+' No.3',_desertPlanet?.id||aiHomePlanet.id,'LOW',_t3Cars,false);
+  _t3.color=AI_CORP_COLOR;
+  trains.push(_t3);
+  const aiExtraTrainIndices=[_t2Idx,_t3Idx];
   const ownedPlanetIds=new Set();
-  // VH-style seed stations: AI home (resort) plus the two largest other
-  // in-system planets. Sorting by size keeps the picks revenue-relevant
-  // regardless of how aiStarPlanets happens to be ordered.
+  // Seed stations: home resort, lava (starting system), desert (starting system).
   aiHomePlanet.aiHasStation=true;ownedPlanetIds.add(aiHomePlanet.id);
-  const _szRank={XS:0,S:1,M:2,L:3,XL:4,XXL:5};
-  const _seedExtras=aiStarPlanets
-    .filter(p=>p.id!==aiHomePlanet.id)
-    .sort((a,b)=>(_szRank[b.size]||0)-(_szRank[a.size]||0))
-    .slice(0,2);
-  for(const _e of _seedExtras){_e.aiHasStation=true;ownedPlanetIds.add(_e.id);}
+  if(_lavaPlanet&&_lavaPlanet.id!==aiHomePlanet.id){
+    _lavaPlanet.aiHasStation=true;ownedPlanetIds.add(_lavaPlanet.id);
+  }
+  if(_desertPlanet&&_desertPlanet.id!==aiHomePlanet.id&&_desertPlanet.id!==_lavaPlanet?.id){
+    _desertPlanet.aiHasStation=true;ownedPlanetIds.add(_desertPlanet.id);
+  }
   const aiVisited=new Set();
   for(const p of aiStarPlanets) aiVisited.add(p.id);
   // Rival CEO for the founding popup — any CEO not chosen by the player
@@ -5615,11 +5631,115 @@ function _initAICorp(){
     // draw FROM the yard before charging full price. The AI only pays for
     // net-new car/engine units it doesn't already own. Map: cartype -> count.
     trainYard:{},
+    // SCRIPTED START STATE — see `_initAICorp`. Carries metadata for the AI
+    // setup hooks: iron-foundry queue, train-3 deferred routing, etc.
+    _scriptedSetup:{
+      lavaPlanetId:_lavaPlanet?.id??null,
+      desertPlanetId:_desertPlanet?.id??null,
+      t1Idx:aiTrainIdx, t2Idx:_t2Idx, t3Idx:_t3Idx,
+      foundryQueued:false, foundryBuilt:false,
+      t3RouteAssigned:false,
+    },
   };
+  // ── IMMEDIATE FOUNDRY QUEUE ─────────────────────────────────────
+  // Per user spec: build an Iron Foundry on the desert planet immediately
+  // after the desert station is up. The standard build_upgrade action runs
+  // through the same path used elsewhere; we queue it on the first AI tick
+  // (action queue is processed before any decision logic).
+  if(_desertPlanet&&_desertPlanet.aiHasStation){
+    // Find input sources (water, molten_ore) in range so the foundry has its
+    // logistics pre-planned. Falls back to in-system planets at startup since
+    // nothing is visited beyond the home system yet.
+    const _waterSrc=aiStarPlanets.find(p=>(p.supply?.water||0)>0);
+    const _oreSrc=_lavaPlanet||aiStarPlanets.find(p=>(p.supply?.molten_ore||0)>0);
+    const _inputSources={};
+    if(_waterSrc) _inputSources.water=_waterSrc.id;
+    if(_oreSrc) _inputSources.molten_ore=_oreSrc.id;
+    _aiCorp.actionQueue.push({
+      type:'build_upgrade',
+      planetId:_desertPlanet.id,
+      upgradeId:'iron_foundry',
+      inputSources:_inputSources,
+      outputPid:null, // sink picked dynamically once routes flow
+    });
+    _aiCorp._scriptedSetup.foundryQueued=true;
+  }
+  // ── ASSIGN SCRIPTED ROUTES ──────────────────────────────────────
+  // Train 1: lava → desert (loop so train cycles between them)
+  if(_lavaPlanet&&_desertPlanet){
+    _aiCorp.actionQueue.push({
+      type:'assign_route', trainIdx:aiTrainIdx,
+      planetIds:[_lavaPlanet.id, _desertPlanet.id, _lavaPlanet.id]
+    });
+  }
+  // Train 2: resort (home) → desert (loop)
+  if(_desertPlanet){
+    _aiCorp.actionQueue.push({
+      type:'assign_route', trainIdx:_t2Idx,
+      planetIds:[aiHomePlanet.id, _desertPlanet.id, aiHomePlanet.id]
+    });
+  }
+  // Train 3's route is deferred — set in `_aiMaintainScriptedSetup` once iron
+  // becomes available on the desert planet's supply.
+}
+
+// Scripted-setup hook: handle the deferred actions tied to the user-spec
+// starting strategy (immediate iron-foundry, train-3 iron route).
+function _aiMaintainScriptedSetup(){
+  if(!_aiCorp||!_aiCorp._scriptedSetup) return;
+  const ss=_aiCorp._scriptedSetup;
+  const desert=ss.desertPlanetId!=null?galaxy.planets[ss.desertPlanetId]:null;
+  // Mark foundry as built once the upgrade actually exists.
+  if(!ss.foundryBuilt && desert && (desert.upgrades||[]).includes('iron_foundry')){
+    ss.foundryBuilt=true;
+  }
+  // Train 3: route once the desert planet has iron supply > 0 (foundry online).
+  if(!ss.t3RouteAssigned && desert){
+    const _ironReady=ss.foundryBuilt && (desert.supply?.iron||0)>0;
+    if(_ironReady){
+      // Pick a non-Large-Station target as the 3rd stop. Prefer an AI-owned
+      // station that doesn't have a Large Station yet (and isn't desert/star).
+      let _thirdStop=null;
+      for(const _pid of _aiCorp.ownedPlanetIds){
+        const _p=galaxy.planets[_pid];
+        if(!_p||_p.id===desert.id) continue;
+        if(_p.hasLargeStation) continue;
+        if(_p.isStarProxy) continue;
+        _thirdStop=_p; break;
+      }
+      if(!_thirdStop){
+        // Fallback: any in-system planet with station that isn't desert/large.
+        for(const _p of galaxy.planets){
+          if(!_p||_p.id===desert.id) continue;
+          if(!(_p.hasStation||_p.aiHasStation)) continue;
+          if(_p.hasLargeStation) continue;
+          _thirdStop=_p; break;
+        }
+      }
+      // Use the star proxy for the hazmat-dispose hop. Each star has a proxy
+      // planet (isStarProxy=true) for trains to "park at the star".
+      const _starProxy=galaxy.planets.find(p=>p.isStarProxy&&p.starId===desert.starId);
+      if(_thirdStop && _starProxy){
+        _aiCorp.actionQueue.push({
+          type:'assign_route', trainIdx:ss.t3Idx,
+          planetIds:[desert.id, _starProxy.id, _thirdStop.id, desert.id]
+        });
+        ss.t3RouteAssigned=true;
+      } else if(_thirdStop){
+        // No star proxy available — fall back to direct desert ↔ third-stop loop.
+        _aiCorp.actionQueue.push({
+          type:'assign_route', trainIdx:ss.t3Idx,
+          planetIds:[desert.id, _thirdStop.id, desert.id]
+        });
+        ss.t3RouteAssigned=true;
+      }
+    }
+  }
 }
 
 function updateAICorp(dt){
   if(!_aiCorp||!galaxy) return;
+  _aiMaintainScriptedSetup();
   for(const ti of _aiCorp.trainIndices){
     const t=trains[ti];if(!t) continue;
     _aiCorp.visitedPlanetIds.add(t.planetId);
@@ -5646,8 +5766,16 @@ function updateAICorp(dt){
   // train progress counter (incremented on every transit start), so we
   // use the stardate at which it last changed to detect freezes.
   if(!_aiCorp._stuckTrack) _aiCorp._stuckTrack={};
-  if(!_aiCorp.actionQueue.some(a=>a&&a.type==='assign_route')){
+  // Iter 1 (post-yard) fix: previously the stuck detector skipped the ENTIRE
+  // fleet whenever any assign_route was pending in the queue. With Layer 2
+  // now firing 3 evals/tick, the queue is rarely empty, leaving long-stuck
+  // trains (800+ minute idle) unrescued. Now: per-train skip only when THAT
+  // SPECIFIC train has a pending assign_route.
+  const _pendingByTi=new Set();
+  for(const _a of _aiCorp.actionQueue) if(_a&&_a.type==='assign_route') _pendingByTi.add(_a.trainIdx);
+  {
     for(const ti of _aiCorp.trainIndices){
+      if(_pendingByTi.has(ti)) continue;
       const t=trains[ti]; if(!t) continue;
       const _curSegs=(t.carSegments&&t.carSegments[0])||0;
       let _tr=_aiCorp._stuckTrack[ti];
@@ -5857,7 +5985,12 @@ function _aiDecide(){
       if(_activeExplorers<_maxExp){
         for(const ti of _aiCorp.trainIndices){
           const t=trains[ti];if(!t) continue;
-          if(t.route&&t.route.phase!=='orbit') continue; // never interrupt mid-transit
+          // Allow exploration assignment from any IDLE phase, not just orbit
+          // (Iter 12 fix). Trains stuck in waiting/queueing/blocked at a hub
+          // are wasted capacity — sending them exploring is always better
+          // than letting them idle. Only `transit` and `descending` interrupt-
+          // safely block reassignment.
+          if(t.route&&(t.route.phase==='transit'||t.route.phase==='descending')) continue;
           if(_aiIsRouteLocked(ti)) continue; // honour the re-route cooldown
           const expl=_aiPickExploreTarget(t);
           if(expl){
@@ -6063,7 +6196,7 @@ function _aiDecide(){
     // through to the normal station path so the AI doesn't deadlock
     // waiting for a foundry it can't build.
     const _hasFoundryNow=galaxy.planets.some(_p=>_p&&_p.aiHasStation&&(_p.upgrades||[]).includes('iron_foundry'));
-    const _foundryFirstActive=_aiCorp.stationsBuilt>=4 && !_hasFoundryNow;
+    const _foundryFirstActive=_aiCorp.stationsBuilt>=3 && !_hasFoundryNow;
     let _stationDeferredForFoundry=false;
     let _upgradeQueuedThisBatch=false;
     if(_foundryFirstActive && (diff==='normal'||diff==='hard'||diff==='very_hard')){
@@ -6235,22 +6368,48 @@ function _aiPickRoute(trainIdx){
     const _sortedSig=[..._ot.route.stops].sort((a,b)=>a-b).join(',');
     _fleetRouteSigs.add(_sortedSig);
   }
+  // Iter 8 fix: also factor in PENDING assign_route actions in the queue so
+  // two simultaneous route picks don't end up assigning identical routes.
+  for(const _a of (_aiCorp.actionQueue||[])){
+    if(!_a||_a.type!=='assign_route'||_a.trainIdx===trainIdx) continue;
+    if(!_a.planetIds||_a.planetIds.length<2) continue;
+    const _isLoop=_a.planetIds[0]===_a.planetIds[_a.planetIds.length-1];
+    const _stops=_isLoop?_a.planetIds.slice(0,-1):_a.planetIds.slice();
+    if(_stops.length<2) continue;
+    _fleetRouteSigs.add([..._stops].sort((a,b)=>a-b).join(','));
+  }
   const _sigFor=(arr)=>[...arr].sort((a,b)=>a-b).join(',');
   let bestScore=-Infinity,bestIds=null;
   // ── Directed leg scoring (one-way supply→demand) ────────────────
   // _aiScorePair returns both directions summed. For multi-stop chains we
   // need each leg scored independently so a 3-stop loop A→B→C→A is the
   // sum of three directed legs.
+  // Iter 2 fix: build a set of cargos the train can ACTUALLY carry based on
+  // its current cars. Routes whose only viable flow uses an absent car type
+  // get heavily penalized — the train would depart empty otherwise.
+  const _carriableCargos=new Set();
+  for(const _c of (t.cars||[])){
+    const _cargo=_AI_CAR_TO_CARGO[_c];
+    if(_cargo) _carriableCargos.add(_cargo);
+  }
   const _legScore=(src,dst)=>{
-    let _s=0;
+    let _s=0, _carryableContrib=0;
     const _dstFoundry=(dst.upgrades||[]).includes('iron_foundry');
     for(const [c,amt] of Object.entries(src.supply||{})){
       const dem=(dst.demand||{})[c]||0;
       if(dem>0.5 && amt>0.5){
         const _r=(_dstFoundry&&(c==='water'||c==='molten_ore'))?_AI_CARGO_RATES.iron*1.2:(_AI_CARGO_RATES[c]||1000);
-        _s+=Math.min(amt,10)*Math.min(dem,10)*_r*0.001;
+        const _contrib=Math.min(amt,10)*Math.min(dem,10)*_r*0.001;
+        _s+=_contrib;
+        // Only count toward "carriable" if the train has a matching car type.
+        if(_carriableCargos.has(c)) _carryableContrib+=_contrib;
       }
     }
+    // If <20% of the route's value is actually carryable with current cars,
+    // discount the score by 40% — the train will mostly run empty until
+    // Layer 2 evaluation reshuffles cars. (Iter 3 fix: softened from ×0.30
+    // at <30% — over-restricted the picker and starved foundry creation.)
+    if(_s>0 && _carryableContrib/_s<0.20) _s*=0.60;
     return _s;
   };
   // ── 2-stop loop search ─────────────────────────────────────────
@@ -6286,7 +6445,7 @@ function _aiPickRoute(trainIdx){
   // we want the extra revenue to actually justify the longer round trip.
   // Saturation, corridor-cap, and same-route penalties from the 2-stop pass
   // are reused conceptually: if ANY edge corridor is at the hard cap, skip.
-  const _MULTISTOP_PREMIUM=1.10;
+  const _MULTISTOP_PREMIUM=1.05;
   for(let _ai=0; _ai<stPlanets.length; _ai++){
     const pA=stPlanets[_ai];
     for(let _bi=0; _bi<stPlanets.length; _bi++){
@@ -6336,10 +6495,23 @@ function _aiPickRoute(trainIdx){
   const _inRange2=stPlanets.filter(p=>Math.hypot(p.x-tp2.x,p.y-tp2.y)<=maxRange*0.95);
   _inRange2.sort((a,b)=>Math.hypot(a.x-tp2.x,a.y-tp2.y)-Math.hypot(b.x-tp2.x,b.y-tp2.y));
   if(_inRange2.length<1) return null;
-  const _fbA=_inRange2[0];
-  const _fbB=_inRange2.find(p=>p.id!==_fbA.id&&Math.hypot(p.x-_fbA.x,p.y-_fbA.y)<=maxRange*0.95);
-  if(_fbB) return [_fbA.id,_fbB.id,_fbA.id];
-  return [tp2.id,_fbA.id]; // single-leg if no valid loop partner
+  // Iter 7 fix: enumerate fallback pairs in distance order and prefer pairs
+  // that aren't duplicates or saturated. Iter 10 softening: if NO clean pair
+  // exists, fall back to the closest pair (better to ping-pong than stay
+  // permanently stuck). Hard cap still applies — never exceed cap.
+  let _dirtyFallback=null;
+  for(const _fbA of _inRange2){
+    for(const _fbB of _inRange2){
+      if(_fbA.id===_fbB.id) continue;
+      if(Math.hypot(_fbA.x-_fbB.x,_fbA.y-_fbB.y)>maxRange*0.95) continue;
+      if((_corridorCounts.get(_corKey(_fbA.id,_fbB.id))||0)>=_AI_CORRIDOR_CAP) continue;
+      const _isDup=_fleetRouteSigs.has(_sigFor([_fbA.id,_fbB.id]));
+      if(!_isDup) return [_fbA.id,_fbB.id,_fbA.id];
+      if(!_dirtyFallback) _dirtyFallback=[_fbA.id,_fbB.id,_fbA.id];
+    }
+  }
+  if(_dirtyFallback) return _dirtyFallback;
+  return null;
 }
 
 function _aiScorePair(pA,pB){
@@ -7089,7 +7261,6 @@ function _aiDoSwapCars(trainIdx,newCars,cost){
   // Commit: consume `added` from yard, deposit `removed` into yard.
   _aiYardConsume(_yardAdded);
   _aiYardDeposit(_yardRemoved);
-  const oldCars=t.cars||[];
   const _oldEng=oldCars[0]||null, _newEng=newCars[0]||null;
   const _carryArr=(arr,def)=>newCars.map((_,i)=>oldCars[i]===newCars[i]?(arr?.[i]??def):def);
   t.cars=newCars.slice();
@@ -7265,14 +7436,16 @@ function _aiPickCarsForRoute(train, stops){
   for(let i=0;i<stops.length;i++){
     const pSrc=galaxy.planets[stops[i]]; if(!pSrc) continue;
     for(const [c,amt] of Object.entries(pSrc.supply||{})){
-      if(amt<0.5) continue;
+      // Per user spec: any cargo with >0 supply at this stop AND >0 demand
+      // at some other stop on the same route qualifies as a candidate car.
+      if(amt<=0) continue;
       if(!_AI_CARGO_TO_CAR[c]) continue;
       for(let j=0;j<stops.length;j++){
         if(j===i) continue;
         if(stops[i]===stops[j]) continue; // supplier and consumer must be different planets
         const pDst=galaxy.planets[stops[j]]; if(!pDst) continue;
         const dem=(pDst.demand||{})[c]||0;
-        if(dem<0.5) continue;
+        if(dem<=0) continue;
         const _s=Math.min(amt,10)*Math.min(dem,10)*(_AI_CARGO_RATES[c]||1000);
         if(!_byCargo[c] || _s>_byCargo[c]) _byCargo[c]=_s;
       }
@@ -7313,13 +7486,12 @@ function _aiApplyCarRefit(trainIdx, newCars){
   if(!_aiCorp) return;
   const t=trains[trainIdx];
   if(!t||!Array.isArray(newCars)||newCars.length<1) return;
-  // Rate-limit: at most one refit per train per 2 SD. The parked-train +
-  // frozen-train detectors and the foundry-supply ensurer all call
-  // _aiDoAssignRoute frequently; without this guard, every reassignment
-  // re-charges car costs even when the train's cars are functionally
-  // identical to what was there before.
+  // Rate limit removed: with the train-yard accounting, refits are mostly
+  // free (cars come from the yard inventory, not net-new purchase). The user
+  // explicitly wants the AI to retrofit cars IMMEDIATELY after every route
+  // assignment, picking only car types whose cargo has both supply at one
+  // stop and demand at another stop on the new route.
   if(!_aiCorp._lastRefitSd) _aiCorp._lastRefitSd={};
-  if((stardate-(_aiCorp._lastRefitSd[trainIdx]||-999))<0.5) return;
   const oldCars=t.cars||[];
   const _oldEng=oldCars[0]||null, _newEng=newCars[0]||null;
   // Refit cost = NET asset increase only. Swapping a passenger car for an
@@ -10658,6 +10830,18 @@ function updateTrain(t, dt){
           // immediately give up and park.
           const _shouldQ=_hasSt&&_shouldQueueForLowerOrbit(t,_fDstP);
           if(_tierOk || _shouldQ){
+            // AI trains: NEVER create the X→X self-route. It's pure waste
+            // — the train would burn maintenance circling its current planet
+            // when it could either unload and pick a productive new route,
+            // or get rescued by the stuck-train detector. For AI trains we
+            // unload via _aiUnloadAndPark below and clear the route so the
+            // next AI tick picks a real destination.
+            if(!t.isPlayer){
+              t.route=null; t.queuedRoute=null; t._detourPermanentRoute=null;
+              t._cargoCheckedThisStop=false;
+              _invalidateOccOrbit();
+              return;
+            }
             t.route={stops:[t.planetId,t.planetId],isLoop:false,fromIdx:0,toIdx:0,
               phase:'orbit',orbitSpun:0,dir:1,minOrbitDone:true,
               stopOrbitR:[t.orbitR,t.orbitR],_recomputeTimer:0,
