@@ -1941,9 +1941,13 @@ let _starPanelPlanetHover=-1;      // index in starPanelPlanetBounds
 let _trainAddHover=false, _trainRowHover=-1;
 let _routesRowHover=-1; // hover index for ROUTES popup rows
 let _routesStopHover=-1; // hover index for ROUTES popup per-stop planet blocks
+let _routesRuleBtnHover=-1; // hover index for the "RULES" button (one per visible stop pane)
 let _routesVizHover=-1; // hover index for ROUTES popup train-viz strips (drives the 500ms-delayed cargo tooltip)
 let _routesVizHoverStartMs=0; // real-time ms when current viz hover began (0=inactive)
 let _routesVizHoverCpX=0, _routesVizHoverCpY=0; // last cursor pos while hovering a viz strip — anchors the tooltip
+// Pre-Departure Checklist popup hover/state — see drawPreDepartureChecklistPopup.
+let _pdcRuleDeleteHover=-1; // hover index over the red X for an existing rule
+let _pdcCreateBtnHover=false;
 // Right-side Trains panel "Add new train" pseudo-slot: bounds set during draw
 // (cleared if the slot is scrolled out of view), hover flag updated by mousemove.
 let _addTrainPanelBounds=null;
@@ -3813,7 +3817,7 @@ function computeSupplyRate(p){
   if(bio==='agri'&&dl>=3)    r.water=(r.water||0)+3.0;
   // Iron supply unlocks removed — no biome / population dev-level step bonuses
   // for iron supply. Iron is now exclusively a foundry-output cargo.
-  if(bio==='desert'&&dl>=5)  r.molten_ore=(r.molten_ore||0)+3.0;
+  // Desert planets do not supply molten ore (lava-only supply).
   if(bio==='jungle'&&dl>=6)  r.livestock=(r.livestock||0)+4.0;
   if(bio==='ocean'&&dl>=7)   r.ice=(r.ice||0)+4.0;
   if(bio==='ice'&&dl>=8)     r.water=(r.water||0)+4.0;
@@ -4013,17 +4017,47 @@ function _startCargoOps(t, p){
   _startLoadPhase(t,p);
 }
 function _startLoadPhase(t, p){
-  // Build load queue: empty cars whose cargo type has sufficient supply
+  // Build load queue: empty cars whose cargo type has sufficient supply.
+  // Pre-Departure Checklist guard: cars whose cargo type has a "Must be
+  // Empty" rule at this stop are NEVER loaded — doing so would immediately
+  // re-break the rule that's keeping the train here.
+  const _emptyRuleCargos=new Set();
+  if(t.preDepartureRules){
+    for(const r of t.preDepartureRules){
+      if(r.stopPlanetId===p.id && r.threshold===0) _emptyRuleCargos.add(r.cargoType);
+    }
+  }
   const lq=[];
   for(let i=0;i<t.cars.length;i++){
     if(!t.carFull?.[i]){
       const cargo=CAR_CARGO_TYPE[t.cars[i]];
       const _cU=CAR_CARGO_UNITS[t.cars[i]]||1.0;
+      if(_emptyRuleCargos.has(cargo)) continue;
       if(cargo&&(p.supply?.[cargo]||0)>=_cU&&(cargo!=='gold'||p.goldRevealed)&&(cargo!=='diamond'||p.diamondRevealed)) lq.push(i);
     }
   }
   if(lq.length){ t.cargoPhase='loading'; t.cargoQueue=lq; t.cargoTimer=CARGO_OP_TIME; return; }
   t.cargoPhase=null; // nothing to do
+}
+// Unload-only trigger — used by the WAITING FOR DEMAND poll. Identical to
+// _startCargoOps's unload-queue build, but without the trailing
+// _startLoadPhase fallthrough (so cars don't get refilled the same frame).
+function _startUnloadPhase(t, p){
+  const uq=[];
+  for(let i=0;i<t.cars.length;i++){
+    if(t.carFull?.[i]){
+      const cargo=t.carCargo?.[i];
+      if(!cargo){ t.carFull[i]=false; continue; }
+      const _cU=CAR_CARGO_UNITS[t.cars[i]]||1.0;
+      if((p.demand?.[cargo]||0)<0.5*_cU) continue;
+      if(cargo==='passengers'&&t.carCargoSource?.[i]===p.id) continue;
+      uq.push(i);
+    }
+  }
+  if(uq.length){
+    t.cargoPhase='unloading'; t.cargoQueue=uq; t.cargoTimer=CARGO_OP_TIME;
+    t._unloadRevenue=0; t._unloadCount=0;
+  }
 }
 function _startStarOps(t, starProxy){
   // Queue all full hazmat cars for disposal into the star
@@ -7648,6 +7682,8 @@ function drawPlanetClouds(cx,cy,r,p){
 function getTrainStatus(train){
   if(train.cargoPhase==='unloading') return {text:'UNLOADING', color:'rgba(255,165,40,0.92)'};
   if(train.cargoPhase==='loading')   return {text:'LOADING',   color:'rgba(60,210,180,0.92)'};
+  if(train._waitingForCargoRules)    return {text:'WAITING FOR CARGO', color:'rgba(255,220,80,0.95)'};
+  if(train._waitingForDemandRules)   return {text:'WAITING FOR DEMAND', color:'rgba(255,170,60,0.95)'};
   const r=train.route;
   const rph=r?r.phase:null;
   if(!r){
@@ -8387,6 +8423,69 @@ function _planetTopN(p, side, n){
   const out=[]; for(let i=0;i<n;i++){ if(best[i]) out.push(best[i]); }
   return out;
 }
+// ── Pre-Departure Checklist helpers ────────────────────────
+// Rules are stored on the train as t.preDepartureRules = [
+//   {stopPlanetId, cargoType, threshold}, ...
+// ] where threshold is 0.25 / 0.5 / 0.75 / 1.0.
+// Each rule says "at this stop, before departing, this fraction of cars of
+// this cargo type must be full." Rules persist across route reassignments
+// but only apply to stops the train's current route actually visits.
+function _trainCargoCarCounts(t){
+  // Returns {cargoType: count} for each cargo-carrying car on the train.
+  // Engines + caboose return undefined from CAR_CARGO_TYPE and are skipped.
+  const out={};
+  for(const c of t.cars){
+    const ct=CAR_CARGO_TYPE[c];
+    if(!ct) continue;
+    out[ct]=(out[ct]||0)+1;
+  }
+  return out;
+}
+function _trainCargoFilledCounts(t){
+  // Returns {cargoType: filledCount} for cars currently marked carFull[i].
+  const out={};
+  if(!t.carFull) return out;
+  for(let i=0;i<t.cars.length;i++){
+    const ct=CAR_CARGO_TYPE[t.cars[i]];
+    if(!ct) continue;
+    if(t.carFull[i]) out[ct]=(out[ct]||0)+1;
+  }
+  return out;
+}
+function _evaluatePreDepartureRule(t, rule){
+  // Returns true if the rule is currently satisfied. threshold === 0 is a
+  // sentinel for "Must be Empty" — satisfied when zero cars of this cargo
+  // type are full. threshold > 0 means "Must be at least X% full".
+  const counts=_trainCargoCarCounts(t);
+  const filled=_trainCargoFilledCounts(t);
+  const total=counts[rule.cargoType]||0;
+  if(total<=0) return true; // no cars of that type → vacuously satisfied
+  const have=filled[rule.cargoType]||0;
+  if(rule.threshold===0) return have===0;
+  return (have/total) >= rule.threshold;
+}
+function _trainHasUnsatisfiedRulesAt(t, planetId){
+  if(!t.preDepartureRules || !t.preDepartureRules.length) return false;
+  for(const r of t.preDepartureRules){
+    if(r.stopPlanetId!==planetId) continue;
+    if(!_evaluatePreDepartureRule(t, r)) return true;
+  }
+  return false;
+}
+// Classify the unsatisfied rules at a given stop into "needs unload" (empty
+// rules) vs "needs load" (fill rules). Drives the WAITING FOR CARGO vs
+// WAITING FOR DEMAND status split and the per-1/32-orbit poll dispatch.
+function _classifyUnsatisfiedRulesAt(t, planetId){
+  let empty=false, fill=false;
+  if(t.preDepartureRules){
+    for(const r of t.preDepartureRules){
+      if(r.stopPlanetId!==planetId) continue;
+      if(_evaluatePreDepartureRule(t, r)) continue;
+      if(r.threshold===0) empty=true; else fill=true;
+    }
+  }
+  return {empty, fill, any: empty||fill};
+}
 // Lazily compute the top-4 cargoes by amount on the supply or demand side of
 // the planet, filtered to >=0.05 and respecting gold/diamond revelation.
 function _planetTop4(p,side){
@@ -8942,6 +9041,47 @@ function updateTrain(t, dt){
       // Unload-and-park: final destination of a "route train here" trip — cargo ops are
       // complete, so discard the temporary route and leave the train in a free orbit.
       if(r._unloadAndPark){ t.route=null; t.queuedRoute=null; return; }
+      // ── Pre-Departure Checklist gate ──────────────────────────
+      // Classify unsatisfied rules at this stop into:
+      //   • empty  — "Must be Empty" rules (train needs to UNLOAD cargo)
+      //   • fill   — "Must be ≥X% full" rules (train needs to LOAD cargo)
+      // Status:
+      //   • only empty unsat              → WAITING FOR DEMAND
+      //   • any fill unsat (with or w/o empty) → WAITING FOR CARGO
+      // Every 1/32 of an orbit while waiting:
+      //   • First try to descend to a now-free lower orbit tier (mirrors the
+      //     queueing system). Descent flag t._descendBackToWaiting prevents
+      //     the cargo gate from re-firing UNLOAD on the new tier.
+      //   • Else if an empty rule is unsat → _startUnloadPhase (unload-only,
+      //     no fallthrough to load).
+      //   • Else if a fill rule is unsat   → _startLoadPhase (load-only,
+      //     skips cargo types that have a Must-Be-Empty rule on this stop).
+      const _ruleStatus=_classifyUnsatisfiedRulesAt(t, t.planetId);
+      if(_ruleStatus.any){
+        if(_ruleStatus.fill){ t._waitingForCargoRules=true;  t._waitingForDemandRules=false; }
+        else                { t._waitingForCargoRules=false; t._waitingForDemandRules=true;  }
+        t._pdcRecheckAcc=(t._pdcRecheckAcc||0)+ORB_SPD*dt;
+        if(t._pdcRecheckAcc>=(Math.PI*2)/32){
+          t._pdcRecheckAcc=0;
+          const _cplPdc=_gp(t.planetId);
+          if(_cplPdc&&(_cplPdc.hasStation||_cplPdc.aiHasStation)){
+            const _nextTier=_nextLowerOrbitTier(t.orbitTier);
+            if(_nextTier && _isOrbitTierFree(t.planetId,_nextTier,t)){
+              t._descendBackToWaiting=true;
+              _startOrbitDescent(t, r, _nextTier);
+              return;
+            }
+            if(_ruleStatus.empty){
+              _startUnloadPhase(t,_cplPdc);
+            } else if(_ruleStatus.fill){
+              _startLoadPhase(t,_cplPdc);
+            }
+          }
+        }
+        return; // hold in orbit — re-check next frame
+      } else {
+        t._waitingForCargoRules=false; t._waitingForDemandRules=false; t._pdcRecheckAcc=0;
+      }
       const fromP=_gp(r.stops[r.fromIdx]);
       r.departAngle=computeDepartAngle(fromP,r.stops[r.toIdx],t.orbitR,r.stopOrbitR[r.toIdx]||t.orbitR);
       const da=(r.departAngle%(Math.PI*2)+Math.PI*2)%(Math.PI*2);
@@ -9031,7 +9171,18 @@ function updateTrain(t, dt){
       const _cpQ=_gp(t.planetId);
       if(_trainTierIsCargoReady(t, _cpQ)){
         r.phase='orbit'; r.orbitSpun=0; r.minOrbitDone=true;
-        t._cargoCheckedThisStop=false;
+        // Special case: this descent was triggered from inside a
+        // WAITING-FOR-CARGO 1/32-orbit poll (the train had already
+        // unloaded + loaded once at the previous tier). Keep
+        // _cargoCheckedThisStop=true so the cargo gate does NOT re-fire
+        // unload at the new tier — we want to land straight back in the
+        // departure-gate's WAITING-FOR-CARGO branch and resume polling.
+        if(t._descendBackToWaiting){
+          t._descendBackToWaiting=false;
+          t._pdcRecheckAcc=0;
+        } else {
+          t._cargoCheckedThisStop=false;
+        }
       } else {
         // Not cargo-ready yet (e.g., HIGH→MED at station-only). Chain
         // straight into another descent if the next slot is free; else
@@ -14065,10 +14216,28 @@ function drawTrainDetailPopup(){
     _finRow('PROFIT', profit, py+352);
   }
   // ── Current Route section ─────────────────────────────────────
+  // The whole panel is a single click target: clicking anywhere inside it
+  // opens the [R] ROUTES popup, scrolled so this train's row is visible.
+  // Bounds + hover highlight are painted FIRST so subsequent label / strip
+  // drawing sits on top of the wash.
+  popupState.currentRouteBounds={x:px+1,y:py+366,w:pw-2,h:ph-366-1};
+  if(popupState.hoverCurrentRoute){
+    ctx.fillStyle='rgba(120,210,180,0.10)';
+    ctx.fillRect(px+1,py+367,pw-2,ph-366-2);
+    ctx.strokeStyle='rgba(120,210,180,0.45)'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.rect(px+1.5,py+366.5,pw-3,ph-366-2); ctx.stroke();
+  }
   ctx.strokeStyle='rgba(80,60,30,0.4)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(px,py+366); ctx.lineTo(px+pw,py+366); ctx.stroke();
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
-  ctx.fillStyle='rgba(200,140,60,0.75)'; ctx.fillText('CURRENT ROUTE',px+14,py+380);
+  ctx.fillStyle=popupState.hoverCurrentRoute?'rgba(220,200,120,0.95)':'rgba(200,140,60,0.75)';
+  ctx.fillText('CURRENT ROUTE',px+14,py+380);
+  if(popupState.hoverCurrentRoute){
+    ctx.font='9px "Exo 2",sans-serif'; ctx.textAlign='right';
+    ctx.fillStyle='rgba(180,230,210,0.80)';
+    ctx.fillText('click to open [R] ROUTES →',px+pw-14,py+380);
+    ctx.textAlign='left';
+  }
   if(t.route&&t.route.isTempRoute&&t.route.phase==='transit'&&t.queuedRoute){
     ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(255,160,60,0.6)';
     ctx.fillText('(completing segment — new route queued)',px+130,py+380);
@@ -16000,8 +16169,9 @@ function drawPlanetDetailPopup(){
 let trainsPopupAddBounds=null;
 let trainsPopupRowBounds=[]; // [{x,y,w,h, trainIdx}] for dbl-click name edit
 let routesPopupRowBounds=[]; // [{x,y,w,h, trainIdx}] for ROUTES popup click hit-tests
-let routesPopupStopBounds=[]; // [{x,y,w,h, planetId}] per-stop planet panel hit-tests in ROUTES popup
+let routesPopupStopBounds=[]; // [{x,y,w,h, planetId, trainIdx}] per-stop planet panel hit-tests in ROUTES popup
 let routesPopupVizBounds=[]; // [{x,y,w,h, trainIdx}] per-train viz strip hit-tests (drives the cargo tooltip)
+let routesPopupRuleBtnBounds=[]; // [{x,y,w,h, trainIdx, planetId}] one per visible stop pane — the "RULES" button
 
 function addNewPlayerTrain(){
   if(!galaxy) return;
@@ -16621,7 +16791,7 @@ function drawTrainsPopup(){
 // visible window. Double-click any panel to open that train's detail popup.
 function drawRoutesPopup(){
   if(activePopup!=='routes'||!galaxy) return;
-  const pw=620, ph=440;
+  const pw=620, ph=464;
   const [px,py]=drawPopupBase(pw,ph,'rgba(100,210,170,0.6)');
   ctx.save();
   ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
@@ -16650,11 +16820,12 @@ function drawRoutesPopup(){
     if(r) _routed.push({t,i,r});
   }
 
-  const listY=py+34, listH=ph-44, ROW=200;
+  const listY=py+34, listH=ph-44, ROW=224;
   const scroll=popupState.scroll||0;
   routesPopupRowBounds=[];
   routesPopupStopBounds=[];
   routesPopupVizBounds=[];
+  routesPopupRuleBtnBounds=[];
   ctx.save(); ctx.beginPath(); ctx.rect(px+1,listY,pw-2,listH); ctx.clip();
 
   if(_routed.length===0){
@@ -16818,7 +16989,13 @@ function drawRoutesPopup(){
     // baseline; outline runs down past the last cargo entry row with a
     // small pad.
     const _paneTopY = _badgeY + 5;    // = ry + 67
-    const _paneBotY = stopsY + 16 + 10 + 8*10 + 4; // colHdrY=stopsY+16, colsY0=+10, 8 rows × 10 + small pad
+    // Pane bottom reserves a slot for the RULES button under the sup/dem
+    // columns. The button appears only when the pane is hovered, but the
+    // pane outline always reserves the space so the layout doesn't jump
+    // on hover.
+    const _RULES_BTN_H = 18;
+    const _RULES_BTN_PAD = 4; // gap between last cargo row and button top
+    const _paneBotY = stopsY + 16 + 10 + 8*10 + _RULES_BTN_PAD + _RULES_BTN_H + 4;
     const _paneH = _paneBotY - _paneTopY;
     const _paneR = 5;                 // corner radius for the rounded outline
     // Clip the planet-chain content (badges + outlines + names + arrows +
@@ -16951,6 +17128,43 @@ function drawRoutesPopup(){
       }
       if(!demEntries.length){ ctx.fillStyle='rgba(200,130,40,0.35)'; ctx.fillText('none',demX,colsY0); }
     }
+    // ── RULES button per visible pane ─────────────────────────
+    // One button per stop pane, anchored inside the pane near the bottom.
+    // Visible only when that pane is the hovered one. Hit-test rect is
+    // always registered so the click handler can map a click to the right
+    // (trainIdx, planetId). Button index in routesPopupRuleBtnBounds
+    // matches the corresponding routesPopupStopBounds entry by position.
+    for(let bi=0;bi<N;bi++){
+      const sp=_gp(stops[bi]); if(!sp) continue;
+      const _bx=rowX0+bi*(blockW+ARROW_W)-_hScroll;
+      const _rbW=Math.min(72, blockW-16);
+      const _rbX=_bx+Math.floor((blockW-_rbW)/2);
+      const _rbY=_paneBotY-_RULES_BTN_H-4;
+      const _rbIdx=routesPopupRuleBtnBounds.length;
+      routesPopupRuleBtnBounds.push({x:_rbX, y:_rbY, w:_rbW, h:_RULES_BTN_H, trainIdx:ti, planetId:sp.id});
+      // Find the matching routesPopupStopBounds index for this pane so the
+      // button's "visible" gate matches the pane hover state.
+      let _stopBoundsIdxForBi=-1;
+      for(let _si=routesPopupStopBounds.length-1;_si>=0;_si--){
+        const _sb=routesPopupStopBounds[_si];
+        if(_sb.planetId===sp.id && _sb.x===_bx){ _stopBoundsIdxForBi=_si; break; }
+      }
+      const _paneHovered=(_stopBoundsIdxForBi>=0 && _routesStopHover===_stopBoundsIdxForBi);
+      const _btnHovered=(_routesRuleBtnHover===_rbIdx);
+      if(!_paneHovered && !_btnHovered) continue;
+      // Blue rounded-rect button — smaller version of the PURCHASE button
+      // used in the planet-detail upgrades panel.
+      const _bb=_btnHovered;
+      ctx.save();
+      ctx.fillStyle=_bb?'rgba(35,95,200,0.97)':'rgba(20,60,150,0.92)';
+      ctx.beginPath(); ctx.roundRect(_rbX,_rbY,_rbW,_RULES_BTN_H,3); ctx.fill();
+      ctx.strokeStyle=_bb?'rgba(140,210,255,0.95)':'rgba(80,160,255,0.80)'; ctx.lineWidth=_bb?1.5:1;
+      ctx.beginPath(); ctx.roundRect(_rbX,_rbY,_rbW,_RULES_BTN_H,3); ctx.stroke();
+      ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='alphabetic';
+      ctx.fillStyle=_bb?'rgba(220,240,255,0.98)':'rgba(170,220,255,0.95)';
+      ctx.fillText('RULES', _rbX+_rbW/2, _rbY+_RULES_BTN_H/2+3);
+      ctx.restore();
+    }
     // Close the per-row horizontal-scroll content clip.
     ctx.restore();
 
@@ -17049,6 +17263,235 @@ function _drawRoutesVizTooltip(){
   ctx.fillStyle='rgba(210,235,225,0.95)';
   for(let i=0;i<lines.length;i++){
     ctx.fillText(lines[i], _tx+_pad, _ty+_pad+_lh-3+i*_lh);
+  }
+  ctx.restore();
+}
+
+// ── PRE-DEPARTURE CHECKLIST popup ───────────────────────────
+// Opens via the RULES button on a Routes-popup planet pane. Lists every
+// existing rule attached to the (train, planet) pair, lets the user delete
+// any of them via a per-row red X, and provides a new-rule creator with two
+// dropdowns (cargo type + threshold) and a CREATE RULE button. Rules are
+// stored on train.preDepartureRules.
+const _PDC_THRESHOLDS=[
+  {v:0,    label:'Must be Empty'},   // sentinel: rule satisfied only when 0 cars of this type are full
+  {v:0.25, label:'Must be >25% full'},
+  {v:0.50, label:'Must be >50% full'},
+  {v:0.75, label:'Must be >75% full'},
+  {v:1.00, label:'Must be 100% full'},
+];
+function drawPreDepartureChecklistPopup(){
+  if(activePopup!=='predeparturechecklist'||!galaxy) return;
+  const train=trains[popupState.pdcTrainIdx];
+  const planet=galaxy.planets[popupState.pdcPlanetId];
+  if(!train||!planet){ activePopup=null; popupState={}; return; }
+  const pw=460, ph=380;
+  const [px,py]=drawPopupBase(pw,ph,'rgba(80,160,255,0.7)');
+  ctx.save();
+  // ── Header
+  ctx.font='bold 13px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='#7df'; ctx.fillText('PRE-DEPARTURE CHECKLIST',px+pw/2,py+24);
+  ctx.font='10px "Exo 2",sans-serif';
+  const _escTxt='[ESC] close';
+  const _escW=ctx.measureText(_escTxt).width;
+  const _escX=px+pw-12-_escW, _escY=py+14, _escH=14;
+  popupState.pdcEscBounds={x:_escX,y:_escY,w:_escW+4,h:_escH};
+  ctx.textAlign='left';
+  ctx.fillStyle=popupState.pdcEscHover?'rgba(255,255,255,0.92)':'rgba(90,130,190,0.55)';
+  ctx.fillText(_escTxt,_escX,py+24);
+  ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(px,py+34); ctx.lineTo(px+pw,py+34); ctx.stroke();
+  // ── Info block: Train + cargo summary + Planet
+  ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='left';
+  ctx.fillStyle=train.color||'rgba(170,220,210,0.9)';
+  ctx.fillText('Train: '+train.name, px+16, py+54);
+  // Cargo car summary like "PSNGR x2, WATER x4"
+  const counts=_trainCargoCarCounts(train);
+  const cargoSummary=Object.entries(counts).sort((a,b)=>b[1]-a[1]).map(([ct,n])=>(CARGO_SHORT[ct]||ct.slice(0,5).toUpperCase())+' x'+n).join(', ')||'(no cargo cars)';
+  ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(170,210,240,0.82)';
+  ctx.fillText('Cargo: '+cargoSummary, px+16, py+70);
+  ctx.fillStyle='rgba(255,220,80,0.92)';
+  ctx.fillText('Planet: '+planet.name, px+16, py+86);
+  ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(px,py+96); ctx.lineTo(px+pw,py+96); ctx.stroke();
+  // ── Existing rules list
+  if(!train.preDepartureRules) train.preDepartureRules=[];
+  const matchingRules=train.preDepartureRules.map((r,gi)=>({r,gi})).filter(o=>o.r.stopPlanetId===planet.id);
+  popupState.pdcRuleDeleteBounds=[];
+  let _yCursor=py+114;
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
+  ctx.fillStyle='rgba(130,180,230,0.72)';
+  ctx.fillText('EXISTING RULES', px+16, _yCursor); _yCursor+=12;
+  if(matchingRules.length===0){
+    ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(140,170,200,0.55)';
+    ctx.fillText('(none yet — create one below)', px+24, _yCursor);
+    _yCursor+=18;
+  } else {
+    // Rules render as a numbered list. Each rule is colored by type:
+    //   • "Must be Empty" (threshold===0) → bold red
+    //   • Must be ___ full              → bold green
+    // The leading "#N." prefix stays neutral so the colored phrase reads
+    // as the rule itself, not the index.
+    for(let mi=0;mi<matchingRules.length;mi++){
+      const {r:rule,gi:globalIdx}=matchingRules[mi];
+      const rowY=_yCursor;
+      const _rowH=26;
+      const _delIdx=mi;
+      const _delHov=(_pdcRuleDeleteHover===_delIdx);
+      const cargoLabel=CARGO_LABEL[rule.cargoType]||rule.cargoType.toUpperCase();
+      const thrLabel=(_PDC_THRESHOLDS.find(t=>Math.abs(t.v-rule.threshold)<0.001)||{label:''}).label;
+      const _isEmpty=(rule.threshold===0);
+      const _ruleCol=_isEmpty?'rgba(255,90,90,0.98)':'rgba(90,230,130,0.98)';
+      const _numTxt='#'+(mi+1)+'.';
+      const _ruleTxt=cargoLabel+'  —  '+thrLabel;
+      const _numStartX=px+22;
+      // Measure index and rule separately so we can draw them in two fonts.
+      ctx.font='bold 13px "Exo 2",sans-serif';
+      const _numW=ctx.measureText(_numTxt).width;
+      const _ruleTextStartX=_numStartX+_numW+8;
+      const _ruleTextW=ctx.measureText(_ruleTxt).width;
+      // Row background — slightly highlighted on hover.
+      if(_delHov){
+        ctx.fillStyle='rgba(60,30,30,0.30)';
+        ctx.fillRect(px+16,rowY-14,pw-32,_rowH);
+      }
+      // Index prefix — neutral light blue.
+      ctx.fillStyle='rgba(180,210,235,0.88)';
+      ctx.fillText(_numTxt, _numStartX, rowY+5);
+      // Rule phrase — bold, color-coded by type.
+      ctx.fillStyle=_ruleCol;
+      ctx.fillText(_ruleTxt, _ruleTextStartX, rowY+5);
+      // Red X delete button — anchored just past the text. The HOVER hit
+      // area spans the whole row so the X appears while the user is over
+      // any part of the rule, but the CLICK hit area is just the X glyph
+      // so accidental row-clicks don't delete the rule.
+      const _xW=20, _xH=18;
+      const _xX=_ruleTextStartX + _ruleTextW + 8;
+      const _xY=rowY-10;
+      popupState.pdcRuleDeleteBounds.push({
+        // hover bounds — covers the full row text area + the X
+        hx:px+16, hy:rowY-14, hw:pw-32, hh:_rowH,
+        // click bounds — only the X itself
+        x:_xX, y:_xY, w:_xW, h:_xH,
+        ruleGlobalIdx:globalIdx,
+      });
+      if(_delHov){
+        ctx.fillStyle='rgba(180,40,40,0.95)';
+        ctx.beginPath(); ctx.roundRect(_xX,_xY,_xW,_xH,3); ctx.fill();
+        ctx.strokeStyle='rgba(255,120,120,0.9)'; ctx.lineWidth=1;
+        ctx.beginPath(); ctx.roundRect(_xX,_xY,_xW,_xH,3); ctx.stroke();
+        ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
+        ctx.fillStyle='rgba(255,240,240,0.98)';
+        ctx.fillText('X', _xX+_xW/2, _xY+_xH/2+4);
+        ctx.textAlign='left';
+      }
+      _yCursor+=_rowH;
+    }
+  }
+  ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(px,_yCursor+8); ctx.lineTo(px+pw,_yCursor+8); ctx.stroke();
+  _yCursor+=22;
+  // ── New rule creator
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
+  ctx.fillStyle='rgba(130,180,230,0.72)';
+  ctx.fillText('CREATE NEW RULE', px+16, _yCursor); _yCursor+=14;
+  // Two side-by-side dropdowns
+  const _ddH=22, _ddGap=10;
+  const _ddW=Math.floor((pw-32-_ddGap)/2);
+  const _ddYRow=_yCursor;
+  const _ddCargoX=px+16, _ddThrX=_ddCargoX+_ddW+_ddGap;
+  // Allowed cargo types — unique types present on this train.
+  const _availableCargoTypes=Object.keys(counts);
+  // Cargo dropdown
+  const _cargoLabel=popupState.pdcCargoSel
+    ? (CARGO_LABEL[popupState.pdcCargoSel]||popupState.pdcCargoSel.toUpperCase())
+    : '<Cargo Type>';
+  ctx.fillStyle='rgba(20,40,80,0.85)';
+  ctx.beginPath(); ctx.roundRect(_ddCargoX,_ddYRow,_ddW,_ddH,4); ctx.fill();
+  ctx.strokeStyle='rgba(80,140,210,0.55)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.roundRect(_ddCargoX,_ddYRow,_ddW,_ddH,4); ctx.stroke();
+  ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle=popupState.pdcCargoSel?'rgba(220,235,255,0.92)':'rgba(140,170,210,0.65)';
+  ctx.fillText(_cargoLabel, _ddCargoX+8, _ddYRow+_ddH/2+3);
+  ctx.fillStyle='rgba(150,190,240,0.7)';
+  ctx.fillText('▾', _ddCargoX+_ddW-14, _ddYRow+_ddH/2+3);
+  popupState.pdcCargoDdBounds={x:_ddCargoX,y:_ddYRow,w:_ddW,h:_ddH};
+  // Threshold dropdown
+  const _thrLabel=popupState.pdcThresholdSel!=null
+    ? (_PDC_THRESHOLDS.find(t=>Math.abs(t.v-popupState.pdcThresholdSel)<0.001)||{label:'<Rule>'}).label
+    : '<Rule>';
+  ctx.fillStyle='rgba(20,40,80,0.85)';
+  ctx.beginPath(); ctx.roundRect(_ddThrX,_ddYRow,_ddW,_ddH,4); ctx.fill();
+  ctx.strokeStyle='rgba(80,140,210,0.55)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.roundRect(_ddThrX,_ddYRow,_ddW,_ddH,4); ctx.stroke();
+  ctx.fillStyle=popupState.pdcThresholdSel!=null?'rgba(220,235,255,0.92)':'rgba(140,170,210,0.65)';
+  ctx.fillText(_thrLabel, _ddThrX+8, _ddYRow+_ddH/2+3);
+  ctx.fillStyle='rgba(150,190,240,0.7)';
+  ctx.fillText('▾', _ddThrX+_ddW-14, _ddYRow+_ddH/2+3);
+  popupState.pdcThrDdBounds={x:_ddThrX,y:_ddYRow,w:_ddW,h:_ddH};
+  _yCursor+=_ddH+12;
+  // CREATE RULE button — greyed out unless both selections are present.
+  const _canCreate=!!(popupState.pdcCargoSel && popupState.pdcThresholdSel!=null);
+  const _crBtnW=130, _crBtnH=26;
+  const _crBtnX=px+(pw-_crBtnW)/2, _crBtnY=_yCursor;
+  const _crHov=(_pdcCreateBtnHover && _canCreate);
+  if(_canCreate){
+    ctx.fillStyle=_crHov?'rgba(45,200,90,0.99)':'rgba(30,160,70,0.88)';
+    ctx.beginPath(); ctx.roundRect(_crBtnX,_crBtnY,_crBtnW,_crBtnH,4); ctx.fill();
+    ctx.strokeStyle=_crHov?'rgba(80,240,120,0.95)':'rgba(60,220,100,0.70)'; ctx.lineWidth=_crHov?1.5:1;
+    ctx.beginPath(); ctx.roundRect(_crBtnX,_crBtnY,_crBtnW,_crBtnH,4); ctx.stroke();
+    ctx.font='bold 10px Orbitron,sans-serif'; ctx.textAlign='center';
+    ctx.fillStyle=_crHov?'rgba(230,255,235,1.0)':'rgba(195,240,210,0.97)';
+  } else {
+    ctx.fillStyle='rgba(40,55,80,0.60)';
+    ctx.beginPath(); ctx.roundRect(_crBtnX,_crBtnY,_crBtnW,_crBtnH,4); ctx.fill();
+    ctx.strokeStyle='rgba(60,80,110,0.45)'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.roundRect(_crBtnX,_crBtnY,_crBtnW,_crBtnH,4); ctx.stroke();
+    ctx.font='bold 10px Orbitron,sans-serif'; ctx.textAlign='center';
+    ctx.fillStyle='rgba(120,140,170,0.65)';
+  }
+  ctx.fillText('CREATE RULE', _crBtnX+_crBtnW/2, _crBtnY+_crBtnH/2+4);
+  popupState.pdcCreateBtnBounds={x:_crBtnX,y:_crBtnY,w:_crBtnW,h:_crBtnH, enabled:_canCreate};
+  // ── Open dropdown overlay (drawn LAST so it sits on top of everything)
+  popupState.pdcCargoDdOptionBounds=[];
+  popupState.pdcThrDdOptionBounds=[];
+  if(popupState.pdcDropdownOpen==='cargo'){
+    const _optH=20;
+    const _ddX=_ddCargoX, _ddY=_ddYRow+_ddH+2;
+    const _list=_availableCargoTypes;
+    const _bgH=Math.max(_optH, _list.length*_optH);
+    ctx.fillStyle='rgba(10,22,46,0.97)';
+    ctx.beginPath(); ctx.roundRect(_ddX,_ddY,_ddW,_bgH,4); ctx.fill();
+    ctx.strokeStyle='rgba(80,140,210,0.70)'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.roundRect(_ddX,_ddY,_ddW,_bgH,4); ctx.stroke();
+    ctx.font='10px "Exo 2",sans-serif';
+    for(let oi=0;oi<_list.length;oi++){
+      const _oy=_ddY+oi*_optH;
+      const _hov=(popupState.pdcDdOptionHover==='cargo:'+oi);
+      if(_hov){ ctx.fillStyle='rgba(30,80,170,0.55)'; ctx.fillRect(_ddX+2,_oy+1,_ddW-4,_optH-2); }
+      ctx.fillStyle='rgba(220,235,255,0.92)';
+      ctx.textAlign='left';
+      ctx.fillText(CARGO_LABEL[_list[oi]]||_list[oi].toUpperCase(), _ddX+8, _oy+_optH/2+3);
+      popupState.pdcCargoDdOptionBounds.push({x:_ddX,y:_oy,w:_ddW,h:_optH, value:_list[oi], idx:oi});
+    }
+  }
+  if(popupState.pdcDropdownOpen==='threshold'){
+    const _optH=20;
+    const _ddX=_ddThrX, _ddY=_ddYRow+_ddH+2;
+    const _bgH=_PDC_THRESHOLDS.length*_optH;
+    ctx.fillStyle='rgba(10,22,46,0.97)';
+    ctx.beginPath(); ctx.roundRect(_ddX,_ddY,_ddW,_bgH,4); ctx.fill();
+    ctx.strokeStyle='rgba(80,140,210,0.70)'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.roundRect(_ddX,_ddY,_ddW,_bgH,4); ctx.stroke();
+    ctx.font='10px "Exo 2",sans-serif';
+    for(let oi=0;oi<_PDC_THRESHOLDS.length;oi++){
+      const _oy=_ddY+oi*_optH;
+      const _hov=(popupState.pdcDdOptionHover==='threshold:'+oi);
+      if(_hov){ ctx.fillStyle='rgba(30,80,170,0.55)'; ctx.fillRect(_ddX+2,_oy+1,_ddW-4,_optH-2); }
+      ctx.fillStyle='rgba(220,235,255,0.92)';
+      ctx.textAlign='left';
+      ctx.fillText(_PDC_THRESHOLDS[oi].label, _ddX+8, _oy+_optH/2+3);
+      popupState.pdcThrDdOptionBounds.push({x:_ddX,y:_oy,w:_ddW,h:_optH, value:_PDC_THRESHOLDS[oi].v, idx:oi});
+    }
   }
   ctx.restore();
 }
@@ -18520,7 +18963,9 @@ function drawGalaxy(ts,dt){
   drawPlanetDetailPopup();
   drawStarDetailPopup();
   drawTrainsPopup();
-  drawRoutesPopup();
+  // drawRoutesPopup moved AFTER drawTopBar (see below) so the popup paints
+  // over the top stats bar — matches drawCarDetailPopup. Per user request.
+  drawPreDepartureChecklistPopup();
   // Blue "Click here to purchase a second train" callout removed per design —
   // the yellow `_drawBuyTrainPlusHintCallout` (mission-gated) covers this
   // need now. `_drawBuyTrainCallout` definition kept dormant in case it's
@@ -18551,6 +18996,9 @@ function drawGalaxy(ts,dt){
   // bar in any vertical overlap region (the rest of the popups are intentionally
   // beneath the top bar — this one is the exception per user request).
   drawCarDetailPopup();
+  // Routes popup also drawn AFTER drawTopBar (per user request) so the top
+  // of the popup isn't clipped by the top stats bar when the list is tall.
+  drawRoutesPopup();
   // Finance popup drawn last so its dropdown renders above the top stats bar
   drawFinancesPopup();
   // Tutorial chain — popup stage drawn AFTER popups so bubbles pointing at
@@ -19095,7 +19543,7 @@ canvas.addEventListener('wheel',e=>{
     return;
   }
   if(activePopup==='routes'){
-    // Mirror drawRoutesPopup geometry: listH = ph - 44 = 396, ROW = 200.
+    // Mirror drawRoutesPopup geometry: ph=464, listH = ph - 44 = 420, ROW = 224.
     // Only player trains on a real (non-temp) ≥2-stop route count.
     let _rc=0;
     for(let i=0;i<trains.length;i++){
@@ -19103,7 +19551,7 @@ canvas.addEventListener('wheel',e=>{
       if((t.route       && !t.route.isTempRoute       && (t.route.stops||[]).length>=2) ||
          (t.queuedRoute && !t.queuedRoute.isTempRoute && (t.queuedRoute.stops||[]).length>=2)) _rc++;
     }
-    const listH=396, ROW=200;
+    const listH=420, ROW=224;
     const maxScroll=Math.max(0,_rc*ROW-listH);
     popupState.scroll=Math.max(0,Math.min(maxScroll,(popupState.scroll||0)+e.deltaY*0.6));
     return;
@@ -19407,8 +19855,11 @@ canvas.addEventListener('mousemove',e=>{
     popupState.namePencilHover=!!( (_tnb&&cp.x>=_tnb.x&&cp.x<=_tnb.x+_tnb.w&&cp.y>=_tnb.y&&cp.y<=_tnb.y+_tnb.h)||(_tpb&&cp.x>=_tpb.x&&cp.x<=_tpb.x+_tpb.w&&cp.y>=_tpb.y&&cp.y<=_tpb.y+_tpb.h) );
     const _csb=popupState.colorSquareBounds;
     popupState.colorSquareHover=!!(_csb&&cp.x>=_csb.x&&cp.x<=_csb.x+_csb.w&&cp.y>=_csb.y&&cp.y<=_csb.y+_csb.h);
-    if(popupState.namePencilHover||popupState.colorSquareHover) canvas.style.cursor='pointer';
-  } else if(activePopup!=='train'){ if(popupState) popupState.namePencilHover=false; }
+    // CURRENT ROUTE panel — clickable region that opens the [R] ROUTES popup.
+    const _crb=popupState.currentRouteBounds;
+    popupState.hoverCurrentRoute=!!(_crb&&cp.x>=_crb.x&&cp.x<=_crb.x+_crb.w&&cp.y>=_crb.y&&cp.y<=_crb.y+_crb.h);
+    if(popupState.namePencilHover||popupState.colorSquareHover||popupState.hoverCurrentRoute) canvas.style.cursor='pointer';
+  } else if(activePopup!=='train'){ if(popupState) { popupState.namePencilHover=false; popupState.hoverCurrentRoute=false; } }
   // Hover tracking for planet detail popup — tabs, star link, name/pencil
   if(activePopup==='planet'){
     // Tab hover
@@ -19448,6 +19899,8 @@ canvas.addEventListener('mousemove',e=>{
     for(let _ri=0;_ri<routesPopupRowBounds.length;_ri++){const _rb=routesPopupRowBounds[_ri];if(cp.x>=_rb.x&&cp.x<=_rb.x+_rb.w&&cp.y>=_rb.y&&cp.y<=_rb.y+_rb.h){_routesRowHover=_ri;break;}}
     _routesStopHover=-1;
     for(let _si=0;_si<routesPopupStopBounds.length;_si++){const _sb=routesPopupStopBounds[_si];if(cp.x>=_sb.x&&cp.x<=_sb.x+_sb.w&&cp.y>=_sb.y&&cp.y<=_sb.y+_sb.h){_routesStopHover=_si;break;}}
+    _routesRuleBtnHover=-1;
+    for(let _rbi=0;_rbi<routesPopupRuleBtnBounds.length;_rbi++){const _rb=routesPopupRuleBtnBounds[_rbi];if(cp.x>=_rb.x&&cp.x<=_rb.x+_rb.w&&cp.y>=_rb.y&&cp.y<=_rb.y+_rb.h){_routesRuleBtnHover=_rbi;break;}}
     // Train-viz hover with 500ms delay. Tracks both the index and a real-time
     // start timestamp. Moving between viz strips (different train idx) resets
     // the timer. Cursor position is captured so the tooltip can anchor near
@@ -19461,8 +19914,41 @@ canvas.addEventListener('mousemove',e=>{
     if(_vh>=0){ _routesVizHoverCpX=cp.x; _routesVizHoverCpY=cp.y; }
     const _reb=popupState.routesEscBounds;
     popupState.routesEscHover=!!(_reb&&cp.x>=_reb.x&&cp.x<=_reb.x+_reb.w&&cp.y>=_reb.y&&cp.y<=_reb.y+_reb.h);
-    if(_routesRowHover>=0||_routesStopHover>=0||popupState.routesEscHover) canvas.style.cursor='pointer';
-  } else { _routesRowHover=-1; _routesStopHover=-1; _routesVizHover=-1; _routesVizHoverStartMs=0; }
+    if(_routesRowHover>=0||_routesStopHover>=0||_routesRuleBtnHover>=0||popupState.routesEscHover) canvas.style.cursor='pointer';
+  } else { _routesRowHover=-1; _routesStopHover=-1; _routesRuleBtnHover=-1; _routesVizHover=-1; _routesVizHoverStartMs=0; }
+  // Pre-Departure Checklist popup — hover tracking for ESC, dropdown rows,
+  // CREATE RULE button, and existing-rule delete X.
+  if(activePopup==='predeparturechecklist'){
+    const _peb=popupState.pdcEscBounds;
+    popupState.pdcEscHover=!!(_peb&&cp.x>=_peb.x&&cp.x<=_peb.x+_peb.w&&cp.y>=_peb.y&&cp.y<=_peb.y+_peb.h);
+    // CREATE RULE hover (only meaningful when enabled, but track regardless)
+    const _pcb=popupState.pdcCreateBtnBounds;
+    _pdcCreateBtnHover=!!(_pcb&&cp.x>=_pcb.x&&cp.x<=_pcb.x+_pcb.w&&cp.y>=_pcb.y&&cp.y<=_pcb.y+_pcb.h);
+    // Existing-rule delete X hover — checks the WIDE row bounds (hx/hy/hw/hh)
+    // so the X reveals while the cursor is over any part of the rule text.
+    _pdcRuleDeleteHover=-1;
+    if(popupState.pdcRuleDeleteBounds){
+      for(let _di=0;_di<popupState.pdcRuleDeleteBounds.length;_di++){
+        const _b=popupState.pdcRuleDeleteBounds[_di];
+        if(cp.x>=_b.hx&&cp.x<=_b.hx+_b.hw&&cp.y>=_b.hy&&cp.y<=_b.hy+_b.hh){ _pdcRuleDeleteHover=_di; break; }
+      }
+    }
+    // Open-dropdown row hover
+    popupState.pdcDdOptionHover=null;
+    if(popupState.pdcDropdownOpen==='cargo' && popupState.pdcCargoDdOptionBounds){
+      for(let _oi=0;_oi<popupState.pdcCargoDdOptionBounds.length;_oi++){
+        const _ob=popupState.pdcCargoDdOptionBounds[_oi];
+        if(cp.x>=_ob.x&&cp.x<=_ob.x+_ob.w&&cp.y>=_ob.y&&cp.y<=_ob.y+_ob.h){ popupState.pdcDdOptionHover='cargo:'+_oi; break; }
+      }
+    }
+    if(popupState.pdcDropdownOpen==='threshold' && popupState.pdcThrDdOptionBounds){
+      for(let _oi=0;_oi<popupState.pdcThrDdOptionBounds.length;_oi++){
+        const _ob=popupState.pdcThrDdOptionBounds[_oi];
+        if(cp.x>=_ob.x&&cp.x<=_ob.x+_ob.w&&cp.y>=_ob.y&&cp.y<=_ob.y+_ob.h){ popupState.pdcDdOptionHover='threshold:'+_oi; break; }
+      }
+    }
+    if(popupState.pdcEscHover||_pdcCreateBtnHover||_pdcRuleDeleteHover>=0||popupState.pdcCargoDdBounds||popupState.pdcThrDdBounds) canvas.style.cursor='pointer';
+  } else { _pdcCreateBtnHover=false; _pdcRuleDeleteHover=-1; }
   // Hover tracking for planet registry sort + rows
   if(activePopup==='pokedex'){
     _pokedexSortHover=!!(pokedexSortBounds&&cp.x>=pokedexSortBounds.x&&cp.x<=pokedexSortBounds.x+pokedexSortBounds.w&&cp.y>=pokedexSortBounds.y&&cp.y<=pokedexSortBounds.y+pokedexSortBounds.h);
@@ -20191,6 +20677,91 @@ canvas.addEventListener('mouseup',e=>{
           return;
         }
       }
+      // Pre-Departure Checklist popup interactions
+      if(activePopup==='predeparturechecklist'){
+        // [ESC] close → close popup outright
+        if(popupState.pdcEscBounds){
+          const b=popupState.pdcEscBounds;
+          if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+            activePopup=null; popupState={};
+            return;
+          }
+        }
+        // Dropdown option click (if a dropdown is open) — handled FIRST
+        // so the open list intercepts clicks before falling through to
+        // the dropdown-toggle behavior below.
+        if(popupState.pdcDropdownOpen==='cargo' && popupState.pdcCargoDdOptionBounds){
+          for(const ob of popupState.pdcCargoDdOptionBounds){
+            if(cp.x>=ob.x&&cp.x<=ob.x+ob.w&&cp.y>=ob.y&&cp.y<=ob.y+ob.h){
+              popupState.pdcCargoSel=ob.value;
+              popupState.pdcDropdownOpen=null;
+              return;
+            }
+          }
+          popupState.pdcDropdownOpen=null; // click outside list → close
+          return;
+        }
+        if(popupState.pdcDropdownOpen==='threshold' && popupState.pdcThrDdOptionBounds){
+          for(const ob of popupState.pdcThrDdOptionBounds){
+            if(cp.x>=ob.x&&cp.x<=ob.x+ob.w&&cp.y>=ob.y&&cp.y<=ob.y+ob.h){
+              popupState.pdcThresholdSel=ob.value;
+              popupState.pdcDropdownOpen=null;
+              return;
+            }
+          }
+          popupState.pdcDropdownOpen=null;
+          return;
+        }
+        // Cargo dropdown toggle
+        if(popupState.pdcCargoDdBounds){
+          const b=popupState.pdcCargoDdBounds;
+          if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+            popupState.pdcDropdownOpen=(popupState.pdcDropdownOpen==='cargo')?null:'cargo';
+            return;
+          }
+        }
+        // Threshold dropdown toggle
+        if(popupState.pdcThrDdBounds){
+          const b=popupState.pdcThrDdBounds;
+          if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+            popupState.pdcDropdownOpen=(popupState.pdcDropdownOpen==='threshold')?null:'threshold';
+            return;
+          }
+        }
+        // CREATE RULE button (enabled only when both dropdowns selected)
+        if(popupState.pdcCreateBtnBounds){
+          const b=popupState.pdcCreateBtnBounds;
+          if(b.enabled && cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+            const _t=trains[popupState.pdcTrainIdx];
+            if(_t){
+              if(!_t.preDepartureRules) _t.preDepartureRules=[];
+              _t.preDepartureRules.push({
+                stopPlanetId: popupState.pdcPlanetId,
+                cargoType: popupState.pdcCargoSel,
+                threshold: popupState.pdcThresholdSel,
+              });
+              // Reset selections so the user can immediately make another.
+              popupState.pdcCargoSel=null;
+              popupState.pdcThresholdSel=null;
+              popupState.pdcDropdownOpen=null;
+              playSound('click');
+            }
+            return;
+          }
+        }
+        // Existing-rule delete X
+        if(popupState.pdcRuleDeleteBounds){
+          for(const b of popupState.pdcRuleDeleteBounds){
+            if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+              const _t=trains[popupState.pdcTrainIdx];
+              if(_t&&_t.preDepartureRules){
+                _t.preDepartureRules.splice(b.ruleGlobalIdx,1);
+              }
+              return;
+            }
+          }
+        }
+      }
       // Options popup: [ESC] close — clicking closes the popup outright.
       if(activePopup==='options'&&popupState.optionsEscBounds){
         const b=popupState.optionsEscBounds;
@@ -20249,6 +20820,35 @@ canvas.addEventListener('mouseup',e=>{
       if(activePopup==='train'&&popupState.hoverTrainViz&&popupState.trainVizBounds){
         const b=popupState.trainVizBounds;
         if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ openTrainBuilderEdit(popupState.trainIdx); return; }
+      }
+      // Train detail CURRENT ROUTE panel click → open [R] ROUTES popup
+      // scrolled to the row for this train. Mirror the row-filter logic in
+      // drawRoutesPopup so the computed ri lines up with the actual list,
+      // and reuse the same ROW=224 / listH=ph-44=420 geometry to scroll.
+      if(activePopup==='train'&&popupState.currentRouteBounds){
+        const b=popupState.currentRouteBounds;
+        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+          const _targetIdx=popupState.trainIdx;
+          let _ri=-1, _rc=0;
+          for(let _i=0;_i<trains.length;_i++){
+            const _tt=trains[_i]; if(!_tt||!_tt.isPlayer) continue;
+            const _qualifies =
+              (_tt.route       && !_tt.route.isTempRoute       && (_tt.route.stops||[]).length>=2) ||
+              (_tt.queuedRoute && !_tt.queuedRoute.isTempRoute && (_tt.queuedRoute.stops||[]).length>=2);
+            if(!_qualifies) continue;
+            if(_i===_targetIdx) _ri=_rc;
+            _rc++;
+          }
+          const _ROW=224, _listH=464-44;
+          const _maxScroll=Math.max(0,_rc*_ROW-_listH);
+          let _scroll=_ri>=0?_ri*_ROW:0;
+          if(_scroll>_maxScroll) _scroll=_maxScroll;
+          if(_scroll<0) _scroll=0;
+          activePopup='routes';
+          popupState={scroll:_scroll};
+          playSound('click');
+          return;
+        }
       }
       // Train detail color square click → open color picker
       if(activePopup==='train'&&popupState.colorSquareBounds){
@@ -20522,6 +21122,26 @@ canvas.addEventListener('mouseup',e=>{
           for(const b of routesPopupRowBounds){
             if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
               activePopup='train'; popupState={trainIdx:b.trainIdx};
+              return;
+            }
+          }
+        }
+        // RULES button on a hovered planet pane → open the Pre-Departure
+        // Checklist popup for that (train, planet) combo. Checked BEFORE the
+        // generic pane click so a click on the button doesn't fall through
+        // to "open planet detail".
+        if(!isDbl&&routesPopupRuleBtnBounds.length){
+          for(const b of routesPopupRuleBtnBounds){
+            if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+              activePopup='predeparturechecklist';
+              popupState={
+                pdcTrainIdx:b.trainIdx,
+                pdcPlanetId:b.planetId,
+                pdcCargoSel:null,
+                pdcThresholdSel:null,
+                pdcDropdownOpen:null, // 'cargo' | 'threshold' | null
+              };
+              playSound('click');
               return;
             }
           }
@@ -20806,8 +21426,8 @@ canvas.addEventListener('mouseup',e=>{
         }
       }
       // Click outside popup → close
-      const popupW=activePopup==='pokedex'?460:activePopup==='starregistry'?460:activePopup==='train'?430:activePopup==='planet'?470:activePopup==='star'?520:activePopup==='trains'?580:activePopup==='trainbuilder'?620:activePopup==='quitconfirm'?390:activePopup==='finances'?580:activePopup==='corp'?570:activePopup==='ceohire'?700:activePopup==='car_unlock'?320:activePopup==='car_detail'?460:activePopup==='rival_founded'?460:activePopup==='ancient_message'?520:activePopup==='savemanager'?560:activePopup==='controls'?620:activePopup==='routes'?620:300;
-      const popupH=activePopup==='pokedex'?390:activePopup==='starregistry'?390:activePopup==='train'?430:activePopup==='planet'?416:activePopup==='star'?390:activePopup==='trains'?430:activePopup==='trainbuilder'?444:activePopup==='quitconfirm'?110:activePopup==='options'?280:activePopup==='cheats'?270:activePopup==='finances'?400:activePopup==='corp'?440:activePopup==='ceohire'?370:activePopup==='car_unlock'?230:activePopup==='car_detail'?430:activePopup==='rival_founded'?420:activePopup==='ancient_message'?320:activePopup==='savemanager'?420:activePopup==='controls'?300:activePopup==='routes'?440:130;
+      const popupW=activePopup==='pokedex'?460:activePopup==='starregistry'?460:activePopup==='train'?430:activePopup==='planet'?470:activePopup==='star'?520:activePopup==='trains'?580:activePopup==='trainbuilder'?620:activePopup==='quitconfirm'?390:activePopup==='finances'?580:activePopup==='corp'?570:activePopup==='ceohire'?700:activePopup==='car_unlock'?320:activePopup==='car_detail'?460:activePopup==='rival_founded'?460:activePopup==='ancient_message'?520:activePopup==='savemanager'?560:activePopup==='controls'?620:activePopup==='routes'?620:activePopup==='predeparturechecklist'?460:300;
+      const popupH=activePopup==='pokedex'?390:activePopup==='starregistry'?390:activePopup==='train'?430:activePopup==='planet'?416:activePopup==='star'?390:activePopup==='trains'?430:activePopup==='trainbuilder'?444:activePopup==='quitconfirm'?110:activePopup==='options'?280:activePopup==='cheats'?270:activePopup==='finances'?400:activePopup==='corp'?440:activePopup==='ceohire'?370:activePopup==='car_unlock'?230:activePopup==='car_detail'?430:activePopup==='rival_founded'?420:activePopup==='ancient_message'?320:activePopup==='savemanager'?420:activePopup==='controls'?300:activePopup==='routes'?464:activePopup==='predeparturechecklist'?380:130;
       const ppx=(W-popupW)/2, ppy=(H-popupH)/2;
       let _outsidePopup=cp.x<ppx||cp.x>ppx+popupW||cp.y<ppy||cp.y>ppy+popupH;
       if(_outsidePopup&&activePopup==='planet'&&popupState._upgradePanelBounds){
@@ -21324,6 +21944,7 @@ function _buildSaveObject(){
     route:t.route||null,
     queuedRoute:t.queuedRoute||null,
     _detourPermanentRoute:t._detourPermanentRoute||null,
+    preDepartureRules:t.preDepartureRules||null,
   }));
   // ── Ledger + newspaper trimming ─────────────────────────────
   // financeLedger and _newspaperArchive both grow linearly with stardates
@@ -21632,6 +22253,7 @@ function _restoreFromSave(save){
     route:t.route||null,
     queuedRoute:t.queuedRoute||null,
     _detourPermanentRoute:t._detourPermanentRoute||null,
+    preDepartureRules:Array.isArray(t.preDepartureRules)?t.preDepartureRules:[],
   }));
   // Seed cached top-orbited + segment-count for each restored train so the
   // Trains popup renders without per-frame Object.entries().sort() / .reduce().
