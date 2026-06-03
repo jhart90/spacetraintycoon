@@ -7650,8 +7650,11 @@ function drawPlanetClouds(cx,cy,r,p){
 function getTrainStatus(train){
   if(train.cargoPhase==='unloading') return {text:'UNLOADING', color:'rgba(255,165,40,0.92)'};
   if(train.cargoPhase==='loading')   return {text:'LOADING',   color:'rgba(60,210,180,0.92)'};
-  if(train._waitingForCargoRules)    return {text:'WAITING FOR CARGO', color:'rgba(255,220,80,0.95)'};
-  if(train._waitingForDemandRules)   return {text:'WAITING FOR DEMAND', color:'rgba(255,170,60,0.95)'};
+  // WAITING FOR CARGO / DEMAND share the same red as the other "I cannot
+  // depart right now" states (QUEUEING, DESTINATION IS FULL) so the player
+  // can scan a train list and see all blockers in one color family.
+  if(train._waitingForCargoRules)    return {text:'WAITING FOR CARGO', color:'rgba(255,60,60,0.85)'};
+  if(train._waitingForDemandRules)   return {text:'WAITING FOR DEMAND', color:'rgba(255,60,60,0.85)'};
   const r=train.route;
   const rph=r?r.phase:null;
   if(!r){
@@ -7667,7 +7670,7 @@ function getTrainStatus(train){
     return {text:'DESCENDING', color:'rgba(150,220,255,0.92)'};
   }
   if(rph==='waiting'){
-    return {text:'HOLDING / ON ROUTE', color:'rgba(255,60,60,0.85)'};
+    return {text:'DESTINATION IS FULL', color:'rgba(255,60,60,0.85)'};
   }
   if(rph==='blocked'){
     return {text:'BLOCKED / ON ROUTE', color:'rgba(255,110,20,0.90)'};
@@ -8526,10 +8529,23 @@ function _buildOccOrbitMap(){
   // race in. Process transit reservations first so they always populate the
   // map and subsequent in-place claims at the same slot are silently
   // ignored under first-writer-wins.
-  // ── Pass 1: transit reservations ────────────────────────────
+  // ── Pass 1: transit reservations + waiting-phase claims ─────
+  // Trains in transit OWN their destination tier until arrival (irrevocable).
+  // Trains that claimed a destination tier during 'waiting' phase (the
+  // DESTINATION IS FULL → tier freed up → claim immediately flow) also hold
+  // their reservation here via r._destReservedFromWait so another train at
+  // the same destination can't race in and steal the slot between the claim
+  // and the next tangent crossing.
   for(let i=0;i<trains.length;i++){
     const t=trains[i]; if(!t) continue;
-    if(t.route?.phase==='transit'){
+    const _ph=t.route?.phase;
+    if(_ph==='transit'){
+      const _dest=t.route.stops[t.route.toIdx];
+      _add(_dest,t.route.arrivalOrbitTier,t);
+    } else if((_ph==='orbit'||_ph==='blocked') && t.route._destReservedFromWait && t.route.arrivalOrbitTier){
+      // Orbit-phase (post-claim, pre-tangent) and blocked-phase (post-claim,
+      // path obstructed) both hold the reservation until transit actually
+      // begins.
       const _dest=t.route.stops[t.route.toIdx];
       _add(_dest,t.route.arrivalOrbitTier,t);
     }
@@ -8806,13 +8822,32 @@ function updateTrain(t, dt){
   }
   const r=t.route;
   if(r.phase==='waiting'){
+    // "DESTINATION IS FULL" — the train has cargo ready and a valid path but
+    // every orbital tier at the destination is occupied. Spin in place and
+    // poll every 1/32 of an orbit (32 checks per orbit) for a tier to free
+    // up. The moment one does, CLAIM IT immediately by setting arrivalOrbitR
+    // / arrivalOrbitTier + a sticky reservation flag (_destReservedFromWait)
+    // that _buildOccOrbitMap honors in pass 1 — this guarantees no other
+    // train can race in and steal the slot before this train's next tangent
+    // crossing. Phase flips to 'orbit' so the normal departure-gate handles
+    // the actual transit start on the next tangent.
     t.angle-=ORB_SPD*dt;
     r.orbitSpun+=ORB_SPD*dt;
     if(t.isPlayer){ t._angleAcc+=ORB_SPD*dt; trackOrbit(t); }
-    if(r.orbitSpun>=Math.PI*2){
-      r.orbitSpun=0;
+    r._waitingPollAcc=(r._waitingPollAcc||0)+ORB_SPD*dt;
+    const _WAIT_POLL_DA=(Math.PI*2)/32;
+    if(r._waitingPollAcc>=_WAIT_POLL_DA){
+      r._waitingPollAcc=0;
       const avail=getAvailableOrbitTier(r.stops[r.toIdx],t);
-      if(avail){ r.phase='orbit'; r.minOrbitDone=true; }
+      if(avail){
+        r.arrivalOrbitR=avail.orbitR;
+        r.arrivalOrbitTier=avail.tier;
+        if(r.stopOrbitR) r.stopOrbitR[r.toIdx]=avail.orbitR;
+        r._destReservedFromWait=true;
+        r.phase='orbit';
+        r.minOrbitDone=true;
+        r.orbitSpun=0;
+      }
     }
   } else if(r.phase==='blocked'){
     // Orbit in place; once per orbit check clearance and lookahead
@@ -8851,6 +8886,10 @@ function updateTrain(t, dt){
         r._departExtLen=null; r._lockedDepTanAx=null; r._lockedDepTanAy=null; r._lockedDepTanAngle=null;
         r._arrivalTimer=null; r._blockedTime=0;
         r._visitFired=false; r._blockedSoundFired=false;
+        // Transit now owns the destination tier via Pass 1 of
+        // _buildOccOrbitMap, so the temporary waiting-phase reservation is
+        // no longer needed.
+        r._destReservedFromWait=false;
         // Speed-tip educational callout: the FIRST show is gated on a player
         // train actually leaving orbit. Once armed here, _drawSpeedTip's
         // periodic auto-launch picks it up on the next frame.
@@ -9058,7 +9097,13 @@ function updateTrain(t, dt){
       const crossed=prev>=curr ? (da<=prev&&da>=curr) : (da<=prev||da>=curr);
       if(crossed){
         const avail=getAvailableOrbitTier(r.stops[r.toIdx],t);
-        if(!avail){ r.phase='waiting'; r.orbitSpun=0; return; }
+        if(!avail){
+          // Lost the slot between waiting-claim and tangent crossing (race
+          // with another train) — drop the reservation and go back to
+          // waiting to re-poll.
+          r._destReservedFromWait=false;
+          r.phase='waiting'; r.orbitSpun=0; return;
+        }
         r.arrivalOrbitR=avail.orbitR; r.arrivalOrbitTier=avail.tier;
         // Sync the per-stop orbit radius the route-line renderer reads, so
         // the visualised line tracks the orbit the train is actually
@@ -9083,6 +9128,10 @@ function updateTrain(t, dt){
         r._departExtLen=null; r._lockedDepTanAx=null; r._lockedDepTanAy=null; r._lockedDepTanAngle=null;
         r._arrivalTimer=null; r._blockedTime=0;
         r._visitFired=false; // reset so next destination triggers trackVisit
+        // Transit now owns the destination tier via Pass 1 of
+        // _buildOccOrbitMap, so the temporary waiting-phase reservation flag
+        // is no longer needed.
+        r._destReservedFromWait=false;
         // Speed-tip educational callout: arm on first player-train departure.
         // (See sibling hook in the unblock path ~line 8430.)
         if(t.isPlayer && !_speedTipSuppressed && _speedTipShownCount===0 && _speedTipStartMs===0 && _speedTipNextRealMs===0){
@@ -17006,13 +17055,46 @@ function drawRoutesPopup(){
       }
       // Planet name — yellow ONLY for the at-this-planet stop; others stay
       // neutral teal regardless of segment.
-      ctx.font='bold 11px "Exo 2",sans-serif'; ctx.textAlign='center';
+      // Pre-departure-rule asterisks: per stop, count the train's rules
+      // targeting THIS planet, split into empty (threshold===0 → red) and
+      // fill (threshold>0 → green). One '*' per rule, drawn in the rule's
+      // color, appended after the planet name. Total = name + reds + greens
+      // is centered as a unit so a planet with several rules pushes left
+      // proportionally.
+      let _emptyRules=0, _fillRules=0;
+      if(sp && train.preDepartureRules){
+        for(const _r of train.preDepartureRules){
+          if(_r.stopPlanetId!==sp.id) continue;
+          if(_r.threshold===0) _emptyRules++; else _fillRules++;
+        }
+      }
+      const _redStars   = '*'.repeat(_emptyRules);
+      const _greenStars = '*'.repeat(_fillRules);
+      ctx.font='bold 11px "Exo 2",sans-serif'; ctx.textAlign='left';
+      // Truncate the NAME portion so the full label (name + stars) fits in
+      // blockW-4. Reserve width for the stars first.
+      const _starsW = ctx.measureText(_redStars+_greenStars).width;
+      let _n=pn, _nW=ctx.measureText(_n).width;
+      while(_nW+_starsW>blockW-4 && _n.length>4){ _n=_n.slice(0,-1); _nW=ctx.measureText(_n).width; }
+      if(_n!==pn){ _n=_n.slice(0,-1)+'…'; _nW=ctx.measureText(_n).width; }
+      const _totalW=_nW+_starsW;
+      const _startX=_bx+blockW/2-_totalW/2;
+      // Name
       ctx.fillStyle=_isAtThis?'rgba(255,220,80,0.95)':'rgba(170,220,210,0.85)';
-      // Clip the name to blockW
-      let _n=pn;
-      while(ctx.measureText(_n).width>blockW-4&&_n.length>4) _n=_n.slice(0,-1);
-      if(_n!==pn) _n+='…';
-      ctx.fillText(_n,_bx+blockW/2,stopsY);
+      ctx.fillText(_n,_startX,stopsY);
+      let _cursorX=_startX+_nW;
+      // Red asterisks (Must be Empty rules)
+      if(_redStars){
+        ctx.fillStyle='rgba(255,90,90,0.95)';
+        ctx.fillText(_redStars,_cursorX,stopsY);
+        _cursorX+=ctx.measureText(_redStars).width;
+      }
+      // Green asterisks (Must be ____ full rules)
+      if(_greenStars){
+        ctx.fillStyle='rgba(90,230,130,0.95)';
+        ctx.fillText(_greenStars,_cursorX,stopsY);
+      }
+      ctx.textAlign='center'; // restore default for subsequent arrow + col-header draws
     }
     // Arrows between blocks — color reflects direction + active segment.
     // When the train is mid-transit (not departing/arriving/in orbit at any
@@ -22684,6 +22766,65 @@ function _newsWrap(c,text,x,y,mw,lh){
   if(line){c.fillText(line,x,ly);ly+=lh;}
   return ly;
 }
+// Human-readable cargo label → cargo sprite key. Used by the newspaper image
+// picker to translate ms.CRG (a free-text label from _newsGetSubs) into a real
+// car sprite. Free-text labels without a clean sprite match map to a stand-in.
+const _NEWS_CRG_TO_CAR={
+  'Iron Ore':'car_iron','Passengers':'car_passenger','Grain':'car_grain',
+  'Hazardous Materials':'car_hazmat','Crystals':'car_gold',
+  'Medical Supplies':'car_medical','Royal Cargo':'car_royal',
+  'Flowers':'car_flowers','Livestock':'car_livestock','Diamonds':'car_diamond',
+};
+// Pick a structured "image" for a major story. Returns one of:
+//   {kind:'real_planet', planetId}      — render the actual planet (biome,
+//                                          ring, light dir) as if photographed
+//                                          from galaxy view
+//   {kind:'real_star',   starId}        — actual star with halo + orbit dots
+//   {kind:'real_engine', spriteKey}     — real engine sprite (greyscale)
+//   {kind:'real_car',    spriteKey}     — real cargo car sprite
+//   {kind:'real_blackhole'}             — accretion disk render
+//   {kind:'corp_logo',   name, isRival} — fabricated wordmark + emblem
+// Falls back to {kind:'legacy', imgType:mh.img} when the relevant real data
+// isn't available (e.g. mh.img=='planet' but ms._pln is null).
+function _pickNewsImage(mh, ms){
+  const _img=mh.img;
+  const _isRivalCat = (mh.cat||'').startsWith('rival');
+  // Occasional logo override — adds variety for player-and-rival categories.
+  // Skipped on commerce/discovery/galaxy_event so those still showcase the
+  // relevant world / cargo / star.
+  if(_isRivalCat && Math.random()<0.25){
+    const _rname=_aiCorp?.name||ms.R||'Rival Corp';
+    return {kind:'corp_logo', name:_rname, isRival:true};
+  }
+  if((mh.cat==='player_win'||mh.cat==='player_build') && Math.random()<0.20){
+    const _pname=corpName||'Space Tycoon Corp';
+    return {kind:'corp_logo', name:_pname, isRival:false};
+  }
+  if(_img==='planet'){
+    if(ms._pln && ms._pln.id!=null) return {kind:'real_planet', planetId:ms._pln.id};
+    return {kind:'legacy', imgType:'planet'};
+  }
+  if(_img==='star'){
+    if(ms._str && ms._str.id!=null) return {kind:'real_star', starId:ms._str.id};
+    return {kind:'legacy', imgType:'star'};
+  }
+  if(_img==='train'){
+    // Prefer a real engine the player owns; fall back to engine_constellation.
+    const _playerEngines=trains.filter(t=>t&&t.isPlayer&&t.cars?.[0]?.startsWith('engine_')).map(t=>t.cars[0]);
+    const _spr=_playerEngines.length>0
+      ? _playerEngines[Math.floor(Math.random()*_playerEngines.length)]
+      : 'engine_constellation';
+    return {kind:'real_engine', spriteKey:_spr};
+  }
+  if(_img==='cargo'){
+    const _carKey=_NEWS_CRG_TO_CAR[ms.CRG]||'car_iron';
+    return {kind:'real_car', spriteKey:_carKey};
+  }
+  if(_img==='blackhole'){
+    return {kind:'real_blackhole'};
+  }
+  return {kind:'legacy', imgType:_img||'planet'};
+}
 function _buildNewspaper(sd){
   const _hasRival=!!_aiCorp;
   // ── Founding issues: fixed majors for the first two newspapers ─────────────
@@ -22746,6 +22887,17 @@ function _buildNewspaper(sd){
     const mb=_mbArr[Math.floor(Math.random()*_mbArr.length)];
     majorOut={headline:_newsFill(mh.t,ms),body1:_newsFill(mb[0],ms),body2:_newsFill(mb[1],ms),
               pageNum:3+Math.floor(Math.random()*10),imgType:mh.img,_pln:ms._pln,_str:ms._str};
+    // Improved image rendering — kicks in once the fixed founding issues are
+    // out of the way. Threshold: issue ≥3 in games with an AI rival (issues
+    // 1+2 are the founding pair), issue ≥2 in games without a rival (only
+    // issue 1 is the founding spot). _paperIssueNum is incremented AFTER
+    // this function returns, so the current paper's number is
+    // (_paperIssueNum+1).
+    const _curIssueNum=_paperIssueNum+1;
+    const _improvedThreshold=_hasRival?3:2;
+    if(_curIssueNum>=_improvedThreshold){
+      majorOut.image=_pickNewsImage(mh, ms);
+    }
   }
   // ── Step 3: pick two minor headlines ──────────────────────────────────────
   if(_paperMinorUsed.length>=_MINOR_HDLS.length-1) _paperMinorUsed=[];
@@ -22787,7 +22939,274 @@ function _buildNewspaper(sd){
   return _issue;
 }
 
-function _drawNewsImage(x,y,w,h,imgType){
+// Newsprint render of a real planet from galaxy data. The planet's biome,
+// ring, cloud angle, and gold/diamond patches all carry through; a tint and
+// a slight grayscale push give it the printed-newspaper feel.
+function _drawNewsRealPlanet(x,y,w,h,planet){
+  if(!planet||!planet.type) return false;
+  const cx=x+w/2, cy=y+h/2;
+  const r=Math.min(w,h)*0.34;
+  ctx.save();
+  // Pure black star-field backdrop so the orbit ring + planet read against
+  // a "vacuum photo" rather than newsprint sepia.
+  ctx.fillStyle='#0a0d1a'; ctx.fillRect(x,y,w,h);
+  // Faint scattered stars
+  ctx.fillStyle='rgba(220,220,200,0.55)';
+  for(let i=0;i<28;i++){
+    const _sx=x+((i*73)%w), _sy=y+((i*131)%h);
+    const _sr=((i*17)%3===0)?1.4:0.7;
+    ctx.beginPath(); ctx.arc(_sx,_sy,_sr,0,Math.PI*2); ctx.fill();
+  }
+  // Orbit ring around the planet (galaxy-view feel)
+  ctx.strokeStyle='rgba(200,200,180,0.30)'; ctx.lineWidth=0.8;
+  ctx.beginPath(); ctx.ellipse(cx,cy,r*1.55,r*0.55,0,0,Math.PI*2); ctx.stroke();
+  // Slight newsprint cast over the whole tile
+  ctx.filter='grayscale(0.45) contrast(1.05) brightness(0.92) sepia(0.10)';
+  // Synthesize a star direction off the upper-left so light is convincing
+  const _sx=cx-r*4, _sy=cy-r*4;
+  try{ drawPlanet(cx,cy,r,planet.type,planet.ring,1.0,_sx,_sy,false,null); }
+  catch(_e){ /* defensive: any drawPlanet edge case → fall back below */ ctx.restore(); return false; }
+  ctx.restore();
+  // Newsprint frame + caption strip
+  ctx.save();
+  ctx.strokeStyle='#48402e'; ctx.lineWidth=1; ctx.strokeRect(x,y,w,h);
+  ctx.fillStyle='rgba(240,232,208,0.92)';
+  ctx.fillRect(x,y+h-15,w,15);
+  ctx.fillStyle='#1a1208'; ctx.font='bold 8px Orbitron,sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  const _cap=(planet.name||'').toUpperCase();
+  ctx.fillText(_cap,x+w/2,y+h-7);
+  ctx.restore();
+  return true;
+}
+// Newsprint render of a real star with its colored corona plus tiny orbiting
+// planet pips. Captures the "galaxy view zoom-in" feel.
+function _drawNewsRealStar(x,y,w,h,star){
+  if(!star) return false;
+  const cx=x+w/2, cy=y+h/2;
+  const r=Math.min(w,h)*0.18;
+  ctx.save();
+  ctx.fillStyle='#08081a'; ctx.fillRect(x,y,w,h);
+  // Faint nebula wash (radial)
+  const _neb=ctx.createRadialGradient(cx,cy,r*0.5,cx,cy,Math.max(w,h)*0.7);
+  _neb.addColorStop(0,'rgba(80,40,90,0.35)'); _neb.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=_neb; ctx.fillRect(x,y,w,h);
+  // Scattered stars
+  ctx.fillStyle='rgba(220,220,200,0.55)';
+  for(let i=0;i<40;i++){
+    const _sx=x+((i*53)%w), _sy=y+((i*97)%h);
+    const _sr=((i*7)%4===0)?1.3:0.6;
+    ctx.beginPath(); ctx.arc(_sx,_sy,_sr,0,Math.PI*2); ctx.fill();
+  }
+  // Orbit rings + pips for up to 5 of the star's planets
+  const _pIds=(star.planetIds||[]).slice(0,5);
+  ctx.strokeStyle='rgba(200,200,180,0.28)'; ctx.lineWidth=0.7;
+  for(let i=0;i<_pIds.length;i++){
+    const _or=r*(2.0+i*0.9);
+    ctx.beginPath(); ctx.ellipse(cx,cy,_or,_or*0.42,0,0,Math.PI*2); ctx.stroke();
+    const _ang=(i*1.13);
+    const _px=cx+_or*Math.cos(_ang), _py=cy+_or*0.42*Math.sin(_ang);
+    const _p=galaxy?galaxy.planets[_pIds[i]]:null;
+    ctx.fillStyle=_p?.type?.hi||'#bdb098';
+    ctx.beginPath(); ctx.arc(_px,_py,Math.max(1.6,r*0.16),0,Math.PI*2); ctx.fill();
+  }
+  // The star itself
+  ctx.filter='grayscale(0.30) contrast(1.10) brightness(0.94) sepia(0.08)';
+  try{
+    const _col=STAR_COLORS[star.colorName]||STAR_COLORS.yellow;
+    drawStar(cx,cy,r,_col);
+  } catch(_e){ ctx.restore(); return false; }
+  ctx.restore();
+  ctx.save();
+  ctx.strokeStyle='#48402e'; ctx.lineWidth=1; ctx.strokeRect(x,y,w,h);
+  ctx.fillStyle='rgba(240,232,208,0.92)';
+  ctx.fillRect(x,y+h-15,w,15);
+  ctx.fillStyle='#1a1208'; ctx.font='bold 8px Orbitron,sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(((star.name||'')+' SYSTEM').toUpperCase(),x+w/2,y+h-7);
+  ctx.restore();
+  return true;
+}
+// Newsprint render of a real engine sprite. Greyscale + contrast cast.
+function _drawNewsRealEngine(x,y,w,h,spriteKey){
+  const img=imgs[spriteKey];
+  if(!img||!img.naturalWidth) return false;
+  ctx.save();
+  ctx.fillStyle='#cec6b2'; ctx.fillRect(x,y,w,h);
+  // Soft track-bed gradient at the bottom third
+  const _g=ctx.createLinearGradient(0,y+h*0.55,0,y+h);
+  _g.addColorStop(0,'rgba(60,50,30,0)'); _g.addColorStop(1,'rgba(40,32,18,0.30)');
+  ctx.fillStyle=_g; ctx.fillRect(x,y,w,h);
+  // Rail line
+  ctx.strokeStyle='rgba(40,32,18,0.55)'; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.moveTo(x+8,y+h*0.78); ctx.lineTo(x+w-8,y+h*0.78); ctx.stroke();
+  // Engine sprite — fit-to-width, anchored bottom
+  ctx.filter='grayscale(0.85) contrast(1.05) brightness(0.92) sepia(0.10)';
+  const _ar=img.naturalHeight/img.naturalWidth;
+  let _dw=w*0.85, _dh=_dw*_ar;
+  if(_dh>h*0.7){ _dh=h*0.7; _dw=_dh/_ar; }
+  const _dx=x+(w-_dw)/2, _dy=y+h*0.78-_dh;
+  ctx.drawImage(img,_dx,_dy,_dw,_dh);
+  ctx.restore();
+  ctx.save();
+  ctx.strokeStyle='#48402e'; ctx.lineWidth=1; ctx.strokeRect(x,y,w,h);
+  ctx.fillStyle='rgba(240,232,208,0.92)';
+  ctx.fillRect(x,y+h-15,w,15);
+  ctx.fillStyle='#1a1208'; ctx.font='bold 8px Orbitron,sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  const _lbl=(spriteKey||'').replace(/^engine_/,'').toUpperCase()+'-CLASS ENGINE';
+  ctx.fillText(_lbl,x+w/2,y+h-7);
+  ctx.restore();
+  return true;
+}
+// Newsprint render of a real cargo car sprite.
+function _drawNewsRealCar(x,y,w,h,spriteKey){
+  const img=imgs[spriteKey];
+  if(!img||!img.naturalWidth) return false;
+  ctx.save();
+  ctx.fillStyle='#cec6b2'; ctx.fillRect(x,y,w,h);
+  const _g=ctx.createLinearGradient(0,y+h*0.55,0,y+h);
+  _g.addColorStop(0,'rgba(60,50,30,0)'); _g.addColorStop(1,'rgba(40,32,18,0.30)');
+  ctx.fillStyle=_g; ctx.fillRect(x,y,w,h);
+  ctx.strokeStyle='rgba(40,32,18,0.55)'; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.moveTo(x+8,y+h*0.78); ctx.lineTo(x+w-8,y+h*0.78); ctx.stroke();
+  ctx.filter='grayscale(0.70) contrast(1.05) brightness(0.92) sepia(0.10)';
+  const _ar=img.naturalHeight/img.naturalWidth;
+  let _dw=w*0.82, _dh=_dw*_ar;
+  if(_dh>h*0.7){ _dh=h*0.7; _dw=_dh/_ar; }
+  const _dx=x+(w-_dw)/2, _dy=y+h*0.78-_dh;
+  ctx.drawImage(img,_dx,_dy,_dw,_dh);
+  ctx.restore();
+  ctx.save();
+  ctx.strokeStyle='#48402e'; ctx.lineWidth=1; ctx.strokeRect(x,y,w,h);
+  ctx.fillStyle='rgba(240,232,208,0.92)';
+  ctx.fillRect(x,y+h-15,w,15);
+  ctx.fillStyle='#1a1208'; ctx.font='bold 8px Orbitron,sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  const _short=(spriteKey||'').replace(/^car_/,'').toUpperCase();
+  ctx.fillText(_short+' CAR',x+w/2,y+h-7);
+  ctx.restore();
+  return true;
+}
+// Newsprint render of a real black hole using the in-game drawBlackHole.
+function _drawNewsRealBlackHole(x,y,w,h){
+  const cx=x+w/2, cy=y+h/2, r=Math.min(w,h)*0.32;
+  ctx.save();
+  ctx.fillStyle='#06060a'; ctx.fillRect(x,y,w,h);
+  ctx.fillStyle='rgba(220,220,200,0.55)';
+  for(let i=0;i<30;i++){
+    const _sx=x+((i*61)%w), _sy=y+((i*113)%h);
+    ctx.beginPath(); ctx.arc(_sx,_sy,((i*5)%3===0)?1.4:0.7,0,Math.PI*2); ctx.fill();
+  }
+  ctx.filter='grayscale(0.40) contrast(1.05) brightness(0.95) sepia(0.05)';
+  try{ drawBlackHole(cx,cy,r,performance.now()*0.001); }
+  catch(_e){ /* fallback to original accretion-disk render */
+    for(let i=5;i>=1;i--){
+      const ar=r*i/5;
+      const ring=ctx.createRadialGradient(cx,cy,ar*0.65,cx,cy,ar);
+      ring.addColorStop(0,'rgba(80,72,60,0.55)'); ring.addColorStop(1,'rgba(20,18,12,0)');
+      ctx.fillStyle=ring; ctx.beginPath(); ctx.arc(cx,cy,ar,0,Math.PI*2); ctx.fill();
+    }
+    ctx.fillStyle='#080604'; ctx.beginPath(); ctx.arc(cx,cy,r*0.22,0,Math.PI*2); ctx.fill();
+  }
+  ctx.restore();
+  ctx.save();
+  ctx.strokeStyle='#48402e'; ctx.lineWidth=1; ctx.strokeRect(x,y,w,h);
+  ctx.fillStyle='rgba(240,232,208,0.92)';
+  ctx.fillRect(x,y+h-15,w,15);
+  ctx.fillStyle='#1a1208'; ctx.font='bold 8px Orbitron,sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText('GRAVITATIONAL ANOMALY',x+w/2,y+h-7);
+  ctx.restore();
+  return true;
+}
+// Fabricated corp wordmark — sepia card, big stencil monogram emblem in a
+// circle, then the wordmark across the bottom. Player vs rival just changes
+// the accent color.
+function _drawNewsCorpLogo(x,y,w,h,name,isRival){
+  ctx.save();
+  // Card background — cream stock with a darker inset panel
+  ctx.fillStyle='#e6dcc0'; ctx.fillRect(x,y,w,h);
+  ctx.strokeStyle='#48402e'; ctx.lineWidth=1; ctx.strokeRect(x,y,w,h);
+  const _accent=isRival?'#7a1a1a':'#1a3a5a';
+  const _accent2=isRival?'#c25555':'#5a8acc';
+  // Inset rule frame
+  ctx.strokeStyle='#48402e'; ctx.lineWidth=0.5;
+  ctx.strokeRect(x+6,y+6,w-12,h-12);
+  // Monogram emblem (first letter inside a ringed disc)
+  const cx=x+w/2, cy=y+h*0.38;
+  const r=Math.min(w,h)*0.24;
+  // Outer rings (printed-letterpress feel)
+  ctx.strokeStyle=_accent; ctx.lineWidth=2.5;
+  ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke();
+  ctx.lineWidth=0.8;
+  ctx.beginPath(); ctx.arc(cx,cy,r+5,0,Math.PI*2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx,cy,r-4,0,Math.PI*2); ctx.stroke();
+  // Filled disc
+  ctx.fillStyle=_accent;
+  ctx.beginPath(); ctx.arc(cx,cy,r-6,0,Math.PI*2); ctx.fill();
+  // Monogram letter
+  ctx.fillStyle='#f4ecd2';
+  ctx.font='bold '+Math.round(r*1.35)+'px Orbitron,sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  const _mono=(name||'?').trim().charAt(0).toUpperCase();
+  ctx.fillText(_mono,cx,cy+1);
+  // Decorative tick rays under emblem
+  ctx.strokeStyle=_accent2; ctx.lineWidth=0.8;
+  for(let i=0;i<5;i++){
+    const _xx=cx-r+(i*((r*2)/4));
+    ctx.beginPath(); ctx.moveTo(_xx,cy+r+8); ctx.lineTo(_xx,cy+r+14); ctx.stroke();
+  }
+  // Wordmark — bottom strip
+  ctx.fillStyle='#1a1208';
+  ctx.font='bold 14px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+  let _disp=name||'';
+  // Truncate to fit
+  while(ctx.measureText(_disp).width>w-20 && _disp.length>4) _disp=_disp.slice(0,-1);
+  if(_disp!==name) _disp=_disp.slice(0,-1)+'…';
+  ctx.fillText(_disp,x+w/2,y+h-26);
+  ctx.fillStyle=_accent;
+  ctx.font='italic bold 9px "Exo 2",sans-serif';
+  ctx.fillText(isRival?'— RIVAL CORPORATION —':'— GALACTIC TRANSPORT CORP —',x+w/2,y+h-11);
+  ctx.restore();
+  return true;
+}
+
+// Top-level newspaper image dispatch. mxOrType is either the legacy imgType
+// string (old issues, founding) OR the full major object with an .image
+// property (issues from the improved range). Falls back to the generic
+// silhouette renderer if the structured render can't pull its sprite/data.
+function _drawNewsImage(x,y,w,h,mxOrType){
+  // Resolve which renderer to use.
+  let _image=null, _legacyImgType=null;
+  if(typeof mxOrType==='string'){ _legacyImgType=mxOrType; }
+  else if(mxOrType && typeof mxOrType==='object'){
+    _image=mxOrType.image||null;
+    _legacyImgType=mxOrType.imgType||null;
+  }
+  if(_image){
+    let _ok=false;
+    if(_image.kind==='real_planet'){
+      const _p=galaxy?galaxy.planets[_image.planetId]:null;
+      _ok=_drawNewsRealPlanet(x,y,w,h,_p);
+    } else if(_image.kind==='real_star'){
+      const _s=galaxy?galaxy.stars[_image.starId]:null;
+      _ok=_drawNewsRealStar(x,y,w,h,_s);
+    } else if(_image.kind==='real_engine'){
+      _ok=_drawNewsRealEngine(x,y,w,h,_image.spriteKey);
+    } else if(_image.kind==='real_car'){
+      _ok=_drawNewsRealCar(x,y,w,h,_image.spriteKey);
+    } else if(_image.kind==='real_blackhole'){
+      _ok=_drawNewsRealBlackHole(x,y,w,h);
+    } else if(_image.kind==='corp_logo'){
+      _ok=_drawNewsCorpLogo(x,y,w,h,_image.name,_image.isRival);
+    } else if(_image.kind==='legacy'){
+      _legacyImgType=_image.imgType||_legacyImgType;
+    }
+    if(_ok) return;
+    // Fall through to legacy renderer if structured render failed.
+  }
+  const imgType=_legacyImgType||'planet';
   ctx.save();
   ctx.beginPath();ctx.rect(x,y,w,h);ctx.clip();
   ctx.fillStyle='#cec6b2';ctx.fillRect(x,y,w,h);
@@ -22871,7 +23290,7 @@ function _drawNewsL0(np,x,y,w,h){
   // Text col left, image col right
   const imgW=Math.round(w*0.33),imgH=150,textW=w-imgW-14;
   const imgX=x+textW+14;
-  _drawNewsImage(imgX,hy2,imgW,imgH,mx.imgType);
+  _drawNewsImage(imgX,hy2,imgW,imgH,mx);
   ctx.fillStyle='#1a1208';ctx.font='11px "Exo 2",sans-serif';ctx.textAlign='left';ctx.textBaseline='top';
   let ty=hy2;
   ty=_newsWrap(ctx,mx.body1,x,ty,textW,16)+3;
@@ -22893,7 +23312,7 @@ function _drawNewsL0(np,x,y,w,h){
 function _drawNewsL1(np,x,y,w,h){
   const mx=np.major,m1=np.minor1,m2=np.minor2;
   const iw=Math.round(w*0.30),ih=205;
-  _drawNewsImage(x,y,iw,ih,mx.imgType);
+  _drawNewsImage(x,y,iw,ih,mx);
   const rx=x+iw+14,rw=w-iw-14;
   ctx.fillStyle='#1a1208';ctx.textAlign='left';ctx.textBaseline='top';
   ctx.font='bold 18px Orbitron,sans-serif';
@@ -22924,7 +23343,7 @@ function _drawNewsL2(np,x,y,w,h){
   ctx.strokeStyle='rgba(42,34,20,0.45)';ctx.lineWidth=0.5;
   ctx.beginPath();ctx.moveTo(x,hy2);ctx.lineTo(x+w,hy2);ctx.stroke();hy2+=6;
   const iw=Math.round(w*0.30),ih=150,ix=x+w-iw;
-  _drawNewsImage(ix,hy2,iw,ih,mx.imgType);
+  _drawNewsImage(ix,hy2,iw,ih,mx);
   const tw=w-iw-14;
   ctx.fillStyle='#1a1208';ctx.font='11px "Exo 2",sans-serif';ctx.textAlign='left';ctx.textBaseline='top';
   let ty=hy2;
