@@ -4,24 +4,24 @@
     "gameStartSd": 829,
     "age": 11,
     "phase": "late",
-    "credits": 746157,
-    "totalRevenue": 189157,
-    "totalCosts": 193000,
-    "netProfit": -3843,
-    "netWorth": 1163157,
-    "trainCount": 4,
-    "purchasedTrains": 1,
-    "stationsBuilt": 4,
+    "credits": 68717,
+    "totalRevenue": 527717,
+    "totalCosts": 1209000,
+    "netProfit": -681283,
+    "netWorth": 1365717,
+    "trainCount": 11,
+    "purchasedTrains": 8,
+    "stationsBuilt": 12,
     "foundries": 1,
     "trainDetails": [
       {
         "num": 1,
         "isStarter": true,
-        "routePhase": "queueing",
+        "routePhase": "transit",
         "cargo": "empty",
         "idleTimer": 0,
         "assetVal": 46000,
-        "route": "Athosis -> Kraxisor"
+        "route": "Cerionzan -> New Venus"
       },
       {
         "num": 2,
@@ -30,16 +30,16 @@
         "cargo": "empty",
         "idleTimer": 0,
         "assetVal": 46000,
-        "route": "Uldriseth -> Kraxisor"
+        "route": "Temprisix -> New Venus"
       },
       {
         "num": 3,
         "isStarter": true,
-        "routePhase": "waiting",
+        "routePhase": "orbit",
         "cargo": "empty",
-        "idleTimer": 2.8,
-        "assetVal": 53000,
-        "route": "Uldriseth -> Athosis -> Kraxisor"
+        "idleTimer": 1.5,
+        "assetVal": 75000,
+        "route": "Emblathax -> Temprisix"
       },
       {
         "num": 4,
@@ -47,29 +47,92 @@
         "routePhase": "transit",
         "cargo": "empty",
         "idleTimer": 0,
+        "assetVal": 41000,
+        "route": "Ilvethvon -> Avenalen"
+      },
+      {
+        "num": 5,
+        "isStarter": false,
+        "routePhase": "queueing",
+        "cargo": "empty",
+        "idleTimer": 0,
+        "assetVal": 61000,
+        "route": "Temprisix -> Denebvon Station -> New Venus"
+      },
+      {
+        "num": 6,
+        "isStarter": false,
+        "routePhase": "transit",
+        "cargo": "empty",
+        "idleTimer": 0,
+        "assetVal": 46000,
+        "route": "Avenalen -> Straldonas"
+      },
+      {
+        "num": 7,
+        "isStarter": false,
+        "routePhase": "waiting",
+        "cargo": "empty",
+        "idleTimer": 5.8,
+        "assetVal": 62000,
+        "route": "New Venus -> Denebvon Station -> Ilvethvon"
+      },
+      {
+        "num": 8,
+        "isStarter": false,
+        "routePhase": "waiting",
+        "cargo": "empty",
+        "idleTimer": 1.8,
+        "assetVal": 85000,
+        "route": "Zovratha -> New Venus"
+      },
+      {
+        "num": 9,
+        "isStarter": false,
+        "routePhase": "waiting",
+        "cargo": "empty",
+        "idleTimer": 1.8,
+        "assetVal": 91000,
+        "route": "Denebvon Station -> New Venus"
+      },
+      {
+        "num": 10,
+        "isStarter": false,
+        "routePhase": "waiting",
+        "cargo": "empty",
+        "idleTimer": 1.8,
         "assetVal": 72000,
-        "route": "Kraxisor -> Faeronzan"
+        "route": "Cherona -> New Venus"
+      },
+      {
+        "num": 11,
+        "isStarter": false,
+        "routePhase": "orbit",
+        "cargo": "empty",
+        "idleTimer": 1.5,
+        "assetVal": 72000,
+        "route": "New Venus -> Toldonix"
       }
     ],
     "actionQueue": [],
     "nextTrainCost": 63000,
     "nextTrainThreshold": 69300,
-    "canBuyTrain": true,
-    "credits_vs_threshold": 676857,
+    "canBuyTrain": false,
+    "credits_vs_threshold": -583,
     "trainCooldownRemaining": 0,
     "lastTrainBuildSd": -999,
     "canBuyStation": true,
     "stationCooldownRemaining": 0,
-    "lastStationBuildSd": 839.43,
-    "discoveredStars": 5,
+    "lastStationBuildSd": 839.01,
+    "discoveredStars": 8,
     "exploreTarget": 15,
     "explorationComplete": false,
     "activeExplorers": 0,
-    "idleTrains": 0,
-    "revenuePerSd": 17196,
-    "trainAssetVal": 217000,
-    "stationAssetVal": 200000,
+    "idleTrains": 1,
+    "revenuePerSd": 47974,
+    "trainAssetVal": 697000,
+    "stationAssetVal": 600000,
     "run": 1,
-    "elapsed_s": 23.2
+    "elapsed_s": 26.7
   }
 ]

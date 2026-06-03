@@ -6291,7 +6291,11 @@ function _aiDecide(){
   // The AI saves up, then prioritises among train / station / foundry purchases it can afford,
   // queuing everything in one shot. Credits are simulated sequentially (highest-priority first)
   // so it never over-commits. A new random cooldown is set after each window, win or lose.
-  if((stardate-(_aiCorp.lastBatchSd||-999))>(_aiCorp.batchCooldown||0)){
+  // Force entry: when credits exceed $150K, the AI MUST act this tick — the
+  // batch-cooldown is ignored so hoarded capital is spent immediately. The
+  // priority-phase gate (station vs train) still applies inside the block.
+  const _forceBatchEntry = _aiCorp.credits > 150000;
+  if(_forceBatchEntry || (stardate-(_aiCorp.lastBatchSd||-999))>(_aiCorp.batchCooldown||0)){
     const _bCarCost={engine_constellation:10000,engine_galaxy:20000,car_passenger:5000,car_mail:4000,car_water_tank:8000,car_ore:8000,car_iron:10000,car_oil:9000,caboose:3000};
     let _bBudget=_aiCorp.credits; // simulated remaining credits for this batch
     // ── ALTERNATING STATION/TRAIN PRIORITY CYCLE (user spec) ──
@@ -6741,6 +6745,11 @@ function _aiScorePair(pA,pB){
 
 function _aiPickStationTarget(){
   if(!_aiCorp||!galaxy) return null;
+  // User spec: when credits exceed $150K the AI MUST spend. Relax the
+  // anti-congestion per-star station cap so a saturated home system doesn't
+  // strand capital — force-buy mode raises the cap by +2.
+  const _forceMode=_aiCorp.credits>150000;
+  const _perStarCap=_forceMode?5:3;
   let bestScore=-Infinity,best=null;
   const _sz={XS:1,S:2,M:3,L:5,XL:8,XXL:12};
   // Collect cargo types carried by AI trains (so we prioritise complementary supply/demand)
@@ -6762,7 +6771,7 @@ function _aiPickStationTarget(){
   }
   for(const pid of _aiCorp.visitedPlanetIds){
     const p=galaxy.planets[pid];if(!p||p.hasStation||p.aiHasStation||p.isStarProxy) continue;
-    if((_aiStationsPerStar[p.starId]||0)>=3) continue;
+    if((_aiStationsPerStar[p.starId]||0)>=_perStarCap) continue;
     let score=(_sz[p.size]||1)*10+(p.devLevel||0)*15;
     score+=Object.values(p.supply||{}).reduce((s,v)=>s+v,0)*5+Object.values(p.demand||{}).reduce((s,v)=>s+v,0)*5;
     score+=(p.supply?.iron||0)*20+(p.supply?.gold||0)*60+(p.supply?.diamond||0)*80;
