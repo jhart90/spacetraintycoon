@@ -5578,6 +5578,11 @@ function _initAICorp(){
     // Stardate the most recent upgrade (any kind) was built. The longer it's
     // been, the higher build_upgrade ranks in the P_BATCH priority list.
     lastUpgradeSd:-999,
+    // AI TRAIN YARD — mirrors the player's trainyard inventory. Cars/engines
+    // removed during a refit go INTO the yard; subsequent refits/purchases
+    // draw FROM the yard before charging full price. The AI only pays for
+    // net-new car/engine units it doesn't already own. Map: cartype -> count.
+    trainYard:{},
   };
 }
 
@@ -5615,7 +5620,11 @@ function updateAICorp(dt){
       const _curSegs=(t.carSegments&&t.carSegments[0])||0;
       let _tr=_aiCorp._stuckTrack[ti];
       // Initialize / refresh the per-train progress snapshot.
-      if(!_tr || _tr.segs!==_curSegs || !t.route){
+      // Iter 20 fix: only reset on FORWARD progress (_curSegs > _tr.segs) or
+      // when there's no route. Refits zero carSegments to 0, which used to
+      // look like "progress" and reset the stuck clock — leaving waiting
+      // trains permanently undetected. Forward-only avoids that trap.
+      if(!_tr || !t.route || _curSegs > (_tr.segs||0)){
         _aiCorp._stuckTrack[ti]={segs:_curSegs, lastSd:stardate};
         _tr=_aiCorp._stuckTrack[ti];
       }
@@ -5630,11 +5639,14 @@ function updateAICorp(dt){
         }
         continue;
       }
-      // Frozen on route → force re-plan after 5 SD of zero progress.
+      // Frozen on route → force re-plan after 2 SD of zero progress.
       // The 10-SD hard lock-timeout in _aiIsRouteLocked already ensures
       // the cooldown lifts by then; this layer detects + acts on the
       // freeze sooner than the cooldown would alone.
-      if((stardate - _tr.lastSd) > 5.0){
+      // Iteration 15 fix: blocked phase gets an even shorter 1 SD timeout
+      // because blocked routes are a strong "this path is dead" signal.
+      const _stuckThresh=(t.route?.phase==='blocked')?1.0:2.0;
+      if((stardate - _tr.lastSd) > _stuckThresh){
         const _route=_aiPickRoute(ti);
         if(_route){
           _aiDoAssignRoute(ti,_route);
@@ -5809,7 +5821,7 @@ function _aiDecide(){
         const _destP=galaxy.planets[_et.route.stops[_et.route.stops.length-1]];
         return _destP&&!_aiCorp.discoveredStarIds.has(_destP.starId);
       }).length;
-      const _maxExp=diff==='very_hard'?1:2;
+      const _maxExp=diff==='very_hard'?3:2;
       if(_activeExplorers<_maxExp){
         for(const ti of _aiCorp.trainIndices){
           const t=trains[ti];if(!t) continue;
@@ -5944,23 +5956,30 @@ function _aiDecide(){
     // fleet this means every train gets a fresh look every ~1.6 SD at the
     // outside, and trains with dead cars get fixed within ~0.4 SD of a
     // newly-arrived dead-car threshold trip.
-    let _staleTi=-1, _staleSd=Infinity;
-    for(const ti of _aiCorp.trainIndices){
-      const _last=_aiCorp.carEvalLastSd?.[ti]??-999;
-      if(_last<_staleSd){_staleSd=_last;_staleTi=ti;}
-    }
-    if(_staleTi>=0 && (stardate-_staleSd)>0.4){
-      // Mark this train as Layer-2-managed BEFORE the eval so Layer 1 stops
-      // re-adding cars that Layer 2 might drop (even if eval returns null
-      // this round, Layer 2 has begun supervising this train).
-      if(!_aiCorp.trainsManagedByEval) _aiCorp.trainsManagedByEval=new Set();
+    // Iteration 18 fix: rank trains by staleness and evaluate up to 3 per tick.
+    // With 10+ trains in the fleet, the prior 1-per-tick scheme meant a full
+    // rotation took ~30+ game-minutes — too slow for empty-cargo trains to
+    // get their cars rebalanced to match new routes. Empty waiting/orbit
+    // trains also get a priority boost so they're evaluated first.
+    const _byStale=_aiCorp.trainIndices
+      .map(ti=>{
+        const _t=trains[ti];
+        const _last=_aiCorp.carEvalLastSd?.[ti]??-999;
+        const _isStalled=_t&&(_t.route?.phase==='waiting'||_t.route?.phase==='orbit')&&!(_t.carFull||[]).some(Boolean);
+        // Stalled-empty trains get a 2 SD "boost" so they jump the queue.
+        return {ti, eff:_last-(_isStalled?2:0)};
+      })
+      .filter(x=>(stardate-x.eff)>0.4)
+      .sort((a,b)=>a.eff-b.eff)
+      .slice(0,3);
+    let _queuedAny=false;
+    if(!_aiCorp.trainsManagedByEval) _aiCorp.trainsManagedByEval=new Set();
+    for(const {ti:_staleTi} of _byStale){
       _aiCorp.trainsManagedByEval.add(_staleTi);
       const _act=_aiEvaluateTrain(_staleTi);
-      if(_act){_aiCorp.actionQueue.push(_act);return;}
-      // _aiEvaluateTrain already bumped carEvalLastSd even when returning
-      // null, so the next tick will rotate to the next-oldest train rather
-      // than re-attempt this one.
+      if(_act){_aiCorp.actionQueue.push(_act); _queuedAny=true;}
     }
+    if(_queuedAny) return;
   }
 
   // P_BATCH: purchase window — fires when the random batch cooldown (0.2–1.2 SD) expires.
@@ -5976,11 +5995,17 @@ function _aiDecide(){
     // $1,500 the trains are cargo-saturated and another train won't pay back its $63k
     // sticker for 40+ SDs. Skip the buy and let _aiDecide() reassign idle/waiting trains
     // first. Exempt the first 3 trains so the AI can seed revenue out of game start.
-    const _MIN_REV_PER_TRAIN_PER_SD=1500;
+    const _MIN_REV_PER_TRAIN_PER_SD=300;
     const _trCount=_aiCorp.trainIndices.length;
     const _ageSd=Math.max(0.1,stardate-(_gameStartSd||stardate));
     const _revPerTrainPerSd=_trCount>0?((_aiCorp.totalRevenue||0)/_ageSd/_trCount):Infinity;
-    const _buyGuardOK=_trCount<3||_revPerTrainPerSd>=_MIN_REV_PER_TRAIN_PER_SD;
+    // Profitability gate (Iteration 12 fix): once past the 3-train seed phase, also
+    // require cost recovery >= 35% (revenue / costs). Catches the failure mode where
+    // refit+station+foundry spend blows past revenue while rev-per-train still looks
+    // OK on paper. Without this, AI spends into negative credits then chokes.
+    const _costRecov=(_aiCorp.totalCosts||0)>0 ? ((_aiCorp.totalRevenue||0)/(_aiCorp.totalCosts||1)) : Infinity;
+    const _profitGuardOK=_trCount<3||_costRecov>=0.20;
+    const _buyGuardOK=_trCount<3||(_revPerTrainPerSd>=_MIN_REV_PER_TRAIN_PER_SD&&_profitGuardOK);
     if(diff!=='very_easy'&&_trCount<AI_MAX_TRAINS[diff]&&_buyGuardOK){
       const _bCars=_aiPickTrainComp(diff);
       const _bCost=_bCars.reduce((s,c)=>s+(_bCarCost[c]||4000),0);
@@ -6030,7 +6055,9 @@ function _aiDecide(){
     if(diff!=='very_easy' && !_stationDeferredForFoundry){
       const _bStCost=_stationBuildCost();
       const _bStBuf={easy:1.5,normal:1.5,hard:1.5,very_hard:1.1}[diff]||1.5;
-      const _bStCap=Math.min(AI_MAX_STATIONS[diff],_aiCorp.trainIndices.length+5);
+      // Tight cap: at most ONE station ahead of fleet size. Prevents the AI
+      // from dropping $50k stations that have no train to service them.
+      const _bStCap=Math.min(AI_MAX_STATIONS[diff],_aiCorp.trainIndices.length+1);
       if(_aiCorp.stationsBuilt<_bStCap&&_bBudget>_bStCost*_bStBuf){
         const _bStTgt=_aiPickStationTarget();
         if(_bStTgt){
@@ -6049,9 +6076,12 @@ function _aiDecide(){
         for(const _lpid of _aiCorp.ownedPlanetIds){
           const _lp=galaxy.planets[_lpid];
           if(!_lp||!_lp.aiHasStation||_lp.hasLargeStation) continue;
-          if((_lp.devLevel||0)<4||(_lp.ironDelivered||0)<4) continue;
+          // Looser AI thresholds: iron-delivered ≥ 2 (was 4) and 2+ trains
+          // on this planet (was 3). Compounds revenue faster by unlocking
+          // Large Station's broader demand earlier.
+          if((_lp.devLevel||0)<4||(_lp.ironDelivered||0)<2) continue;
           const _tc=_aiCorp.trainIndices.filter(ti=>trains[ti]?.route?.stops?.includes(_lpid)).length;
-          if(_tc>=3){_bLsTgt=_lp;break;}
+          if(_tc>=2){_bLsTgt=_lp;break;}
         }
         if(_bLsTgt){
           _aiCorp.actionQueue.push({type:'build_large_station',planetId:_bLsTgt.id});
@@ -6151,11 +6181,29 @@ function _aiPickRoute(trainIdx){
     const _os=_ot.route.stops;
     const _k=_corKey(_os[0],_os[_os.length-1]);
     _corridorCounts.set(_k,(_corridorCounts.get(_k)||0)+1);
-    if(_ot.route.phase==='waiting'){
+    // Iteration 17 fix: count queueing + descending + blocked the same as
+    // waiting — they ALL indicate the train is stalled at/near a hub. A
+    // saturated hub looks the same to the next train regardless of which
+    // phase the stalled trains report.
+    if(_ot.route.phase==='waiting'||_ot.route.phase==='queueing'||_ot.route.phase==='descending'||_ot.route.phase==='blocked'){
       const _wp=_ot.planetId;
       _waitingAtPlanet.set(_wp,(_waitingAtPlanet.get(_wp)||0)+1);
     }
   }
+  // Iteration 16 fix: track each fleet train's exact route-stop signature
+  // (sorted stop-ids joined). New routes must not produce an EXACT duplicate
+  // of another fleet train's route signature — even when corridor edges are
+  // technically under cap, two trains chasing the same supply/demand pool is
+  // pure waste.
+  const _fleetRouteSigs=new Set();
+  for(const _oti of _aiCorp.trainIndices){
+    if(_oti===trainIdx) continue;
+    const _ot=trains[_oti];
+    if(!_ot?.route?.stops||_ot.route.stops.length<2) continue;
+    const _sortedSig=[..._ot.route.stops].sort((a,b)=>a-b).join(',');
+    _fleetRouteSigs.add(_sortedSig);
+  }
+  const _sigFor=(arr)=>[...arr].sort((a,b)=>a-b).join(',');
   let bestScore=-Infinity,bestIds=null;
   // ── Directed leg scoring (one-way supply→demand) ────────────────
   // _aiScorePair returns both directions summed. For multi-stop chains we
@@ -6195,6 +6243,8 @@ function _aiPickRoute(trainIdx){
     }
     // (c) Soft penalty when 1-2 fleet-mates already serve this corridor.
     if(_corCt>0) score*=0.25;
+    // Block exact duplicate routes (sorted ID set match).
+    if(_fleetRouteSigs.has(_sigFor([pA.id,pB.id]))) continue;
     if(score>bestScore){bestScore=score;bestIds=[pA.id,pB.id,pA.id];}
   }
   // ── 3-stop loop search (Task B-1) ──────────────────────────────
@@ -6231,6 +6281,8 @@ function _aiPickRoute(trainIdx){
         if((_corridorCounts.get(_corKey(pA.id,pB.id))||0)>0) _3score*=0.5;
         if((_corridorCounts.get(_corKey(pB.id,pC.id))||0)>0) _3score*=0.5;
         if((_corridorCounts.get(_corKey(pC.id,pA.id))||0)>0) _3score*=0.5;
+        // Block exact duplicate 3-stop routes.
+        if(_fleetRouteSigs.has(_sigFor([pA.id,pB.id,pC.id]))) continue;
         if(_3score > bestScore*_MULTISTOP_PREMIUM){
           bestScore=_3score;
           bestIds=[pA.id,pB.id,pC.id,pA.id];
@@ -6297,8 +6349,19 @@ function _aiPickStationTarget(){
   const _aiCargos=new Set([..._aiCarTypes].map(c=>_cargoMatch[c]).filter(Boolean));
   // Planets in star systems the AI doesn't yet own get a bonus to encourage expansion
   const _ownedStarIds=new Set([..._aiCorp.ownedPlanetIds].map(id=>galaxy.planets[id]?.starId).filter(Boolean));
+  // HARD CAP: at most 3 AI stations per star system. Beyond that, trains
+  // congest at the same hub planets and half the fleet ends up queueing
+  // for orbit slots instead of carrying cargo. Count current AI stations
+  // per star up front, then skip candidate planets in already-saturated
+  // systems.
+  const _aiStationsPerStar={};
+  for(const _opid of _aiCorp.ownedPlanetIds){
+    const _op=galaxy.planets[_opid];
+    if(_op&&_op.aiHasStation) _aiStationsPerStar[_op.starId]=(_aiStationsPerStar[_op.starId]||0)+1;
+  }
   for(const pid of _aiCorp.visitedPlanetIds){
     const p=galaxy.planets[pid];if(!p||p.hasStation||p.aiHasStation||p.isStarProxy) continue;
+    if((_aiStationsPerStar[p.starId]||0)>=3) continue;
     let score=(_sz[p.size]||1)*10+(p.devLevel||0)*15;
     score+=Object.values(p.supply||{}).reduce((s,v)=>s+v,0)*5+Object.values(p.demand||{}).reduce((s,v)=>s+v,0)*5;
     score+=(p.supply?.iron||0)*20+(p.supply?.gold||0)*60+(p.supply?.diamond||0)*80;
@@ -6313,6 +6376,14 @@ function _aiPickStationTarget(){
       const _nearFoundry=_aiFoundries.some(q=>Math.hypot(q.x-p.x,q.y-p.y)<22000);
       if(_nearFoundry&&(p.type.id==='ocean'||(p.supply?.water||0)>0)) score+=80; // water source near foundry
       if(_nearFoundry&&(p.type.id==='lava'||(p.supply?.molten_ore||0)>0)) score+=80; // ore source near foundry
+    }
+    // Iteration 19 fix: pre-foundry desert seeding. If no foundry exists yet
+    // and the AI already has ≥3 stations, give DESERT planets a massive +200
+    // bonus so the AI deliberately stakes out a foundry site rather than
+    // randomly picking biomes. Iron pipeline is the highest-value cargo loop
+    // — must explicitly chase desert station to unlock it.
+    if(_aiFoundries.length===0 && _aiCorp.stationsBuilt>=3 && p.type.id==='desert'){
+      score+=200;
     }
     // Expansion bonus: strongly prefer planets in new star systems over home system
     if(!_ownedStarIds.has(p.starId)) score+=120;
@@ -6589,12 +6660,41 @@ function _aiEnsureFoundrySupplyTrains(){
         }
       }
     }
+    // Iron OUTPUT distribution sink — prefer an in-range AI station that
+    // demands iron (≥1.0) AND has no Large Station yet (iron deliveries
+    // there fuel the Large Station upgrade). Falls back to any in-range
+    // AI station demanding iron.
+    let _ironSink=null;
+    {
+      let _bestScore=-Infinity;
+      for(const rid of _aiCorp.ownedPlanetIds){
+        const r=galaxy.planets[rid];
+        if(!r || r.id===fp.id || !r.aiHasStation) continue;
+        const _d=Math.hypot(r.x-fp.x,r.y-fp.y);
+        const _fEngLocal='engine_galaxy';
+        if(_d>(ENGINE_MAX_RANGE[_fEngLocal]||25000)) continue;
+        const _dem=(r.demand||{}).iron||0;
+        if(_dem<1.0) continue;
+        // Score: higher demand wins; bonus +50% if hub hasn't been Large-upgraded
+        let _s=_dem * (r.hasLargeStation?1.0:1.5);
+        if(_s>_bestScore){_bestScore=_s;_ironSink=r;}
+      }
+    }
+    // Iron-output leg is gated on the foundry actually having iron ready
+    // to ship. Until production has rotated at least once and pushed iron
+    // into the planet's supply pool, assigning a train here would just
+    // park it in DESTINATION IS FULL / waiting indefinitely, starving
+    // other revenue routes.
+    const _foundryHasIron=(fp.supply?.iron||0)>0;
     const _legs=[
-      {cargo:'molten_ore', carKey:'car_ore',        src:_oreSrc},
-      {cargo:'water',      carKey:'car_water_tank', src:_waterSrc},
+      {cargo:'molten_ore', carKey:'car_ore',        src:_oreSrc,      dst:fp},
+      {cargo:'water',      carKey:'car_water_tank', src:_waterSrc,    dst:fp},
     ];
+    if(_foundryHasIron && _ironSink){
+      _legs.push({cargo:'iron', carKey:'car_iron', src:fp, dst:_ironSink, isOutput:true});
+    }
     for(const leg of _legs){
-      if(!leg.src) continue; // no usable source for this cargo yet
+      if(!leg.src||!leg.dst) continue; // no usable source/sink for this cargo yet
       // LIVE coverage check (no cached flag): a leg is served when SOME AI
       // train's route passes through both endpoints AND the train carries
       // the matching car. The car check is the critical addition — a
@@ -6602,37 +6702,36 @@ function _aiEnsureFoundrySupplyTrains(){
       // perfect its route geometry.
       const _served=_aiCorp.trainIndices.some(ti=>{
         const t=trains[ti]; if(!t?.route?.stops) return false;
-        const _geoOk = t.route.stops.includes(leg.src.id) && t.route.stops.includes(fp.id);
+        const _geoOk = t.route.stops.includes(leg.src.id) && t.route.stops.includes(leg.dst.id);
         const _carOk = (t.cars||[]).includes(leg.carKey);
         return _geoOk && _carOk;
       });
       if(_served) continue;
       // Try to divert an idle (orbit-phase) train onto this leg. The car
       // refit happens automatically inside _aiDoAssignRoute via
-      // _aiPickCarsForRoute, which will pull a car_ore or car_water_tank
-      // into the loadout because the route supplies that cargo at the
-      // source and demands it at the foundry sink.
+      // _aiPickCarsForRoute.
       for(const ti of _aiCorp.trainIndices){
         const t=trains[ti]; if(!t) continue;
-        // Allow orbit / blocked / waiting trains to be diverted; transit
-        // can't be interrupted but the route handler will queue properly
-        // when transit completes.
         if(t.route && t.route.phase==='transit') continue;
-        // Foundry supply is a top-priority continuous goal — bypass the
-        // re-route cooldown for these specific reassignments.
-        _aiDoAssignRoute(ti,[t.planetId, leg.src.id, fp.id, leg.src.id]);
+        _aiDoAssignRoute(ti,[t.planetId, leg.src.id, leg.dst.id, leg.src.id]);
         return true;
       }
       // No divertible train — queue a buy_train action with a loadout
-      // built specifically for this leg. Engine = engine_galaxy (range +
-      // capacity for long-haul supply runs), cargo car for the leg,
-      // passengers + mail for revenue padding, caboose. Bypasses the
-      // rev-per-train guardrail because foundry throughput trumps general
-      // fleet economics. Honors only the absolute AI_MAX_TRAINS cap.
+      // built specifically for this leg. NOW respects the same rev-per-
+      // train guardrail as the general buy path: if the existing fleet
+      // isn't earning at least $1,500/train/SD, foundry-supply purchases
+      // are deferred too. Otherwise the AI keeps buying "supply" trains
+      // it can't keep economically afloat, driving per-train revenue
+      // toward zero (see iter 7 of the snapshot loop).
       const _bHp=_aiGetHomePlanet();
       const _diff=_aiCorp.skillLevel;
       const _atCap=_aiCorp.trainIndices.length>=AI_MAX_TRAINS[_diff];
-      if(_bHp && !_atCap){
+      const _fsAge=Math.max(0.1,stardate-(_gameStartSd||stardate));
+      const _fsTrCount=_aiCorp.trainIndices.length;
+      const _fsRevPer=_fsTrCount>0?((_aiCorp.totalRevenue||0)/_fsAge/_fsTrCount):0;
+      const _fsCostRecov=(_aiCorp.totalCosts||0)>0 ? ((_aiCorp.totalRevenue||0)/(_aiCorp.totalCosts||1)) : Infinity;
+      const _fsBuyGuardOK=_fsTrCount<3||(_fsRevPer>=300&&_fsCostRecov>=0.20);
+      if(_bHp && !_atCap && _fsBuyGuardOK){
         const _cars=['engine_galaxy', leg.carKey, 'car_passenger', 'car_mail', 'caboose'];
         const _bCarCost={engine_constellation:10000,engine_galaxy:20000,car_passenger:5000,car_mail:4000,car_water_tank:8000,car_ore:8000,car_iron:10000,caboose:3000};
         const _cost=_cars.reduce((s,c)=>s+(_bCarCost[c]||4000),0);
@@ -6830,6 +6929,60 @@ function _aiEvaluateTrain(ti){
   return null;
 }
 
+// ── AI TRAIN YARD ──────────────────────────────────────────────
+// The AI corp maintains an inventory of unused car/engine units that came
+// off prior refits. When buying a new train or refitting, the AI first
+// draws from the yard; only the shortfall is charged at full price. Mirrors
+// the player's trainyard so the AI has the same capital efficiency.
+//
+// _aiYardCount(carType) → number of units of `carType` available in yard.
+// _aiYardConsume(cars) → for each car in `cars`, decrement the yard if a
+//   unit is available; returns the list of cars NOT covered by the yard
+//   (the ones that must be purchased at full price).
+// _aiYardDeposit(cars) → adds every car in `cars` to the yard.
+function _aiYardCount(carType){
+  if(!_aiCorp||!_aiCorp.trainYard) return 0;
+  return _aiCorp.trainYard[carType]||0;
+}
+function _aiYardConsume(cars){
+  if(!_aiCorp){return cars.slice();}
+  if(!_aiCorp.trainYard) _aiCorp.trainYard={};
+  const _shortfall=[];
+  for(const c of cars){
+    if((_aiCorp.trainYard[c]||0)>0){
+      _aiCorp.trainYard[c]--;
+    } else {
+      _shortfall.push(c);
+    }
+  }
+  return _shortfall;
+}
+function _aiYardDeposit(cars){
+  if(!_aiCorp) return;
+  if(!_aiCorp.trainYard) _aiCorp.trainYard={};
+  for(const c of cars){
+    if(!c) continue;
+    _aiCorp.trainYard[c]=(_aiCorp.trainYard[c]||0)+1;
+  }
+}
+// Compute multiset diff: returns {removed, added} arrays.
+// removed = cars in `oldCars` that are NOT consumed by matching slots in `newCars`.
+// added   = cars in `newCars` that have no matching slot in `oldCars`.
+// Matching is by type, not position (so reordering doesn't trigger purchases).
+function _aiYardDiff(oldCars,newCars){
+  const _oldCounts={}, _newCounts={};
+  for(const c of oldCars||[]) if(c) _oldCounts[c]=(_oldCounts[c]||0)+1;
+  for(const c of newCars||[]) if(c) _newCounts[c]=(_newCounts[c]||0)+1;
+  const removed=[], added=[];
+  const _types=new Set([...Object.keys(_oldCounts),...Object.keys(_newCounts)]);
+  for(const t of _types){
+    const _delta=(_newCounts[t]||0)-(_oldCounts[t]||0);
+    if(_delta>0) for(let i=0;i<_delta;i++) added.push(t);
+    else if(_delta<0) for(let i=0;i<-_delta;i++) removed.push(t);
+  }
+  return {removed,added};
+}
+
 function _aiPickExploreTarget(train){
   if(!_aiCorp||!galaxy) return null;
   const tp=galaxy.planets[train.planetId];if(!tp) return null;
@@ -6858,8 +7011,19 @@ function _aiPickTrainComp(diff){
 function _aiDoBuyTrain(cars,planetId){
   if(!_aiCorp||!galaxy) return;
   const p=galaxy.planets[planetId];if(!p) return;
-  const cost=cars.reduce((s,c)=>s+({engine_constellation:10000,engine_galaxy:20000,car_passenger:5000,car_mail:4000,car_water_tank:8000,car_ore:8000,car_iron:10000,car_oil:9000,caboose:3000}[c]||4000),0);
+  // Train yard: price = sticker for cars we DON'T have in stock. Compute
+  // cost first (without mutating the yard) so we can bail on insufficient
+  // credits, then mutate the yard only when the purchase actually goes through.
+  const _yardSnapshot={};
+  if(_aiCorp.trainYard) for(const k in _aiCorp.trainYard) _yardSnapshot[k]=_aiCorp.trainYard[k];
+  let cost=0;
+  for(const c of cars){
+    if((_yardSnapshot[c]||0)>0) _yardSnapshot[c]--;
+    else cost+=(_AI_CAR_VALS[c]||4000);
+  }
   if(_aiCorp.credits<cost) return;
+  // Commit the yard consumption.
+  _aiYardConsume(cars);
   const n=_aiCorp.trainIndices.length+1;
   const idx=trains.length;
   const tr=makeGalaxyTrain(AI_CORP_NAMES[_aiCorp.skillLevel].split(' ')[0]+' No.'+n,planetId,'MED',cars,false);
@@ -6875,7 +7039,24 @@ function _aiDoSwapCars(trainIdx,newCars,cost){
   if(!t||!Array.isArray(newCars)||newCars.length<1) return;
   // Never modify cars mid-flight
   if(t.route&&t.route.phase==='transit') return;
+  // Train-yard accounting: removed cars go into the yard; added cars come
+  // FROM the yard if available, else are purchased net-new. Caller's `cost`
+  // argument is ignored — we compute the real cost from the diff.
+  const oldCars=t.cars||[];
+  const {removed:_yardRemoved, added:_yardAdded}=_aiYardDiff(oldCars,newCars);
+  // Price each added car: yard-stock first, then sticker.
+  const _yardSnap={};
+  if(_aiCorp.trainYard) for(const k in _aiCorp.trainYard) _yardSnap[k]=_aiCorp.trainYard[k];
+  let _realCost=0;
+  for(const c of _yardAdded){
+    if((_yardSnap[c]||0)>0) _yardSnap[c]--;
+    else _realCost+=(_AI_CAR_VALS[c]||4000);
+  }
+  cost=_realCost;
   if(_aiCorp.credits<cost) return;
+  // Commit: consume `added` from yard, deposit `removed` into yard.
+  _aiYardConsume(_yardAdded);
+  _aiYardDeposit(_yardRemoved);
   const oldCars=t.cars||[];
   const _oldEng=oldCars[0]||null, _newEng=newCars[0]||null;
   const _carryArr=(arr,def)=>newCars.map((_,i)=>oldCars[i]===newCars[i]?(arr?.[i]??def):def);
@@ -7100,14 +7281,34 @@ function _aiApplyCarRefit(trainIdx, newCars){
   if(!_aiCorp) return;
   const t=trains[trainIdx];
   if(!t||!Array.isArray(newCars)||newCars.length<1) return;
+  // Rate-limit: at most one refit per train per 2 SD. The parked-train +
+  // frozen-train detectors and the foundry-supply ensurer all call
+  // _aiDoAssignRoute frequently; without this guard, every reassignment
+  // re-charges car costs even when the train's cars are functionally
+  // identical to what was there before.
+  if(!_aiCorp._lastRefitSd) _aiCorp._lastRefitSd={};
+  if((stardate-(_aiCorp._lastRefitSd[trainIdx]||-999))<0.5) return;
   const oldCars=t.cars||[];
   const _oldEng=oldCars[0]||null, _newEng=newCars[0]||null;
-  // Compute refit cost: any slot where the type changed costs the new car.
+  // Refit cost = NET asset increase only. Swapping a passenger car for an
+  // ore car (same $5k vs $8k) charges $3k, not $8k. Replacing like-for-
+  // like is free. Removing cars never refunds. This matches the player's
+  // intuition that a "refit" is reshuffling existing assets, not buying
+  // a brand-new train.
+  // Train-yard accounting: removed cars go into the yard; added cars come
+  // FROM the yard if available, else are purchased net-new. The AI only
+  // pays for cars it doesn't already have in inventory.
+  const {removed:_yardRemoved, added:_yardAdded}=_aiYardDiff(oldCars,newCars);
+  const _yardSnap={};
+  if(_aiCorp.trainYard) for(const k in _aiCorp.trainYard) _yardSnap[k]=_aiCorp.trainYard[k];
   let _cost=0;
-  const _len=Math.max(oldCars.length,newCars.length);
-  for(let i=0;i<_len;i++){
-    if(oldCars[i]!==newCars[i] && newCars[i]) _cost+=(_AI_CAR_VALS[newCars[i]]||4000);
+  for(const c of _yardAdded){
+    if((_yardSnap[c]||0)>0) _yardSnap[c]--;
+    else _cost+=(_AI_CAR_VALS[c]||4000);
   }
+  _aiYardConsume(_yardAdded);
+  _aiYardDeposit(_yardRemoved);
+  _aiCorp._lastRefitSd[trainIdx]=stardate;
   const _carryArr=(arr,def)=>newCars.map((_,i)=>oldCars[i]===newCars[i]?(arr?.[i]??def):def);
   t.cars=newCars.slice();
   t.carFull=_carryArr(t.carFull,false);

@@ -1,66 +1,8 @@
 [
   {
-    "stardate": 840,
-    "gameStartSd": 829,
-    "age": 11,
-    "phase": "late",
-    "credits": -853009,
-    "totalRevenue": 32991,
-    "totalCosts": 1636000,
-    "netProfit": -1603009,
-    "netWorth": -440009,
-    "trainCount": 3,
-    "purchasedTrains": 0,
-    "stationsBuilt": 6,
-    "foundries": 1,
-    "trainDetails": [
-      {
-        "num": 1,
-        "isStarter": true,
-        "routePhase": "orbit",
-        "cargo": "empty",
-        "idleTimer": 343.5,
-        "assetVal": 28000,
-        "route": "Tektonor -> Axionil -> Tektonor -> Axionil"
-      },
-      {
-        "num": 2,
-        "isStarter": true,
-        "routePhase": "queueing",
-        "cargo": "empty",
-        "idleTimer": 0,
-        "assetVal": 49000,
-        "route": "Belkorar -> Tektonor -> Denebor"
-      },
-      {
-        "num": 3,
-        "isStarter": true,
-        "routePhase": "queueing",
-        "cargo": "empty",
-        "idleTimer": 0,
-        "assetVal": 36000,
-        "route": "Belkorar -> Tektonor"
-      }
-    ],
-    "actionQueue": [],
-    "nextTrainCost": 63000,
-    "nextTrainThreshold": 69300,
-    "canBuyTrain": false,
-    "credits_vs_threshold": -922309,
-    "trainCooldownRemaining": 0,
-    "lastTrainBuildSd": -999,
-    "canBuyStation": false,
-    "stationCooldownRemaining": 0,
-    "lastStationBuildSd": 831.55,
-    "discoveredStars": 6,
-    "exploreTarget": 15,
-    "explorationComplete": false,
-    "activeExplorers": 0,
-    "idleTrains": 1,
-    "revenuePerSd": 2999,
-    "trainAssetVal": 113000,
-    "stationAssetVal": 300000,
     "run": 1,
-    "elapsed_s": 20.6
+    "error": "Page.evaluate: ReferenceError: stardate is not defined\n    at eval (eval at evaluate (:302:30), <anonymous>:1:54)\n    at eval (<anonymous>)\n    at UtilityScript.evaluate (<anonymous>:302:30)\n    at UtilityScript.<anonymous> (<anonymous>:1:44)",
+    "stardate": -1,
+    "elapsed_s": 3.8
   }
 ]
