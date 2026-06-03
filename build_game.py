@@ -5769,6 +5769,7 @@ function _aiDecide(){
         for(const ti of _aiCorp.trainIndices){
           const t=trains[ti];if(!t) continue;
           if(t.route&&t.route.phase!=='orbit') continue; // never interrupt mid-transit
+          if(_aiIsRouteLocked(ti)) continue; // honour the re-route cooldown
           const expl=_aiPickExploreTarget(t);
           if(expl){
             _aiCorp.actionQueue.push({type:'assign_route',trainIdx:ti,planetIds:[t.planetId,expl.id]});
@@ -5795,6 +5796,9 @@ function _aiDecide(){
   for(const ti of _aiCorp.trainIndices){
     const _effThresh=trains[ti]?.route?.phase==='blocked'?_blockedThresh:idleThresh;
     if((_aiCorp.idleTimers[ti]||0)>_effThresh){
+      // Honour the re-route cooldown — even idle/blocked trains stay put
+      // until their current orders complete or 6+ segments tick by.
+      if(_aiIsRouteLocked(ti)){_aiCorp.idleTimers[ti]=0;continue;}
       const t=trains[ti];
       const route=_aiPickRoute(ti);
       _aiCorp.idleTimers[ti]=0; // always reset so P2/P3 can fire if we don't queue a route
@@ -5820,6 +5824,7 @@ function _aiDecide(){
   // P1b: trains with no route at all
   for(const ti of _aiCorp.trainIndices){
     const t=trains[ti];if(!t||t.route) continue;
+    if(_aiIsRouteLocked(ti)) continue;
     const route=_aiPickRoute(ti);
     if(route){_aiCorp.actionQueue.push({type:'assign_route',trainIdx:ti,planetIds:route});return;}
   }
@@ -6066,6 +6071,23 @@ function _aiPickRoute(trainIdx){
     }
   }
   let bestScore=-Infinity,bestIds=null;
+  // ── Directed leg scoring (one-way supply→demand) ────────────────
+  // _aiScorePair returns both directions summed. For multi-stop chains we
+  // need each leg scored independently so a 3-stop loop A→B→C→A is the
+  // sum of three directed legs.
+  const _legScore=(src,dst)=>{
+    let _s=0;
+    const _dstFoundry=(dst.upgrades||[]).includes('iron_foundry');
+    for(const [c,amt] of Object.entries(src.supply||{})){
+      const dem=(dst.demand||{})[c]||0;
+      if(dem>0.5 && amt>0.5){
+        const _r=(_dstFoundry&&(c==='water'||c==='molten_ore'))?_AI_CARGO_RATES.iron*1.2:(_AI_CARGO_RATES[c]||1000);
+        _s+=Math.min(amt,10)*Math.min(dem,10)*_r*0.001;
+      }
+    }
+    return _s;
+  };
+  // ── 2-stop loop search ─────────────────────────────────────────
   for(const pA of stPlanets) for(const pB of stPlanets){
     if(pA.id===pB.id) continue;
     if(Math.hypot(pA.x-pB.x,pA.y-pB.y)>maxRange*0.95) continue;
@@ -6088,6 +6110,47 @@ function _aiPickRoute(trainIdx){
     // (c) Soft penalty when 1-2 fleet-mates already serve this corridor.
     if(_corCt>0) score*=0.25;
     if(score>bestScore){bestScore=score;bestIds=[pA.id,pB.id,pA.id];}
+  }
+  // ── 3-stop loop search (Task B-1) ──────────────────────────────
+  // For every triple (A,B,C) where all three legs are in engine range, score
+  // the directed loop A→B→C→A. The 3-stop loop must clear a 1.10× margin
+  // over the best 2-stop to win — adds an extra cargo op cycle per loop, so
+  // we want the extra revenue to actually justify the longer round trip.
+  // Saturation, corridor-cap, and same-route penalties from the 2-stop pass
+  // are reused conceptually: if ANY edge corridor is at the hard cap, skip.
+  const _MULTISTOP_PREMIUM=1.10;
+  for(let _ai=0; _ai<stPlanets.length; _ai++){
+    const pA=stPlanets[_ai];
+    for(let _bi=0; _bi<stPlanets.length; _bi++){
+      const pB=stPlanets[_bi];
+      if(pB.id===pA.id) continue;
+      if(Math.hypot(pA.x-pB.x,pA.y-pB.y)>maxRange*0.95) continue;
+      if((_corridorCounts.get(_corKey(pA.id,pB.id))||0)>=_AI_CORRIDOR_CAP) continue;
+      for(let _ci=0; _ci<stPlanets.length; _ci++){
+        const pC=stPlanets[_ci];
+        if(pC.id===pA.id||pC.id===pB.id) continue;
+        if(Math.hypot(pB.x-pC.x,pB.y-pC.y)>maxRange*0.95) continue;
+        if(Math.hypot(pC.x-pA.x,pC.y-pA.y)>maxRange*0.95) continue;
+        if((_corridorCounts.get(_corKey(pB.id,pC.id))||0)>=_AI_CORRIDOR_CAP) continue;
+        if((_corridorCounts.get(_corKey(pC.id,pA.id))||0)>=_AI_CORRIDOR_CAP) continue;
+        let _3score=_legScore(pA,pB)+_legScore(pB,pC)+_legScore(pC,pA);
+        // Saturation penalty if any node is a depleted hub.
+        if((_waitingAtPlanet.get(pA.id)||0)>=_AI_SAT_WAITING||
+           (_waitingAtPlanet.get(pB.id)||0)>=_AI_SAT_WAITING||
+           (_waitingAtPlanet.get(pC.id)||0)>=_AI_SAT_WAITING){
+          _3score*=0.1;
+        }
+        // Corridor crowding — multiply by 0.25 per edge that's already
+        // covered by another fleet train.
+        if((_corridorCounts.get(_corKey(pA.id,pB.id))||0)>0) _3score*=0.5;
+        if((_corridorCounts.get(_corKey(pB.id,pC.id))||0)>0) _3score*=0.5;
+        if((_corridorCounts.get(_corKey(pC.id,pA.id))||0)>0) _3score*=0.5;
+        if(_3score > bestScore*_MULTISTOP_PREMIUM){
+          bestScore=_3score;
+          bestIds=[pA.id,pB.id,pC.id,pA.id];
+        }
+      }
+    }
   }
   // If best available route is low-value, prefer exploring a new star system instead
   if(bestScore<EXPLORE_THRESHOLD){
@@ -6363,6 +6426,7 @@ function _aiCoverUpgradeLogistics(){
         for(const ti of _aiCorp.trainIndices){
           const t=trains[ti];if(!t) continue;
           if(t.route&&t.route.phase!=='orbit') continue;
+          if(_aiIsRouteLocked(ti)) continue;
           const tp=galaxy.planets[t.planetId];if(!tp) continue;
           const pa=galaxy.planets[_endA],pb=galaxy.planets[_endB];
           if(!pa||!pb) continue;
@@ -6382,6 +6446,7 @@ function _aiCoverUpgradeLogistics(){
         for(const ti of _aiCorp.trainIndices){
           const t=trains[ti];if(!t) continue;
           if(t.route&&t.route.phase!=='orbit') continue;
+          if(_aiIsRouteLocked(ti)) continue;
           const tp=galaxy.planets[t.planetId];if(!tp) continue;
           const pa=galaxy.planets[pid],pb=galaxy.planets[obj.outputPid];
           if(!pa||!pb) continue;
@@ -6425,11 +6490,10 @@ function _aiEvaluateTrain(ti){
   const estMaintPerSd=cars.length*200;
   const netRevPerSd=Math.max(0.1, trainRev/age - estMaintPerSd);
   const paybackSd=trainCost/netRevPerSd;
-  // Q5 — bad ROI: look for a meaningfully better route.
-  // 10 SD is the user's target. Only switch if we find a route that
-  // _aiPickRoute considers a different+better option (the picker already
-  // applies anti-cluster + already-used-corridor discounts).
-  if(paybackSd>10 && t.route?.stops?.length>=2){
+  // Q5 — bad ROI: look for a meaningfully better route. Skip when the train
+  // is still inside its re-route cooldown — even bad-ROI trains have to
+  // complete their current orders before the AI can repurpose them.
+  if(paybackSd>10 && t.route?.stops?.length>=2 && !_aiIsRouteLocked(ti)){
     const _newRoute=_aiPickRoute(ti);
     if(_newRoute){
       const _cs=t.route.stops;
@@ -6840,19 +6904,20 @@ function makeGStars(){
 // three quadrants get the remaining schemes in a fixed clockwise rotation.
 const _NEBULA_TILE_SZ=512;
 const _NEBULA_SCHEMES=[
-  // home: dark blue / purple / occasional light blue
-  {name:'home',  base:[6,8,30],   mid:[40,20,70],  accent:[80,140,210]},
-  // dark green / blue / occasional light green
-  {name:'green', base:[8,28,18],  mid:[20,55,70],  accent:[80,200,140]},
-  // dark red / purple / occasional pink
-  {name:'red',   base:[40,8,18],  mid:[60,20,70],  accent:[210,80,160]},
-  // yellow / orange / occasional bright red
-  {name:'amber', base:[60,40,12], mid:[160,80,20], accent:[230,80,40]},
+  // home: rich indigo base / electric royal purple / saturated cyan-blue accent
+  {name:'home',  base:[14,18,82],   mid:[96,40,196],  accent:[140,210,255]},
+  // emerald base / luminous teal / vivid mint accent (high-chroma green stack)
+  {name:'green', base:[8,68,38],    mid:[28,150,170], accent:[160,255,200]},
+  // deep crimson base / vivid magenta-purple / electric hot pink accent
+  {name:'red',   base:[100,16,52],  mid:[170,42,162], accent:[255,120,210]},
+  // deep amber base / saturated tangerine / electric red-orange accent
+  {name:'amber', base:[120,72,16],  mid:[245,140,32], accent:[255,120,52]},
 ];
 // Galactic-centre scheme — fades in within ~30,000 SU of (0,0). User spec:
 // bright blue under-layer (background pixels), dark purple over-layer
-// (filament peaks where the noise ridges).
-const _NEBULA_CORE_SCHEME={name:'core', base:[80,140,220], mid:[55,55,150], accent:[40,12,72]};
+// (filament peaks where the noise ridges). Saturation richened to match the
+// quadrant schemes.
+const _NEBULA_CORE_SCHEME={name:'core', base:[100,180,255], mid:[88,70,210], accent:[44,12,100]};
 const _NEBULA_CORE_RADIUS=30000;   // SU within which the core scheme is fully present
 const _NEBULA_CORE_BLEND_W=10000;  // SU over which it blends out into the quadrant schemes
 let _nebulaTiles=[];               // 4 quadrant canvases
@@ -10237,7 +10302,9 @@ function trackVisit(pid){
   if(!visitedPlanetIds.has(pid)){
     const _bio=_tp.type.id;
     const _bioUnlockMsg={
-      lava:'MOLTEN ORE CAR UNLOCKED',
+      // 'lava' deliberately omitted — the Molten Ore Car is unlocked from
+      // game start, so a first-lava-visit "MOLTEN ORE CAR UNLOCKED" message
+      // would be misleading.
       desert:'SAND CAR UNLOCKED', ice:'ICE TANKER UNLOCKED',
       oil:'OIL TANKER UNLOCKED', storm:'BATTERY CAR UNLOCKED',
       chemical:'CHEMICAL CAR UNLOCKED',
@@ -10337,7 +10404,7 @@ function trackVisit(pid){
     }
     // Emit car unlock message and queue popup if this is the first visited planet of this biome
     const _bioUnlockCar={
-      lava:    {sprite:'car_ore',      displayName:'Molten Ore Car'},
+      // 'lava' deliberately omitted — see _bioUnlockMsg comment above.
       desert:  {sprite:'car_sand',     displayName:'Sand Car'},
       ice:     {sprite:'car_ice',      displayName:'Ice Tanker'},
       oil:     {sprite:'car_oil',      displayName:'Oil Tanker'},
@@ -14473,7 +14540,7 @@ function drawCheatsPopup(){
   // open. Amber palette to visually distinguish from the cool-blue Options.
   // Houses the four planet-shortcut cheats AND the Fog of War toggle so the
   // standard Options popup stays free of "viewing-mode" debug toggles.
-  const pw=300, ph=312;
+  const pw=300, ph=360;
   const [px,py]=drawPopupBase(pw,ph,'rgba(255,170,60,0.7)');
   ctx.save();
   ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
@@ -14566,6 +14633,31 @@ function drawCheatsPopup(){
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
   ctx.fillStyle='#fff'; ctx.fillText(fogEnabled?'ON':'OFF',fwX+fwW/2,fwT+fwH/2+4);
   popupState.fogToggleBounds={x:fwX,y:fwT,w:fwW,h:fwH};
+  // Divider before Export Planet Data
+  ctx.strokeStyle='rgba(180,90,40,0.35)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(px,py+295); ctx.lineTo(px+pw,py+295); ctx.stroke();
+  // Export Planet Data row — greyed out unless the player has a planet
+  // selected. Writes the same JSON schema discussed previously to a
+  // downloadable <planet>_planet.json file.
+  const _selIsPlanet=!!(typeof sel!=='undefined' && sel && sel.type==='planet' && sel.data);
+  const _expP=_selIsPlanet?sel.data:null;
+  const ry7=py+325;
+  ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
+  ctx.fillStyle=_selIsPlanet?'rgba(255,210,150,0.92)':'rgba(120,110,90,0.5)';
+  ctx.fillText('Export Planet Data',px+18,ry7);
+  ctx.font='10px "Exo 2",sans-serif';
+  ctx.fillStyle=_selIsPlanet?'rgba(200,150,90,0.55)':'rgba(105,95,80,0.4)';
+  ctx.fillText(_selIsPlanet?('Selected: '+_expP.name):'no planet selected',px+18,ry7+16);
+  const epW=72, epH=22, epX=px+pw-18-epW, epT=ry7-14;
+  const _epHov=_selIsPlanet&&!!popupState.exportPlanetHover;
+  ctx.fillStyle=_selIsPlanet?(_epHov?'rgba(32,155,72,0.98)':'rgba(22,108,52,0.88)'):'rgba(40,40,45,0.65)';
+  ctx.fillRect(epX,epT,epW,epH);
+  ctx.strokeStyle=_selIsPlanet?(_epHov?'rgba(70,220,110,0.90)':'rgba(45,195,85,0.75)'):'rgba(75,70,65,0.4)';
+  ctx.lineWidth=1; ctx.strokeRect(epX,epT,epW,epH);
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle=_selIsPlanet?'#afa':'rgba(100,95,80,0.6)';
+  ctx.fillText('EXPORT',epX+epW/2,epT+epH/2+4);
+  popupState.exportPlanetBtnBounds=_selIsPlanet?{x:epX,y:epT,w:epW,h:epH}:null;
   ctx.restore();
 }
 
@@ -15525,13 +15617,28 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
     // then takes a dedicated AI-owned branch (see ~line 15211) that shows
     // the owner notice instead of any upgrade flow.
     const isBuilt=u.isStation?(p.hasStation||p.aiHasStation):builtSet.has(u.id);
-    // Non-station upgrades stay LOCKED on AI-owned planets (player has no
-    // station of their own there). _noStn drives the greyed-out style.
-    const _noStn=!u.isStation&&!p.hasStation;
+    // _aiUpgradeRow flags every NON-station upgrade card when the planet is
+    // AI-owned (rival station built, player hasn't built one). These cards
+    // never show a PURCHASE button — instead they render either:
+    //   • a green "Built by [AI Corp]" panel (parallel to the station card's
+    //     AI-owned styling), when the rival has built this upgrade, OR
+    //   • a greyed-out "NOT BUILT" label, when the rival has not built it.
+    const _aiUpgradeRow=!u.isStation&&!!p.aiHasStation&&!p.hasStation;
+    const _aiUpgradeBuilt=_aiUpgradeRow&&builtSet.has(u.id);
+    // _noStn applies ONLY when NEITHER player nor AI has a station here —
+    // the genuine "no station anywhere" case that keeps the legacy greyed-
+    // out PURCHASE button.
+    const _noStn=!u.isStation&&!p.hasStation&&!p.aiHasStation;
     const itemY=_cumItemY; _cumItemY+=itemH;
-    if(_noStn){
+    if(_noStn||(_aiUpgradeRow&&!_aiUpgradeBuilt)){
       ctx.fillStyle='rgba(8,8,20,0.50)';
       ctx.strokeStyle='rgba(25,30,50,0.22)';
+    } else if(_aiUpgradeBuilt){
+      // Same green tint the station's AI-owned branch sits on — re-using
+      // the regular "built" panel palette so the rival's footprint reads
+      // as installed infrastructure.
+      ctx.fillStyle='rgba(15,50,25,0.65)';
+      ctx.strokeStyle='rgba(40,160,70,0.45)';
     } else {
       ctx.fillStyle=isBuilt?'rgba(15,50,25,0.65)':'rgba(8,18,48,0.65)';
       ctx.strokeStyle=isBuilt?'rgba(40,160,70,0.38)':'rgba(50,90,190,0.32)';
@@ -15539,7 +15646,15 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
     ctx.lineWidth=0.8;
     ctx.beginPath(); ctx.roundRect(upX+6,itemY+3,upW-12,itemH-6,4); ctx.fill(); ctx.stroke();
     ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
-    ctx.fillStyle=_noStn?'rgba(65,70,85,0.55)':isBuilt?'rgba(70,200,100,0.9)':'rgba(130,175,240,0.9)';
+    // Title color: grey for greyed-out states (no-station + AI-owned-not-built),
+    // green for built (player OR rival), blue for buildable.
+    if(_noStn || (_aiUpgradeRow && !_aiUpgradeBuilt)){
+      ctx.fillStyle='rgba(65,70,85,0.55)';
+    } else if(_aiUpgradeBuilt){
+      ctx.fillStyle='rgba(70,200,100,0.9)';
+    } else {
+      ctx.fillStyle=isBuilt?'rgba(70,200,100,0.9)':'rgba(130,175,240,0.9)';
+    }
     ctx.fillText(u.label,upX+12,_isCompCard(u)?itemY+13:itemY+17);
     ctx.font='9px "Exo 2",sans-serif';
     ctx.fillStyle='rgba(110,145,195,0.60)';
@@ -15547,7 +15662,9 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
     // Compressed cards start at itemY+25 (tighter against the title); the card height
     // (_heights[i]) was pre-computed from the same wrap so the BUILD button + cost pill
     // sit cleanly below the last line with a small buffer.
-    if(!isBuilt){
+    // Skipped for built items AND for AI-built rival upgrades (those show
+    // the "Built by [AI Corp]" overlay instead of a description).
+    if(!isBuilt && !_aiUpgradeBuilt){
       const _udW=upW-26, _udWds=u.desc.split(' ');
       let _udCur='', _udY=_isCompCard(u)?itemY+25:itemY+30;
       for(const _udW2 of _udWds){
@@ -15556,6 +15673,33 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
         else{if(_udCur)ctx.fillText(_udCur,upX+12,_udY); _udCur=_udW2; _udY+=11;}
       }
       if(_udCur) ctx.fillText(_udCur,upX+12,_udY);
+    }
+    // ── AI-owned planet, non-station upgrade card ──
+    // Hijacks the normal upgrade rendering before the legacy _noStn or
+    // u.isStation branches get a chance to run. Two visual variants:
+    //   (a) AI has BUILT this upgrade → green panel + amber "Built by [AI]"
+    //       overlay. No buttons; no clickable bounds registered.
+    //   (b) AI has NOT built this upgrade → greyed-out pill labeled "NOT
+    //       BUILT" (instead of "PURCHASE"). No clickable bounds.
+    if(_aiUpgradeRow){
+      if(_aiUpgradeBuilt){
+        ctx.font='9px "Exo 2",sans-serif';
+        ctx.fillStyle='rgba(225,150,90,0.85)';
+        ctx.fillText('Built by '+((_aiCorp&&_aiCorp.name)||'rival corporation')+'.',upX+12,itemY+30);
+        ctx.fillStyle='rgba(170,135,100,0.62)';
+        ctx.fillText('Cannot modify a rival’s upgrade.',upX+12,itemY+44);
+      } else {
+        const _nbBW=86,_nbBH=20,_nbBX=upX+(upW-86)/2;
+        const _nbBY=itemY+itemH-_nbBH-8;
+        ctx.fillStyle='rgba(18,18,35,0.75)';
+        ctx.beginPath(); ctx.roundRect(_nbBX,_nbBY,_nbBW,_nbBH,3); ctx.fill();
+        ctx.strokeStyle='rgba(40,40,65,0.40)'; ctx.lineWidth=1;
+        ctx.beginPath(); ctx.roundRect(_nbBX,_nbBY,_nbBW,_nbBH,3); ctx.stroke();
+        ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
+        ctx.fillStyle='rgba(55,62,80,0.62)';
+        ctx.fillText('NOT BUILT',_nbBX+_nbBW/2,_nbBY+_nbBH/2+3.5);
+      }
+      continue;
     }
     // Locked state: no station built yet — show greyed-out BUILD button; not clickable
     if(_noStn){
@@ -17175,7 +17319,12 @@ function drawTrainBuilderPopup(){
   const _oilUnlocked=galaxy&&galaxy.planets.some(p=>p.type.id==='oil'&&visitedPlanetIds.has(p.id));
   const _batteryUnlocked=galaxy&&galaxy.planets.some(p=>p.type.id==='storm'&&visitedPlanetIds.has(p.id));
   const _chemicalUnlocked=galaxy&&galaxy.planets.some(p=>p.type.id==='chemical'&&visitedPlanetIds.has(p.id));
-  const _oreUnlocked=galaxy&&galaxy.planets.some(p=>p.type.id==='lava'&&visitedPlanetIds.has(p.id));
+  // Molten Ore Car is unlocked from the very first game frame — the tutorial
+  // points the player at the home-system lava world right away, and gating
+  // the car behind a real visit forces an awkward "you can't build this yet"
+  // state during the build-station tutorial. Treat it as a baseline car
+  // alongside the engine cars.
+  const _oreUnlocked=true;
   // _livestockCarUnlocked, _grainCarUnlocked, _fruitCarUnlocked are global flags set in trackVisit
   const _sandUnlocked=galaxy&&galaxy.planets.some(p=>p.type.id==='desert'&&visitedPlanetIds.has(p.id));
   const _iceUnlocked=galaxy&&galaxy.planets.some(p=>p.type.id==='ice'&&visitedPlanetIds.has(p.id));
@@ -20815,6 +20964,8 @@ canvas.addEventListener('mousemove',e=>{
     popupState.colonyPlanetHover=!!(_cpbb&&cp.x>=_cpbb.x&&cp.x<=_cpbb.x+_cpbb.w&&cp.y>=_cpbb.y&&cp.y<=_cpbb.y+_cpbb.h);
     const _rvbb=popupState.rivalBtnBounds;
     popupState.rivalBtnHover=!!(_rvbb&&cp.x>=_rvbb.x&&cp.x<=_rvbb.x+_rvbb.w&&cp.y>=_rvbb.y&&cp.y<=_rvbb.y+_rvbb.h);
+    const _epbb=popupState.exportPlanetBtnBounds;
+    popupState.exportPlanetHover=!!(_epbb&&cp.x>=_epbb.x&&cp.x<=_epbb.x+_epbb.w&&cp.y>=_epbb.y&&cp.y<=_epbb.y+_epbb.h);
     const _astb=popupState.autosaveToggleBounds;
     popupState.autosaveToggleHover=!!(_astb&&cp.x>=_astb.x&&cp.x<=_astb.x+_astb.w&&cp.y>=_astb.y&&cp.y<=_astb.y+_astb.h);
     const _mttb=popupState.missionTrackerToggleBounds;
@@ -20825,7 +20976,7 @@ canvas.addEventListener('mousemove',e=>{
     popupState.optionsSaveBtnHover=!!(_osbb&&cp.x>=_osbb.x&&cp.x<=_osbb.x+_osbb.w&&cp.y>=_osbb.y&&cp.y<=_osbb.y+_osbb.h);
     const _oeb=popupState.optionsEscBounds;
     popupState.optionsEscHover=!!(_oeb&&cp.x>=_oeb.x&&cp.x<=_oeb.x+_oeb.w&&cp.y>=_oeb.y&&cp.y<=_oeb.y+_oeb.h);
-    if(popupState.fogToggleHover||popupState.addCreditsHover||popupState.flowerPlanetHover||popupState.colonyPlanetHover||popupState.rivalBtnHover||popupState.autosaveToggleHover||popupState.missionTrackerToggleHover||popupState.controlsBtnHover||popupState.optionsSaveBtnHover||popupState.optionsEscHover) canvas.style.cursor='pointer';
+    if(popupState.fogToggleHover||popupState.addCreditsHover||popupState.flowerPlanetHover||popupState.colonyPlanetHover||popupState.rivalBtnHover||popupState.exportPlanetHover||popupState.autosaveToggleHover||popupState.missionTrackerToggleHover||popupState.controlsBtnHover||popupState.optionsSaveBtnHover||popupState.optionsEscHover) canvas.style.cursor='pointer';
   }
   // Controls popup — [ESC] close hit detection (lives in its own block since
   // the Options/Cheats hover detector only runs while those two popups are
@@ -21491,6 +21642,18 @@ canvas.addEventListener('mouseup',e=>{
         if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
           const _rp=galaxy&&_aiCorp&&galaxy.planets[_aiCorp.homePlanetId];
           if(_rp){ sel={type:'planet',data:_rp}; routeStops=[_rp]; tracking=false; cam.scale=MIN_SC; cam.x=_rp.x; cam.y=_rp.y; clampCamera(); activePopup=null; popupState={}; }
+          return;
+        }
+      }
+      // Cheats: Export Planet Data — only registered when a planet is selected
+      // (the bounds slot is null otherwise, so this branch is inert in the
+      // greyed-out state). Triggers a JSON download with the full structured
+      // planet schema (_meta / identity / location / physical / geology /
+      // population / economy / development / player_interaction / discovery).
+      if(activePopup==='cheats'&&popupState.exportPlanetBtnBounds){
+        const b=popupState.exportPlanetBtnBounds;
+        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+          if(sel&&sel.type==='planet'&&sel.data) _downloadPlanetJson(sel.data);
           return;
         }
       }
@@ -23303,6 +23466,133 @@ function _autosaveToLocalStorage(){
     _chatMsg('AUTOSAVE FAILED — STORAGE FULL','rgba(255,100,100,1)');
   }
 }
+// Build a single-planet export blob — same JSON schema discussed with the
+// player earlier. Groups every per-planet attribute into logical sections so
+// a downstream "surface game" can consume only what it needs (identity vs
+// orbital geometry vs economy vs geology vs upgrade pipeline). The schema
+// version is recorded in _meta so future re-imports stay versioned.
+const _PLANET_EXPORT_BIOME_LABEL={
+  agri:'Agricultural', storm:'Storm', lava:'Volcanic', ocean:'Ocean', ice:'Ice',
+  desert:'Desert', jungle:'Jungle', rocky:'Rocky', resort:'Resort', oil:'Oil',
+  chemical:'Chemical', urban:'Urban', ancient:'Ancient',
+};
+const _PLANET_EXPORT_SIZE_LABEL={
+  XS:'Extra Small', S:'Small', M:'Medium', L:'Large', XL:'Extra Large', XXL:'Massive',
+};
+function _buildPlanetExportObj(p){
+  if(!p||!galaxy) return null;
+  const _star=galaxy.stars[p.starId]||{};
+  // Sum per-train orbit counts for total player orbit visits.
+  let _orbitTotal=0;
+  const _opc=(typeof planetOrbitCounts!=='undefined' && planetOrbitCounts) ? planetOrbitCounts[p.id] : null;
+  if(_opc) for(const _v of Object.values(_opc)) _orbitTotal+=(_v||0);
+  return {
+    _meta:{
+      export_schema_version:1,
+      source:'Space Train Tycoon — Cheats menu export',
+      export_stardate:stardate,
+      corp:corpName||'',
+    },
+    identity:{
+      id:p.id,
+      name:p.name,
+      catchphrase:p.catchphrase||null,
+      is_starter_world:!!p.isStarter,
+      is_alien_relic:!!p.isAlienRelic,
+    },
+    location:{
+      host_star:{
+        id:_star.id??null, name:_star.name||null,
+        color_class:_star.colorName||null, size:_star.size||null,
+        radius:_star.radius??null, x:_star.x??null, y:_star.y??null,
+      },
+      orbit_radius_su:p.orbitRadius??null,
+      orbit_angle_rad:p.orbitAngle??null,
+      orbit_speed_rad_per_sd:p.orbitSpeed??null,
+      world_x:p.x??null, world_y:p.y??null,
+    },
+    physical:{
+      size_class:p.size||null,
+      size_label:_PLANET_EXPORT_SIZE_LABEL[p.size]||p.size||null,
+      radius_su:p.radius??null,
+      biome_id:p.type?.id||null,
+      biome_label:_PLANET_EXPORT_BIOME_LABEL[p.type?.id]||(p.type?.id||null),
+      biome_seed:p.biomeSeed??null,
+      cloud_angle:p.cloudAngle??null,
+    },
+    geology:{
+      has_gold:!!p.hasGold, gold_revealed:!!p.goldRevealed, gold_patch:p.goldPatch||null,
+      has_diamond:!!p.hasDiamond, diamond_revealed:!!p.diamondRevealed, diamond_patch:p.diamondPatch||null,
+      ring:p.ring||null,
+      moons:p.moons||[],
+    },
+    population:{
+      current:p.population??null,
+      base_at_generation:p.populationBase??null,
+      growth_multiplier:(p.populationBase&&p.populationBase>0)?((p.population||0)/p.populationBase):null,
+    },
+    economy:{
+      supply:p.supply||{},
+      demand:p.demand||{},
+      unlocks:{
+        flowers:!!p.flowerUnlocked,
+        flowers_origin:!!p.isFlowersOrigin,
+        fruit:!!p.fruitUnlocked,
+        grain:!!p.grainUnlocked,
+        livestock:!!p.livestockUnlocked,
+      },
+    },
+    development:{
+      level:p.devLevel||0,
+      base_level_at_generation:p.devLevelBase||0,
+      delivery_log:p.devLog||[],
+      passenger_delivery_log:p.passengerDeliveries||[],
+      iron_delivered_lifetime:p.ironDelivered||0,
+      steel_delivered_lifetime:p.steelDelivered||0,
+      glass_delivered_lifetime:p.glassDelivered||0,
+    },
+    player_interaction:{
+      has_station:!!p.hasStation,
+      has_large_station:!!p.hasLargeStation,
+      has_terminal:!!p.hasTerminal,
+      station_built_by_player:!!p.playerBuiltStation,
+      station_built_by_ai:!!p.aiHasStation,
+      station_orbit_angle:p.stationAngle??null,
+      station_orbit_speed:p.stationSpeed??null,
+      upgrades_present:p.upgrades||[],
+      upgrades_built_by_player:p.playerBuiltUpgrades||[],
+      upgrade_data:p.upgradeData||{},
+      structure_angles:{
+        agri_struct:p.agriStructAngle??null,
+        bakery:p.bakeryAngle??null,
+        blast_furnace:p.blastFurnaceAngle??null,
+        factory:p.factoryAngle??null,
+        foundry:p.foundryAngle??null,
+        glassworks:p.glassworksAngle??null,
+        juicery:p.juiceryAngle??null,
+      },
+    },
+    discovery:{
+      discovered:(typeof discoveredPlanetIds!=='undefined') ? discoveredPlanetIds.has(p.id) : false,
+      visited:(typeof visitedPlanetIds!=='undefined') ? visitedPlanetIds.has(p.id) : false,
+      orbit_count_by_player_trains:_orbitTotal,
+    },
+  };
+}
+function _downloadPlanetJson(p){
+  if(!p||!galaxy) return;
+  const obj=_buildPlanetExportObj(p); if(!obj) return;
+  const json=JSON.stringify(obj,null,2);
+  const _safeName=String(p.name||'planet').replace(/[^A-Za-z0-9_\-]+/g,'_').replace(/_+/g,'_').replace(/^_|_$/g,'')||'planet';
+  const fname=_safeName+'_planet.json';
+  const blob=new Blob([json],{type:'application/json'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url; a.download=fname;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 // Build a downloadable .stt blob from a save object. Reused by the manager's
 // "Export .stt" action AND by the legacy / fallback `saveGame` path. Filename
 // defaults to "<corp>_<sd>.stt" but a custom label can override.
