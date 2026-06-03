@@ -3899,6 +3899,19 @@ function computeDemandRate(p){
   // requirement is satisfied). Mirror of the iron-for-Large-Station pattern
   // above.
   if(p.hasLargeStation||p.hasTerminal) r.steel=Math.max(r.steel||0, 1.0);
+  // Glass demand:
+  //   • URBAN planets ALWAYS demand a healthy amount of glass — every
+  //     skyscraper, atrium, and dome on an urban world is sheet-glass-clad,
+  //     so urban biomes are the canonical glass sink. Sets a 4.0 floor
+  //     (the max economic rate the cargo system uses) so urban planets
+  //     read as "always glass-hungry" regardless of dev level.
+  //   • Inhabited planets at DEV LEVEL 4+ also demand glass — by that
+  //     dev tier any biome has built enough infrastructure (storefronts,
+  //     greenhouses, vehicle windscreens, etc.) for glass to be a real
+  //     consumable. Floor 1.0 matches the iron / steel pattern.
+  // Both floors apply via Math.max so the highest applicable demand wins.
+  if(bio==='urban') r.glass=Math.max(r.glass||0, 4.0);
+  if(pop>0&&dl>=4) r.glass=Math.max(r.glass||0, 1.0);
   // Juicery floor: a jungle planet running a juicery whose fruit bin is not
   // yet maxed (10/10) must show a floor of at least 1 fruit demand so trains
   // can keep feeding it. Computed live so the floor disappears the moment
@@ -6285,22 +6298,40 @@ const _AI_CAR_VALS={engine_constellation:10000,engine_galaxy:20000,engine_classJ
 // Picks an upgrade to build next. Returns
 //   {planet, upgradeId, inputSources:{cargo:srcPid}, outputPid}
 // or null if no candidate satisfies all preconditions.
-// Preconditions per upgrade:
+//
+// Strictly DEMAND-AWARE (Priority 1 from the rival diagnosis report):
+//   • An upgrade is ONLY built when its output cargo has a real demand sink
+//     somewhere in the visited galaxy (any planet — AI-owned, player-owned,
+//     or neutral — with demand ≥ 1.0 for the output cargo). This prevents
+//     the AI from ever spending on a glassworks / factory / blast furnace
+//     / bakery whose output has nowhere to be delivered.
+//   • Iron is the universal demand sink (every populated station planet
+//     wants iron, plus the Large-Station upgrade pipeline reinforces the
+//     loop). The score prioritizes iron-producing upgrades so remaining
+//     capital steers there first.
+// Range policy:
+//   • Output sink MUST be in engine range (the AI's fleet has to be able to
+//     deliver the produced cargo profitably).
+//   • Input sources may be sourced from BEYOND engine range as a last
+//     resort — the input picker first tries to find sources in range, then
+//     widens to "any visited planet with positive supply" if no in-range
+//     source exists. Long-haul input legs are tolerated because the AI's
+//     fleet can grow its engine class over time, and even a slow trickle
+//     keeps the production line alive.
+// Per-upgrade preconditions (unchanged):
 //   • upgradeId has cost>0 (skip preBuiltBiomes freebies like pumping_station)
 //   • upgradeId !== 'repair_drones' (passive — not an economic priority)
 //   • planet is AI-owned with a station, biome matches eligibleBiomes,
 //     upgrade not already built
-//   • for input-needing upgrades: every input cargo has a visited supply
-//     source within engine range
-//   • for output-producing upgrades: an AI-owned station within range can
-//     serve as the distribution target. For iron specifically, we prefer
-//     a sink that hasn't been upgraded to Large yet — iron deliveries
-//     there will help unlock the Large Station upgrade.
 function _aiPickUpgradeTarget(){
   if(!_aiCorp||!galaxy) return null;
   let _fEngine='engine_constellation';
   for(const ti of _aiCorp.trainIndices){const _et=trains[ti];if(_et?.cars[0]){_fEngine=_et.cars[0];break;}}
   const _fRange=ENGINE_MAX_RANGE[_fEngine]??15000;
+  // Demand threshold — a sink must offer at least this rate to count as a
+  // real delivery target. 1.0 mirrors the iron/steel demand floors in
+  // computeDemandRate and keeps the AI honest about output viability.
+  const _DEMAND_MIN=1.0;
   let best=null, bestScore=-Infinity;
   for(const upDef of UPGRADES){
     if(!upDef||upDef.cost<=0) continue;
@@ -6313,49 +6344,73 @@ function _aiPickUpgradeTarget(){
       if(!p||!p.aiHasStation) continue;
       if(!(upDef.eligibleBiomes||[]).includes(p.type.id)) continue;
       if((p.upgrades||[]).includes(upDef.id)) continue;
+      // ── Input sourcing (in-range preferred, out-of-range allowed) ──
+      // For each required input cargo, first search visited planets WITHIN
+      // engine range; if none, widen to ANY visited planet with positive
+      // supply (long-haul tolerated). If even the widened search returns
+      // nothing, skip the candidate — that input simply cannot be sourced.
       const inputSources={};
+      const inputLongHaul=[]; // input cargos that needed the wider search
       let _ok=true;
       for(const c of _inputs){
-        let _bestSrcPid=null, _bestDist=Infinity;
+        let _bestInRangePid=null, _bestInRangeDist=Infinity;
+        let _bestAnyPid=null,     _bestAnyDist=Infinity;
         for(const q of galaxy.planets){
           if(!q||q.id===p.id||!_aiCorp.visitedPlanetIds.has(q.id)) continue;
           if(((q.supply||{})[c]||0)<=0) continue;
           const d=Math.hypot(q.x-p.x,q.y-p.y);
-          if(d>_fRange) continue;
-          if(d<_bestDist){_bestDist=d;_bestSrcPid=q.id;}
+          if(d<_bestAnyDist){_bestAnyDist=d;_bestAnyPid=q.id;}
+          if(d<=_fRange && d<_bestInRangeDist){_bestInRangeDist=d;_bestInRangePid=q.id;}
         }
-        if(_bestSrcPid==null){_ok=false;break;}
-        inputSources[c]=_bestSrcPid;
+        const _chosen = (_bestInRangePid!=null) ? _bestInRangePid : _bestAnyPid;
+        if(_chosen==null){_ok=false;break;}
+        inputSources[c]=_chosen;
+        if(_bestInRangePid==null) inputLongHaul.push(c);
       }
       if(!_ok) continue;
-      let _outputPid=null;
+      // ── Output sink (HARD demand-aware, in-range only) ──
+      // The sink must be an in-range planet (any kind — AI, player, neutral)
+      // whose demand rate for the output cargo is at least _DEMAND_MIN.
+      // No fallback. If no sink qualifies, skip the candidate entirely.
+      // (Glass / machinery / cargo currently have 0 galaxy-wide demanders,
+      // so this rejects those upgrades until the demand model grows them
+      // or until a planet with relevant infrastructure shows up.)
+      let _outputPid=null, _outputDem=0;
       if(_outputCargo){
-        // Iron pipeline: prefer a hub that hasn't been Large-upgraded yet, so
-        // iron deliveries there fuel the Large Station upgrade (mirrors the
-        // legacy _aiPickFoundryTarget behaviour).
+        // Iron pipeline: prefer a hub that hasn't been Large-upgraded yet,
+        // because iron deliveries there unlock the Large Station upgrade.
+        // The check is now a SOFT preference (best non-Large in range wins
+        // over best Large in range with the same demand), not a hard filter.
         const _ironStrict=(_outputCargo==='iron');
-        for(const rid of _aiCorp.ownedPlanetIds){
-          const r=galaxy.planets[rid];
-          if(!r||r.id===p.id||!r.aiHasStation) continue;
-          if(_ironStrict&&r.hasLargeStation) continue;
-          if(Math.hypot(r.x-p.x,r.y-p.y)>_fRange) continue;
-          if(((r.demand||{})[_outputCargo]||0)>0){_outputPid=r.id;break;}
+        for(const q of galaxy.planets){
+          if(!q||q.id===p.id) continue;
+          if(!_aiCorp.visitedPlanetIds.has(q.id)) continue;
+          if(Math.hypot(q.x-p.x,q.y-p.y)>_fRange) continue;
+          const _d=(q.demand||{})[_outputCargo]||0;
+          if(_d<_DEMAND_MIN) continue;
+          // Iron softening: a non-Large hub gets a +0.5 demand bonus in the
+          // ranking so the picker leans toward the Large-Station pipeline.
+          const _eff=_d + (_ironStrict && !q.hasLargeStation ? 0.5 : 0);
+          if(_eff>_outputDem){_outputDem=_eff; _outputPid=q.id;}
         }
-        if(_outputPid==null){
-          for(const rid of _aiCorp.ownedPlanetIds){
-            const r=galaxy.planets[rid];
-            if(!r||r.id===p.id||!r.aiHasStation) continue;
-            if(_ironStrict&&r.hasLargeStation) continue;
-            if(Math.hypot(r.x-p.x,r.y-p.y)>_fRange) continue;
-            _outputPid=r.id;break;
-          }
-        }
-        if(_outputPid==null) continue;
+        if(_outputPid==null) continue; // strict reject — no real sink → skip
       }
-      // Lightweight score: cheaper upgrades + bigger/dev'd host planet win ties.
-      let _score=100-upDef.cost/1000;
-      if((p.devLevel||0)>=3) _score+=20;
-      if(p.size==='L'||p.size==='XL'||p.size==='XXL') _score+=15;
+      // ── Score ──
+      // Base: cheaper upgrades + bigger/dev'd host planet.
+      // Output value: stronger sink demand → higher score.
+      // IRON BONUS: iron is the universal sink + drives the Large-Station
+      // upgrade loop. A flat +60 bias makes iron_foundry win every tie
+      // and most close races against other upgrades.
+      // Long-haul input penalty: each input that needed the wider search
+      // costs ~10 score (the leg is harder to staff).
+      let _score = 100 - upDef.cost/1000;
+      if((p.devLevel||0)>=3) _score += 20;
+      if(p.size==='L'||p.size==='XL'||p.size==='XXL') _score += 15;
+      if(_outputCargo){
+        _score += Math.min(20, _outputDem * 4); // scale demand into ~0–20 pts
+        if(_outputCargo==='iron') _score += 60;  // universal-sink bonus
+      }
+      _score -= inputLongHaul.length * 10;
       if(_score>bestScore){
         bestScore=_score;
         best={planet:p, upgradeId:upDef.id, inputSources, outputPid:_outputPid};
@@ -6872,20 +6927,24 @@ function makeGStars(){
 // three quadrants get the remaining schemes in a fixed clockwise rotation.
 const _NEBULA_TILE_SZ=512;
 const _NEBULA_SCHEMES=[
-  // home: rich indigo base / electric royal purple / saturated cyan-blue accent
-  {name:'home',  base:[14,18,82],   mid:[96,40,196],  accent:[140,210,255]},
-  // emerald base / luminous teal / vivid mint accent (high-chroma green stack)
-  {name:'green', base:[8,68,38],    mid:[28,150,170], accent:[160,255,200]},
-  // deep crimson base / vivid magenta-purple / electric hot pink accent
-  {name:'red',   base:[100,16,52],  mid:[170,42,162], accent:[255,120,210]},
-  // deep amber base / saturated tangerine / electric red-orange accent
-  {name:'amber', base:[120,72,16],  mid:[245,140,32], accent:[255,120,52]},
+  // home: electric indigo base / luminous violet / near-white cyan accent
+  {name:'home',  base:[40,52,170],  mid:[170,85,255], accent:[200,235,255]},
+  // vivid emerald base / luminous teal-mint / near-white mint accent
+  {name:'green', base:[20,140,80],  mid:[60,230,200], accent:[220,255,230]},
+  // luminous crimson-magenta / electric neon magenta / luminous hot pink
+  {name:'red',   base:[180,32,92],  mid:[255,80,220], accent:[255,180,240]},
+  // amber stack rebuilt to actually READ as yellow at the visible mid stop:
+  // rich gold base / pure sun yellow mid / warm gold-orange accent. The mid
+  // is what most of the tile renders at (noise < 0.5 ramps base→mid), so
+  // making it a true yellow rather than a tangerine is what brings the
+  // yellow quadrant through.
+  {name:'amber', base:[180,130,40], mid:[255,230,80], accent:[255,180,70]},
 ];
 // Galactic-centre scheme — fades in within ~30,000 SU of (0,0). User spec:
 // bright blue under-layer (background pixels), dark purple over-layer
-// (filament peaks where the noise ridges). Saturation richened to match the
-// quadrant schemes.
-const _NEBULA_CORE_SCHEME={name:'core', base:[100,180,255], mid:[88,70,210], accent:[44,12,100]};
+// (filament peaks where the noise ridges). Brightened to match the
+// quadrant schemes' new luminance.
+const _NEBULA_CORE_SCHEME={name:'core', base:[140,220,255], mid:[130,100,255], accent:[80,30,150]};
 const _NEBULA_CORE_RADIUS=30000;   // SU within which the core scheme is fully present
 const _NEBULA_CORE_BLEND_W=10000;  // SU over which it blends out into the quadrant schemes
 let _nebulaTiles=[];               // 4 quadrant canvases
