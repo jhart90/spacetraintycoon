@@ -3976,8 +3976,13 @@ function _startCargoOps(t, p){
       if(!cargo){ t.carFull[i]=false; continue; } // self-heal orphaned full state
       const _cU=CAR_CARGO_UNITS[t.cars[i]]||1.0;
       if((p.demand?.[cargo]||0)<0.5*_cU) continue;
-      // Passengers never unload at the planet they boarded from
-      if(cargo==='passengers'&&t.carCargoSource?.[i]===p.id) continue;
+      // Same-planet unload guard: cargo never unloads at the planet it was
+      // originally loaded from, even if there's local demand. Keeps the
+      // commodity in transit so it can earn revenue at a real destination.
+      // (Previously gated to 'passengers' only; now applies to every cargo
+      // type — iron carried back through its foundry, water through its
+      // ocean source, etc.)
+      if(t.carCargoSource?.[i]===p.id) continue;
       uq.push(i);
     }
   }
@@ -4018,7 +4023,9 @@ function _startUnloadPhase(t, p){
       if(!cargo){ t.carFull[i]=false; continue; }
       const _cU=CAR_CARGO_UNITS[t.cars[i]]||1.0;
       if((p.demand?.[cargo]||0)<0.5*_cU) continue;
-      if(cargo==='passengers'&&t.carCargoSource?.[i]===p.id) continue;
+      // Same-planet unload guard (see _startCargoOps for the full comment) —
+      // covers every cargo type, not just passengers.
+      if(t.carCargoSource?.[i]===p.id) continue;
       uq.push(i);
     }
   }
@@ -5323,15 +5330,163 @@ function _initAICorp(){
     const sps=galaxy.planets.filter(p=>p.starId===s.id);
     return sps.length>=4&&sps.some(p=>p.type.id==='resort'&&(p.population||0)>0);
   });
-  const _aiStarPool=_idealAiStars.length?_idealAiStars:candidateStars;
-  const aiHomeStar=_aiStarPool.length?_aiStarPool[Math.floor(Math.random()*_aiStarPool.length)]:galaxy.stars.find(s=>s.id!==homeStarId);
+  // Prefer a star that DOESN'T host any galaxy-special planet (colony train,
+  // famine, outbreak, black-hole research) so the mirror transform below
+  // doesn't accidentally rewrite those special targets.
+  const _specialPids=new Set([
+    galaxy.colonyTrainDestId, galaxy.faminePlanetId,
+    galaxy.outbreakPlanetId, galaxy.bhResearchPlanetId,
+    ...(galaxy.bhResearchPlanetIds||[]),
+  ].filter(v=>v!=null));
+  const _starHasSpecial=(s)=>galaxy.planets.some(p=>p.starId===s.id&&_specialPids.has(p.id));
+  const _aiStarPool0=_idealAiStars.length?_idealAiStars:candidateStars;
+  const _aiStarPool=_aiStarPool0.filter(s=>!_starHasSpecial(s));
+  const _aiStarPoolFinal=_aiStarPool.length?_aiStarPool:_aiStarPool0;
+  const aiHomeStar=_aiStarPoolFinal.length?_aiStarPoolFinal[Math.floor(Math.random()*_aiStarPoolFinal.length)]:galaxy.stars.find(s=>s.id!==homeStarId);
   if(!aiHomeStar){_aiCorp=null;return;}
-  const aiStarPlanets=galaxy.planets.filter(p=>p.starId===aiHomeStar.id);
-  const _sz={XS:0,S:1,M:2,L:3,XL:4,XXL:5};
-  // Use the resort planet as home (matching Orijen), falling back to the largest planet
-  const _aiResortHome=aiStarPlanets.find(p=>p.type.id==='resort'&&(p.population||0)>0);
-  aiStarPlanets.sort((a,b)=>(_sz[b.size]||0)-(_sz[a.size]||0));
-  const aiHomePlanet=_aiResortHome||aiStarPlanets[0];
+
+  // ── MIRROR-SYSTEM TRANSFORM ────────────────────────────────────
+  // Repaint the chosen star to mirror Gigi Prime — same M-class size, but
+  // RED instead of yellow. Then walk the host star's planets in orbit-radius
+  // order and rewrite their biomes to match Gigi Prime's HOME_BIOMES sequence
+  // (lava, resort, desert, agri, rocky, chemical). Planet IDs are preserved
+  // throughout so mission targets, news log references, and route stops on
+  // any pre-existing planet stay valid. If the host star starts with fewer
+  // than 6 planets, fresh ones are appended at outer orbits to fill the
+  // sequence; if it has more, the extras keep their original biomes (they
+  // sit outside the canonical 6-planet system).
+  aiHomeStar.size='M';
+  aiHomeStar.radius=STAR_R['M'];
+  aiHomeStar.colorName='red';
+  aiHomeStar.color=STAR_COLORS.red;
+  const _AI_HOME_BIOMES=['lava','resort','desert','agri','rocky','chemical'];
+  const _orderedAiPlanets=galaxy.planets
+    .filter(p=>p.starId===aiHomeStar.id)
+    .sort((a,b)=>a.orbitRadius-b.orbitRadius);
+  // Mutate first N existing planets to the mirror biomes.
+  const _mutateCount=Math.min(_orderedAiPlanets.length,_AI_HOME_BIOMES.length);
+  for(let i=0;i<_mutateCount;i++){
+    const _bio=_AI_HOME_BIOMES[i];
+    const _newType=PTYPES.find(t=>t.id===_bio)||PTYPES[0];
+    const _p=_orderedAiPlanets[i];
+    _p.type=_newType;
+    // Match Gigi Prime's anchor sizes: M lava (i=0), L resort (i=1).
+    if(i===0){_p.size='M'; _p.radius=SIZE_R['M'];}
+    else if(i===1){_p.size='L'; _p.radius=SIZE_R['L'];}
+    _attachBiome(_p);
+    _p.clouds=generatePlanetClouds(_p); _p.cloudAngle=Math.random()*Math.PI*2;
+    // Reset dev + cargo log so old biome history doesn't bleed into the new one.
+    _p.devLog=[]; _p.passengerDeliveries=[];
+    _p.devLevelBase=(i===1)?3:randInt(0,2);
+    _p.devLevel=_p.devLevelBase;
+    _p.population=generatePopulation(_p);
+    _p.populationBase=_p.population;
+    // Agri planets re-roll their pre-built upgrade; everything else gets the
+    // standard preBuiltBiomes set (e.g. pumping_station on ocean — though
+    // ocean isn't in this sequence).
+    if(_p.type.id==='agri'){
+      const _aR=Math.random(); _p.agriStructAngle=rand(0,Math.PI*2);
+      _p.grainUnlocked=_p.livestockUnlocked=_p.fruitUnlocked=false;
+      if(_aR<0.333){_p.grainUnlocked=true; _p.upgrades=['granary'];}
+      else if(_aR<0.667){_p.livestockUnlocked=true; _p.upgrades=['farm'];}
+      else{_p.fruitUnlocked=true; _p.upgrades=['orchard'];}
+    } else {
+      _p.upgrades=UPGRADES.filter(u=>u.preBuiltBiomes.includes(_p.type.id)).map(u=>u.id);
+    }
+    if(_p.upgradeData){
+      // Strip stale upgrade data tied to the old biome.
+      _p.upgradeData={};
+    }
+    _p.supplyRate=computeSupplyRate(_p); _p.demandRate=computeDemandRate(_p);
+    _p.economicHealth=computeEconomicHealth(_p); seedCargoPlanet(_p);
+    // Wipe any pre-existing station / upgrade flags — the AI start path below
+    // will re-apply aiHasStation to the three innermost slots.
+    _p.hasStation=false; _p.playerBuiltStation=false; _p.aiHasStation=false;
+    _p.hasLargeStation=false; _p.hasTerminal=false;
+    _p.playerBuiltUpgrades=[];
+  }
+  // If the host star started with fewer than 6 planets, append new ones to
+  // fill the canonical sequence at outer orbits.
+  if(_orderedAiPlanets.length<_AI_HOME_BIOMES.length){
+    let _maxPid=galaxy.planets.reduce((m,p)=>Math.max(m,p.id),0);
+    let _outerR=_orderedAiPlanets.length>0
+      ? (_orderedAiPlanets[_orderedAiPlanets.length-1].orbitRadius+800)
+      : (aiHomeStar.radius*1.8+400);
+    const _dDir=Math.random()<0.5?1:-1;
+    const _usedNames=new Set([
+      ...galaxy.stars.map(s=>s.name||''),
+      ...galaxy.planets.map(p=>p.name||''),
+    ]);
+    const _uniqAiName=(maker)=>{
+      for(let _tr=0;_tr<200;_tr++){
+        const _n=maker(); if(!_usedNames.has(_n)){_usedNames.add(_n); return _n;}
+      }
+      let _b=maker(),_sfx=2;
+      while(_usedNames.has(_b+' '+_sfx)) _sfx++;
+      const _f=_b+' '+_sfx; _usedNames.add(_f); return _f;
+    };
+    for(let i=_orderedAiPlanets.length;i<_AI_HOME_BIOMES.length;i++){
+      const _bio=_AI_HOME_BIOMES[i];
+      const _newType=PTYPES.find(t=>t.id===_bio)||PTYPES[0];
+      const _sz=(i===1)?'L':(i===0?'M':pickSize());
+      const _pr=SIZE_R[_sz];
+      _outerR+=_pr+rand(280,720);
+      const _ang=rand(0,Math.PI*2);
+      const _spd=0.00025*Math.sqrt(800/_outerR)*_dDir;
+      const _np={
+        id:++_maxPid, starId:aiHomeStar.id,
+        orbitRadius:_outerR, orbitAngle:_ang, orbitSpeed:_spd,
+        x:aiHomeStar.x+_outerR*Math.cos(_ang), y:aiHomeStar.y+_outerR*Math.sin(_ang),
+        size:_sz, radius:_pr, type:_newType,
+        name:_uniqAiName(()=>makeName(i+1)),
+        isStarter:false,
+      };
+      _attachBiome(_np);
+      _np.moons=generateMoons(_np);
+      _np.ring=(Math.random()<0.10)?{
+        rot:pick([0,Math.PI/8,Math.PI/4,Math.PI*3/8,Math.PI/2,Math.PI*5/8,Math.PI*3/4,Math.PI*7/8]),
+        outerFrac:rand(2.0,2.9), innerFrac:rand(1.35,1.75),
+        incl:rand(0.15,0.42),
+        rgb:_np.type.rim.map(v=>Math.min(255,Math.round(v*0.5+rand(30,70))))
+      }:null;
+      _np.catchphrase=generateCatchphrase(_np);
+      _np.population=generatePopulation(_np);
+      _np.populationBase=_np.population;
+      _np.clouds=generatePlanetClouds(_np); _np.cloudAngle=Math.random()*Math.PI*2;
+      const _goldBiomes=['rocky','desert','resort','jungle','ocean'];
+      _np.hasGold=(_goldBiomes.includes(_np.type.id)&&Math.random()<0.1);
+      _np.goldRevealed=false;
+      _np.goldPatch=_np.hasGold?{angle:rand(0,Math.PI*2),arcSize:Math.PI*0.25}:null;
+      _np.hasDiamond=(_goldBiomes.includes(_np.type.id)&&Math.random()<0.02);
+      _np.diamondRevealed=false;
+      _np.diamondPatch=_np.hasDiamond?{angle:rand(0,Math.PI*2),arcSize:Math.PI*0.22}:null;
+      _np.devLevelBase=(i===1)?3:randInt(0,2);
+      _np.devLevel=_np.devLevelBase;
+      _np.devLog=[]; _np.passengerDeliveries=[];
+      if(_np.type.id==='agri'){
+        const _aR=Math.random(); _np.agriStructAngle=rand(0,Math.PI*2);
+        if(_aR<0.333){_np.grainUnlocked=true; _np.upgrades=['granary'];}
+        else if(_aR<0.667){_np.livestockUnlocked=true; _np.upgrades=['farm'];}
+        else{_np.fruitUnlocked=true; _np.upgrades=['orchard'];}
+      } else {
+        _np.upgrades=UPGRADES.filter(u=>u.preBuiltBiomes.includes(_np.type.id)).map(u=>u.id);
+      }
+      _np.supplyRate=computeSupplyRate(_np); _np.demandRate=computeDemandRate(_np);
+      _np.economicHealth=computeEconomicHealth(_np); seedCargoPlanet(_np);
+      _np.hasStation=false;
+      galaxy.planets.push(_np);
+      aiHomeStar.planetIds.push(_np.id);
+      _orderedAiPlanets.push(_np);
+    }
+  }
+
+  // Pick the canonical mirror-system planet list (orbit-sorted) so the AI's
+  // home assignment + seed stations use the new ordering.
+  const aiStarPlanets=galaxy.planets
+    .filter(p=>p.starId===aiHomeStar.id)
+    .sort((a,b)=>a.orbitRadius-b.orbitRadius);
+  // AI home is the resort planet at index 1 (mirror of Orijen).
+  const aiHomePlanet=aiStarPlanets[1]||aiStarPlanets[0];
   if(!aiHomePlanet){_aiCorp=null;return;}
   // Mirror Orijen's starting development level so the AI home is equally productive
   if(aiHomePlanet.type.id==='resort'&&(aiHomePlanet.devLevel||0)<3) aiHomePlanet.devLevel=3;
@@ -5349,10 +5504,16 @@ function _initAICorp(){
     aiExtraTrainIndices.push(trains.length);trains.push(_et);
   }
   const ownedPlanetIds=new Set();
-  // VH-style seed stations: home + planet[1] + planet[2] for every difficulty
+  // VH-style seed stations: AI home (resort) plus the two largest other
+  // in-system planets. Sorting by size keeps the picks revenue-relevant
+  // regardless of how aiStarPlanets happens to be ordered.
   aiHomePlanet.aiHasStation=true;ownedPlanetIds.add(aiHomePlanet.id);
-  if(aiStarPlanets[1]){aiStarPlanets[1].aiHasStation=true;ownedPlanetIds.add(aiStarPlanets[1].id);}
-  if(aiStarPlanets[2]){aiStarPlanets[2].aiHasStation=true;ownedPlanetIds.add(aiStarPlanets[2].id);}
+  const _szRank={XS:0,S:1,M:2,L:3,XL:4,XXL:5};
+  const _seedExtras=aiStarPlanets
+    .filter(p=>p.id!==aiHomePlanet.id)
+    .sort((a,b)=>(_szRank[b.size]||0)-(_szRank[a.size]||0))
+    .slice(0,2);
+  for(const _e of _seedExtras){_e.aiHasStation=true;ownedPlanetIds.add(_e.id);}
   const aiVisited=new Set();
   for(const p of aiStarPlanets) aiVisited.add(p.id);
   // Rival CEO for the founding popup — any CEO not chosen by the player
@@ -5384,8 +5545,20 @@ function _initAICorp(){
     netWorth:AI_START_CREDITS[_vhDiff],lastStationBuildSd:-999,lastTrainBuildSd:-999,
     lastBatchSd:-999,batchCooldown:0,
     homePlanetId:aiHomePlanet.id, rivalCeo:_rivalCeo,
-    foundryObjectives:{}, // keyed by foundry planetId; tracks supply/dist leg completion
     carSwapLastSd:{},     // keyed by train index; stardate of last car-swap (1 SD per-train cooldown)
+    // Upgrade tracking — keyed by planetId, then by upgradeId.
+    // Each entry: {inputs:[{cargo,sourcePid,covered}], outputCargo, outputPid, outputCovered}.
+    // Used by _aiCoverUpgradeLogistics to route inputs in and the produced
+    // 2nd-tier good out. Handles all upgrades uniformly: iron_foundry,
+    // blast_furnace, glassworks, factory, bakery, juicery.
+    upgradeObjectives:{},
+    // Per-train per-SD evaluation cadence (Q4+Q5). Keyed by train index.
+    // _aiEvaluateTrain bumps the value on every evaluation, and the
+    // P_EVAL block always picks the train with the OLDEST timestamp first.
+    carEvalLastSd:{},
+    // Stardate the most recent upgrade (any kind) was built. The longer it's
+    // been, the higher build_upgrade ranks in the P_BATCH priority list.
+    lastUpgradeSd:-999,
   };
 }
 
@@ -5432,25 +5605,57 @@ function _aiExecuteAction(action){
     _aiDoBuyTrain(action.cars,action.planetId);
   } else if(action.type==='swap_cars'){
     _aiDoSwapCars(action.trainIdx,action.newCars,action.cost);
-  } else if(action.type==='build_foundry'){
+  } else if(action.type==='build_upgrade'){
+    // Generic upgrade builder — handles every UPGRADE the player could build,
+    // including iron_foundry. Skips upgrades with cost===0 (preBuiltBiomes
+    // freebies like pumping_station). Records objectives in
+    // _aiCorp.upgradeObjectives so the per-tick logistics coverage pass
+    // (P0c → _aiCoverUpgradeLogistics) routes inputs in and the produced
+    // 2nd-tier good back out.
     const p=galaxy.planets[action.planetId];
-    if(!p||!p.aiHasStation) return;
-    if((p.upgrades||[]).includes('iron_foundry')) return;
-    const _fCost=10000;
-    if(_aiCorp.credits<_fCost) return;
+    const upDef=UPGRADES.find(u=>u.id===action.upgradeId);
+    if(!p||!p.aiHasStation||!upDef||upDef.cost<=0) return;
+    if((p.upgrades||[]).includes(action.upgradeId)) return;
+    if(!(upDef.eligibleBiomes||[]).includes(p.type.id)) return;
+    if(_aiCorp.credits<upDef.cost) return;
     if(!p.upgrades) p.upgrades=[];
-    p.upgrades.push('iron_foundry');
+    p.upgrades.push(action.upgradeId);
     if(!p.upgradeData) p.upgradeData={};
-    p.upgradeData.iron_foundry={ore:0,water:0,progress:0};
-    p.foundryAngle=(p.stationAngle||0)+Math.PI+0.4;
-    _aiCorp.credits-=_fCost;_aiCorp.totalCosts+=_fCost;
-    // Record the supply/distribution sub-objectives so P0b can route trains to fulfil them
-    if(!_aiCorp.foundryObjectives) _aiCorp.foundryObjectives={};
-    _aiCorp.foundryObjectives[action.planetId]={
-      waterPid:action.waterPid||null,orePid:action.orePid||null,ironPid:action.ironPid||null,
-      waterCovered:false,oreCovered:false,ironCovered:false
-    };
-    _chatMsg(_aiCorp.name+' built a foundry on '+p.name,'rgba(232,147,32,0.9)',5000,true);
+    // Initialize per-upgrade data — mirrors what _processCargoQueue would
+    // lazy-init on first delivery (so the AI's upgrades behave identically).
+    const _uData={
+      iron_foundry: {ore:0,water:0,progress:0},
+      blast_furnace:{iron:0,chemical:0,progress:0},
+      glassworks:   {sand:0,chemical:0,progress:0},
+      factory:      {iron:0,oil:0,progress:0},
+      bakery:       {grain:0,progress:0},
+      juicery:      {fruit:0,progress:0},
+    }[action.upgradeId];
+    if(_uData) p.upgradeData[action.upgradeId]=_uData;
+    // Visual structure angle (placement around the station). Each upgrade
+    // type gets a deterministic offset from the station angle so they don't
+    // overlap.
+    const _baseA=p.stationAngle||0;
+    if(action.upgradeId==='iron_foundry') p.foundryAngle=_baseA+Math.PI+0.4;
+    else if(action.upgradeId==='blast_furnace') p.blastFurnaceAngle=_baseA+Math.PI*0.7;
+    else if(action.upgradeId==='glassworks') p.glassworksAngle=_baseA+Math.PI*0.5;
+    else if(action.upgradeId==='bakery') p.bakeryAngle=_baseA+Math.PI*0.35;
+    // Record objectives if the upgrade consumes inputs.
+    const _inputs=_AI_UPGRADE_INPUTS[action.upgradeId];
+    if(_inputs && _inputs.length>0){
+      if(!_aiCorp.upgradeObjectives) _aiCorp.upgradeObjectives={};
+      if(!_aiCorp.upgradeObjectives[action.planetId]) _aiCorp.upgradeObjectives[action.planetId]={};
+      const _srcs=action.inputSources||{};
+      _aiCorp.upgradeObjectives[action.planetId][action.upgradeId]={
+        inputs:_inputs.map(c=>({cargo:c,sourcePid:_srcs[c]||null,covered:false})),
+        outputCargo:_AI_UPGRADE_OUTPUTS[action.upgradeId]||null,
+        outputPid:action.outputPid||null,
+        outputCovered:false,
+      };
+    }
+    _aiCorp.credits-=upDef.cost; _aiCorp.totalCosts+=upDef.cost;
+    _aiCorp.lastUpgradeSd=stardate;
+    _chatMsg(_aiCorp.name+' built a '+upDef.label+' at '+p.name,'rgba(232,147,32,0.9)',5000,true);
   } else if(action.type==='build_large_station'){
     const p=galaxy.planets[action.planetId];
     if(!p||!p.aiHasStation||p.hasLargeStation) return;
@@ -5508,48 +5713,13 @@ function _aiDecide(){
     }
   }
 
-  // P0b: Pursue uncovered foundry logistics legs (hard/very_hard only).
-  // After a foundry is built with sub-objectives, proactively assign idle trains to cover:
-  //   • water supply → foundry  (orbit: waterPid ↔ foundryPid)
-  //   • ore supply   → foundry  (orbit: orePid   ↔ foundryPid)
-  //   • iron distribution       (orbit: foundryPid ↔ ironPid)
-  // Once a train is detected serving each leg the flag is set and we stop chasing it.
-  if((diff==='hard'||diff==='very_hard')&&_aiCorp.foundryObjectives){
-    let _fEngine='engine_constellation';
-    for(const ti of _aiCorp.trainIndices){const _et=trains[ti];if(_et?.cars[0]){_fEngine=_et.cars[0];break;}}
-    const _fRange=ENGINE_MAX_RANGE[_fEngine]??15000;
-    outer:for(const fpidStr of Object.keys(_aiCorp.foundryObjectives)){
-      const fpid=Number(fpidStr);
-      const fp=galaxy.planets[fpid];if(!fp) continue;
-      const obj=_aiCorp.foundryObjectives[fpidStr];
-      // legs: [coveredFlag, supplyPid, isDistributionLeg(fromFoundry)]
-      const _legs=[
-        {flag:'waterCovered',pid:obj.waterPid,fromFoundry:false},
-        {flag:'oreCovered',  pid:obj.orePid,  fromFoundry:false},
-        {flag:'ironCovered', pid:obj.ironPid,  fromFoundry:true},
-      ];
-      for(const leg of _legs){
-        if(obj[leg.flag]||!leg.pid) continue;
-        // Check if an existing AI train already serves both stops on this leg
-        const _alrCov=_aiCorp.trainIndices.some(ti=>{
-          const _lt=trains[ti];if(!_lt?.route?.stops) return false;
-          return _lt.route.stops.includes(leg.pid)&&_lt.route.stops.includes(fpid);
-        });
-        if(_alrCov){obj[leg.flag]=true;continue;}
-        // Try to divert an idle (orbiting) train to this leg
-        const [_endA,_endB]=leg.fromFoundry?[fpid,leg.pid]:[leg.pid,fpid];
-        for(const ti of _aiCorp.trainIndices){
-          const t=trains[ti];if(!t) continue;
-          if(t.route&&t.route.phase!=='orbit') continue; // never interrupt mid-transit
-          const tp=galaxy.planets[t.planetId];if(!tp) continue;
-          const pa=galaxy.planets[_endA],pb=galaxy.planets[_endB];if(!pa||!pb) continue;
-          if(Math.hypot(pa.x-pb.x,pa.y-pb.y)>_fRange) continue; // leg must be in range
-          if(Math.hypot(tp.x-pa.x,tp.y-pa.y)>_fRange) continue; // train must reach first stop
-          _aiCorp.actionQueue.push({type:'assign_route',trainIdx:ti,planetIds:[t.planetId,_endA,_endB,_endA]});
-          _aiCorp.idleTimers[ti]=0;break outer;
-        }
-      }
-    }
+  // P0b: Cover ALL upgrade logistics — iron_foundry, blast_furnace, glassworks,
+  // factory, bakery, juicery. Walks _aiCorp.upgradeObjectives and diverts at
+  // most one idle train per call to cover an uncovered input or output leg.
+  // (Foundry's water+ore-in + iron-out legs were previously special-cased; they
+  // are now just three legs in the generic objectives map.)
+  if(diff==='hard'||diff==='very_hard'||diff==='normal'){
+    if(_aiCoverUpgradeLogistics()) return;
   }
 
   // P1: re-assign idle trains; avoid re-assigning the exact same route (stuck-orbit fix)
@@ -5588,28 +5758,43 @@ function _aiDecide(){
     if(route){_aiCorp.actionQueue.push({type:'assign_route',trainIdx:ti,planetIds:route});return;}
   }
 
-  // P_SWAP: car-swap upgrades for existing trains.
-  // Not gated by the buy-train batch cooldown — operates on a per-train 1 SD cooldown.
-  // Compares each train's current composition against the difficulty's ideal comp and queues
-  // additions for missing non-engine slots. Engines are never swapped here (use buy_train for that).
+  // P_EVAL: ~1×/SD per-train economic evaluation (Q4 + Q5).
+  // Two layers:
+  //   1) Template fill: if the train is missing cars from the difficulty's
+  //      ideal composition, queue an "add missing car" action (the old
+  //      P_SWAP behaviour — preserved so under-built trains finish building).
+  //   2) Reactive evaluation: pick the train with the OLDEST carEvalLastSd
+  //      and run _aiEvaluateTrain(ti). That function returns either a
+  //      swap_cars action (worst-performing car → demanded-but-uncovered
+  //      cargo) or an assign_route action (current route's payback > 10 SD).
+  // Layer 2 fires when at least one train hasn't been evaluated in >0.4 SD.
+  // The cadence is intentionally aggressive — the user observed trains running
+  // useless cars for multiple SDs in a row, so each train gets reviewed
+  // multiple times per stardate instead of just once.
   if(diff!=='very_easy'){
-    const _swapCooldown=1.0; // stardates between swaps on the same train
+    const _swapCooldown=0.4;
     const _swapUnitCost={car_passenger:5000,car_mail:4000,car_water_tank:8000,car_ore:8000,car_iron:10000,car_oil:9000,caboose:3000};
     const _idealComp=_aiPickTrainComp(diff);
     const _idealCounts={};
     for(const c of _idealComp){if(!c.startsWith('engine_')) _idealCounts[c]=(_idealCounts[c]||0)+1;}
     const _swapBuf={easy:1.6,normal:1.5,hard:1.4,very_hard:1.15}[diff]||1.5;
+    // Layer 1 — template fill. Only runs while Layer 2 hasn't started managing
+    // the train. Once Layer 2 has evaluated a train once (recorded in
+    // _aiCorp.trainsManagedByEval), Layer 2 owns its composition — Layer 1
+    // would otherwise keep re-adding template cars that Layer 2 just dropped
+    // as dead weight.
+    if(!_aiCorp.trainsManagedByEval) _aiCorp.trainsManagedByEval=new Set();
     for(const ti of _aiCorp.trainIndices){
-      const _lastSwap=_aiCorp.carSwapLastSd?.[ti]??-999;
-      if(stardate-_lastSwap<_swapCooldown) continue;
+      if(_aiCorp.trainsManagedByEval.has(ti)) continue;
+      const _lastEval=_aiCorp.carEvalLastSd?.[ti]??-999;
+      if(stardate-_lastEval<_swapCooldown) continue;
       const t=trains[ti];
       if(!t) continue;
-      if(t.route&&t.route.phase==='transit') continue; // never modify mid-flight
+      if(t.route&&t.route.phase==='transit') continue;
       const _curCars=t.cars||[];
       if(_curCars.length>=10) continue;
       const _curCounts={};
       for(const c of _curCars) _curCounts[c]=(_curCounts[c]||0)+1;
-      // Pick the first missing car (caboose last so the order stays sensible)
       let _addCar=null;
       for(const type of Object.keys(_idealCounts)){
         if(type==='caboose') continue;
@@ -5619,13 +5804,36 @@ function _aiDecide(){
       if(!_addCar) continue;
       const _carCost=_swapUnitCost[_addCar]||4000;
       if(_aiCorp.credits<_carCost*_swapBuf) continue;
-      // Insert the new car before any existing caboose so train layout stays engine-cars-caboose
       const _newCars=_curCars.slice();
       const _cbIdx=_addCar==='caboose'?_newCars.length:_newCars.indexOf('caboose');
       if(_cbIdx>=0) _newCars.splice(_cbIdx,0,_addCar);
       else _newCars.push(_addCar);
+      _aiCorp.carEvalLastSd[ti]=stardate; // count fill as an eval (rotates the queue)
       _aiCorp.actionQueue.push({type:'swap_cars',trainIdx:ti,newCars:_newCars,cost:_carCost});
       return;
+    }
+    // Layer 2 — reactive evaluation. Always pick the OLDEST train so the
+    // rotation is fair. Skip only when every train has been evaluated within
+    // the last 0.4 SD (matches the layer-1 cooldown). With 4 trains in the
+    // fleet this means every train gets a fresh look every ~1.6 SD at the
+    // outside, and trains with dead cars get fixed within ~0.4 SD of a
+    // newly-arrived dead-car threshold trip.
+    let _staleTi=-1, _staleSd=Infinity;
+    for(const ti of _aiCorp.trainIndices){
+      const _last=_aiCorp.carEvalLastSd?.[ti]??-999;
+      if(_last<_staleSd){_staleSd=_last;_staleTi=ti;}
+    }
+    if(_staleTi>=0 && (stardate-_staleSd)>0.4){
+      // Mark this train as Layer-2-managed BEFORE the eval so Layer 1 stops
+      // re-adding cars that Layer 2 might drop (even if eval returns null
+      // this round, Layer 2 has begun supervising this train).
+      if(!_aiCorp.trainsManagedByEval) _aiCorp.trainsManagedByEval=new Set();
+      _aiCorp.trainsManagedByEval.add(_staleTi);
+      const _act=_aiEvaluateTrain(_staleTi);
+      if(_act){_aiCorp.actionQueue.push(_act);return;}
+      // _aiEvaluateTrain already bumped carEvalLastSd even when returning
+      // null, so the next tick will rotate to the next-oldest train rather
+      // than re-attempt this one.
     }
   }
 
@@ -5695,15 +5903,28 @@ function _aiDecide(){
       }
     }
 
-    // Priority 3: build iron foundry (normal+ only; requires all 3 logistics legs planned)
+    // Priority 3: build an upgrade (any kind — iron_foundry, blast_furnace,
+    // glassworks, factory, bakery, juicery, granary, farm, orchard, terminal).
+    // Priority RISES the longer it's been since the AI built any upgrade — the
+    // "urgency multiplier" tilts the picker against alternate spending the
+    // longer it idles. At ≥2 SD without an upgrade, _aiPickUpgradeTarget is
+    // considered. After 5 SD the AI will also accept paying the upgrade cost
+    // even when the budget buffer would normally hold capital for trains.
     if(diff==='normal'||diff==='hard'||diff==='very_hard'){
-      const _bFCost=10000;
-      if(_bBudget>=_bFCost){
-        const _bFTgt=_aiPickFoundryTarget();
-        if(_bFTgt){
-          _aiCorp.actionQueue.push({type:'build_foundry',planetId:_bFTgt.planet.id,
-            waterPid:_bFTgt.waterPid,orePid:_bFTgt.orePid,ironPid:_bFTgt.ironPid});
-          _bBudget-=_bFCost;
+      const _sinceUp=stardate-(_aiCorp.lastUpgradeSd||-999);
+      if(_sinceUp>=2.0){
+        const _bUTgt=_aiPickUpgradeTarget();
+        if(_bUTgt){
+          const _upDef=UPGRADES.find(u=>u.id===_bUTgt.upgradeId);
+          const _uCost=_upDef?.cost||10000;
+          // Looser buffer the longer it's been — past 5 SD, drop to 1.0×.
+          const _uBuf=_sinceUp>=5?1.0:1.2;
+          if(_bBudget>=_uCost*_uBuf){
+            _aiCorp.actionQueue.push({type:'build_upgrade',planetId:_bUTgt.planet.id,
+              upgradeId:_bUTgt.upgradeId, inputSources:_bUTgt.inputSources,
+              outputPid:_bUTgt.outputPid});
+            _bBudget-=_uCost;
+          }
         }
       }
     }
@@ -5824,8 +6045,12 @@ function _aiPickRoute(trainIdx){
 
 function _aiScorePair(pA,pB){
   // Score both legs: A→B (pA supplies, pB demands) + B→A (pB supplies, pA demands)
-  // A loop route carries cargo in both directions, so both legs contribute revenue
-  const rates={passengers:1000,royal:1500,water:2000,ice:2500,sand:1200,molten_ore:3800,iron:6200,gold:12000,diamond:18000,hazmat:2500,oil:5500,battery:4800,chemical:3800,flowers:2200,medical:3500,livestock:800,mail:1000};
+  // A loop route carries cargo in both directions, so both legs contribute revenue.
+  // Uses the shared _AI_CARGO_RATES table — which mirrors CARGO_BASE_RATE for
+  // 1st-tier cargos and bakes in the 1.5× 2nd-tier bias for iron, steel,
+  // glass, machinery, and cargo. Single source so _aiEvaluateTrain and
+  // _aiScorePair never drift.
+  const rates=_AI_CARGO_RATES;
   // Foundry planets: water and ore deliveries are worth iron-equivalent value (indirect production)
   const _pBFoundry=(pB.upgrades||[]).includes('iron_foundry');
   const _pAFoundry=(pA.upgrades||[]).includes('iron_foundry');
@@ -5896,45 +6121,330 @@ function _aiPickStationTarget(){
   return best;
 }
 
-function _aiPickFoundryTarget(){
-  // Returns {planet, waterPid, orePid, ironPid} only when ALL 3 logistics legs can be
-  // planned — (1) a visited water source within range, (2) a visited ore source within range,
-  // (3) a reachable AI-owned station to distribute iron to.  All three must exist before the
-  // foundry is authorised, preventing stranded foundries that never get fed.
+// ── Generic upgrade tables ───────────────────────────────────
+// Cargo inputs each upgrade consumes (mirrors player-facing upgrade pipelines).
+// Upgrades NOT in this map (granary/farm/orchard/terminal/repair_drones) are
+// either pure production boosters or universal — they have no input legs to
+// cover. iron_foundry is now handled here too — its water + ore inputs and
+// iron output flow through the generic _aiCoverUpgradeLogistics pass like
+// every other upgrade.
+const _AI_UPGRADE_INPUTS={
+  iron_foundry:  ['water','molten_ore'],
+  blast_furnace: ['iron','chemical'],
+  glassworks:    ['sand','chemical'],
+  factory:       ['iron','oil'],
+  bakery:        ['grain'],
+  juicery:       ['fruit'],
+};
+// 2nd-tier cargo each upgrade produces. Used to plan an output-distribution
+// leg from the upgrade planet to a hub that demands the produced good.
+const _AI_UPGRADE_OUTPUTS={
+  iron_foundry:  'iron',
+  blast_furnace: 'steel',
+  glassworks:    'glass',
+  factory:       'machinery',
+  bakery:        'cargo',
+  juicery:       'cargo',
+};
+// Cargo type → ideal car sprite. Used by _aiEvaluateTrain to swap a worst-
+// performing car for a car that serves an uncovered, in-demand cargo type.
+const _AI_CARGO_TO_CAR={
+  passengers:'car_passenger', mail:'car_mail', water:'car_water_tank',
+  molten_ore:'car_ore', iron:'car_iron', oil:'car_oil', gold:'car_gold',
+  diamond:'car_diamond', flowers:'car_flowers', livestock:'car_livestock',
+  medical:'car_medical', grain:'car_grain', fruit:'car_fruit',
+  hazmat:'car_hazmat', battery:'car_battery', chemical:'car_chemical',
+  sand:'car_sand', ice:'car_ice', steel:'car_steel', glass:'car_glass',
+  machinery:'car_machinery', cargo:'car_cargo',
+};
+// Inverse: car sprite → cargo type carried.
+const _AI_CAR_TO_CARGO={};
+for(const k in _AI_CARGO_TO_CAR) _AI_CAR_TO_CARGO[_AI_CARGO_TO_CAR[k]]=k;
+// Shared rates table (mirrors CARGO_BASE_RATE) — used by _aiEvaluateTrain and
+// _aiScorePair so both decisions price 2nd-tier goods correctly.
+// 2nd-tier goods (iron, steel, glass, machinery, cargo — all produced by
+// upgrade pipelines) get a 1.5× scoring bias so the AI prioritizes building
+// upgrade supply chains and distributing the produced goods. The underlying
+// CARGO_BASE_RATE (and therefore actual sale price) is unchanged — this is
+// AI-decision weighting only.
+const _AI_2ND_TIER_BIAS=1.5;
+const _AI_2ND_TIER_CARGOS=new Set(['iron','steel','glass','machinery','cargo']);
+const _AI_CARGO_RATES={passengers:1000,royal:1500,water:2000,ice:2500,sand:1200,
+  molten_ore:3800,iron:6200*_AI_2ND_TIER_BIAS,gold:12000,diamond:18000,
+  hazmat:2500,oil:5500,battery:4800,chemical:3800,flowers:2200,medical:3500,
+  livestock:800,mail:1000,grain:900,fruit:1100,
+  steel:8000*_AI_2ND_TIER_BIAS,glass:5500*_AI_2ND_TIER_BIAS,
+  machinery:9500*_AI_2ND_TIER_BIAS,cargo:1800*_AI_2ND_TIER_BIAS};
+// Per-car purchase value lookup. Shared between net-worth and the train-
+// economics estimate in _aiEvaluateTrain.
+const _AI_CAR_VALS={engine_constellation:10000,engine_galaxy:20000,engine_classJ:50000,
+  engine_classR:70000,engine_N700:100000,car_passenger:5000,car_royal:10000,
+  car_water_tank:8000,car_cargo:4000,car_livestock:6000,car_grain:5000,car_fruit:6000,
+  car_mail:4000,car_ice:9000,car_sand:5000,car_ore:8000,car_iron:10000,car_hazmat:7000,
+  car_oil:9000,car_battery:11000,car_chemical:9000,car_gold:30000,car_diamond:45000,
+  car_flowers:7000,car_medical:8000,car_steel:12000,car_glass:9000,car_machinery:12000,
+  caboose:3000};
+
+// Picks an upgrade to build next. Returns
+//   {planet, upgradeId, inputSources:{cargo:srcPid}, outputPid}
+// or null if no candidate satisfies all preconditions.
+// Preconditions per upgrade:
+//   • upgradeId has cost>0 (skip preBuiltBiomes freebies like pumping_station)
+//   • upgradeId !== 'repair_drones' (passive — not an economic priority)
+//   • planet is AI-owned with a station, biome matches eligibleBiomes,
+//     upgrade not already built
+//   • for input-needing upgrades: every input cargo has a visited supply
+//     source within engine range
+//   • for output-producing upgrades: an AI-owned station within range can
+//     serve as the distribution target. For iron specifically, we prefer
+//     a sink that hasn't been upgraded to Large yet — iron deliveries
+//     there will help unlock the Large Station upgrade.
+function _aiPickUpgradeTarget(){
   if(!_aiCorp||!galaxy) return null;
-  // Use the current fleet's engine to determine feasible route distances
   let _fEngine='engine_constellation';
   for(const ti of _aiCorp.trainIndices){const _et=trains[ti];if(_et?.cars[0]){_fEngine=_et.cars[0];break;}}
   const _fRange=ENGINE_MAX_RANGE[_fEngine]??15000;
-  for(const pid of _aiCorp.ownedPlanetIds){
-    const p=galaxy.planets[pid];
-    if(!p||!p.aiHasStation) continue;
-    if(p.type.id!=='desert') continue;
-    if((p.upgrades||[]).includes('iron_foundry')) continue;
-    // Sub-objective 1: a visited planet within range that produces water
-    let waterPid=null;
-    for(const q of galaxy.planets){
-      if(!q||!_aiCorp.visitedPlanetIds.has(q.id)||q.id===p.id) continue;
-      if((q.supply?.water||0)>0&&Math.hypot(q.x-p.x,q.y-p.y)<_fRange){waterPid=q.id;break;}
+  let best=null, bestScore=-Infinity;
+  for(const upDef of UPGRADES){
+    if(!upDef||upDef.cost<=0) continue;
+    if(upDef.id==='repair_drones') continue;
+    if(_aiCorp.credits<upDef.cost) continue;
+    const _inputs=_AI_UPGRADE_INPUTS[upDef.id]||[];
+    const _outputCargo=_AI_UPGRADE_OUTPUTS[upDef.id]||null;
+    for(const pid of _aiCorp.ownedPlanetIds){
+      const p=galaxy.planets[pid];
+      if(!p||!p.aiHasStation) continue;
+      if(!(upDef.eligibleBiomes||[]).includes(p.type.id)) continue;
+      if((p.upgrades||[]).includes(upDef.id)) continue;
+      const inputSources={};
+      let _ok=true;
+      for(const c of _inputs){
+        let _bestSrcPid=null, _bestDist=Infinity;
+        for(const q of galaxy.planets){
+          if(!q||q.id===p.id||!_aiCorp.visitedPlanetIds.has(q.id)) continue;
+          if(((q.supply||{})[c]||0)<=0) continue;
+          const d=Math.hypot(q.x-p.x,q.y-p.y);
+          if(d>_fRange) continue;
+          if(d<_bestDist){_bestDist=d;_bestSrcPid=q.id;}
+        }
+        if(_bestSrcPid==null){_ok=false;break;}
+        inputSources[c]=_bestSrcPid;
+      }
+      if(!_ok) continue;
+      let _outputPid=null;
+      if(_outputCargo){
+        // Iron pipeline: prefer a hub that hasn't been Large-upgraded yet, so
+        // iron deliveries there fuel the Large Station upgrade (mirrors the
+        // legacy _aiPickFoundryTarget behaviour).
+        const _ironStrict=(_outputCargo==='iron');
+        for(const rid of _aiCorp.ownedPlanetIds){
+          const r=galaxy.planets[rid];
+          if(!r||r.id===p.id||!r.aiHasStation) continue;
+          if(_ironStrict&&r.hasLargeStation) continue;
+          if(Math.hypot(r.x-p.x,r.y-p.y)>_fRange) continue;
+          if(((r.demand||{})[_outputCargo]||0)>0){_outputPid=r.id;break;}
+        }
+        if(_outputPid==null){
+          for(const rid of _aiCorp.ownedPlanetIds){
+            const r=galaxy.planets[rid];
+            if(!r||r.id===p.id||!r.aiHasStation) continue;
+            if(_ironStrict&&r.hasLargeStation) continue;
+            if(Math.hypot(r.x-p.x,r.y-p.y)>_fRange) continue;
+            _outputPid=r.id;break;
+          }
+        }
+        if(_outputPid==null) continue;
+      }
+      // Lightweight score: cheaper upgrades + bigger/dev'd host planet win ties.
+      let _score=100-upDef.cost/1000;
+      if((p.devLevel||0)>=3) _score+=20;
+      if(p.size==='L'||p.size==='XL'||p.size==='XXL') _score+=15;
+      if(_score>bestScore){
+        bestScore=_score;
+        best={planet:p, upgradeId:upDef.id, inputSources, outputPid:_outputPid};
+      }
     }
-    if(!waterPid) continue;
-    // Sub-objective 2: a visited planet within range that produces molten ore
-    let orePid=null;
-    for(const q of galaxy.planets){
-      if(!q||!_aiCorp.visitedPlanetIds.has(q.id)||q.id===p.id) continue;
-      if((q.supply?.molten_ore||0)>0&&Math.hypot(q.x-p.x,q.y-p.y)<_fRange){orePid=q.id;break;}
+  }
+  return best;
+}
+
+// Generic version of P0b's foundry-leg coverage. Walks _aiCorp.upgradeObjectives
+// (non-foundry upgrades) and diverts at most one idle train per call to cover
+// an uncovered input or output leg. Mirrors the foundry handler's structure
+// and same constraints (idle/orbit only, in-range, two-stop loop). Returns
+// true if an action was queued.
+function _aiCoverUpgradeLogistics(){
+  if(!_aiCorp||!_aiCorp.upgradeObjectives) return false;
+  let _fEngine='engine_constellation';
+  for(const ti of _aiCorp.trainIndices){const _et=trains[ti];if(_et?.cars[0]){_fEngine=_et.cars[0];break;}}
+  const _fRange=ENGINE_MAX_RANGE[_fEngine]??15000;
+  for(const pidStr of Object.keys(_aiCorp.upgradeObjectives)){
+    const pid=Number(pidStr);
+    if(!galaxy.planets[pid]) continue;
+    const _planetUps=_aiCorp.upgradeObjectives[pidStr];
+    for(const upgId of Object.keys(_planetUps)){
+      const obj=_planetUps[upgId];
+      if(!obj) continue;
+      // Inputs first — without inputs the upgrade idles.
+      for(const inp of obj.inputs||[]){
+        if(inp.covered||inp.sourcePid==null) continue;
+        const _alrCov=_aiCorp.trainIndices.some(ti=>{
+          const _lt=trains[ti];if(!_lt?.route?.stops) return false;
+          return _lt.route.stops.includes(inp.sourcePid)&&_lt.route.stops.includes(pid);
+        });
+        if(_alrCov){inp.covered=true;continue;}
+        const [_endA,_endB]=[inp.sourcePid,pid];
+        for(const ti of _aiCorp.trainIndices){
+          const t=trains[ti];if(!t) continue;
+          if(t.route&&t.route.phase!=='orbit') continue;
+          const tp=galaxy.planets[t.planetId];if(!tp) continue;
+          const pa=galaxy.planets[_endA],pb=galaxy.planets[_endB];
+          if(!pa||!pb) continue;
+          if(Math.hypot(pa.x-pb.x,pa.y-pb.y)>_fRange) continue;
+          if(Math.hypot(tp.x-pa.x,tp.y-pa.y)>_fRange) continue;
+          _aiCorp.actionQueue.push({type:'assign_route',trainIdx:ti,planetIds:[t.planetId,_endA,_endB,_endA]});
+          _aiCorp.idleTimers[ti]=0;return true;
+        }
+      }
+      // Output distribution.
+      if(obj.outputCargo && obj.outputPid!=null && !obj.outputCovered){
+        const _alrCov=_aiCorp.trainIndices.some(ti=>{
+          const _lt=trains[ti];if(!_lt?.route?.stops) return false;
+          return _lt.route.stops.includes(pid)&&_lt.route.stops.includes(obj.outputPid);
+        });
+        if(_alrCov){obj.outputCovered=true;continue;}
+        for(const ti of _aiCorp.trainIndices){
+          const t=trains[ti];if(!t) continue;
+          if(t.route&&t.route.phase!=='orbit') continue;
+          const tp=galaxy.planets[t.planetId];if(!tp) continue;
+          const pa=galaxy.planets[pid],pb=galaxy.planets[obj.outputPid];
+          if(!pa||!pb) continue;
+          if(Math.hypot(pa.x-pb.x,pa.y-pb.y)>_fRange) continue;
+          if(Math.hypot(tp.x-pa.x,tp.y-pa.y)>_fRange) continue;
+          _aiCorp.actionQueue.push({type:'assign_route',trainIdx:ti,planetIds:[t.planetId,pid,obj.outputPid,pid]});
+          _aiCorp.idleTimers[ti]=0;return true;
+        }
+      }
     }
-    if(!orePid) continue;
-    // Sub-objective 3: an AI-owned station planet within range that can receive iron
-    // (no large station yet — meaning iron deliveries there will have impact)
-    let ironPid=null;
-    for(const rid of _aiCorp.ownedPlanetIds){
-      const r=galaxy.planets[rid];
-      if(!r||r.id===p.id||!r.aiHasStation||r.hasLargeStation) continue;
-      if(Math.hypot(r.x-p.x,r.y-p.y)<_fRange){ironPid=r.id;break;}
+  }
+  return false;
+}
+
+// Per-train evaluation (Q4 + Q5 combined).
+//   Q4: identify the worst-performing cargo car on this train and swap it
+//       for a car that serves an uncovered, route-demanded cargo type.
+//   Q5: estimate train ROI / payback period (purchase cost vs net rev per SD
+//       net of an estimated maintenance burn). If payback > 10 SD, try to
+//       find a strictly better route via _aiPickRoute.
+// Bumps _aiCorp.carEvalLastSd[ti] so the rotation moves on. Returns one
+// action ({type:'assign_route', ...} or {type:'swap_cars', ...}) or null.
+function _aiEvaluateTrain(ti){
+  if(!_aiCorp||!galaxy) return null;
+  const t=trains[ti];
+  if(!t) return null;
+  if(t.route && t.route.phase==='transit') return null; // never modify mid-flight
+  if(!_aiCorp.carEvalLastSd) _aiCorp.carEvalLastSd={};
+  _aiCorp.carEvalLastSd[ti]=stardate;
+  const cars=t.cars||[];
+  if(cars.length===0) return null;
+  // Train economics
+  const _purchases=(t.carPurchaseSd||[]).filter(v=>typeof v==='number');
+  const _purchaseSd=_purchases.length?Math.min.apply(null,_purchases):(_gameStartSd||stardate);
+  const age=Math.max(0.5, stardate-_purchaseSd);
+  const trainCost=cars.reduce((s,c)=>s+(_AI_CAR_VALS[c]||4000),0);
+  const trainRev=t.totalRevenue||0;
+  // Maintenance burn estimate — AI doesn't pay it, but the player would, so
+  // we charge it to the ROI math anyway. ~$200/SD per car is a rough mid
+  // estimate that matches the player's empirical ledger curve.
+  const estMaintPerSd=cars.length*200;
+  const netRevPerSd=Math.max(0.1, trainRev/age - estMaintPerSd);
+  const paybackSd=trainCost/netRevPerSd;
+  // Q5 — bad ROI: look for a meaningfully better route.
+  // 10 SD is the user's target. Only switch if we find a route that
+  // _aiPickRoute considers a different+better option (the picker already
+  // applies anti-cluster + already-used-corridor discounts).
+  if(paybackSd>10 && t.route?.stops?.length>=2){
+    const _newRoute=_aiPickRoute(ti);
+    if(_newRoute){
+      const _cs=t.route.stops;
+      const _ro=_newRoute.length>1&&_newRoute[_newRoute.length-1]===_newRoute[0]?_newRoute.slice(0,-1):_newRoute;
+      const _same=_cs&&_ro.length===_cs.length&&_ro.every((id,i)=>id===_cs[i]);
+      if(!_same) return {type:'assign_route',trainIdx:ti,planetIds:_newRoute};
     }
-    if(!ironPid) continue;
-    return {planet:p,waterPid,orePid,ironPid};
+  }
+  // Q4 — find the worst-performing cargo car. Skip engine + caboose. For
+  // each candidate we compute revenue-per-FULL-segment (segments where the
+  // car actually carried cargo). Track BOTH a relative-worst (raw RPS) and
+  // a "dead car" candidate (≥3 full-segment opportunities and ≤$10 revenue
+  // → the car is contributing essentially nothing on this route).
+  let _worstIdx=-1, _worstRPS=Infinity;
+  let _deadIdx=-1, _deadRev=Infinity;
+  for(let i=1;i<cars.length;i++){
+    const c=cars[i];
+    if(!c||c==='caboose'||c.startsWith('engine_')) continue;
+    const _rev=(t.carRevenue?.[i])||0;
+    const _fullSegs=(t.carFullSegments?.[i])||0;
+    const _totalSegs=(t.carSegments?.[i])||0;
+    const _rps=_fullSegs>0?(_rev/_fullSegs):0;
+    if(_rps<_worstRPS){_worstRPS=_rps;_worstIdx=i;}
+    // "Dead car" candidate: at least 3 segments have happened and the car has
+    // returned essentially nothing. Track the WORST dead car (lowest rev).
+    if(_totalSegs>=3 && _rev<=10 && _rev<_deadRev){
+      _deadRev=_rev; _deadIdx=i;
+    }
+  }
+  if(_worstIdx<0) return null;
+  const _routeStops=t.route?.stops||[];
+  if(_routeStops.length<2) return null;
+  // Survey route supply + demand to identify uncovered cargo opportunities.
+  const _demanded={}, _supplied={};
+  for(const pid of _routeStops){
+    const p=galaxy.planets[pid];if(!p) continue;
+    for(const [c,v] of Object.entries(p.demand||{})) if(v>0.5) _demanded[c]=(_demanded[c]||0)+v;
+    for(const [c,v] of Object.entries(p.supply||{})) if(v>0.5) _supplied[c]=(_supplied[c]||0)+v;
+  }
+  const _carried=new Set();
+  for(const c of cars){const _crg=_AI_CAR_TO_CARGO[c];if(_crg) _carried.add(_crg);}
+  let _bestCargo=null, _bestScore=0;
+  for(const c of Object.keys(_demanded)){
+    if(_carried.has(c)||!_supplied[c]) continue;
+    const _s=Math.min(_supplied[c],10)*Math.min(_demanded[c],10)*(_AI_CARGO_RATES[c]||1000);
+    if(_s>_bestScore){_bestScore=_s;_bestCargo=c;}
+  }
+  // ── Decision priority ──
+  // (a) If we have a meaningful UNCOVERED cargo opportunity AND a worst car
+  //     that's underperforming, SWAP the worst car for the new cargo type.
+  //     Underperforming threshold is now generous (worst < 80% of mean) and
+  //     the minimum-data guard is dropped — the user wants faster reactions.
+  // (b) Otherwise, if there's a DEAD car (≥3 segs, ≤$10 lifetime revenue),
+  //     DROP it entirely. The train shrinks but stops carrying dead weight.
+  if(_bestCargo){
+    const _newCar=_AI_CARGO_TO_CAR[_bestCargo];
+    if(_newCar && _newCar!==cars[_worstIdx]){
+      const _sumRev=cars.reduce((s,_c,_i)=>s+((t.carRevenue?.[_i])||0),0);
+      const _sumFullSeg=cars.reduce((s,_c,_i)=>s+Math.max(0,(t.carFullSegments?.[_i])||0),0);
+      const _meanRPS=_sumFullSeg>0?(_sumRev/_sumFullSeg):0;
+      // Permissive: worst < 80% of mean OR worst is essentially zero (any
+      // train with even one dead car gets attention).
+      if(_worstRPS<_meanRPS*0.80 || _worstRPS<50){
+        const _newCars=cars.slice();
+        _newCars[_worstIdx]=_newCar;
+        const _cost=_AI_CAR_VALS[_newCar]||4000;
+        if(_aiCorp.credits>=_cost){
+          return {type:'swap_cars',trainIdx:ti,newCars:_newCars,cost:_cost};
+        }
+      }
+    }
+  }
+  // (b) Drop a dead car. Need at least 3 remaining cargo cars after the drop
+  //     so the train isn't reduced to "engine + caboose" — engine + caboose
+  //     + 2+ cargo cars is the minimum viable size.
+  if(_deadIdx>=0){
+    const _cargoCarCount=cars.filter(c=>c&&c!=='caboose'&&!c.startsWith('engine_')).length;
+    if(_cargoCarCount>=3){
+      const _droppedCars=cars.slice(0,_deadIdx).concat(cars.slice(_deadIdx+1));
+      return {type:'swap_cars',trainIdx:ti,newCars:_droppedCars,cost:0};
+    }
   }
   return null;
 }
@@ -7511,11 +8021,21 @@ function drawPlanetStation(sx,sy,sr,angle,ssz,isAlienRelic=false,isLarge=false,l
         {da: 0.25,bh:_hL,bw:0.065},
       ];
     } else if(isLarge){
+      // Large Station: 5 towers. Center (da=0) reaches just below MED orbit;
+      // the two ADJACENT towers (da=±0.11/0.12) reach just below LOW orbit;
+      // outer pair (da=±0.24/0.25) stays short. When the absolute orbit radii
+      // are passed in (world view), heights derive from them so the tops sit
+      // a constant gap inside the actual orbit rings; otherwise fall back to
+      // the legacy ssz-relative multipliers for the popup mini-viz / star
+      // detail (which don't render orbit rings around the planet anyway).
+      const _gap=ssz*0.18; // "just a tad below" — a touch deeper than the dock-ring gap so tops clearly sit inside the orbit line
+      const _lgM=(largeMedR!=null&&largeMedR>sr+2) ? (largeMedR-sr-_gap)/ssz : 1.30;
+      const _lgL=(largeLowR!=null&&largeLowR>sr+2) ? (largeLowR-sr-_gap)/ssz : 0.37;
       buildings=[
         {da:-0.24,bh:0.22,bw:0.065},
-        {da:-0.11,bh:0.37,bw:0.058},
-        {da: 0.00,bh:1.30,bw:0.032},
-        {da: 0.12,bh:0.32,bw:0.058},
+        {da:-0.11,bh:_lgL,bw:0.058},
+        {da: 0.00,bh:_lgM,bw:0.032},
+        {da: 0.12,bh:_lgL,bw:0.058},
         {da: 0.25,bh:0.19,bw:0.065},
       ];
     } else {
@@ -10901,11 +11421,16 @@ function drawCeoHirePopup(){
 const _VERSUS_METRICS=[
   {key:'value',    label:'Corp. Value',    fmt:_v=>_fmtCr(Math.round(_v))},
   {key:'credits',  label:'Credits',        fmt:_v=>_fmtCr(Math.round(_v))},
-  {key:'revenue',  label:'Total Revenue',  fmt:_v=>_fmtCr(Math.round(_v))},
-  {key:'costs',    label:'Total Costs',    fmt:_v=>_fmtCr(Math.round(_v))},
+  // Revenue + costs are rendered as PER-STARDATE rates (delta between this
+  // SD's cumulative snapshot and the prior SD's). _readP/_readA below do
+  // the delta math; stored values stay cumulative for backward compat.
+  {key:'revenue',  label:'Revenue / SD',   fmt:_v=>_fmtCr(Math.round(_v))},
+  {key:'costs',    label:'Costs / SD',     fmt:_v=>_fmtCr(Math.round(_v))},
   {key:'stations', label:'# of Stations',  fmt:_v=>String(Math.round(_v))},
   {key:'trains',   label:'# of Trains',    fmt:_v=>String(Math.round(_v))},
 ];
+// Which metrics are rendered as per-SD rates (delta) rather than cumulative.
+const _VERSUS_RATE_METRICS=new Set(['revenue','costs']);
 function _versusLiveValue(which){
   // which: 'player' | 'ai'. Returns the live (current SD, mid-flight) value
   // for the currently-selected metric. Falls back to 0 when AI is requested
@@ -10962,8 +11487,23 @@ function _drawFinancesVersusTab(px,py,pw,ph,_tabBaseY){
   // Pull the per-SD value (history, falling back to 0) — except the current
   // SD which reads live so the chart's right-most point ticks up in real
   // time as the player is watching.
-  const _readP=_s=>(_s===_curSd?_versusLiveValue('player'):((corpStatsHistory[_s]&&corpStatsHistory[_s][_versusMetric])||0));
-  const _readA=_s=>(_s===_curSd?_versusLiveValue('ai')    :((aiCorpStatsHistory[_s]&&aiCorpStatsHistory[_s][_versusMetric])||0));
+  // For RATE metrics (revenue / costs) we convert the cumulative snapshots
+  // into per-stardate deltas: value(SD) = cumulative[SD] - cumulative[SD-1].
+  // The live current-SD point uses (liveCumulative - cumulative[SD-1]) so
+  // the right-most bar shows revenue earned (or spent) so far this SD.
+  const _isRate=_VERSUS_RATE_METRICS.has(_versusMetric);
+  const _cumP=_s=>(corpStatsHistory[_s]   && corpStatsHistory[_s][_versusMetric])  ||0;
+  const _cumA=_s=>(aiCorpStatsHistory[_s] && aiCorpStatsHistory[_s][_versusMetric])||0;
+  const _readP=_s=>{
+    if(!_isRate) return _s===_curSd?_versusLiveValue('player'):_cumP(_s);
+    const cur = _s===_curSd?_versusLiveValue('player'):_cumP(_s);
+    return Math.max(0, cur - _cumP(_s-1));
+  };
+  const _readA=_s=>{
+    if(!_isRate) return _s===_curSd?_versusLiveValue('ai'):_cumA(_s);
+    const cur = _s===_curSd?_versusLiveValue('ai'):_cumA(_s);
+    return Math.max(0, cur - _cumA(_s-1));
+  };
   const _pVals=_sds.map(_readP);
   const _aVals=_sds.map(_readA);
 
@@ -14633,7 +15173,7 @@ function drawStarDetailPopup(){
     if(pcx2+sw/2>px+pw-14+4) break;
     const _sdpHov=(popupState.starDetailPlanetHover===i);
     popupState.starDetailPlanetBounds.push({x:xCursor,y:py+218,w:sw,h:ph-224,planet:p});
-    const _sp2Vis=visitedPlanetIds.has(p.id);
+    const _sp2Vis=visitedPlanetIds.has(p.id)||!!p.aiHasStation||!!p.playerPreview;
     if(_sp2Vis){
       drawPlanet(pcx2,stripMidY,pr,p.type,p.ring,isXXL?XXL_GM:2.0,undefined,undefined,false,p.flowerPositions||null);
       if(p.type.id==='urban'&&pr>=3) drawCityscape(pcx2,stripMidY,pr);
@@ -14780,8 +15320,13 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
   for(let i=0;i<shown.length;i++){
     const u=shown[i];
     const itemH=_heights[i];
-    const isBuilt=u.isStation?p.hasStation:builtSet.has(u.id);
-    // Non-station upgrades are locked (greyed, unclickable) until a station is built
+    // The station card considers an AI-built station as "built" so the
+    // PURCHASE button never renders on rival-owned planets. The card body
+    // then takes a dedicated AI-owned branch (see ~line 15211) that shows
+    // the owner notice instead of any upgrade flow.
+    const isBuilt=u.isStation?(p.hasStation||p.aiHasStation):builtSet.has(u.id);
+    // Non-station upgrades stay LOCKED on AI-owned planets (player has no
+    // station of their own there). _noStn drives the greyed-out style.
     const _noStn=!u.isStation&&!p.hasStation;
     const itemY=_cumItemY; _cumItemY+=itemH;
     if(_noStn){
@@ -14837,7 +15382,19 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
       drawPlanetStation(_mvx,_mvy,_mvr,Math.PI*1.2,20,p.isAlienRelic||false,p.hasLargeStation||false,null,p.hasTerminal||false);
       ctx.restore();
       if(isBuilt){
-        if(p.hasTerminal){
+        // AI-owned branch — the rival corp built the station here. Player
+        // can't BUILD on top of it and can't UPGRADE it either (the player-
+        // station-only flags p.hasStation are still false, so the iron /
+        // steel counters belong to the rival's pipeline). Show a clear
+        // ownership notice with the rival's name and DO NOT register any
+        // Large-Station / Terminal upgrade button bounds.
+        if(p.aiHasStation && !p.hasStation){
+          ctx.font='9px "Exo 2",sans-serif';
+          ctx.fillStyle='rgba(225,150,90,0.85)';
+          ctx.fillText('Owned by '+((_aiCorp&&_aiCorp.name)||'rival corporation')+'.',upX+12,itemY+30);
+          ctx.fillStyle='rgba(170,135,100,0.62)';
+          ctx.fillText('Cannot build or modify a rival’s station.',upX+12,itemY+44);
+        } else if(p.hasTerminal){
           // Fully upgraded — Terminal supports all three orbits, no further
           // upgrade path.
           ctx.font='9px "Exo 2",sans-serif';
@@ -15668,7 +16225,16 @@ function drawPlanetDetailPopup(){
   const p=popupState.planet;
   if(!p) return;
   const star=galaxy.stars[p.starId];
-  const _pVis=visitedPlanetIds.has(p.id); // false = discovered but not yet orbited
+  // Visibility gate for the popup's full-detail content. True when:
+  //   • the player has actually orbited the planet, OR
+  //   • the AI has built any station there (regular / Large / Terminal —
+  //     all share the aiHasStation flag), OR
+  //   • the planet is pre-marked as playerPreview (e.g. the tutorial lava
+  //     planet at game start).
+  // View-through does NOT add the planet to visitedPlanetIds, so the
+  // registry, first-visit credit bonus, and biome car unlocks are all
+  // preserved until the player sends a train of their own.
+  const _pVis=visitedPlanetIds.has(p.id)||!!p.aiHasStation||!!p.playerPreview;
   const pw=470, ph=416;
   if(_pVis){ const _mpx=(W-pw)/2,_mpy=(H-ph)/2; _drawUpgradesPanel(_mpx,_mpy,ph,p); }
   const [px,py]=drawPopupBase(pw,ph,'rgba(80,160,255,0.7)');
@@ -15926,7 +16492,9 @@ function drawPlanetDetailPopup(){
   }
   const tabY=py+218, tabH=22, tabW=pw/2;
   const activeTab=popupState.planetTab||'station';
-  const _noStation=!p.hasStation;
+  // Treat an AI-owned station as "station exists" so the dim BUILD overlay
+  // and the cargo-greyed-out treatment don't appear on rival planets.
+  const _noStation=!p.hasStation&&!p.aiHasStation;
   popupState.tabBounds=[
     {x:px,       y:tabY, w:tabW, h:tabH, tab:'station'},
     {x:px+tabW,  y:tabY, w:tabW, h:tabH, tab:'stats'},
@@ -18001,7 +18569,9 @@ function drawGalaxy(ts,dt){
       (p.hasLargeStation||p.hasTerminal)?ORBIT_TIERS[p.size]['MED']*cam.scale:null,
       p.hasTerminal||false,
       p.hasTerminal?ORBIT_TIERS[p.size]['HIGH']*cam.scale:null,
-      p.hasTerminal?ORBIT_TIERS[p.size]['LOW']*cam.scale:null
+      // Large stations also receive largeLowR so the two adjacent towers can
+      // reach just-below LOW orbit (matches Terminal's tier-aware sizing).
+      (p.hasLargeStation||p.hasTerminal)?ORBIT_TIERS[p.size]['LOW']*cam.scale:null
     );
     if(p.aiHasStation){ctx.save();ctx.filter='sepia(1) hue-rotate(-10deg) saturate(2.5) brightness(1.1)';drawPlanetStation(sx,sy,sr,(p.aiStationAngle!==undefined?p.aiStationAngle:Math.PI*0.65),SIZE_R['M']*cam.scale,false,false,null);ctx.filter='none';ctx.restore();}
     if(sr>2){
@@ -18544,7 +19114,9 @@ function drawGalaxy(ts,dt){
       if(cx+sw/2>W-PANEL_W+4) break; // stop if this slot would overflow
       starPanelPlanetBounds.push({x:xCursor,y:GH,w:sw,h:BAR_H,planet:p});
       const _panelPHov=(_starPanelPlanetHover===i);
-      const _pVis2=visitedPlanetIds.has(p.id);
+      // AI-stationed + playerPreview planets show their name + thumbnail
+      // too (view-through), even though visitedPlanetIds isn't updated.
+      const _pVis2=visitedPlanetIds.has(p.id)||!!p.aiHasStation||!!p.playerPreview;
       if(_pVis2){
         drawPlanet(cx,barCY,pr,p.type,p.ring,isXXL?XXL_GM:2.0,undefined,undefined,false,p.flowerPositions||null);
         if(p.type.id==='urban'&&pr>=3) drawCityscape(cx,barCY,pr);
@@ -18586,7 +19158,10 @@ function drawGalaxy(ts,dt){
   } else if(sel.type==='planet'){
     const p=sel.data;
     const star=galaxy.stars[p.starId];
-    const _ibPVis=visitedPlanetIds.has(p.id);
+    // See drawPlanetDetailPopup — AI-stationed and playerPreview planets
+    // are viewable too (view-through), but the player isn't marked as
+    // having visited.
+    const _ibPVis=visitedPlanetIds.has(p.id)||!!p.aiHasStation||!!p.playerPreview;
     // ── Planet visualization: center at x=0, bleeds off left edge ──
     const pDR=80, pGM=3.0; // display radius + glow multiplier
     // Lift the planet visualization (and only the visualization — every text
@@ -20941,7 +21516,13 @@ canvas.addEventListener('mouseup',e=>{
           if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
             const p=popupState.planet;
             const _scCost=_stationBuildCost();
-            if(p&&!p.hasStation&&credits>=_scCost){
+            // Defense: also block when the AI already owns this planet.
+            // The build buttons aren't supposed to render in that case (the
+            // station card takes the AI-owned branch and the station-tab
+            // overlay is suppressed by the wider _noStation gate), but the
+            // explicit check here prevents any future regression from
+            // letting a click slip through.
+            if(p&&!p.hasStation&&!p.aiHasStation&&credits>=_scCost){
               credits-=_scCost; creditDelta-=_scCost;
               spawnCreditFloatScreen(b.x+b.w/2,b.y,-_scCost);
               purchaseLedger.push({sd:stardate,amount:_scCost,type:'station'});
@@ -22084,7 +22665,7 @@ function _buildSaveObject(){
     _tutorialPhase, _tutorialLavaPlanetId,
     routeStops:routeStops.map(p=>({id:p.id,isStarProxy:!!p.isStarProxy})),
     _aiDifficulty,
-    _aiCorp:_aiCorp?{..._aiCorp,ownedPlanetIds:[..._aiCorp.ownedPlanetIds],visitedPlanetIds:[..._aiCorp.visitedPlanetIds],discoveredStarIds:[..._aiCorp.discoveredStarIds]}:null,
+    _aiCorp:_aiCorp?{..._aiCorp,ownedPlanetIds:[..._aiCorp.ownedPlanetIds],visitedPlanetIds:[..._aiCorp.visitedPlanetIds],discoveredStarIds:[..._aiCorp.discoveredStarIds],trainsManagedByEval:_aiCorp.trainsManagedByEval?[..._aiCorp.trainsManagedByEval]:[]}:null,
     _newspaperLastSd,_paperIdx,_paperIssueNum,_paperMajorUsed,_paperMinorUsed,_paperLayout,_newsEventLog,_newsSnapshot,
     _newspaperArchive:_trimmedNewspaper,
   };
@@ -22370,7 +22951,7 @@ function _restoreFromSave(save){
   gs='galaxy';
   _aiDifficulty=save._aiDifficulty||'none';
   if(save._aiCorp){
-    _aiCorp={...save._aiCorp,ownedPlanetIds:new Set(save._aiCorp.ownedPlanetIds||[]),visitedPlanetIds:new Set(save._aiCorp.visitedPlanetIds||[]),discoveredStarIds:new Set(save._aiCorp.discoveredStarIds||[]),_announced:save._aiCorp._announced??true};
+    _aiCorp={...save._aiCorp,ownedPlanetIds:new Set(save._aiCorp.ownedPlanetIds||[]),visitedPlanetIds:new Set(save._aiCorp.visitedPlanetIds||[]),discoveredStarIds:new Set(save._aiCorp.discoveredStarIds||[]),trainsManagedByEval:new Set(save._aiCorp.trainsManagedByEval||[]),_announced:save._aiCorp._announced??true};
     // Migration: old saves stored directorName instead of rivalCeo — patch it now
     if(!_aiCorp.rivalCeo||!_aiCorp.rivalCeo.ceoName){
       const _mr=CEO_ROSTER.filter(r=>r.sprite!==(_corp?.ceoSprite||''));
@@ -22378,6 +22959,29 @@ function _restoreFromSave(save){
       _aiCorp.rivalCeo={ceoName:_me.name,ceoSprite:_me.sprite,salary:60000,primaryPerk:null,secondaryPerk:null};
     }
     delete _aiCorp.directorName; // remove stale field from old saves
+    // Migration: foundryObjectives → upgradeObjectives. The foundry pipeline
+    // used to live in its own per-planet bag with named legs (waterPid,
+    // orePid, ironPid + matching covered flags). The generic upgrade pipeline
+    // now stores all upgrades — foundry included — as
+    //   upgradeObjectives[planetId][upgradeId] = {inputs:[{cargo,sourcePid,covered}], outputCargo, outputPid, outputCovered}
+    // Convert the old shape so mid-game saves keep their coverage state.
+    if(_aiCorp.foundryObjectives){
+      if(!_aiCorp.upgradeObjectives) _aiCorp.upgradeObjectives={};
+      for(const _fpidStr of Object.keys(_aiCorp.foundryObjectives)){
+        const _fo=_aiCorp.foundryObjectives[_fpidStr]||{};
+        if(!_aiCorp.upgradeObjectives[_fpidStr]) _aiCorp.upgradeObjectives[_fpidStr]={};
+        _aiCorp.upgradeObjectives[_fpidStr].iron_foundry={
+          inputs:[
+            {cargo:'water',     sourcePid:_fo.waterPid||null, covered:!!_fo.waterCovered},
+            {cargo:'molten_ore',sourcePid:_fo.orePid  ||null, covered:!!_fo.oreCovered  },
+          ],
+          outputCargo:'iron',
+          outputPid:_fo.ironPid||null,
+          outputCovered:!!_fo.ironCovered,
+        };
+      }
+      delete _aiCorp.foundryObjectives;
+    }
   }else{_aiCorp=null;}
 }
 
@@ -22679,15 +23283,17 @@ function startGame(){
    for(const _hpid of _hst.planetIds){
      discoveredPlanetIds.add(_hpid);
      revealedOrbitedPlanetIds.add(_hpid);
-     // Pre-mark the lava planet in Orijen's system as visited so the tutorial
-     // can point the player at it from the very first frame (its supply/
-     // demand readouts render properly, "??? UNKNOWN ???" doesn't show, etc.).
-     // Side effects of trackVisit (molten-ore car unlock popup, etc.) are
-     // deliberately skipped — those belong to the regular gameplay loop, not
-     // the tutorial.
+     // Pre-mark the lava planet in Orijen's system as PREVIEWABLE so the
+     // tutorial can point the player at it from the very first frame (its
+     // supply/demand readouts render properly, "??? UNKNOWN ???" doesn't
+     // show, etc.). The planet is NOT added to visitedPlanetIds — it acts
+     // exactly like an AI-stationed view-through: the planet detail popup
+     // renders full content, but trackVisit still fires the first-visit
+     // chat message + biome car unlock when the player's train actually
+     // enters orbit for the first time.
      const _hp=galaxy.planets[_hpid];
      if(_hp&&_hp.type.id==='lava'&&_tutorialLavaPlanetId===-1){
-       visitedPlanetIds.add(_hpid);
+       _hp.playerPreview=true;
        _tutorialLavaPlanetId=_hpid;
      }
    }
@@ -22947,22 +23553,23 @@ function _drawNewsRealPlanet(x,y,w,h,planet){
   const cx=x+w/2, cy=y+h/2;
   const r=Math.min(w,h)*0.34;
   ctx.save();
-  // Pure black star-field backdrop so the orbit ring + planet read against
-  // a "vacuum photo" rather than newsprint sepia.
-  ctx.fillStyle='#0a0d1a'; ctx.fillRect(x,y,w,h);
-  // Faint scattered stars
-  ctx.fillStyle='rgba(220,220,200,0.55)';
+  // Sepia-brown "night sky" backdrop tuned to read as part of the same
+  // newsprint plate as the surrounding paper (matches the body text + frame
+  // tones). No blue.
+  ctx.fillStyle='#28200f'; ctx.fillRect(x,y,w,h);
+  // Faint scattered stars — cream / off-white so they read as printed ink.
+  ctx.fillStyle='rgba(232,222,196,0.55)';
   for(let i=0;i<28;i++){
     const _sx=x+((i*73)%w), _sy=y+((i*131)%h);
     const _sr=((i*17)%3===0)?1.4:0.7;
     ctx.beginPath(); ctx.arc(_sx,_sy,_sr,0,Math.PI*2); ctx.fill();
   }
-  // Orbit ring around the planet (galaxy-view feel)
-  ctx.strokeStyle='rgba(200,200,180,0.30)'; ctx.lineWidth=0.8;
+  // Orbit ring (galaxy-view feel) — same cream tone as the stars.
+  ctx.strokeStyle='rgba(210,196,170,0.30)'; ctx.lineWidth=0.8;
   ctx.beginPath(); ctx.ellipse(cx,cy,r*1.55,r*0.55,0,0,Math.PI*2); ctx.stroke();
-  // Slight newsprint cast over the whole tile
-  ctx.filter='grayscale(0.45) contrast(1.05) brightness(0.92) sepia(0.10)';
-  // Synthesize a star direction off the upper-left so light is convincing
+  // Full B&W / sepia cast on the planet sprite so the biome colours collapse
+  // to printed-ink tones matching the rest of the paper.
+  ctx.filter='grayscale(1) contrast(1.10) brightness(0.94) sepia(0.40)';
   const _sx=cx-r*4, _sy=cy-r*4;
   try{ drawPlanet(cx,cy,r,planet.type,planet.ring,1.0,_sx,_sy,false,null); }
   catch(_e){ /* defensive: any drawPlanet edge case → fall back below */ ctx.restore(); return false; }
@@ -22986,32 +23593,30 @@ function _drawNewsRealStar(x,y,w,h,star){
   const cx=x+w/2, cy=y+h/2;
   const r=Math.min(w,h)*0.18;
   ctx.save();
-  ctx.fillStyle='#08081a'; ctx.fillRect(x,y,w,h);
-  // Faint nebula wash (radial)
+  ctx.fillStyle='#28200f'; ctx.fillRect(x,y,w,h);
+  // Faint nebula wash (radial) — warm sepia, no purple.
   const _neb=ctx.createRadialGradient(cx,cy,r*0.5,cx,cy,Math.max(w,h)*0.7);
-  _neb.addColorStop(0,'rgba(80,40,90,0.35)'); _neb.addColorStop(1,'rgba(0,0,0,0)');
+  _neb.addColorStop(0,'rgba(90,72,40,0.35)'); _neb.addColorStop(1,'rgba(0,0,0,0)');
   ctx.fillStyle=_neb; ctx.fillRect(x,y,w,h);
-  // Scattered stars
-  ctx.fillStyle='rgba(220,220,200,0.55)';
+  ctx.fillStyle='rgba(232,222,196,0.55)';
   for(let i=0;i<40;i++){
     const _sx=x+((i*53)%w), _sy=y+((i*97)%h);
     const _sr=((i*7)%4===0)?1.3:0.6;
     ctx.beginPath(); ctx.arc(_sx,_sy,_sr,0,Math.PI*2); ctx.fill();
   }
-  // Orbit rings + pips for up to 5 of the star's planets
+  // Orbit rings + pips for up to 5 of the star's planets — all cream-tone.
   const _pIds=(star.planetIds||[]).slice(0,5);
-  ctx.strokeStyle='rgba(200,200,180,0.28)'; ctx.lineWidth=0.7;
+  ctx.strokeStyle='rgba(210,196,170,0.28)'; ctx.lineWidth=0.7;
   for(let i=0;i<_pIds.length;i++){
     const _or=r*(2.0+i*0.9);
     ctx.beginPath(); ctx.ellipse(cx,cy,_or,_or*0.42,0,0,Math.PI*2); ctx.stroke();
     const _ang=(i*1.13);
     const _px=cx+_or*Math.cos(_ang), _py=cy+_or*0.42*Math.sin(_ang);
-    const _p=galaxy?galaxy.planets[_pIds[i]]:null;
-    ctx.fillStyle=_p?.type?.hi||'#bdb098';
+    ctx.fillStyle='#d6c4a0'; // cream pip, no biome tint
     ctx.beginPath(); ctx.arc(_px,_py,Math.max(1.6,r*0.16),0,Math.PI*2); ctx.fill();
   }
-  // The star itself
-  ctx.filter='grayscale(0.30) contrast(1.10) brightness(0.94) sepia(0.08)';
+  // The star itself — full B&W/sepia so all colour classes read uniform.
+  ctx.filter='grayscale(1) contrast(1.10) brightness(0.94) sepia(0.40)';
   try{
     const _col=STAR_COLORS[star.colorName]||STAR_COLORS.yellow;
     drawStar(cx,cy,r,_col);
@@ -23040,8 +23645,9 @@ function _drawNewsRealEngine(x,y,w,h,spriteKey){
   // Rail line
   ctx.strokeStyle='rgba(40,32,18,0.55)'; ctx.lineWidth=1.5;
   ctx.beginPath(); ctx.moveTo(x+8,y+h*0.78); ctx.lineTo(x+w-8,y+h*0.78); ctx.stroke();
-  // Engine sprite — fit-to-width, anchored bottom
-  ctx.filter='grayscale(0.85) contrast(1.05) brightness(0.92) sepia(0.10)';
+  // Engine sprite — fit-to-width, anchored bottom. Full B&W/sepia so the
+  // engine tint reads as printed ink, not coloured photo.
+  ctx.filter='grayscale(1) contrast(1.10) brightness(0.94) sepia(0.35)';
   const _ar=img.naturalHeight/img.naturalWidth;
   let _dw=w*0.85, _dh=_dw*_ar;
   if(_dh>h*0.7){ _dh=h*0.7; _dw=_dh/_ar; }
@@ -23070,7 +23676,7 @@ function _drawNewsRealCar(x,y,w,h,spriteKey){
   ctx.fillStyle=_g; ctx.fillRect(x,y,w,h);
   ctx.strokeStyle='rgba(40,32,18,0.55)'; ctx.lineWidth=1.5;
   ctx.beginPath(); ctx.moveTo(x+8,y+h*0.78); ctx.lineTo(x+w-8,y+h*0.78); ctx.stroke();
-  ctx.filter='grayscale(0.70) contrast(1.05) brightness(0.92) sepia(0.10)';
+  ctx.filter='grayscale(1) contrast(1.10) brightness(0.94) sepia(0.35)';
   const _ar=img.naturalHeight/img.naturalWidth;
   let _dw=w*0.82, _dh=_dw*_ar;
   if(_dh>h*0.7){ _dh=h*0.7; _dw=_dh/_ar; }
@@ -23092,13 +23698,13 @@ function _drawNewsRealCar(x,y,w,h,spriteKey){
 function _drawNewsRealBlackHole(x,y,w,h){
   const cx=x+w/2, cy=y+h/2, r=Math.min(w,h)*0.32;
   ctx.save();
-  ctx.fillStyle='#06060a'; ctx.fillRect(x,y,w,h);
-  ctx.fillStyle='rgba(220,220,200,0.55)';
+  ctx.fillStyle='#1a160a'; ctx.fillRect(x,y,w,h);
+  ctx.fillStyle='rgba(232,222,196,0.55)';
   for(let i=0;i<30;i++){
     const _sx=x+((i*61)%w), _sy=y+((i*113)%h);
     ctx.beginPath(); ctx.arc(_sx,_sy,((i*5)%3===0)?1.4:0.7,0,Math.PI*2); ctx.fill();
   }
-  ctx.filter='grayscale(0.40) contrast(1.05) brightness(0.95) sepia(0.05)';
+  ctx.filter='grayscale(1) contrast(1.10) brightness(0.94) sepia(0.40)';
   try{ drawBlackHole(cx,cy,r,performance.now()*0.001); }
   catch(_e){ /* fallback to original accretion-disk render */
     for(let i=5;i>=1;i--){
@@ -23128,8 +23734,11 @@ function _drawNewsCorpLogo(x,y,w,h,name,isRival){
   // Card background — cream stock with a darker inset panel
   ctx.fillStyle='#e6dcc0'; ctx.fillRect(x,y,w,h);
   ctx.strokeStyle='#48402e'; ctx.lineWidth=1; ctx.strokeRect(x,y,w,h);
-  const _accent=isRival?'#7a1a1a':'#1a3a5a';
-  const _accent2=isRival?'#c25555':'#5a8acc';
+  // Accents stay newsprint-monochrome (no red/blue). Rival = darker tone,
+  // player = mid-brown, so they're still distinguishable but read as the
+  // same B&W ink the rest of the paper is printed in.
+  const _accent =isRival?'#1a1208':'#3a2f1c';
+  const _accent2=isRival?'#5a4830':'#7a6242';
   // Inset rule frame
   ctx.strokeStyle='#48402e'; ctx.lineWidth=0.5;
   ctx.strokeRect(x+6,y+6,w-12,h-12);
@@ -23165,7 +23774,7 @@ function _drawNewsCorpLogo(x,y,w,h,name,isRival){
   while(ctx.measureText(_disp).width>w-20 && _disp.length>4) _disp=_disp.slice(0,-1);
   if(_disp!==name) _disp=_disp.slice(0,-1)+'…';
   ctx.fillText(_disp,x+w/2,y+h-26);
-  ctx.fillStyle=_accent;
+  ctx.fillStyle='#3a2f1c'; // sepia tagline, no colour split
   ctx.font='italic bold 9px "Exo 2",sans-serif';
   ctx.fillText(isRival?'— RIVAL CORPORATION —':'— GALACTIC TRANSPORT CORP —',x+w/2,y+h-11);
   ctx.restore();
