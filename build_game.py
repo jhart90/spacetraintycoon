@@ -239,8 +239,9 @@ const AI_CORP_COLOR='#e89320';
 const AI_CORP_RGB=[232,147,32];
 const AI_TICK_INTERVALS={very_easy:22,easy:13,normal:7,hard:3.5,very_hard:1.8};
 const AI_START_CREDITS={very_easy:250000,easy:300000,normal:400000,hard:500000,very_hard:750000};
-const AI_MAX_TRAINS={very_easy:5,easy:8,normal:12,hard:25,very_hard:Infinity};
-const AI_MAX_STATIONS={very_easy:5,easy:8,normal:12,hard:25,very_hard:Infinity};
+// User spec: no theoretical maximum. AI grows uncapped at every difficulty.
+const AI_MAX_TRAINS={very_easy:Infinity,easy:Infinity,normal:Infinity,hard:Infinity,very_hard:Infinity};
+const AI_MAX_STATIONS={very_easy:Infinity,easy:Infinity,normal:Infinity,hard:Infinity,very_hard:Infinity};
 const AI_CORP_NAMES={very_easy:'Cosmic Crawlers Inc.',easy:'Frontier Lines',normal:'Stellar Transport Corp.',hard:'Galaxy Express Corp.',very_hard:'Omnivore Logistics'};
 
 // Planet world-unit radii (diameter in px at 1:1 scale)
@@ -1755,6 +1756,13 @@ let _aiSelBounds=[];      // [{x,y,w,h,diff}] AI select option buttons
 let _aiSelConfirmBounds=null;
 let _aiSelBackBounds=null;
 let _totalPassengersDelivered=0; // cumulative passenger delivery count
+// One-shot flag: set to true the first time ANY 'cargo' type unit is produced
+// by a Bakery, Juicery, or other source (player OR AI). Once set, computeDemandRate
+// adds galaxy-wide cargo demand (scaled by dev level) AND strips livestock /
+// grain / fruit demand from non-agricultural planets, except where an upgrade
+// uses that good as its input (e.g. grain→Bakery, fruit→Juicery — those
+// planets keep a ≥1 demand floor for the input cargo).
+let _anyCargoProduced=false;
 let missions=[]; // active/completed mission objects
 // Cached id-sets of every ACTIVE mission's target planet / target star. Refilled
 // by _recomputeMissionTargets() whenever the missions list mutates (accept,
@@ -3957,6 +3965,31 @@ function computeDemandRate(p){
     const _bkGrain=p.upgradeData?.bakery?.grain||0;
     if(_bkGrain<10) r.grain=Math.max(r.grain||0, 1.0);
   }
+  // ── CARGO-PRODUCED GLOBAL DEMAND SHIFT (user spec) ─────────────
+  // Once any player or AI has produced a unit of "cargo" type cargo from a
+  // Bakery / Juicery, every populated planet develops demand for cargo that
+  // scales with development level. Simultaneously, non-agricultural planets
+  // LOSE their grain / livestock / fruit demand (those goods now flow as
+  // refined cargo) — UNLESS the planet hosts an upgrade that uses one of
+  // those goods as input (grain→Bakery, fruit→Juicery), in which case that
+  // input good retains a ≥1 demand floor.
+  if(_anyCargoProduced){
+    if(pop>0){
+      // Cargo demand for any populated planet, scaling 0.5 → 4.0 with dev level.
+      const _cargoBase=Math.min(4.0, 0.5 + dl*0.4);
+      r.cargo=Math.max(r.cargo||0, _cargoBase);
+    }
+    if(bio!=='agri'){
+      const _ups=p.upgrades||[];
+      // Strip non-agri grain/livestock/fruit demand, then re-apply floors for
+      // upgrade inputs.
+      delete r.grain; delete r.livestock; delete r.fruit;
+      if(_ups.includes('bakery')) r.grain=Math.max(r.grain||0, 1.0);
+      if(_ups.includes('juicery')) r.fruit=Math.max(r.fruit||0, 1.0);
+      // No upgrade currently uses livestock as an input — livestock demand
+      // simply disappears on non-agri biomes once cargo is online.
+    }
+  }
   return r;
 }
 // Planet economic health: multiplier for revenue (0.3–1.5)
@@ -5756,6 +5789,90 @@ function _aiMaintainScriptedSetup(){
       }
     }
   }
+  // ── #3 SECOND FOUNDRY ──────────────────────────────────────────
+  // After the first foundry has produced iron for 2+ SD, queue a build_upgrade
+  // for iron_foundry on the next AI-owned desert planet. Each additional
+  // foundry doubles iron output.
+  if(ss.foundryBuilt && !ss.secondFoundryBuilt){
+    if(ss.firstIronSeenSd==null && desert && (desert.supply?.iron||0)>0){
+      ss.firstIronSeenSd=stardate;
+    }
+    if(ss.firstIronSeenSd!=null && (stardate-ss.firstIronSeenSd)>=2.0 && !ss.secondFoundryQueued){
+      // Pick a non-foundry desert AI-owned planet. Fallback: any visited
+      // desert (we'd build the station first as part of the normal cycle).
+      let _2dDesert=null;
+      for(const _pid of _aiCorp.ownedPlanetIds){
+        const _p=galaxy.planets[_pid];
+        if(!_p||_p.type.id!=='desert') continue;
+        if((_p.upgrades||[]).includes('iron_foundry')) continue;
+        _2dDesert=_p; break;
+      }
+      if(_2dDesert){
+        // Reuse the same input-source logic as the first foundry.
+        const _waterSrc=galaxy.planets.find(p=>p&&(p.supply?.water||0)>0&&_aiCorp.visitedPlanetIds.has(p.id));
+        const _oreSrc=galaxy.planets.find(p=>p&&(p.supply?.molten_ore||0)>0&&_aiCorp.visitedPlanetIds.has(p.id));
+        const _inputSources={};
+        if(_waterSrc) _inputSources.water=_waterSrc.id;
+        if(_oreSrc) _inputSources.molten_ore=_oreSrc.id;
+        _aiCorp.actionQueue.push({
+          type:'build_upgrade', planetId:_2dDesert.id,
+          upgradeId:'iron_foundry', inputSources:_inputSources, outputPid:null,
+        });
+        ss.secondFoundryQueued=true;
+      }
+    }
+    // Mark completion the moment a 2nd foundry exists anywhere on AI planets.
+    const _foundryCount=[..._aiCorp.ownedPlanetIds].filter(id=>{
+      const p=galaxy.planets[id]; return p && (p.upgrades||[]).includes('iron_foundry');
+    }).length;
+    if(_foundryCount>=2) ss.secondFoundryBuilt=true;
+  }
+  // ── #4 BLAST FURNACE ───────────────────────────────────────────
+  // After iron pipeline is "stable" (total iron delivered across AI planets
+  // ≥ 4), build a blast_furnace on a rocky AI-owned planet for steel
+  // production. Steel is a 1.5× revenue-multiplied 2nd-tier cargo.
+  if(!ss.blastFurnaceQueued){
+    let _totalIronDel=0;
+    for(const _pid of _aiCorp.ownedPlanetIds){
+      const _p=galaxy.planets[_pid];
+      if(_p) _totalIronDel+=(_p.ironDelivered||0);
+    }
+    if(_totalIronDel>=4){
+      // Find a rocky AI-owned station planet without a blast_furnace already.
+      let _rockyTarget=null;
+      for(const _pid of _aiCorp.ownedPlanetIds){
+        const _p=galaxy.planets[_pid];
+        if(!_p||_p.type.id!=='rocky'||!_p.aiHasStation) continue;
+        if((_p.upgrades||[]).includes('blast_furnace')) continue;
+        _rockyTarget=_p; break;
+      }
+      if(_rockyTarget){
+        // Inputs: iron (from foundry) + chemical (find a chemical-supplier).
+        const _ironSrc=desert; // foundry-bearing desert
+        const _chemSrc=galaxy.planets.find(p=>p&&(p.supply?.chemical||0)>0&&_aiCorp.visitedPlanetIds.has(p.id));
+        const _inputSources={};
+        if(_ironSrc) _inputSources.iron=_ironSrc.id;
+        if(_chemSrc) _inputSources.chemical=_chemSrc.id;
+        _aiCorp.actionQueue.push({
+          type:'build_upgrade', planetId:_rockyTarget.id,
+          upgradeId:'blast_furnace', inputSources:_inputSources, outputPid:null,
+        });
+        ss.blastFurnaceQueued=true;
+      }
+    }
+  }
+  // ── #5 BAD-GALAXY EMERGENCY EXPLORATION ────────────────────────
+  // If by SD 835 (6 SD past game start) the AI's revenue is still under
+  // $50K, the galaxy roll likely placed it in a sparse neighborhood.
+  // Trigger emergency mode: widen the per-cycle exploration range to 60k SU
+  // and dispatch up to 3 simultaneous explorer trains until revenue > $100K.
+  if(!ss.badGalaxyDetected && stardate>=835.0 && (_aiCorp.totalRevenue||0)<50000){
+    ss.badGalaxyDetected=true;
+    _aiCorp._emergencyExplore=true;
+  }
+  if(ss.badGalaxyDetected && (_aiCorp.totalRevenue||0)>100000){
+    _aiCorp._emergencyExplore=false;
+  }
 }
 
 // User spec (exploration cycle): every SD, pick 3 unvisited planets within
@@ -5787,10 +5904,22 @@ function _aiMaintainExplorationCycle(){
     }
   }
   // Throttle: once per SD, and never while an exploration is in flight.
-  if(ec.activeTi>=0) return;
-  if(stardate-(ec.lastSd||-999) < 1.0) return;
-  // Pick 3 unvisited planets within 25,000 SU of any AI-station planet.
-  const _EXPLORE_RANGE=25000;
+  // BAD-GALAXY EMERGENCY MODE (user spec #5): when activated, allow up to 3
+  // simultaneous explorer trains and widen the range to 60K SU so the AI
+  // can break out of a sparse-neighborhood spawn.
+  const _emergency=!!_aiCorp._emergencyExplore;
+  const _maxActive=_emergency?3:1;
+  if(ec.activeTi>=0 && !_emergency) return;
+  if(stardate-(ec.lastSd||-999) < 1.0 && !_emergency) return;
+  // Count current active explorers (in emergency mode we may run several).
+  let _activeCount=0;
+  for(const ti of _aiCorp.trainIndices){
+    if(trains[ti]?._aiExploringRoute) _activeCount++;
+  }
+  if(_activeCount>=_maxActive) return;
+  // Pick 3 unvisited planets within 25,000 SU (or 60K in emergency) of any
+  // AI-station planet.
+  const _EXPLORE_RANGE=_emergency?60000:25000;
   const _aiStations=[..._aiCorp.ownedPlanetIds].map(id=>galaxy.planets[id]).filter(Boolean);
   if(_aiStations.length<1) return;
   const _candidates=[];
@@ -6074,11 +6203,15 @@ function _aiExecuteAction(action){
   } else if(action.type==='build_large_station'){
     const p=galaxy.planets[action.planetId];
     if(!p||!p.aiHasStation||p.hasLargeStation) return;
-    if(_aiCorp.credits<50000||(p.devLevel||0)<4||(p.ironDelivered||0)<4) return;
-    p.ironDelivered=(p.ironDelivered||0)-4;
-    // Iron-specific dual-counter sync (matches the player large-station path).
+    // Thresholds synced with the picker (devLevel ≥ 3, ironDel ≥ 1). The
+    // executor previously required 4/4, which silently rejected every
+    // eligible candidate the picker produced.
+    if(_aiCorp.credits<50000||(p.devLevel||0)<3||(p.ironDelivered||0)<1) return;
+    // Consume up to the available iron buffer (don't go below 0).
+    const _ironConsume=Math.min(p.ironDelivered||0, 4);
+    p.ironDelivered=(p.ironDelivered||0)-_ironConsume;
     if((p.supply?.iron||0)>0){
-      p.supply.iron=Math.max(0,(p.supply.iron||0)-4);
+      p.supply.iron=Math.max(0,(p.supply.iron||0)-_ironConsume);
     }
     p.hasLargeStation=true;
     _aiCorp.credits-=50000;_aiCorp.totalCosts+=50000;
@@ -6364,13 +6497,28 @@ function _aiDecide(){
       const _bCars=_aiPickTrainComp(diff);
       const _bCost=_bCars.reduce((s,c)=>s+(_bCarCost[c]||4000),0);
       const _bBuf={easy:1.8,normal:1.8,hard:1.8,very_hard:1.1}[diff]||1.8;
-      const _affordable=_forceBuy ? _bBudget>=_bCost : _bBudget>_bCost*_bBuf;
-      if(_affordable){
+      // User spec: in 'train' phase, keep buying trains until credits drop
+      // below $150K. Avoids the failure mode where the AI sat at $1M+ credits
+      // with cycle stuck in 'train' but bought only 1 train per batch.
+      // Outside force-buy mode, only queue ONE train per batch (original
+      // behavior preserved). Cap _maxBuys to 3 per batch (lowered from 8)
+      // to prevent over-commit — at $63K/train, 3 buys = $189K which is the
+      // largest single-batch spend we want without sanity-checking interim
+      // revenue first. Subsequent batches keep buying if credits stay high.
+      const _maxBuys=_forceBuy ? 3 : 1;
+      let _runningTrCount=_trCount;
+      for(let _bi=0; _bi<_maxBuys; _bi++){
+        if(_runningTrCount>=AI_MAX_TRAINS[diff]) break;
+        const _affordable=_forceBuy ? _bBudget>=_bCost : _bBudget>_bCost*_bBuf;
+        if(!_affordable) break;
         const _bHp=_aiGetHomePlanet();
-        if(_bHp){
-          _aiCorp.actionQueue.push({type:'buy_train',cars:_bCars,planetId:_bHp.id});
-          _bBudget-=_bCost;
-        }
+        if(!_bHp) break;
+        _aiCorp.actionQueue.push({type:'buy_train',cars:_bCars,planetId:_bHp.id});
+        _bBudget-=_bCost;
+        _runningTrCount++;
+        // Stop multi-buy as soon as the simulated budget drops below the
+        // user-spec spend floor.
+        if(_bBudget<=150000) break;
       }
     }
 
@@ -6424,6 +6572,14 @@ function _aiDecide(){
         if(_bStTgt){
           _aiCorp.actionQueue.push({type:'build_station',planetId:_bStTgt.id});
           _bBudget-=_bStCost;
+        } else {
+          // User-noted plateau: cycle stuck in 'station' phase but no
+          // candidate exists (exploration hasn't surfaced new biomes yet).
+          // Auto-flip to 'train' so the AI keeps spending instead of
+          // freezing. Records the flip in cycle bookkeeping.
+          _aiCorp._priorityCycle='train';
+          _aiCorp._priorityCycleSd=stardate;
+          _aiCorp._priorityCycleTrainCount=_aiCorp.trainIndices.length;
         }
       }
     }
@@ -9976,6 +10132,14 @@ function updateFoundries(dtG){
           // lockstep for foundry-origin iron (see _processCargoQueue + the
           // player/AI large-station purchase).
           p.ironDelivered=(p.ironDelivered||0)+1;
+          // User spec: foundry-produced iron also counts toward the planet's
+          // development level. Push an iron entry into p.devLog with the same
+          // shape used by cargo-delivery unloads (sd, value, cargo) so the
+          // dev-level recompute picks up the premium iron bonus (+2 DL if
+          // produced in the last 1 SD, +1 DL if within 10 SD) and the cargo-
+          // diversity tally counts it as a unique cargo type at this planet.
+          if(!p.devLog) p.devLog=[];
+          p.devLog.push({sd:stardate, value:DEV_CARGO_VALUES.iron||100, cargo:'iron'});
           if(!_ironCarUnlocked){ _ironCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_iron',displayName:'Iron Car'}); _chatMsg('IRON CAR UNLOCKED','rgba(200,210,235,1)'); _ga('car_unlocked',{car_type:'iron', cargo:'iron', sd:Math.floor(stardate)}); }
           p.supply.hazmat=Math.min(CARGO_MAX_SUPPLY,(p.supply.hazmat||0)+0.5);
           _fd.hazmatTotal=(_fd.hazmatTotal||0)+0.5; // cumulative produced, unaffected by consumption
@@ -10073,6 +10237,7 @@ function updateFoundries(dtG){
           _bk.progress=0;
           _bk.grain=Math.max(0,(_bk.grain||0)-1);
           p.supply.cargo=Math.min(CARGO_MAX_SUPPLY,(p.supply.cargo||0)+1);
+          _anyCargoProduced=true; // one-shot flag for galaxy-wide cargo demand
         }
       } else if((_bk.grain||0)>=1){
         _bk.progress=FOUNDRY_PROD_TIME;
@@ -10087,6 +10252,7 @@ function updateFoundries(dtG){
           _jc.progress=0;
           _jc.fruit=Math.max(0,(_jc.fruit||0)-1);
           p.supply.cargo=Math.min(CARGO_MAX_SUPPLY,(p.supply.cargo||0)+1);
+          _anyCargoProduced=true;
         }
       } else if((_jc.fruit||0)>=1){
         _jc.progress=FOUNDRY_PROD_TIME;
@@ -21055,6 +21221,15 @@ function drawGalaxy(ts,dt){
   // Top bar always on top; panel folder tabs drawn over top bar in panel area
   drawTopBar();
   drawPanelTabs();
+  // Tutorial chain — popup stage. Moved to between drawPanelTabs and the
+  // special "above-tabs" popups (car detail / routes / finances) so the
+  // select_train highlight + bubble always renders ABOVE the right UI panel
+  // and panel folder tabs but BELOW any open detail window. Other popup-
+  // stage phases (build_station, train_detail_edit, builder_*) anchor INSIDE
+  // popups that draw earlier (line ~21150), so they still visually sit on
+  // top of those popups — only the special above-tabs popups now overlay
+  // tutorial bubbles, matching the user's request.
+  _drawTutorialChain('popup');
   // Car-detail popup explicitly drawn AFTER drawTopBar so it paints over the
   // bar in any vertical overlap region (the rest of the popups are intentionally
   // beneath the top bar — this one is the exception per user request).
@@ -21064,11 +21239,6 @@ function drawGalaxy(ts,dt){
   drawRoutesPopup();
   // Finance popup drawn last so its dropdown renders above the top stats bar
   drawFinancesPopup();
-  // Tutorial chain — popup stage drawn AFTER popups so bubbles pointing at
-  // controls INSIDE an open popup (BUILD STATION, EDIT, CONFIRM, etc.)
-  // stay visible on top of the popup. Galaxy-stage call earlier already
-  // ran all advance / transition logic this frame.
-  _drawTutorialChain('popup');
   _drawVisitHint();
   // (_drawOrbitHintCallout moved to the pre-popup callout block above so it
   // renders BEHIND any open popup window.)
@@ -22611,6 +22781,12 @@ canvas.addEventListener('mouseup',e=>{
               _buyTrainHintFadeOutStartMs=0;
               _buyTrainHintSuppressed=true;
             }
+            // User spec: when create_route is accepted, deselect everything
+            // so the player can pick a fresh train / starting planet.
+            if(def.id==='create_route'){
+              sel=null; routeStops=[];
+              assignPending=false; routeHerePending=false;
+            }
           }
           activePopup=null; popupState={};
           return;
@@ -23917,12 +24093,22 @@ document.addEventListener('keydown',e=>{
       if(activePopup==='options') popupState={};
       return;
     }
-    // 'C' opens the hidden Cheats popup, but only when the Options popup is
-    // already open (so the rest of the game doesn't accidentally trigger it).
-    // Pressing Esc / C / O from inside Cheats closes back out via the normal
-    // popup-close paths.
+    // 'C' opens the hidden Cheats popup ONLY when the Options popup is
+    // already open (kept so the cheats backdoor still works). Otherwise
+    // 'C' toggles the Corporation popup per user request.
     if((e.key==='c'||e.key==='C') && activePopup==='options'){
       activePopup='cheats'; popupState={};
+      return;
+    }
+    if(e.key==='c'||e.key==='C'){
+      activePopup=activePopup==='corp'?null:'corp';
+      if(activePopup==='corp') popupState={};
+      return;
+    }
+    // 'F' toggles the Corporate Finances popup.
+    if(e.key==='f'||e.key==='F'){
+      activePopup=activePopup==='finances'?null:'finances';
+      if(activePopup==='finances') popupState={};
       return;
     }
     if(e.key==='t'||e.key==='T'){
@@ -24097,7 +24283,7 @@ function _buildSaveObject(){
     _classJEngineUnlocked, _classREngineUnlocked, _N700EngineUnlocked,
     _steelProdLog,
     _sensorUpgradeActive, _stationCostDiscount, _sandstormCheckSd, _bhResearchCheckSd,
-    _totalPassengersDelivered, _totalHazmatIncinerated,
+    _totalPassengersDelivered, _totalHazmatIncinerated, _anyCargoProduced,
     trainyard, financeLedger:_trimmedFinance, _ledgerSummary:_builtLedgerSummary, purchaseLedger, corpValueHistory, corpStatsHistory, aiCorpStatsHistory, _corp, _ceoHireCandidates,
     creditSnapshots, lastCreditSnapshotSd,
     galaxy:{homeStarId:galaxy.homeStarId, origenId:galaxy.origenId, blackHoles:galaxy.blackHoles, colonyTrainDestId:galaxy.colonyTrainDestId??null, faminePlanetId:galaxy.faminePlanetId??null, outbreakPlanetId:galaxy.outbreakPlanetId??null, bhResearchPlanetId:galaxy.bhResearchPlanetId??null, bhResearchPlanetIds:galaxy.bhResearchPlanetIds??[], stars:saveStars, planets:savePlanets, nebulas:(galaxy.nebulas||[]).map(n=>({x:_r5(n.x),y:_r5(n.y),rx:n.rx,ry:n.ry,rot:_r5(n.rot),colorIdx:n.colorIdx,secondaryColorIdx:n.secondaryColorIdx,seed:n.seed,name:n.name}))},
@@ -24265,6 +24451,7 @@ function _restoreFromSave(save){
   _newspaperArchive=save._newspaperArchive||[]; _newspaperViewIdx=null;
   _sandstormCheckSd=save._sandstormCheckSd||0; _bhResearchCheckSd=save._bhResearchCheckSd||0;
   _totalPassengersDelivered=save._totalPassengersDelivered||0; _totalHazmatIncinerated=save._totalHazmatIncinerated||0;
+  _anyCargoProduced=!!save._anyCargoProduced;
   trainyard=save.trainyard||{}; financeLedger=save.financeLedger||[]; _ledgerSummary=save._ledgerSummary||{totalRevenue:0,totalCost:0,totalInterest:0}; purchaseLedger=save.purchaseLedger||[]; corpValueHistory=save.corpValueHistory||{};
   corpStatsHistory=save.corpStatsHistory||{}; aiCorpStatsHistory=save.aiCorpStatsHistory||{};
   // Migrate old trainyard format {type: count} → {type: [carRecord]} so the
@@ -24832,7 +25019,7 @@ function startGame(){
   pendingEngineUnlocks=[];
   pendingMissionIntros=[];
   pendingAncientPopups=[]; _ancientTranslatedWords=new Set();
-  _ironCarUnlocked=false; _steelCarUnlocked=false; _glassCarUnlocked=false; _machineryCarUnlocked=false; _hazmatCarUnlocked=false; _royalCarUnlocked=false; _flowersCarUnlocked=false; _medicalCarUnlocked=false; _grainCarUnlocked=false; _livestockCarUnlocked=false; _fruitCarUnlocked=false; _totalPassengersDelivered=0; _totalHazmatIncinerated=0;
+  _ironCarUnlocked=false; _steelCarUnlocked=false; _glassCarUnlocked=false; _machineryCarUnlocked=false; _hazmatCarUnlocked=false; _royalCarUnlocked=false; _flowersCarUnlocked=false; _medicalCarUnlocked=false; _grainCarUnlocked=false; _livestockCarUnlocked=false; _fruitCarUnlocked=false; _totalPassengersDelivered=0; _totalHazmatIncinerated=0; _anyCargoProduced=false;
   _classJEngineUnlocked=false; _classREngineUnlocked=false; _N700EngineUnlocked=false;
   _steelProdLog=[]; _steelMissionTimerMs=0;
   _sensorUpgradeActive=false; _stationCostDiscount=0; _galaxyCensusTimerMs=0; _sandstormCheckSd=0; _bhResearchCheckSd=0;
