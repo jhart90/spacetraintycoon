@@ -328,8 +328,8 @@ function bellPlanetCount(){
 }
 
 const ORB_SPD  = 0.004;
-const MAX_TRANSIT_SPD = 20;             // AU/s — global cap (engine_N700 max); used as display reference
-const TRANSIT_ACCEL   = 0.00018 * 5;   // AU/s² — base accel (engine_constellation = 1×)
+const MAX_TRANSIT_SPD = 20;             // SU/s — global cap (engine_N700 max); used as display reference
+const TRANSIT_ACCEL   = 0.00018 * 5;   // SU/s² — base accel (engine_constellation = 1×)
 
 // ── Cargo system ──────────────────────────────────────────────
 // Which cargo type each car type carries
@@ -707,9 +707,9 @@ const MISSION_DEFS=[
    imageType:'car', imageKey:'car_passenger',
    startsAfter:1.25,
    objectives:[
-     {id:'deliver_15k_au', text:'Deliver any cargo or passengers on a single trip of more than 15,000 AU'},
+     {id:'deliver_15k_au', text:'Deliver any cargo or passengers on a single trip of more than 15,000 SU'},
    ],
-   details:"Can your trains go the distance? Complete a single cargo delivery trip of more than 15,000 AU — note that this exceeds the maximum range of the Constellation class engine, so a more powerful engine will be required.",
+   details:"Can your trains go the distance? Complete a single cargo delivery trip of more than 15,000 SU — note that this exceeds the maximum range of the Constellation class engine, so a more powerful engine will be required.",
    reward:30000, timeLimit:null,
    checkObj:(oid,m)=>{
      if(oid==='deliver_15k_au') return !!(m._longHaulDone);
@@ -771,7 +771,7 @@ const MISSION_DEFS=[
      return false;
    }},
 ];
-const MAINT_DECAY_PER_AU   = 0.00001; // maintenance fraction lost per AU in transit (constellation base)
+const MAINT_DECAY_PER_AU   = 0.00001; // maintenance fraction lost per SU in transit (constellation base)
 const REPAIR_COST_PER_MAINT = 600;     // credits per car per 1.0 maintenance fraction lost (constellation base)
 const CLOUD_SPEED      = 0.000070; // rad/frame-unit — slow atmospheric drift
 
@@ -1777,8 +1777,8 @@ let fogCanvas=null;
 let fogDirty=false;        // true when fogPoints changed since last draw
 let fogStampCanvas=null;   // pre-rendered gradient reveal circle (created once)
 let fogLastCamX=NaN, fogLastCamY=NaN, fogLastCamScale=NaN; // camera state at last fog draw
-const FOG_REVEAL_R=5000; // world AU — train car reveal radius
-const FOG_GRID=600;       // world AU grid cell size for dedup (was 150 — 16× fewer points)
+const FOG_REVEAL_R=5000; // world SU — train car reveal radius
+const FOG_GRID=600;       // world SU grid cell size for dedup (was 150 — 16× fewer points)
 
 // ── visit tracking ───────────────────────────────────────────
 let visitedPlanetIds=new Set();
@@ -1786,7 +1786,7 @@ let planetOrbitCounts={}; // planetId → {trainIdx:count}
 let revealedStarIds=new Set();
 let revealedStarsInOrder=[]; // star IDs in discovery order (for registry sort)
 let fogStarReveals=[]; // {wx,wy,r} large-radius reveals for discovered star systems
-let revealedOrbitedPlanetIds=new Set(); // orbited planets get permanent 1000AU reveal
+let revealedOrbitedPlanetIds=new Set(); // orbited planets get permanent 1000SU reveal
 let discoveredPlanetIds=new Set(); // all planets in any system where any planet has been orbited
 let colorPickerState=null; // {trainIdx} when color picker sub-popup is open
 let cancelRouteBtnBounds=null;
@@ -1805,12 +1805,14 @@ let quitConfirmYesBounds=null, quitConfirmNoBounds=null;
 // so mousedown / mousemove handlers can implement drag-to-scroll uniformly.
 // Cleared at the top of each drawGalaxy pass. Each entry:
 //   {x,y,w,h}            track screen bounds
-//   thumbY, thumbH       thumb screen bounds
+//   axis                 'y' (default) or 'x' — vertical or horizontal track
+//   thumbY, thumbH       thumb screen bounds (vertical axis)
+//   thumbX, thumbW       thumb screen bounds (horizontal axis)
 //   maxScroll            content scroll range (clamps to [0, maxScroll])
 //   setScroll(v)         setter that updates the underlying scroll variable
 let _sbBounds=[];
-let _sbDrag=null; // {entry, startY, startScroll}
-function _regScrollbar(b){ _sbBounds.push(b); }
+let _sbDrag=null; // {entry, startCp, startScroll}
+function _regScrollbar(b){ if(!b.axis) b.axis='y'; _sbBounds.push(b); }
 
 // ── top bar / economy ────────────────────────────────────────
 let stardate=829.00;
@@ -1906,6 +1908,10 @@ let _planetStarNameHover=false;    // star-name link in planet info bar
 let _starPanelPlanetHover=-1;      // index in starPanelPlanetBounds
 let _trainAddHover=false, _trainRowHover=-1;
 let _routesRowHover=-1; // hover index for ROUTES popup rows
+let _routesStopHover=-1; // hover index for ROUTES popup per-stop planet blocks
+let _routesVizHover=-1; // hover index for ROUTES popup train-viz strips (drives the 500ms-delayed cargo tooltip)
+let _routesVizHoverStartMs=0; // real-time ms when current viz hover began (0=inactive)
+let _routesVizHoverCpX=0, _routesVizHoverCpY=0; // last cursor pos while hovering a viz strip — anchors the tooltip
 // Right-side Trains panel "Add new train" pseudo-slot: bounds set during draw
 // (cleared if the slot is scrolled out of view), hover flag updated by mousemove.
 let _addTrainPanelBounds=null;
@@ -3882,10 +3888,13 @@ function computeDemandRate(p){
   //     accept iron deliveries once the station is up.
   if(pop>0) r.iron=(r.iron||0)+dl*0.3;
   if(p.hasStation) r.iron=Math.max(r.iron||0, 1.0);
-  // Steel demand floor: a Large Station planet always has ≥1 steel demand rate
-  // so the player can accumulate the 6 steelDelivered units required for the
-  // Terminal upgrade. Mirror of the iron-for-Large-Station pattern above.
-  if(p.hasLargeStation) r.steel=Math.max(r.steel||0, 1.0);
+  // Steel demand floor: any planet with a Large Station OR Terminal upgrade
+  // always has ≥1 steel demand rate so the player can accumulate the 6
+  // steelDelivered units required for the Terminal upgrade (and so Terminal
+  // planets continue to be productive steel sinks even after the upgrade
+  // requirement is satisfied). Mirror of the iron-for-Large-Station pattern
+  // above.
+  if(p.hasLargeStation||p.hasTerminal) r.steel=Math.max(r.steel||0, 1.0);
   // Juicery floor: a jungle planet running a juicery whose fruit bin is not
   // yet maxed (10/10) must show a floor of at least 1 fruit demand so trains
   // can keep feeding it. Computed live so the floor disappears the moment
@@ -3938,7 +3947,7 @@ function computeCargoRevenue(carType, cargoType, destPlanet, srcPlanet){
   const shM=_sysEconMult(galaxy.stars[destPlanet.starId]);
   let distM=1.0;
   if(cargoType==='passengers'&&srcPlanet&&galaxy){
-    // Passenger bonus: +2% per 1000 AU of inter-system distance (same system = 100%)
+    // Passenger bonus: +2% per 1000 SU of inter-system distance (same system = 100%)
     const _sSrc=galaxy.stars[srcPlanet.starId], _sDst=galaxy.stars[destPlanet.starId];
     if(_sSrc&&_sDst) distM=1.0+Math.hypot(_sSrc.x-_sDst.x,_sSrc.y-_sDst.y)/1000*0.02;
   } else if(srcPlanet){
@@ -4134,7 +4143,7 @@ function _processCargoQueue(t, p){
             _srMx._sandDeliveries=(_srMx._sandDeliveries||0)+1;
           }
         }
-        // Galactic Distance Record: check if this cargo trip exceeded 15,000 AU (player trains only)
+        // Galactic Distance Record: check if this cargo trip exceeded 15,000 SU (player trains only)
         if(t.isPlayer&&src){
           const _hauld=Math.hypot(src.x-p.x,src.y-p.y);
           if(_hauld>15000){
@@ -4559,7 +4568,7 @@ function _genNebulas(origenPlanet){
   const MIN_DIST=40000;
   const MAX_DIST=320000;
   const PAL_N=NEBULA_COLOR_PALETTE.length;
-  // World bounds with a 5,000-AU edge buffer so every nebula's name (i.e. its
+  // World bounds with a 5,000-SU edge buffer so every nebula's name (i.e. its
   // centre point, where the label is drawn) is always reachable on the
   // panable galaxy map and never sits in a region the camera can't centre on.
   const _safeMinX=-WORLD_W+5000, _safeMaxX=WORLD_W-5000;
@@ -4590,8 +4599,8 @@ function _genNebulas(origenPlanet){
     out.push({
       x:_clampX(origenPlanet.x+Math.cos(a)*r),
       y:_clampY(origenPlanet.y+Math.sin(a)*r),
-      // 7,500 – 25,000 AU half-extent on each axis ⇒ 15k – 50k AU full span;
-      // the 2× multiplier yields the 30k – 100k AU "big" tier.
+      // 7,500 – 25,000 SU half-extent on each axis ⇒ 15k – 50k SU full span;
+      // the 2× multiplier yields the 30k – 100k SU "big" tier.
       rx:Math.round((7500+Math.random()*17500)*_sizeMult),
       ry:Math.round((7500+Math.random()*17500)*_sizeMult),
       // Snap rotation to a multiple of 90° so the soft-edge mask aligns with
@@ -4608,7 +4617,7 @@ function _genNebulas(origenPlanet){
   // nebula with ≥ 2 close neighbours (i.e. a cluster of 3 or more) and
   // re-locate the most-crowded ones to a fresher patch of space until every
   // nebula has at most 1 neighbour within CLUSTER_R.
-  const CLUSTER_R=70000;     // AU — two centres within this distance are "clustered"
+  const CLUSTER_R=70000;     // SU — two centres within this distance are "clustered"
   const _nearCount=(idx,arr)=>{
     let _c=0; const _a=arr[idx];
     for(let _j=0;_j<arr.length;_j++){
@@ -5061,7 +5070,7 @@ function generateGalaxy(){
   }
 
   // Place Colony Train missions: one source/dest pair per new quadrant (4 total).
-  // Source = colonized desert planet; dest = uninhabited desert/jungle/agri/resort 30k-60k AU away.
+  // Source = colonized desert planet; dest = uninhabited desert/jungle/agri/resort 30k-60k SU away.
   // Each source planet stores its own colonyTrainDestId; galaxy.colonyTrainDestId = first pair's dest.
   let _colonyTrainDestId=null;
   const _ctDestBiomes=['desert','jungle','agri','resort'];
@@ -5150,7 +5159,7 @@ function generateGalaxy(){
     }
   }
 
-  // Place Black Hole Research planets: one per black hole (4 total), within ~30,000 AU of each
+  // Place Black Hole Research planets: one per black hole (4 total), within ~30,000 SU of each
   let _bhResearchPlanetId=null;
   const _bhResearchPlanetIds=[];
   for(const _oneBh of _blackHoles){
@@ -5168,7 +5177,7 @@ function generateGalaxy(){
     }
   }
 
-  // ── Guarantee: at least one Urban planet within 30,000 AU of Orijen ──
+  // ── Guarantee: at least one Urban planet within 30,000 SU of Orijen ──
   // Urban planets are weighted 2× rarer than other biomes, so an unlucky
   // galaxy roll can leave the player without one in early-game range — which
   // would lock them out of the Factory upgrade chain. If the random pass
@@ -5267,7 +5276,7 @@ function _initAICorp(){
   const homeStarId=origen.starId;
   const homeStar=galaxy.stars[homeStarId];
   // AI home must not be Orijen's star and must not be adjacent to it
-  // (adjacent = within constellation engine range, 15,000 AU — reachable on day 1)
+  // (adjacent = within constellation engine range, 15,000 SU — reachable on day 1)
   const CONSTELLATION_RANGE=ENGINE_MAX_RANGE.engine_constellation||15000;
   const candidateStars=galaxy.stars.filter(s=>{
     if(s.id===homeStarId) return false; // not Orijen's star
@@ -5837,7 +5846,7 @@ function _aiPickStationTarget(){
     // network spreads across the galaxy. Without this, the AI tends to cluster stations
     // near the initial hubs — and once trains pile onto those hubs they saturate and
     // stall (the dominant stuck-cluster failure mode). Scales 0 (adjacent) → +60 at
-    // ≥30k AU from the nearest owned planet.
+    // ≥30k SU from the nearest owned planet.
     if(_aiCorp.ownedPlanetIds.size>0){
       let _minDistOwn=Infinity;
       for(const _opid of _aiCorp.ownedPlanetIds){
@@ -6096,12 +6105,12 @@ const _NEBULA_SCHEMES=[
   // yellow / orange / occasional bright red
   {name:'amber', base:[60,40,12], mid:[160,80,20], accent:[230,80,40]},
 ];
-// Galactic-centre scheme — fades in within ~30,000 AU of (0,0). User spec:
+// Galactic-centre scheme — fades in within ~30,000 SU of (0,0). User spec:
 // bright blue under-layer (background pixels), dark purple over-layer
 // (filament peaks where the noise ridges).
 const _NEBULA_CORE_SCHEME={name:'core', base:[80,140,220], mid:[55,55,150], accent:[40,12,72]};
-const _NEBULA_CORE_RADIUS=30000;   // AU within which the core scheme is fully present
-const _NEBULA_CORE_BLEND_W=10000;  // AU over which it blends out into the quadrant schemes
+const _NEBULA_CORE_RADIUS=30000;   // SU within which the core scheme is fully present
+const _NEBULA_CORE_BLEND_W=10000;  // SU over which it blends out into the quadrant schemes
 let _nebulaTiles=[];               // 4 quadrant canvases
 let _nebulaCoreTile=null;          // central canvas (drawn near origin only)
 // Bake one scheme's tile from a shared grayscale noise field. Pulled out
@@ -7845,7 +7854,12 @@ function drawTrainsPanel(){
       const star=galaxy.stars[p.starId];
       const ry=TOP_H+ri*ROW_H-stationPanelScroll;
       const rowMidY=ry+ROW_H/2;
-      const isSelected=sel&&sel.type==='planet'&&sel.data.id===p.id;
+      // Highlight rows that are either the current selection OR part of
+      // the in-progress routeStops chain — so SHIFT+CLICK route-building
+      // from the Stations panel paints every chosen station in the same
+      // selected look.
+      const isSelected=(sel&&sel.type==='planet'&&sel.data.id===p.id)
+                     || routeStops.some(_rs=>_rs && _rs.id===p.id);
       if(isSelected){
         ctx.fillStyle='rgba(80,140,255,0.10)';
         ctx.fillRect(px+2,ry-1,PANEL_W-4,ROW_H-2);
@@ -9346,7 +9360,7 @@ function trackVisit(pid){
     if(_tp.type.id==='rocky'&&!missions.some(mx=>mx.id==='seeking_home')&&!pendingMissionIntros.some(pi=>pi.defId==='seeking_home')){
       const _rockyOthers=galaxy.planets.filter(p=>p.type.id==='rocky'&&p.id!==pid);
       if(_rockyOthers.length>0){
-        // Prefer a planet 50k-100k AU away; fall back to >25k, then >10k, then any other rocky
+        // Prefer a planet 50k-100k SU away; fall back to >25k, then >10k, then any other rocky
         const _dist=p=>Math.hypot(p.x-_tp.x,p.y-_tp.y);
         let _pool=_rockyOthers.filter(p=>{const d=_dist(p);return d>50000&&d<=100000;});
         if(!_pool.length) _pool=_rockyOthers.filter(p=>_dist(p)>25000);
@@ -9482,7 +9496,7 @@ function trackOrbit(t){
 
 // Accumulator so updateFog samples player car positions at most once per
 // 0.01 SD instead of every rendered frame. The fog reveal radius (FOG_REVEAL_R
-// = 5000 AU) is far larger than the distance any train travels in 0.01 SD
+// = 5000 SU) is far larger than the distance any train travels in 0.01 SD
 // even at 10× game speed, so the reveal coverage is visually identical while
 // eliminating ~50 getTrainCarPos calls (each one a computeLiveTangent +
 // trig) + Set hashing every frame at mid-game scale.
@@ -10247,14 +10261,15 @@ function drawQuitConfirmPopup(){
   ctx.strokeStyle=_quitYesHover?'rgba(255,140,140,0.90)':'rgba(255,90,90,0.7)'; ctx.lineWidth=1; ctx.strokeRect(yesBx,by2,bw,bh);
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
   ctx.fillStyle='rgba(255,210,210,0.95)'; ctx.fillText('YES, QUIT',yesBx+bw/2,by2+17);
-  // Save Game button (blue)
-  ctx.fillStyle=_saveGameBtnHover?'rgba(35,100,230,0.99)':'rgba(20,65,175,0.88)'; ctx.fillRect(saveBx,by2,bw,bh);
-  ctx.strokeStyle=_saveGameBtnHover?'rgba(130,195,255,0.95)':'rgba(80,155,255,0.70)'; ctx.lineWidth=1; ctx.strokeRect(saveBx,by2,bw,bh);
-  ctx.fillStyle=_saveGameBtnHover?'rgba(220,240,255,1.0)':'rgba(175,215,255,0.97)'; ctx.fillText('SAVE GAME',saveBx+bw/2,by2+17);
-  // No button
-  ctx.fillStyle=_quitNoHover?'rgba(40,120,85,0.95)':'rgba(30,80,60,0.85)'; ctx.fillRect(noBx,by2,bw,bh);
-  ctx.strokeStyle=_quitNoHover?'rgba(90,255,170,0.75)':'rgba(60,220,130,0.5)'; ctx.lineWidth=1; ctx.strokeRect(noBx,by2,bw,bh);
-  ctx.fillStyle='rgba(160,240,190,0.95)'; ctx.fillText('NO, STAY',noBx+bw/2,by2+17);
+  // Save Game button (green — was blue; swapped with NO, STAY to match the
+  // Options popup's SAVE GAME pill, which is also green).
+  ctx.fillStyle=_saveGameBtnHover?'rgba(40,120,85,0.99)':'rgba(30,80,60,0.88)'; ctx.fillRect(saveBx,by2,bw,bh);
+  ctx.strokeStyle=_saveGameBtnHover?'rgba(90,255,170,0.85)':'rgba(60,220,130,0.60)'; ctx.lineWidth=1; ctx.strokeRect(saveBx,by2,bw,bh);
+  ctx.fillStyle=_saveGameBtnHover?'rgba(210,255,225,1.0)':'rgba(160,240,190,0.97)'; ctx.fillText('SAVE GAME',saveBx+bw/2,by2+17);
+  // No button (blue — was green; swapped with SAVE GAME).
+  ctx.fillStyle=_quitNoHover?'rgba(35,100,230,0.95)':'rgba(20,65,175,0.85)'; ctx.fillRect(noBx,by2,bw,bh);
+  ctx.strokeStyle=_quitNoHover?'rgba(130,195,255,0.85)':'rgba(80,155,255,0.55)'; ctx.lineWidth=1; ctx.strokeRect(noBx,by2,bw,bh);
+  ctx.fillStyle='rgba(175,215,255,0.97)'; ctx.fillText('NO, STAY',noBx+bw/2,by2+17);
   quitConfirmYesBounds={x:yesBx,y:by2,w:bw,h:bh};
   saveGameBtnBounds={x:saveBx,y:by2,w:bw,h:bh};
   quitConfirmNoBounds={x:noBx,y:by2,w:bw,h:bh};
@@ -10523,9 +10538,9 @@ function drawCorpPopup(){
   const _paxCount=financeLedger.filter(e=>e.revenue>0&&e.cargoType==='passengers').length;
   const _totalDist=Math.round(trains.filter(t=>t.isPlayer).reduce((s,t)=>s+(t.totalDist||0),0));
   const _fmtDist=d=>{
-    if(d>=100000000) return Math.round(d/1000000).toLocaleString()+'M AU';
-    if(d>=1000000)   return Math.round(d/1000).toLocaleString()+'k AU';
-    return d.toLocaleString()+' AU';
+    if(d>=100000000) return Math.round(d/1000000).toLocaleString()+'M SU';
+    if(d>=1000000)   return Math.round(d/1000).toLocaleString()+'k SU';
+    return d.toLocaleString()+' SU';
   };
   _dRow2('Distance Traveled',_fmtDist(_totalDist),_bRX,_bY+_bRLH*1);
   _dRow2('Active Trains',_nEngines+'',_bRX,_bY+_bRLH*2);
@@ -13342,7 +13357,7 @@ function drawOptionsPopup(){
   // (Add Credits, Flower Planet, Colony Planet, Rival) AND the Fog of War
   // toggle all live in the hidden Cheats popup accessed by pressing 'C' while
   // Options is open.
-  const pw=300, ph=240;
+  const pw=300, ph=280;
   const [px,py]=drawPopupBase(pw,ph,'rgba(80,160,255,0.7)');
   ctx.save();
   ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
@@ -13374,11 +13389,24 @@ function drawOptionsPopup(){
   ctx.fillStyle=_ctlHov?'rgba(220,240,255,0.98)':'rgba(170,220,255,0.95)';
   ctx.fillText('CONTROLS / HOW TO PLAY',_ctlX+_ctlW/2,_ctlY+_ctlH/2+4);
   popupState.controlsBtnBounds={x:_ctlX,y:_ctlY,w:_ctlW,h:_ctlH};
-  // Divider after Controls button
+  // ── SAVE GAME button — same shape/size as CONTROLS but green. Clicking
+  // calls saveGame() (identical behavior to the SAVE GAME button in the
+  // quit-confirm popup). Hover state lives on popupState.optionsSaveBtnHover.
+  const _saveX=_ctlX, _saveY=py+80, _saveW=_ctlW, _saveH=_ctlH;
+  const _saveHov=!!popupState.optionsSaveBtnHover;
+  ctx.fillStyle=_saveHov?'rgba(45,200,90,0.97)':'rgba(30,160,70,0.85)';
+  ctx.beginPath(); ctx.roundRect(_saveX,_saveY,_saveW,_saveH,4); ctx.fill();
+  ctx.strokeStyle=_saveHov?'rgba(80,240,110,0.95)':'rgba(50,220,90,0.75)'; ctx.lineWidth=_saveHov?1.5:1;
+  ctx.beginPath(); ctx.roundRect(_saveX,_saveY,_saveW,_saveH,4); ctx.stroke();
+  ctx.font='bold 10px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle=_saveHov?'rgba(230,255,235,0.98)':'rgba(195,240,210,0.95)';
+  ctx.fillText('SAVE GAME',_saveX+_saveW/2,_saveY+_saveH/2+4);
+  popupState.optionsSaveBtnBounds={x:_saveX,y:_saveY,w:_saveW,h:_saveH};
+  // Divider after the two top buttons
   ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.moveTo(px,py+88); ctx.lineTo(px+pw,py+88); ctx.stroke();
-  // Autosave row
-  const ry=py+118;
+  ctx.beginPath(); ctx.moveTo(px,py+124); ctx.lineTo(px+pw,py+124); ctx.stroke();
+  // Autosave row — pushed down to make room for the new SAVE GAME button.
+  const ry=py+154;
   ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
   ctx.fillStyle='rgba(160,200,255,0.9)'; ctx.fillText('Autosave',px+18,ry);
   ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,130,180,0.5)';
@@ -13394,13 +13422,13 @@ function drawOptionsPopup(){
   popupState.autosaveToggleBounds={x:asTX,y:asTT,w:asTW,h:asTH};
   // Divider before Mission Objectives Tracker
   ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.moveTo(px,py+155); ctx.lineTo(px+pw,py+155); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(px,py+191); ctx.lineTo(px+pw,py+191); ctx.stroke();
   // Fog toggle has moved to the Cheats popup — clear its bounds so the
   // Options-popup click branch can't hit a stale rectangle from a previous
   // frame's render.
   popupState.fogToggleBounds=null;
   // Mission Objectives Tracker row
-  const ry7=py+185;
+  const ry7=py+221;
   ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
   ctx.fillStyle='rgba(160,200,255,0.9)'; ctx.fillText('Mission Objectives Tracker',px+18,ry7);
   ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,130,180,0.5)';
@@ -13922,7 +13950,7 @@ function drawTrainDetailPopup(){
   ctx.fillStyle='rgba(200,140,60,0.75)'; ctx.fillText('TRAIN STATS',px+14,py+118);
   ctx.font='12px "Exo 2",sans-serif'; ctx.fillStyle='rgba(200,180,140,0.85)';
   const dist=Math.round(t.totalDist||0);
-  ctx.fillText('Total distance:  '+dist.toLocaleString()+' AU',px+14,py+136);
+  ctx.fillText('Total distance:  '+dist.toLocaleString()+' SU',px+14,py+136);
   // Car count + load penalty: every mid car past the 2nd shaves 5% off both
   // acceleration and max speed (see _trainLoadMult). Only show the penalty
   // suffix when it's nonzero (i.e. mid car count > 2) so short trains read
@@ -13972,7 +14000,7 @@ function drawTrainDetailPopup(){
     ctx.fillStyle=mCol; ctx.fillText(pctTxt,barX+barW+8,barY+barH/2+3.5);
     const _dsm=Math.round(t.distSinceMaint||0);
     ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(140,160,200,0.55)';
-    ctx.fillText(_dsm.toLocaleString()+' AU since last service',barX+barW+50,barY+barH/2+3.5);
+    ctx.fillText(_dsm.toLocaleString()+' SU since last service',barX+barW+50,barY+barH/2+3.5);
   }
   // ── Financial Performance section ────────────────────────────
   ctx.strokeStyle='rgba(80,60,30,0.4)'; ctx.lineWidth=1;
@@ -14030,7 +14058,7 @@ function drawTrainDetailPopup(){
     const _engMax4=ENGINE_MAX_SPD[t.cars?.[0]]||MAX_TRANSIT_SPD;
     const spd4=r3.transitSpeed||0, spdPct4=Math.min(999,Math.round(spd4/_engMax4*100));
     ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(160,200,240,0.65)'; ctx.textAlign='left';
-    ctx.fillText('Seg: '+pct4+'%  ·  '+spd4.toFixed(2)+' AU/s  ('+spdPct4+'% max)',px+14,py+415);
+    ctx.fillText('Seg: '+pct4+'%  ·  '+spd4.toFixed(2)+' SU/s  ('+spdPct4+'% max)',px+14,py+415);
   }
   ctx.restore();
   // Draw color picker if open for this train
@@ -14254,7 +14282,7 @@ function drawCarDetailPopup(){
     ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,140,210,0.55)'; ctx.textAlign='left';
     ctx.fillText('DISTANCE FROM ORIGIN',px+14,_crgSectY+46);
     ctx.font='bold 11px "Exo 2",sans-serif'; ctx.fillStyle='rgba(170,215,255,0.88)';
-    ctx.fillText(_distAu!=null?_distAu.toLocaleString()+' AU':'—',px+14,_crgSectY+60);
+    ctx.fillText(_distAu!=null?_distAu.toLocaleString()+' SU':'—',px+14,_crgSectY+60);
     // Cargo value estimate (using distance-based formula approximation)
     const _baseRate=(CARGO_BASE_RATE[_cargoType]||{})[carType]||1000;
     const _dMult=_distAu!=null?(_distAu>120000?2.5:_distAu>60000?1.8:_distAu>20000?1.3:_distAu>5000?1.0:_distAu>1000?0.8:0.5):1.0;
@@ -14342,7 +14370,7 @@ function drawStarDetailPopup(){
   if(vis){
     ctx.fillStyle='rgba(220,180,100,0.9)';
     ctx.fillText('Type:  '+s.size+'-class  '+s.colorName.toUpperCase(),lx,ls);
-    ctx.fillText('Radius:  '+s.radius+' AU',lx,ls+19);
+    ctx.fillText('Radius:  '+s.radius+' SU',lx,ls+19);
     ctx.fillText('Coords:  ('+Math.round(s.x/100)+', '+Math.round(s.y/100)+')',lx,ls+38);
     ctx.fillText('Planets:  '+s.planetIds.length,lx,ls+57);
     const _hzCount=s.hazmatIncinerated||0;
@@ -15561,7 +15589,7 @@ function drawPlanetDetailPopup(){
   if(_pVis){
   _lv('BIOME:  ',p.type.id.toUpperCase(),lx,ls);
 
-  // Size · Radius — bold size code and AU value
+  // Size · Radius — bold size code and SU value
   {
     let _tx=lx;
     ctx.font=_lblU; ctx.fillStyle=_lblC;
@@ -15570,16 +15598,16 @@ function drawPlanetDetailPopup(){
     ctx.font=_lblU; ctx.fillStyle=_lblC;
     const _rdiv='  \xb7  RADIUS:  '; ctx.fillText(_rdiv,_tx,ls+16); _tx+=ctx.measureText(_rdiv).width;
     ctx.font=_normU; ctx.fillStyle=_col; ctx.fillText(p.radius+'',_tx,ls+16); _tx+=ctx.measureText(p.radius+'').width;
-    ctx.font=_lblU; ctx.fillStyle=_lblC; ctx.fillText('  AU',_tx,ls+16);
+    ctx.font=_lblU; ctx.fillStyle=_lblC; ctx.fillText('  SU',_tx,ls+16);
   }
 
-  // Orbit — value then bold AU, then dim “from”, then colored star name
+  // Orbit — value then bold SU, then dim “from”, then colored star name
   {
     let _tx=lx;
     ctx.font=_lblU; ctx.fillStyle=_lblC;
     const _olbl='ORBIT:  '; ctx.fillText(_olbl,_tx,ls+32); _tx+=ctx.measureText(_olbl).width;
     ctx.font=_normU; ctx.fillStyle=_col; const _ov=Math.round(p.orbitRadius)+''; ctx.fillText(_ov,_tx,ls+32); _tx+=ctx.measureText(_ov).width;
-    ctx.font=_lblU; ctx.fillStyle=_lblC; const _au='  AU'; ctx.fillText(_au,_tx,ls+32); _tx+=ctx.measureText(_au).width;
+    ctx.font=_lblU; ctx.fillStyle=_lblC; const _au='  SU'; ctx.fillText(_au,_tx,ls+32); _tx+=ctx.measureText(_au).width;
     ctx.font=_lblU; ctx.fillStyle=_lblC; const _frm='  from '; ctx.fillText(_frm,_tx,ls+32); _tx+=ctx.measureText(_frm).width;
     const _sLinkHov=!!popupState.orbitStarLinkHover;
     ctx.fillStyle=_sLinkHov?'#ffffff':star.color.core; ctx.font=_boldU;
@@ -15940,6 +15968,8 @@ function drawPlanetDetailPopup(){
 let trainsPopupAddBounds=null;
 let trainsPopupRowBounds=[]; // [{x,y,w,h, trainIdx}] for dbl-click name edit
 let routesPopupRowBounds=[]; // [{x,y,w,h, trainIdx}] for ROUTES popup click hit-tests
+let routesPopupStopBounds=[]; // [{x,y,w,h, planetId}] per-stop planet panel hit-tests in ROUTES popup
+let routesPopupVizBounds=[]; // [{x,y,w,h, trainIdx}] per-train viz strip hit-tests (drives the cargo tooltip)
 
 function addNewPlayerTrain(){
   if(!galaxy) return;
@@ -16046,9 +16076,9 @@ function _drawEngineDetailsPanel(mainPx,mainPy,eng){
   if(_corp?.secondaryPerk?.cat==='eng_speed') _spd*=1+_corp.secondaryPerk.val/100;
   const _cost=_carUnitCost(eng);
   const _maint=ENGINE_MAINT_DECAY[eng]||MAINT_DECAY_PER_AU;
-  _row('SPD', _spd.toFixed(1)+' AU/s', 'rgba(80,220,255,0.92)');
-  _row('ACCEL', _accel.toFixed(4)+' AU/s²', 'rgba(120,255,180,0.88)');
-  _row('RANGE', _fmtCr(_range)+' AU', 'rgba(255,210,80,0.92)');
+  _row('SPD', _spd.toFixed(1)+' SU/s', 'rgba(80,220,255,0.92)');
+  _row('ACCEL', _accel.toFixed(4)+' SU/s²', 'rgba(120,255,180,0.88)');
+  _row('RANGE', _fmtCr(_range)+' SU', 'rgba(255,210,80,0.92)');
   _row('COST', _fmtCr(_cost)+' cr', 'rgba(255,160,80,0.92)');
   ctx.strokeStyle='rgba(40,80,160,0.25)'; ctx.lineWidth=0.8;
   ctx.beginPath(); ctx.moveTo(rowX,ry+2); ctx.lineTo(rowX+rowW,ry+2); ctx.stroke();
@@ -16500,7 +16530,7 @@ function drawTrainsPopup(){
     // Stats row 2
     const sy2=ry+114;
     ctx.fillStyle='rgba(180,190,210,0.8)';
-    ctx.fillText('Dist: '+Math.round(train.totalDist||0).toLocaleString()+' AU',px+10,sy2);
+    ctx.fillText('Dist: '+Math.round(train.totalDist||0).toLocaleString()+' SU',px+10,sy2);
     // Cached top-orbited / segment-count entries — see trackOrbit + route advance.
     const _to=train._topOrbited;
     if(_to&&_to.cnt>0){
@@ -16591,6 +16621,8 @@ function drawRoutesPopup(){
   const listY=py+34, listH=ph-44, ROW=200;
   const scroll=popupState.scroll||0;
   routesPopupRowBounds=[];
+  routesPopupStopBounds=[];
+  routesPopupVizBounds=[];
   ctx.save(); ctx.beginPath(); ctx.rect(px+1,listY,pw-2,listH); ctx.clip();
 
   if(_routed.length===0){
@@ -16610,31 +16642,54 @@ function drawRoutesPopup(){
     if(_routesRowHover===ri){ ctx.fillStyle='rgba(28,72,60,0.45)'; ctx.fillRect(px+2,ry,pw-4,ROW); }
     else if(ri%2===0){ ctx.fillStyle='rgba(14,30,28,0.40)'; ctx.fillRect(px+2,ry,pw-4,ROW); }
 
-    // ── Train name (top-left) ──
-    ctx.font='bold 12px Orbitron,sans-serif'; ctx.textAlign='left';
+    // ── Train name (top-left, vertically centered with the viz strip) ──
+    // Name uses textBaseline='middle' so its visual center matches the viz
+    // strip's geometric center exactly (~ry+20).
+    ctx.font='bold 12px Orbitron,sans-serif'; ctx.textAlign='left'; ctx.textBaseline='middle';
     const _tBroken=((train.maintenance??1)<=0);
     ctx.fillStyle=_tBroken?'#ff4444':(train.color||'#7eddc8');
-    // Reserve room for the viz strip on the right (~half the row width).
-    const _nameMaxW=Math.min(220, pw*0.40);
+    // Reserve a fixed left column for the name; the viz strip occupies the
+    // rest of the row width. _VIZ_X0 is the left edge of the viz strip.
+    const _VIZ_X0 = px + 150;             // reserves px+10..px+150 (140 px) for the name
+    const _nameMaxW = _VIZ_X0 - (px+10) - 14;
     let dn=train.name;
     while(ctx.measureText(dn).width>_nameMaxW&&dn.length>4) dn=dn.slice(0,-1);
     if(dn!==train.name) dn+='…';
-    ctx.fillText(dn,px+10,ry+20);
-    const _nameDrawnW=ctx.measureText(dn).width;
-    if(_tBroken) _drawBrokenIcon(px+10+_nameDrawnW+2,ry+20,12);
+    const _NAME_CY = ry + 20; // shared vertical center for name AND viz strip
+    ctx.fillText(dn,px+10,_NAME_CY);
+    if(_tBroken) _drawBrokenIcon(px+10+ctx.measureText(dn).width+2,_NAME_CY,12);
+    ctx.textBaseline='alphabetic';
+    // Train status (small, just below the name). Truncates to the name column
+    // so it can't reach into the viz strip.
+    {
+      const _st=getTrainStatus(train);
+      ctx.font='9px "Exo 2",sans-serif'; ctx.textAlign='left';
+      ctx.fillStyle=_st.color||'rgba(180,210,235,0.85)';
+      let _sttxt=_st.text;
+      while(ctx.measureText(_sttxt).width>_nameMaxW && _sttxt.length>3) _sttxt=_sttxt.slice(0,-1);
+      ctx.fillText(_sttxt, px+10, ry+34);
+    }
 
     // ── Train viz strip (top-right) ──
-    // Starts just after the name ends; clipped + faded right edge like the
-    // T popup's viz strip. Height kept smaller (40 px) since we're sharing
-    // the top row with the name.
-    const _vizX0=Math.min(px+pw-20, px+10+_nameDrawnW+(_tBroken?20:8)+30);
-    const _vizY=ry+6, _vizH=38, _vizW=Math.max(0, (px+pw-10)-_vizX0);
-    if(_vizW>40){
-      const sc=_vizH/CAR_H, cpw2=CAR_W*sc;
-      ctx.save(); ctx.beginPath(); ctx.rect(_vizX0,_vizY,_vizW,_vizH); ctx.clip();
-      let _scx=_vizX0;
+    // Sized so a full 12-car train (engine + 10 cars + caboose) fits within
+    // the visible window with the caboose trailing half-off the right edge.
+    // That gives a visible width = 11.5 base car widths; scale factor falls
+    // out: carDrawW = vizW/11.5, sc = carDrawW/CAR_W. Vertically centered on
+    // _NAME_CY so the name and viz share the same horizontal axis.
+    const _vizW = Math.max(0, (px+pw-10) - _VIZ_X0);
+    if(_vizW > 40){
+      const _carDrawW = _vizW / 11.5;
+      const sc = _carDrawW / CAR_W;
+      const _vizH = CAR_H * sc;
+      const _vizY = Math.round(_NAME_CY - _vizH/2);
+      // Hit-test rect for the cargo tooltip (uses the viz strip clip rect,
+      // not the full row, so hover doesn't trigger when the cursor is over
+      // the planet panes below).
+      routesPopupVizBounds.push({x:_VIZ_X0, y:_vizY, w:_vizW, h:_vizH, trainIdx:ti});
+      ctx.save(); ctx.beginPath(); ctx.rect(_VIZ_X0,_vizY,_vizW,_vizH); ctx.clip();
+      let _scx=_VIZ_X0;
       for(let ci=0;ci<train.cars.length;ci++){
-        const _cw=_carVizW(train.cars[ci],cpw2);
+        const _cw=_carVizW(train.cars[ci],_carDrawW);
         const _sn=getCarSprite(train.cars[ci],train.carFull?.[ci]??false);
         const _bp=SPRITE_BOT[_sn]||SPRITE_BOT[train.cars[ci]]||0;
         const _dy=~~(_vizY+_vizH*_bp);
@@ -16642,9 +16697,20 @@ function drawRoutesPopup(){
         else{ ctx.fillStyle=ci===0?'#4af':ci===train.cars.length-1?'#f84':'#888'; ctx.fillRect(_scx,_vizY,_cw-1,_vizH); }
         _scx+=_cw;
       }
-      const fg=ctx.createLinearGradient(_vizX0+_vizW*0.7,0,_vizX0+_vizW,0);
-      fg.addColorStop(0,'rgba(3,12,10,0)'); fg.addColorStop(1,'rgba(3,12,10,0.95)');
-      ctx.fillStyle=fg; ctx.fillRect(_vizX0,_vizY,_vizW,_vizH);
+      // Right-edge fade — matches the EFFECTIVE row background underneath so
+      // the gradient blends seamlessly instead of always fading to near-black.
+      // Effective color = drawPopupBase fill rgba(3,6,20,0.97) composited
+      // with the per-row tint (hovered teal, alternating dark teal, or none).
+      // Pre-blended approximations are used so the gradient stop matches what
+      // the eye actually sees on the row.
+      let _fadeRGB;
+      if(_routesRowHover===ri)      _fadeRGB='14,36,38';   // hovered teal wash
+      else if(ri%2===0)             _fadeRGB='7,16,23';    // even-row stripe
+      else                          _fadeRGB='3,6,20';     // popup base only
+      const fg=ctx.createLinearGradient(_VIZ_X0+_vizW*0.7,0,_VIZ_X0+_vizW,0);
+      fg.addColorStop(0,'rgba('+_fadeRGB+',0)');
+      fg.addColorStop(1,'rgba('+_fadeRGB+',1)');
+      ctx.fillStyle=fg; ctx.fillRect(_VIZ_X0,_vizY,_vizW,_vizH);
       ctx.restore();
     }
 
@@ -16661,34 +16727,130 @@ function drawRoutesPopup(){
 
     // Per-block geometry — leave ~18 px between block edges for the arrow.
     const ARROW_W=18;
-    const blockW=Math.max(40, Math.floor((rowW-(N-1)*ARROW_W)/N));
+    // Reference block widths at the breakpoints the user spec'd:
+    //   • _N4_blockW  — width at exactly 4 stops; used as the MAX for the
+    //                   sup/dem sub-column layout so 2- and 3-stop routes
+    //                   don't visually spread SUPPLY and DEMAND apart.
+    //   • _N5_blockW  — width at exactly 5 stops; used as the MIN for the
+    //                   actual pane width. Routes with 6+ stops freeze pane
+    //                   width here and overflow horizontally — a horizontal
+    //                   scrollbar at the bottom of the row lets the player
+    //                   pan to the 6th+ stops.
+    const _N4_blockW = Math.max(40, Math.floor((rowW - 3*ARROW_W) / 4));
+    const _N5_blockW = Math.max(40, Math.floor((rowW - 4*ARROW_W) / 5));
+    const _natBlockW = Math.max(40, Math.floor((rowW - (N-1)*ARROW_W) / N));
+    const blockW = Math.max(_N5_blockW, _natBlockW);
+    // Horizontal scroll: needed when the locked-min layout exceeds rowW.
+    const _hScrollKey = 'rowScrollX_'+ti;
+    const _totalContentW = N*blockW + (N-1)*ARROW_W;
+    const _maxHScroll = Math.max(0, _totalContentW - rowW);
+    let _hScroll = popupState[_hScrollKey]||0;
+    if(_hScroll>_maxHScroll) _hScroll=_maxHScroll;
+    if(_hScroll<0) _hScroll=0;
+    popupState[_hScrollKey]=_hScroll;
     const blockCxs=[];
     for(let bi=0;bi<N;bi++){
-      const _bx=rowX0+bi*(blockW+ARROW_W);
+      const _bx=rowX0+bi*(blockW+ARROW_W)-_hScroll;
       blockCxs.push(_bx+blockW/2);
     }
 
-    // Planet name row
-    const stopsY=ry+58;
-    ctx.font='bold 11px "Exo 2",sans-serif'; ctx.textAlign='center';
+    // Determine which planet (if any) the train is currently "at" — for
+    // departing/arriving/in-orbit states. Mid-transit (interplanetary or
+    // interstellar) returns -1 so no planet gets the IN ORBIT badge.
+    //   • orbit/waiting/blocked/queueing/descending → fromIdx (current stop)
+    //   • transit + transitDist < tail               → fromIdx (still departing)
+    //   • transit + transitDist >= lt.tanLen         → toIdx   (already arriving)
+    //   • otherwise (mid-transit)                    → -1
+    let _atPlanetIdx=-1;
+    {
+      const _rph=r.phase;
+      if(_rph==='orbit'||_rph==='waiting'||_rph==='blocked'||_rph==='queueing'||_rph==='descending'){
+        _atPlanetIdx=r.fromIdx;
+      } else if(_rph==='transit'){
+        const _fromP=_gp(r.stops[r.fromIdx]);
+        const _toP=_gp(r.stops[r.toIdx]);
+        const _lt=computeLiveTangent(_fromP,_toP,train.orbitR,r.arrivalOrbitR);
+        const _tail=_trainTailLen(train);
+        if(r.transitDist<_tail) _atPlanetIdx=r.fromIdx;
+        else if(_lt && r.transitDist>=_lt.tanLen) _atPlanetIdx=r.toIdx;
+      }
+    }
+    // Planet name row — _badgeY is the FIXED y the IN ORBIT / EN ROUTE
+    // badges paint at (above the pane outline), and stopsY sits a little
+    // further down to give the planet name visible separation from those
+    // badges so they don't visually merge into the outlined pane below.
+    const _badgeY = ry + 62;          // baseline for tiny IN ORBIT / EN ROUTE green labels
+    const stopsY  = ry + 82;          // planet-name baseline — 20 px below badge baseline
+    // Pane outline + click bounds start BELOW the badges so the outline
+    // never reaches up into them. Outline top sits 5 px below the badge
+    // baseline; outline runs down past the last cargo entry row with a
+    // small pad.
+    const _paneTopY = _badgeY + 5;    // = ry + 67
+    const _paneBotY = stopsY + 16 + 10 + 8*10 + 4; // colHdrY=stopsY+16, colsY0=+10, 8 rows × 10 + small pad
+    const _paneH = _paneBotY - _paneTopY;
+    const _paneR = 5;                 // corner radius for the rounded outline
+    // Clip the planet-chain content (badges + outlines + names + arrows +
+    // sup/dem columns) to the row content rect so overflowing horizontal
+    // content (when N >= 6) is hidden until the user scrolls right.
+    ctx.save();
+    ctx.beginPath(); ctx.rect(rowX0, _badgeY-8, rowW, (_paneBotY+6)-(_badgeY-8)); ctx.clip();
     for(let bi=0;bi<N;bi++){
       const sp=_gp(stops[bi]);
       const pn=sp?sp.name:'?';
-      const _bx=rowX0+bi*(blockW+ARROW_W);
-      // Highlight the from/to stops for the active segment
-      const _isActive=(bi===r.fromIdx||bi===r.toIdx);
-      ctx.fillStyle=_isActive?'rgba(255,220,80,0.95)':'rgba(170,220,210,0.85)';
+      const _bx=rowX0+bi*(blockW+ARROW_W)-_hScroll;
+      const _isAtThis = (_atPlanetIdx===bi);
+      // Register bounds for click + hover — aligned with the outline so the
+      // visible affordance, the hit-area, and the hover highlight all share
+      // the same rectangle. The badge sits ABOVE this rect and is
+      // intentionally not part of the click area.
+      const _stopBoundsIdx = routesPopupStopBounds.length;
+      if(sp){
+        routesPopupStopBounds.push({
+          x:_bx, y:_paneTopY, w:blockW, h:_paneH,
+          planetId: sp.id,
+        });
+      }
+      // Hover highlight — soft teal wash + rounded-rect outline.
+      if(sp && _routesStopHover===_stopBoundsIdx){
+        ctx.save();
+        ctx.fillStyle='rgba(60,180,150,0.18)';
+        ctx.beginPath(); ctx.roundRect(_bx,_paneTopY,blockW,_paneH,_paneR); ctx.fill();
+        ctx.strokeStyle='rgba(120,220,190,0.55)'; ctx.lineWidth=1;
+        ctx.beginPath(); ctx.roundRect(_bx+0.5,_paneTopY+0.5,blockW-1,_paneH-1,_paneR); ctx.stroke();
+        ctx.restore();
+      }
+      // "IN ORBIT" badge — tiny green text above the planet name. Only
+      // drawn for the single planet the train is actively at / arriving at
+      // / departing from. Mid-transit shows nothing.
+      if(_isAtThis){
+        ctx.font='bold 7px Orbitron,sans-serif'; ctx.textAlign='center';
+        ctx.fillStyle='rgba(80,220,120,0.92)';
+        ctx.fillText('IN ORBIT', _bx+blockW/2, _badgeY);
+      }
+      // Planet name — yellow ONLY for the at-this-planet stop; others stay
+      // neutral teal regardless of segment.
+      ctx.font='bold 11px "Exo 2",sans-serif'; ctx.textAlign='center';
+      ctx.fillStyle=_isAtThis?'rgba(255,220,80,0.95)':'rgba(170,220,210,0.85)';
       // Clip the name to blockW
       let _n=pn;
       while(ctx.measureText(_n).width>blockW-4&&_n.length>4) _n=_n.slice(0,-1);
       if(_n!==pn) _n+='…';
       ctx.fillText(_n,_bx+blockW/2,stopsY);
     }
-    // Arrows between blocks — color reflects direction + active segment
-    ctx.font='bold 13px Orbitron,sans-serif';
+    // Arrows between blocks — color reflects direction + active segment.
+    // When the train is mid-transit (not departing/arriving/in orbit at any
+    // planet), label the active arrow with a tiny green "EN ROUTE" badge in
+    // the same slot the IN ORBIT badge would occupy at a planet pane.
+    const _showEnRoute = (_atPlanetIdx===-1 && r.phase==='transit');
     for(let bi=0;bi<N-1;bi++){
-      const _bx=rowX0+bi*(blockW+ARROW_W)+blockW;
+      const _bx=rowX0+bi*(blockW+ARROW_W)+blockW-_hScroll;
       const _isActiveSep = (bi===r.fromIdx && bi+1===r.toIdx) || (bi+1===r.fromIdx && bi===r.toIdx);
+      if(_showEnRoute && _isActiveSep){
+        ctx.font='bold 7px Orbitron,sans-serif'; ctx.textAlign='center';
+        ctx.fillStyle='rgba(80,220,120,0.92)';
+        ctx.fillText('EN ROUTE', _bx+ARROW_W/2, _badgeY);
+      }
+      ctx.font='bold 13px Orbitron,sans-serif'; ctx.textAlign='center';
       ctx.fillStyle=_isActiveSep?'rgba(255,200,50,0.95)':'rgba(120,180,160,0.65)';
       ctx.fillText(sepStr,_bx+ARROW_W/2,stopsY);
     }
@@ -16700,34 +16862,81 @@ function drawRoutesPopup(){
     const N_CARGO=8;
     for(let bi=0;bi<N;bi++){
       const sp=_gp(stops[bi]); if(!sp) continue;
-      const _bx=rowX0+bi*(blockW+ARROW_W);
-      const subW=Math.floor((blockW-4)/2);
-      const supX=_bx+2, demX=_bx+2+subW+2;
-      // Headers
+      const _bx=rowX0+bi*(blockW+ARROW_W)-_hScroll;
+      // Inset the sup/dem columns inside the pane outline so the headers and
+      // entries aren't kissing the outline border. Two sub-columns, each gets
+      // (innerW - gap)/2 of width. For wider panes (2- or 3-stop routes),
+      // cap the effective sub-column block width to the 4-stop width so
+      // SUPPLY and DEMAND don't drift apart visually; the cluster is then
+      // centered horizontally within the actual blockW so the pane outline
+      // still hugs the full planet-name column.
+      const _PANE_PAD=8;
+      const _SUB_GAP=4;
+      const _subBlockW=Math.min(blockW, _N4_blockW);
+      const _innerW=_subBlockW-2*_PANE_PAD;
+      const subW=Math.floor((_innerW-_SUB_GAP)/2);
+      const _subClusterX0=_bx+Math.floor((blockW-_subBlockW)/2);
+      const supX=_subClusterX0+_PANE_PAD;
+      const demX=supX+subW+_SUB_GAP;
+      // Headers — measured BEFORE switching to the entry font, so the
+      // anchor X for the 'x' character of each entry can lock to the left
+      // edge of the LAST letter of the header word ('Y' in SUPPLY, 'D' in
+      // DEMAND). Using the still-active 7px Orbitron font for the measure.
       ctx.font='bold 7px Orbitron,sans-serif'; ctx.textAlign='left';
       ctx.fillStyle='rgba(80,200,255,0.70)'; ctx.fillText('SUPPLY',supX,colHdrY);
       ctx.fillStyle='rgba(255,170,60,0.70)'; ctx.fillText('DEMAND',demX,colHdrY);
-      // Entries
+      const _supXmark=supX+ctx.measureText('SUPPL').width; // x-anchor for supply entries
+      const _demXmark=demX+ctx.measureText('DEMAN').width; // x-anchor for demand entries
+      // Entries — render the cargo short name (left-aligned in its sub-
+      // column) and the "x<n>" portion as separate fillText calls so the
+      // 'x' character of every row lands at the same X column. The cargo
+      // name auto-truncates to whatever fits between supX/demX and the
+      // x-anchor (minus a 2px gap) so it never collides with the count.
       const _fmt=v=>Math.floor(v).toString();
       const supEntries=_planetTopN(sp,'supply',N_CARGO);
       const demEntries=_planetTopN(sp,'demand',N_CARGO);
       ctx.font='8px "Exo 2",sans-serif';
       ctx.fillStyle='rgba(80,200,255,0.85)';
+      const _supNameMaxW=Math.max(8, _supXmark-supX-2);
       for(let ei=0;ei<supEntries.length;ei++){
         const [ct,v]=supEntries[ei];
-        const _txt=(CARGO_SHORT[ct]||ct.slice(0,5).toUpperCase())+' x'+_fmt(v);
-        let _t=_txt; while(ctx.measureText(_t).width>subW-2 && _t.length>2) _t=_t.slice(0,-1);
-        ctx.fillText(_t,supX,colsY0+ei*colStep);
+        const _y=colsY0+ei*colStep;
+        let _name=CARGO_SHORT[ct]||ct.slice(0,5).toUpperCase();
+        while(ctx.measureText(_name).width>_supNameMaxW && _name.length>2) _name=_name.slice(0,-1);
+        ctx.fillText(_name,supX,_y);
+        ctx.fillText('x'+_fmt(v),_supXmark,_y);
       }
       if(!supEntries.length){ ctx.fillStyle='rgba(80,150,200,0.35)'; ctx.fillText('none',supX,colsY0); }
       ctx.fillStyle='rgba(255,170,60,0.85)';
+      const _demNameMaxW=Math.max(8, _demXmark-demX-2);
       for(let ei=0;ei<demEntries.length;ei++){
         const [ct,v]=demEntries[ei];
-        const _txt=(CARGO_SHORT[ct]||ct.slice(0,5).toUpperCase())+' x'+_fmt(v);
-        let _t=_txt; while(ctx.measureText(_t).width>subW-2 && _t.length>2) _t=_t.slice(0,-1);
-        ctx.fillText(_t,demX,colsY0+ei*colStep);
+        const _y=colsY0+ei*colStep;
+        let _name=CARGO_SHORT[ct]||ct.slice(0,5).toUpperCase();
+        while(ctx.measureText(_name).width>_demNameMaxW && _name.length>2) _name=_name.slice(0,-1);
+        ctx.fillText(_name,demX,_y);
+        ctx.fillText('x'+_fmt(v),_demXmark,_y);
       }
       if(!demEntries.length){ ctx.fillStyle='rgba(200,130,40,0.35)'; ctx.fillText('none',demX,colsY0); }
+    }
+    // Close the per-row horizontal-scroll content clip.
+    ctx.restore();
+
+    // Horizontal scrollbar at the bottom of the row, shown when the locked-
+    // min pane width forces content wider than rowW (N ≥ 6 in practice).
+    if(_maxHScroll>0){
+      const _hSbY=ry+ROW-8;
+      const _hSbH=4;
+      const _thumbW=Math.max(20, rowW*(rowW/_totalContentW));
+      const _thumbX=rowX0 + (_maxHScroll>0 ? (_hScroll/_maxHScroll)*(rowW-_thumbW) : 0);
+      ctx.fillStyle='rgba(10,40,32,0.30)'; ctx.fillRect(rowX0,_hSbY,rowW,_hSbH);
+      ctx.fillStyle='rgba(100,210,170,0.55)'; ctx.fillRect(_thumbX,_hSbY,_thumbW,_hSbH);
+      _regScrollbar({
+        axis:'x', x:rowX0, y:_hSbY, w:rowW, h:_hSbH,
+        thumbX:_thumbX, thumbY:_hSbY, thumbW:_thumbW, thumbH:_hSbH,
+        maxScroll:_maxHScroll,
+        setScroll:(v)=>{ popupState[_hScrollKey]=v; },
+      });
     }
 
     // Row divider
@@ -16747,6 +16956,67 @@ function drawRoutesPopup(){
     ctx.fillStyle='rgba(10,40,32,0.30)'; ctx.fillRect(px+pw-6,listY,4,listH);
     ctx.fillStyle='rgba(100,210,170,0.55)'; ctx.fillRect(px+pw-6,sbY,4,sbH);
     _regScrollbar({x:px+pw-6,y:listY,w:4,h:listH,thumbY:sbY,thumbH:sbH,maxScroll:_maxSt,setScroll:(v)=>{popupState.scroll=v;}});
+  }
+  ctx.restore();
+}
+
+// ── ROUTES train-viz cargo tooltip ──────────────────────────
+// Hover the train viz strip in the Routes popup for 500ms → tooltip lists
+// each unique cargo-CAR-TYPE on the train ("PSNGR x2", "ORE x1", …). Counts
+// cars by CAR_CARGO_TYPE[carName] so engines and the caboose (no cargo
+// type) are excluded automatically. Rendered LAST (after every popup +
+// top bar + panel tabs) so it always sits on top. Anchored near the
+// cursor; clamped to keep below the top UI bar and inside the canvas.
+function _drawRoutesVizTooltip(){
+  if(activePopup!=='routes') return;
+  if(_routesVizHover<0) return;
+  if(!_routesVizHoverStartMs) return;
+  if(Date.now()-_routesVizHoverStartMs < 500) return;
+  const _vb=routesPopupVizBounds[_routesVizHover];
+  if(!_vb) return;
+  const train=trains[_vb.trainIdx];
+  if(!train) return;
+  // Aggregate car-type counts. CAR_CARGO_TYPE only has entries for cargo
+  // cars (engines + caboose return undefined and are skipped).
+  const counts={};
+  for(const car of train.cars){
+    const _ct=CAR_CARGO_TYPE[car];
+    if(!_ct) continue;
+    counts[_ct]=(counts[_ct]||0)+1;
+  }
+  const entries=Object.entries(counts).sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0]));
+  if(entries.length===0) return;
+  // Build the lines and measure max width.
+  ctx.save();
+  ctx.font='bold 10px "Exo 2",sans-serif';
+  const lines=entries.map(([ct,n])=>(CARGO_SHORT[ct]||ct.slice(0,5).toUpperCase())+' x'+n);
+  let _maxLineW=0;
+  for(const ln of lines){ const _w=ctx.measureText(ln).width; if(_w>_maxLineW) _maxLineW=_w; }
+  const _pad=8, _lh=14;
+  const _tw=_maxLineW+_pad*2;
+  const _th=lines.length*_lh+_pad*2;
+  // Place above cursor by default. Flip below if it would clip into the
+  // top UI bar. Clamp horizontally inside the canvas.
+  let _tx=Math.round(_routesVizHoverCpX+14);
+  let _ty=Math.round(_routesVizHoverCpY-_th-10);
+  if(_tx+_tw>W-6) _tx=W-6-_tw;
+  if(_tx<6) _tx=6;
+  if(_ty<TOP_H+4){
+    _ty=Math.round(_routesVizHoverCpY+18); // flip below cursor
+  }
+  if(_ty+_th>H-6) _ty=H-6-_th;
+  if(_ty<TOP_H+4) _ty=TOP_H+4;
+  // Render the bubble.
+  ctx.shadowColor='rgba(0,0,0,0.75)'; ctx.shadowBlur=14;
+  ctx.fillStyle='rgba(8,18,26,0.97)';
+  ctx.beginPath(); ctx.roundRect(_tx,_ty,_tw,_th,5); ctx.fill();
+  ctx.shadowBlur=0;
+  ctx.strokeStyle='rgba(120,220,190,0.55)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.roundRect(_tx,_ty,_tw,_th,5); ctx.stroke();
+  ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+  ctx.fillStyle='rgba(210,235,225,0.95)';
+  for(let i=0;i<lines.length;i++){
+    ctx.fillText(lines[i], _tx+_pad, _ty+_pad+_lh-3+i*_lh);
   }
   ctx.restore();
 }
@@ -17436,7 +17706,9 @@ function drawGalaxy(ts,dt){
     }
   }
   _drawCargoParticles();
-  _drawCreditFloats();
+  _drawCreditFloats();      // world-space (cargo revenue at planets)
+  _drawCreditFloats(true);  // screen-space (UI refunds etc.) — drawn here so
+                            // BOTH variants sit UNDER any open popup window.
 
   // Ring front halves — drawn after trains so trains appear behind the near side of rings
   for(const p of galaxy.planets){
@@ -17614,9 +17886,9 @@ function drawGalaxy(ts,dt){
     // Line 2: per-segment distances (or just total for 1 segment)
     ctx.font='12px "Exo 2",sans-serif'; ctx.fillStyle='#8bc';
     if(segCount===1){
-      ctx.fillText(`Distance: ${totalDist.toLocaleString()} AU`,14,GH+38);
+      ctx.fillText(`Distance: ${totalDist.toLocaleString()} SU`,14,GH+38);
     } else {
-      const segStr=segDists.map(d=>d.toLocaleString()).join(' + ')+` = ${totalDist.toLocaleString()} AU`;
+      const segStr=segDists.map(d=>d.toLocaleString()).join(' + ')+` = ${totalDist.toLocaleString()} SU`;
       ctx.fillText(segStr,14,GH+38);
     }
     // Line 3: star path / system info
@@ -17706,7 +17978,7 @@ function drawGalaxy(ts,dt){
       ctx.fillText(s.name,textX,GH+22);
       ctx.font='12px "Exo 2",sans-serif'; ctx.fillStyle='#8bc';
       ctx.fillText(`Coords: (${Math.round(s.x/100)}, ${Math.round(s.y/100)})`,textX,GH+40);
-      ctx.fillText(`${s.planetIds.length} planet${s.planetIds.length!==1?'s':''}  ·  Radius: ${s.radius} AU`,textX,GH+56);
+      ctx.fillText(`${s.planetIds.length} planet${s.planetIds.length!==1?'s':''}  ·  Radius: ${s.radius} SU`,textX,GH+56);
     } else {
       ctx.fillStyle='rgba(60,80,140,0.6)';
       ctx.fillText('UNKNOWN STAR',textX,GH+22);
@@ -17720,7 +17992,7 @@ function drawGalaxy(ts,dt){
     const nW=ctx.measureText(s.name).width;
     ctx.font='12px "Exo 2",sans-serif';
     const cW=ctx.measureText(`Coords: (${Math.round(s.x/100)}, ${Math.round(s.y/100)})`).width;
-    const rW=ctx.measureText(`${s.planetIds.length} planet${s.planetIds.length!==1?'s':''}  ·  Radius: ${s.radius} AU`).width;
+    const rW=ctx.measureText(`${s.planetIds.length} planet${s.planetIds.length!==1?'s':''}  ·  Radius: ${s.radius} SU`).width;
     const stripX=textX+Math.max(nW,cW,rW)+28;
     const sPlanets=s.planetIds.map(id=>galaxy.planets[id]).filter(Boolean).sort((a,b)=>a.orbitRadius-b.orbitRadius);
     const psc=36/432; // XXL r=432 → display r=36 fills BAR_H=72
@@ -17828,7 +18100,7 @@ function drawGalaxy(ts,dt){
       ctx.fillText(p.name+(p.isStarter?' [HOME]':''),textX,GH+22);
       ctx.font='12px "Exo 2",sans-serif'; ctx.fillStyle='#8bc';
       // Row 2: Type · Size · Orbit (Orbit appended on the same left-column row)
-      ctx.fillText(`Type: ${p.type.id.toUpperCase()}  ·  Size: ${p.size}  ·  Orbit: ${Math.round(p.orbitRadius)} AU`,textX,GH+40);
+      ctx.fillText(`Type: ${p.type.id.toUpperCase()}  ·  Size: ${p.size}  ·  Orbit: ${Math.round(p.orbitRadius)} SU`,textX,GH+40);
       // Row 3: Star: NAME · Coords: (X, Y) — Star name remains clickable
       ctx.fillStyle='#8bc';
       ctx.fillText('Star: ',textX,GH+56);
@@ -17937,7 +18209,7 @@ function drawGalaxy(ts,dt){
       ctx.strokeStyle='rgba(100,140,200,0.3)'; ctx.lineWidth=1;
       ctx.beginPath(); ctx.roundRect(barX,barY,barW,barH,3); ctx.stroke();
       ctx.textAlign='right'; ctx.font='11px "Exo 2",sans-serif'; ctx.fillStyle='rgba(160,200,240,0.75)';
-      ctx.fillText(`${spd2.toFixed(1)} AU/s`,W-PANEL_W-12,GH+40);
+      ctx.fillText(`${spd2.toFixed(1)} SU/s`,W-PANEL_W-12,GH+40);
     }
     // Line 3: coords  |  seg%  |  cancel route btn
     ctx.textAlign='left'; ctx.font='11px "Exo 2",sans-serif'; ctx.fillStyle='rgba(120,160,200,0.6)';
@@ -18236,9 +18508,10 @@ function drawGalaxy(ts,dt){
   drawCorpPopup();
   drawCeoHirePopup();
   drawQuitConfirmPopup();
-  // [M] missions callout bubble moved before popups block above
-  // Screen-space credit floats drawn after all popups so they appear above popup UI
-  _drawCreditFloats(true);
+  // [M] missions callout bubble moved before popups block above.
+  // (Credit floats — both world- and screen-space — are now drawn BEFORE
+  // the popup chain in the section above, so any open popup paints over
+  // them rather than the other way around.)
   // Top bar always on top; panel folder tabs drawn over top bar in panel area
   drawTopBar();
   drawPanelTabs();
@@ -18259,6 +18532,10 @@ function drawGalaxy(ts,dt){
   // Supply/Demand hover tooltip drawn LAST so it floats on top of any
   // tutorial highlight box/bubble that overlaps the same area.
   _drawStationHoverTooltipOverlay();
+  // ROUTES train-viz cargo tooltip — drawn LAST so it sits above the top
+  // bar, panel tabs, all popups, and any tutorial bubbles. Only fires when
+  // the user has hovered a train viz strip in the ROUTES popup for ≥500ms.
+  _drawRoutesVizTooltip();
   if(_newspaper) _drawNewspaper();
 }
 
@@ -18360,7 +18637,7 @@ function galaxyClick(sx,sy,shiftKey){
 }
 
 // ── panel click ──────────────────────────────────────────────
-function panelClick(sx,sy){
+function panelClick(sx,sy,shiftKey){
   if(!galaxy) return;
   // Tab switch: header area (y < TOP_H), only when not in assignPending mode
   if(sy<TOP_H&&!assignPending){
@@ -18373,6 +18650,30 @@ function panelClick(sx,sy){
     const ri=Math.floor((sy-TOP_H+stationPanelScroll)/ROW_H);
     if(ri<0||ri>=stationPlanets.length) return;
     const sp=stationPlanets[ri];
+    // ── SHIFT+CLICK extends the route from the Stations panel ──
+    // Mirrors the galaxy-view shift-click flow but stays in the Stations
+    // tab (the auto-switch to Trains is reserved for the ASSIGN-TO-TRAIN
+    // button click downstream). Requires routeStops to already have at
+    // least one stop (set by a prior plain-click seeding, either here in
+    // the panel or from the galaxy view).
+    if(shiftKey && routeStops.length>=1){
+      const _last=routeStops[routeStops.length-1];
+      // Skip exact-duplicate consecutive entries — clicking the same
+      // station twice in a row shouldn't bloat the route.
+      if(!_last || _last.id!==sp.id){
+        routeStops.push(sp);
+      }
+      // Keep `sel` pointing at a planet so the ASSIGN TO TRAIN button
+      // stays visible (its render gate requires sel to be planet/star).
+      sel={type:'planet',data:sp};
+      assignPending=false; routeHerePending=false;
+      // Center camera on the newly added stop; release follow-cam tracking
+      // so the camera doesn't immediately snap back to a previously tracked
+      // selection.
+      cam.x=sp.x; cam.y=sp.y; clampCamera();
+      tracking=false;
+      return;
+    }
     const alreadySelected=sel&&sel.type==='planet'&&sel.data.id===sp.id;
     if(alreadySelected){
       const pos=getSelWorldPos();
@@ -18875,18 +19176,30 @@ canvas.addEventListener('mousedown',e=>{
   // the thumb to centre on the click, then continue dragging from there.
   for(const _sb of _sbBounds){
     if(cp.x>=_sb.x&&cp.x<=_sb.x+_sb.w&&cp.y>=_sb.y&&cp.y<=_sb.y+_sb.h){
+      const _horiz=(_sb.axis==='x');
       let _startScroll;
-      if(cp.y>=_sb.thumbY&&cp.y<=_sb.thumbY+_sb.thumbH){
-        // Click landed on the thumb — start dragging from current scroll.
-        _startScroll=_sb.maxScroll*((_sb.thumbY-_sb.y)/Math.max(1,_sb.h-_sb.thumbH));
+      if(_horiz){
+        if(cp.x>=_sb.thumbX&&cp.x<=_sb.thumbX+_sb.thumbW){
+          _startScroll=_sb.maxScroll*((_sb.thumbX-_sb.x)/Math.max(1,_sb.w-_sb.thumbW));
+        } else {
+          const _newThumbX=Math.max(_sb.x,Math.min(_sb.x+_sb.w-_sb.thumbW,cp.x-_sb.thumbW/2));
+          _startScroll=_sb.maxScroll*((_newThumbX-_sb.x)/Math.max(1,_sb.w-_sb.thumbW));
+          _sb.setScroll(_startScroll);
+        }
+        _sbDrag={entry:_sb,startCp:cp.x,startScroll:_startScroll};
       } else {
-        // Click landed on the empty track — jump the thumb so its centre is
-        // at the click point, then continue dragging from there.
-        const _newThumbY=Math.max(_sb.y,Math.min(_sb.y+_sb.h-_sb.thumbH,cp.y-_sb.thumbH/2));
-        _startScroll=_sb.maxScroll*((_newThumbY-_sb.y)/Math.max(1,_sb.h-_sb.thumbH));
-        _sb.setScroll(_startScroll);
+        if(cp.y>=_sb.thumbY&&cp.y<=_sb.thumbY+_sb.thumbH){
+          // Click landed on the thumb — start dragging from current scroll.
+          _startScroll=_sb.maxScroll*((_sb.thumbY-_sb.y)/Math.max(1,_sb.h-_sb.thumbH));
+        } else {
+          // Click landed on the empty track — jump the thumb so its centre is
+          // at the click point, then continue dragging from there.
+          const _newThumbY=Math.max(_sb.y,Math.min(_sb.y+_sb.h-_sb.thumbH,cp.y-_sb.thumbH/2));
+          _startScroll=_sb.maxScroll*((_newThumbY-_sb.y)/Math.max(1,_sb.h-_sb.thumbH));
+          _sb.setScroll(_startScroll);
+        }
+        _sbDrag={entry:_sb,startCp:cp.y,startScroll:_startScroll};
       }
-      _sbDrag={entry:_sb,startY:cp.y,startScroll:_startScroll};
       return; // skip drag-pan + popup click handlers for this mousedown
     }
   }
@@ -19097,14 +19410,27 @@ canvas.addEventListener('mousemove',e=>{
     for(let _ri=0;_ri<trainsPopupRowBounds.length;_ri++){const _rb=trainsPopupRowBounds[_ri];if(cp.x>=_rb.x&&cp.x<=_rb.x+_rb.w&&cp.y>=_rb.y&&cp.y<=_rb.y+_rb.h){_trainRowHover=_ri;break;}}
     if(_trainAddHover||_trainRowHover>=0) canvas.style.cursor='pointer';
   } else { _trainAddHover=false; _trainRowHover=-1; }
-  // Hover tracking for ROUTES popup rows + [ESC] close label
+  // Hover tracking for ROUTES popup rows + per-stop panes + [ESC] close label
   if(activePopup==='routes'){
     _routesRowHover=-1;
     for(let _ri=0;_ri<routesPopupRowBounds.length;_ri++){const _rb=routesPopupRowBounds[_ri];if(cp.x>=_rb.x&&cp.x<=_rb.x+_rb.w&&cp.y>=_rb.y&&cp.y<=_rb.y+_rb.h){_routesRowHover=_ri;break;}}
+    _routesStopHover=-1;
+    for(let _si=0;_si<routesPopupStopBounds.length;_si++){const _sb=routesPopupStopBounds[_si];if(cp.x>=_sb.x&&cp.x<=_sb.x+_sb.w&&cp.y>=_sb.y&&cp.y<=_sb.y+_sb.h){_routesStopHover=_si;break;}}
+    // Train-viz hover with 500ms delay. Tracks both the index and a real-time
+    // start timestamp. Moving between viz strips (different train idx) resets
+    // the timer. Cursor position is captured so the tooltip can anchor near
+    // the pointer (clamped to canvas bounds in _drawRoutesVizTooltip).
+    let _vh=-1;
+    for(let _vi=0;_vi<routesPopupVizBounds.length;_vi++){const _vb=routesPopupVizBounds[_vi];if(cp.x>=_vb.x&&cp.x<=_vb.x+_vb.w&&cp.y>=_vb.y&&cp.y<=_vb.y+_vb.h){_vh=_vi;break;}}
+    if(_vh!==_routesVizHover){
+      _routesVizHover=_vh;
+      _routesVizHoverStartMs=_vh>=0?Date.now():0;
+    }
+    if(_vh>=0){ _routesVizHoverCpX=cp.x; _routesVizHoverCpY=cp.y; }
     const _reb=popupState.routesEscBounds;
     popupState.routesEscHover=!!(_reb&&cp.x>=_reb.x&&cp.x<=_reb.x+_reb.w&&cp.y>=_reb.y&&cp.y<=_reb.y+_reb.h);
-    if(_routesRowHover>=0||popupState.routesEscHover) canvas.style.cursor='pointer';
-  } else { _routesRowHover=-1; }
+    if(_routesRowHover>=0||_routesStopHover>=0||popupState.routesEscHover) canvas.style.cursor='pointer';
+  } else { _routesRowHover=-1; _routesStopHover=-1; _routesVizHover=-1; _routesVizHoverStartMs=0; }
   // Hover tracking for planet registry sort + rows
   if(activePopup==='pokedex'){
     _pokedexSortHover=!!(pokedexSortBounds&&cp.x>=pokedexSortBounds.x&&cp.x<=pokedexSortBounds.x+pokedexSortBounds.w&&cp.y>=pokedexSortBounds.y&&cp.y<=pokedexSortBounds.y+pokedexSortBounds.h);
@@ -19152,9 +19478,11 @@ canvas.addEventListener('mousemove',e=>{
     popupState.missionTrackerToggleHover=!!(_mttb&&cp.x>=_mttb.x&&cp.x<=_mttb.x+_mttb.w&&cp.y>=_mttb.y&&cp.y<=_mttb.y+_mttb.h);
     const _ctlbb=popupState.controlsBtnBounds;
     popupState.controlsBtnHover=!!(_ctlbb&&cp.x>=_ctlbb.x&&cp.x<=_ctlbb.x+_ctlbb.w&&cp.y>=_ctlbb.y&&cp.y<=_ctlbb.y+_ctlbb.h);
+    const _osbb=popupState.optionsSaveBtnBounds;
+    popupState.optionsSaveBtnHover=!!(_osbb&&cp.x>=_osbb.x&&cp.x<=_osbb.x+_osbb.w&&cp.y>=_osbb.y&&cp.y<=_osbb.y+_osbb.h);
     const _oeb=popupState.optionsEscBounds;
     popupState.optionsEscHover=!!(_oeb&&cp.x>=_oeb.x&&cp.x<=_oeb.x+_oeb.w&&cp.y>=_oeb.y&&cp.y<=_oeb.y+_oeb.h);
-    if(popupState.fogToggleHover||popupState.addCreditsHover||popupState.flowerPlanetHover||popupState.colonyPlanetHover||popupState.rivalBtnHover||popupState.autosaveToggleHover||popupState.missionTrackerToggleHover||popupState.controlsBtnHover||popupState.optionsEscHover) canvas.style.cursor='pointer';
+    if(popupState.fogToggleHover||popupState.addCreditsHover||popupState.flowerPlanetHover||popupState.colonyPlanetHover||popupState.rivalBtnHover||popupState.autosaveToggleHover||popupState.missionTrackerToggleHover||popupState.controlsBtnHover||popupState.optionsSaveBtnHover||popupState.optionsEscHover) canvas.style.cursor='pointer';
   }
   // Controls popup — [ESC] close hit detection (lives in its own block since
   // the Options/Cheats hover detector only runs while those two popups are
@@ -19276,13 +19604,15 @@ canvas.addEventListener('mousemove',e=>{
     }
   } else { _chatLogHover=false; _missionTrackerHover=-1; }
   // Scrollbar drag: update scroll proportional to mouse delta. pxPerScroll
-  // = maxScroll / (trackH - thumbH) so dragging the thumb pixel-for-pixel
-  // moves the content at the matching rate.
+  // = maxScroll / (trackLen - thumbLen) so dragging the thumb pixel-for-
+  // pixel moves the content at the matching rate. Works for both vertical
+  // and horizontal scrollbars based on the entry's `axis` field.
   if(_sbDrag){
     const _entry=_sbDrag.entry;
-    const _dy=cp.y-_sbDrag.startY;
-    const _denom=Math.max(1,_entry.h-_entry.thumbH);
-    const _newScroll=Math.max(0,Math.min(_entry.maxScroll,_sbDrag.startScroll+_dy*(_entry.maxScroll/_denom)));
+    const _horiz=(_entry.axis==='x');
+    const _delta = _horiz ? (cp.x-_sbDrag.startCp) : (cp.y-_sbDrag.startCp);
+    const _denom = Math.max(1, _horiz ? (_entry.w-_entry.thumbW) : (_entry.h-_entry.thumbH));
+    const _newScroll=Math.max(0,Math.min(_entry.maxScroll,_sbDrag.startScroll+_delta*(_entry.maxScroll/_denom)));
     _entry.setScroll(_newScroll);
     return;
   }
@@ -19846,6 +20176,15 @@ canvas.addEventListener('mouseup',e=>{
           return;
         }
       }
+      // Options: SAVE GAME button — identical behavior to the SAVE GAME
+      // button in the quit-confirm popup (calls saveGame()).
+      if(activePopup==='options'&&popupState.optionsSaveBtnBounds){
+        const b=popupState.optionsSaveBtnBounds;
+        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+          saveGame();
+          return;
+        }
+      }
       // Options: Autosave toggle — flips the global flag; persisted in saves.
       if(activePopup==='options'&&popupState.autosaveToggleBounds){
         const b=popupState.autosaveToggleBounds;
@@ -20143,11 +20482,29 @@ canvas.addEventListener('mouseup',e=>{
           }
         }
         // Double-click route panel → open train detail popup for that train
-        // (matches the T popup's row-dbl-click convention).
+        // (matches the T popup's row-dbl-click convention). Checked BEFORE
+        // the per-stop single-click handler so a double-click on a planet
+        // pane still resolves as "open train detail" rather than racing
+        // with the per-stop branch.
         if(isDbl&&routesPopupRowBounds.length){
           for(const b of routesPopupRowBounds){
             if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
               activePopup='train'; popupState={trainIdx:b.trainIdx};
+              return;
+            }
+          }
+        }
+        // Single-click on a per-stop planet pane → open that planet's
+        // detail popup. Each pane spans the planet name + supply/demand
+        // sub-columns, registered in routesPopupStopBounds during draw.
+        if(!isDbl&&routesPopupStopBounds.length){
+          for(const b of routesPopupStopBounds){
+            if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+              const _spl=galaxy.planets[b.planetId];
+              if(_spl){
+                activePopup='planet'; popupState={planet:_spl};
+                updateCargoSupplyDemand(0);
+              }
               return;
             }
           }
@@ -20418,7 +20775,7 @@ canvas.addEventListener('mouseup',e=>{
       }
       // Click outside popup → close
       const popupW=activePopup==='pokedex'?460:activePopup==='starregistry'?460:activePopup==='train'?430:activePopup==='planet'?470:activePopup==='star'?520:activePopup==='trains'?580:activePopup==='trainbuilder'?620:activePopup==='quitconfirm'?390:activePopup==='finances'?580:activePopup==='corp'?570:activePopup==='ceohire'?700:activePopup==='car_unlock'?320:activePopup==='car_detail'?460:activePopup==='rival_founded'?460:activePopup==='ancient_message'?520:activePopup==='savemanager'?560:activePopup==='controls'?620:activePopup==='routes'?620:300;
-      const popupH=activePopup==='pokedex'?390:activePopup==='starregistry'?390:activePopup==='train'?430:activePopup==='planet'?416:activePopup==='star'?390:activePopup==='trains'?430:activePopup==='trainbuilder'?444:activePopup==='quitconfirm'?110:activePopup==='options'?240:activePopup==='cheats'?270:activePopup==='finances'?400:activePopup==='corp'?440:activePopup==='ceohire'?370:activePopup==='car_unlock'?230:activePopup==='car_detail'?430:activePopup==='rival_founded'?420:activePopup==='ancient_message'?320:activePopup==='savemanager'?420:activePopup==='controls'?300:activePopup==='routes'?440:130;
+      const popupH=activePopup==='pokedex'?390:activePopup==='starregistry'?390:activePopup==='train'?430:activePopup==='planet'?416:activePopup==='star'?390:activePopup==='trains'?430:activePopup==='trainbuilder'?444:activePopup==='quitconfirm'?110:activePopup==='options'?280:activePopup==='cheats'?270:activePopup==='finances'?400:activePopup==='corp'?440:activePopup==='ceohire'?370:activePopup==='car_unlock'?230:activePopup==='car_detail'?430:activePopup==='rival_founded'?420:activePopup==='ancient_message'?320:activePopup==='savemanager'?420:activePopup==='controls'?300:activePopup==='routes'?440:130;
       const ppx=(W-popupW)/2, ppy=(H-popupH)/2;
       let _outsidePopup=cp.x<ppx||cp.x>ppx+popupW||cp.y<ppy||cp.y>ppy+popupH;
       if(_outsidePopup&&activePopup==='planet'&&popupState._upgradePanelBounds){
@@ -20542,7 +20899,7 @@ canvas.addEventListener('mouseup',e=>{
       if(isDbl){
         panelDblClick(cp.x,cp.y);
       } else {
-        panelClick(cp.x,cp.y);
+        panelClick(cp.x,cp.y,e.shiftKey);
       }
       return;
     }
@@ -20785,10 +21142,19 @@ document.addEventListener('keydown',e=>{
     // while any popup is open OR a name-edit input has focus so SPACE in
     // text fields doesn't pause the world. Repeats are ignored so holding
     // the key doesn't ping-pong every frame.
+    //
+    // Special case: if the game is currently paused (gameSpeedIdx===0) but
+    // there is NO stashed resume tier, the player got into the paused state
+    // by clicking the speed-slowdown arrow down to 0 (not by SPACE). In
+    // that case SPACE should still unpause — defaulting to 1× (the standard
+    // gameplay speed) so the player isn't stuck in pause.
     if(e.key===' ' && !e.repeat && !activePopup && nameEditEl.style.display!=='block'){
       if(_spacePauseResumeIdx!=null){
         gameSpeedIdx=Math.max(0,Math.min(SPEED_OPTS.length-1, _spacePauseResumeIdx|0));
         _spacePauseResumeIdx=null;
+      } else if(gameSpeedIdx===0){
+        // Paused via the slowdown arrow → resume at 1×.
+        gameSpeedIdx=SPEED_DEFAULT_IDX;
       } else {
         _spacePauseResumeIdx=gameSpeedIdx;
         gameSpeedIdx=0;
