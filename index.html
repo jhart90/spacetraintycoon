@@ -5520,14 +5520,14 @@ function _initAICorp(){
   //        AI then routes it desert → star (hazmat dispose) → some non-Large station once iron flows)
   const _lavaPlanet  = aiStarPlanets.find(p=>p.type.id==='lava')   || aiStarPlanets[0];
   const _desertPlanet= aiStarPlanets.find(p=>p.type.id==='desert') || aiStarPlanets[2];
-  // Train 1: ore hauler — lava → desert
-  const _t1Cars=['engine_constellation','car_passenger','car_mail','car_ore','car_ore','caboose'];
+  // Train 1: ore hauler — lava → desert (3× ore cars for higher throughput)
+  const _t1Cars=['engine_constellation','car_passenger','car_mail','car_ore','car_ore','car_ore','caboose'];
   const aiTrainIdx=trains.length;
   const aiTrain=makeGalaxyTrain(AI_CORP_NAMES[diff].split(' ')[0]+' No.1',_lavaPlanet?.id||aiHomePlanet.id,'LOW',_t1Cars,false);
   aiTrain.color=AI_CORP_COLOR;
   trains.push(aiTrain);
-  // Train 2: water hauler — resort → desert
-  const _t2Cars=['engine_constellation','car_passenger','car_mail','car_water_tank','car_water_tank','caboose'];
+  // Train 2: water hauler — resort → desert (3× water cars for higher throughput)
+  const _t2Cars=['engine_constellation','car_passenger','car_mail','car_water_tank','car_water_tank','car_water_tank','caboose'];
   const _t2Idx=trains.length;
   const _t2=makeGalaxyTrain(AI_CORP_NAMES[diff].split(' ')[0]+' No.2',aiHomePlanet.id,'LOW',_t2Cars,false);
   _t2.color=AI_CORP_COLOR;
@@ -6137,8 +6137,14 @@ function _aiDecide(){
     // refit+station+foundry spend blows past revenue while rev-per-train still looks
     // OK on paper. Without this, AI spends into negative credits then chokes.
     const _costRecov=(_aiCorp.totalCosts||0)>0 ? ((_aiCorp.totalRevenue||0)/(_aiCorp.totalCosts||1)) : Infinity;
-    const _profitGuardOK=_trCount<3||_costRecov>=0.20;
-    const _buyGuardOK=_trCount<3||(_revPerTrainPerSd>=_MIN_REV_PER_TRAIN_PER_SD&&_profitGuardOK);
+    // Iter 1 (new batch) fix: bypass cost-recovery gate when credits are
+    // healthy AND the fleet is still small. Without this, AI at $400K cash
+    // and only 3 trains was hoarding because the cost-recovery ratio looked
+    // bad. Iter 2 narrowing: only bypass when fleet is <8 trains AND credits
+    // are healthy — prevents the 12-train spending spree we saw at iter 2.
+    const _hasRoomToBuy=_aiCorp.credits >= 150000 && _trCount<8;
+    const _profitGuardOK=_trCount<3||_hasRoomToBuy||_costRecov>=0.20;
+    const _buyGuardOK=_trCount<3||_hasRoomToBuy||(_revPerTrainPerSd>=_MIN_REV_PER_TRAIN_PER_SD&&_profitGuardOK);
     if(diff!=='very_easy'&&_trCount<AI_MAX_TRAINS[diff]&&_buyGuardOK){
       const _bCars=_aiPickTrainComp(diff);
       const _bCost=_bCars.reduce((s,c)=>s+(_bCarCost[c]||4000),0);
@@ -6209,12 +6215,15 @@ function _aiDecide(){
         for(const _lpid of _aiCorp.ownedPlanetIds){
           const _lp=galaxy.planets[_lpid];
           if(!_lp||!_lp.aiHasStation||_lp.hasLargeStation) continue;
-          // Looser AI thresholds: iron-delivered ≥ 2 (was 4) and 2+ trains
-          // on this planet (was 3). Compounds revenue faster by unlocking
-          // Large Station's broader demand earlier.
-          if((_lp.devLevel||0)<4||(_lp.ironDelivered||0)<2) continue;
+          // Looser AI thresholds (iter 5 round 2): iron-delivered ≥ 1 (was 2),
+          // devLevel ≥ 3 (was 4), 1+ train on planet (was 2). Compounds revenue
+          // faster by unlocking Large Station's broader demand pool earlier.
+          // The 4-iron threshold was a fundamental limiter — even good runs
+          // struggled to reach it. With 1-iron threshold the upgrade unlocks
+          // as soon as the foundry pipeline delivers its first shipment.
+          if((_lp.devLevel||0)<3||(_lp.ironDelivered||0)<1) continue;
           const _tc=_aiCorp.trainIndices.filter(ti=>trains[ti]?.route?.stops?.includes(_lpid)).length;
-          if(_tc>=2){_bLsTgt=_lp;break;}
+          if(_tc>=1){_bLsTgt=_lp;break;}
         }
         if(_bLsTgt){
           _aiCorp.actionQueue.push({type:'build_large_station',planetId:_bLsTgt.id});
@@ -7383,6 +7392,44 @@ function _aiDoAssignRoute(trainIdx,planetIds){
   if(_refit && !_aiCarArraysEqual(_refit, t.cars||[])){
     _aiApplyCarRefit(trainIdx, _refit);
   }
+  // ── Set Pre-Departure Checklist rules (Iter 1 new batch) ──
+  // For every cargo type the (now-refitted) train can carry, find the route
+  // stops that SUPPLY that cargo and add a "wait until 50% full" rule. This
+  // stops trains from departing supply hubs half-loaded — the dominant
+  // revenue-leak observed in deep-diagnostic runs (e.g. 3-ore-car trains
+  // leaving lava with 1 unit of molten_ore aboard).
+  _aiSetPreDepartureRulesForRoute(t, stops);
+}
+
+// Compute the AI's PDC ruleset for a train on a given route. Targets the
+// highest-value cargo types (iron, steel, glass, machinery, gold, diamond)
+// where the train has dedicated cars AND a route stop supplies the cargo.
+// This prevents departure of half-empty trains hauling expensive cargo
+// long distances. Iter 3 narrowing from "all cargo": broad rules caused
+// iron trains to wait on slow-producing foundries that hadn't ramped up,
+// and waste-prevention vs starvation is a delicate balance.
+const _AI_PDC_PRIORITY_CARGOS=new Set([
+  'iron','steel','glass','machinery','gold','diamond','molten_ore','water'
+]);
+function _aiSetPreDepartureRulesForRoute(t, stops){
+  if(!t||!Array.isArray(stops)||stops.length<2){ if(t) t.preDepartureRules=[]; return; }
+  const _carriable=new Set();
+  for(const c of (t.cars||[])){
+    const cargo=_AI_CAR_TO_CARGO[c];
+    if(cargo && _AI_PDC_PRIORITY_CARGOS.has(cargo)) _carriable.add(cargo);
+  }
+  if(_carriable.size===0){ t.preDepartureRules=[]; return; }
+  const rules=[];
+  for(const _sid of stops){
+    const p=galaxy.planets[_sid]; if(!p) continue;
+    for(const c of _carriable){
+      const _sup=(p.supply||{})[c]||0;
+      if(_sup<=0) continue;
+      // Threshold 0.25 = "must be at least 25% full of this cargo before depart".
+      rules.push({stopPlanetId:p.id, cargoType:c, threshold:0.25});
+    }
+  }
+  t.preDepartureRules=rules;
 }
 
 // Build the ideal car list for an AI train running this route. Walks every
