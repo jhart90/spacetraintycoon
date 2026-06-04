@@ -3790,7 +3790,9 @@ function computeSupplyRate(p){
   // Dev level: scale all base rates, then unlock new supply types
   const dl=p.devLevel||0;
   if(dl>0){const dm=_devMult(dl); for(const k in r) r[k]*=dm;}
-  if(bio==='agri'&&dl>=3)    r.water=(r.water||0)+3.0;
+  // Agri planets intentionally do NOT supply water (user spec) — they CONSUME
+  // water for crops and herds. Water sources are oceans, resort-spring planets,
+  // ice (DL≥8), and lava (DL≥3 condensate).
   // Iron supply unlocks removed — no biome / population dev-level step bonuses
   // for iron supply. Iron is now exclusively a foundry-output cargo.
   // Desert planets do not supply molten ore (lava-only supply).
@@ -3812,12 +3814,19 @@ function computeDemandRate(p){
   const unh=['storm','lava','chemical','oil'].includes(bio);
   // Passengers: demand mirrors supply; resort demands 2× its supply, urban 1.8×
   // (massive city-planet churn — lots of inbound commuters and visitors).
+  // Any planet that PRODUCES passengers also RECEIVES passengers — even an
+  // industrial hostile world with workers has commuter traffic.
   const _passSup=p.supplyRate?.passengers||0;
   if(_passSup>0){ r.passengers=_passSup*(bio==='resort'?2.0:bio==='urban'?1.8:1.0); }
   else if(!unh){ r.passengers=0.05; }
+  // Mail: demand mirrors supply with the same biome multipliers as passengers
+  // (every mail-producing planet also receives mail — bills, news, parcels,
+  // off-world correspondence). Capped at 8 like the prior formula.
+  const _mailSup=p.supplyRate?.mail||0;
+  if(_mailSup>0){
+    r.mail=Math.min(8, _mailSup*(bio==='resort'?2.0:bio==='urban'?1.8:1.0));
+  }
   if(!unh&&pop>0){
-    const bm2={urban:3.0,resort:1.5,ocean:1.2,jungle:1.1,agri:1.0,rocky:0.9,desert:0.9,ice:0.8}[bio]||1.0;
-    r.mail=Math.min(8, pop/2e9*bm2*2);
     // Livestock: all populated habitable worlds want food; scales with population.
     // Urban: a city-planet of billions needs everything in bulk — ×2 the base.
     r.livestock=Math.min(bio==='urban'?30:15, pop/2e9*10*(bio==='urban'?2.0:1.0));
@@ -3924,6 +3933,17 @@ function computeDemandRate(p){
   // Both floors apply via Math.max so the highest applicable demand wins.
   if(bio==='urban') r.glass=Math.max(r.glass||0, 4.0);
   if(pop>0&&dl>=4) r.glass=Math.max(r.glass||0, 1.0);
+  // Machinery demand: agricultural, ice, oil, and storm worlds always want
+  // machinery — harvesters and threshers on agri; ice-cutters and meltwater
+  // condensers on ice; rig pumps and refinery skids on oil; capacitor banks
+  // and storm-tower regulators on storm. Each delivery also triggers a
+  // lagged temporary boost to that planet's own supply generation rate
+  // (see updateCargoSupplyDemand's machineryDeliveries handler).
+  if(['agri','ice','oil','storm'].includes(bio)){
+    const _mpf=pop>0?Math.min(2,0.5+pop/2e9):0.5;
+    const _mBase={agri:2.5,ice:2.0,oil:2.5,storm:2.0}[bio]||2.0;
+    r.machinery=Math.max(r.machinery||0, _mBase*_mpf);
+  }
   // Juicery floor: a jungle planet running a juicery whose fruit bin is not
   // yet maxed (10/10) must show a floor of at least 1 fruit demand so trains
   // can keep feeding it. Computed live so the floor disappears the moment
@@ -4167,7 +4187,15 @@ function _processCargoQueue(t, p){
         if(cargo==='iron')      p.ironDelivered     =(p.ironDelivered     ||0)+_cUU;
         if(cargo==='steel')     p.steelDelivered    =(p.steelDelivered    ||0)+_cUU;
         if(cargo==='glass')     p.glassDelivered    =(p.glassDelivered    ||0)+_cUU;
-        if(cargo==='machinery') p.machineryDelivered=(p.machineryDelivered||0)+_cUU;
+        if(cargo==='machinery'){
+          p.machineryDelivered=(p.machineryDelivered||0)+_cUU;
+          // Machinery to agri/ice/oil/storm: stamp delivery for the lagged
+          // temporary supply-rate boost (see updateCargoSupplyDemand).
+          if(['agri','ice','oil','storm'].includes(p.type.id)){
+            if(!p.machineryDeliveries) p.machineryDeliveries=[];
+            p.machineryDeliveries.push(stardate);
+          }
+        }
         if(cargo==='gold')      p.goldDelivered     =(p.goldDelivered     ||0)+_cUU;
         if(cargo==='diamond')   p.diamondDelivered  =(p.diamondDelivered  ||0)+_cUU;
         p.demand[cargo]=Math.max(0,(p.demand[cargo]||0)-_cUU);
@@ -5357,7 +5385,35 @@ function generateGalaxy(){
   }
 
   const _nebulas=_genNebulas(planets[origenId]);
-  return {stars, planets, homeStarId, origenId, trainPlanetId: origenId, blackHoles: _blackHoles, starProxyMap, colonyTrainDestId:_colonyTrainDestId, faminePlanetId:_faminePlanetId, outbreakPlanetId:_outbreakPlanetId, bhResearchPlanetId:_bhResearchPlanetId, bhResearchPlanetIds:_bhResearchPlanetIds, nebulas:_nebulas};
+  // ── Rocky-mission trigger planets (user spec) ──────────────────
+  // The "Seeking a Way Home" mission used to fire on first visit to ANY
+  // rocky planet. Now we pre-select 4 rocky planets at galaxy-gen time —
+  // one per quadrant relative to Orijen, none within 35,000 SU of Orijen.
+  // The mission triggers only when the player visits one of these 4. The
+  // mission's destination (an OTHER rocky planet) is still picked at trigger
+  // time so the source/target pair stays interesting.
+  const _rockyMissionPids=[];
+  {
+    const _orPlanet=planets[origenId];
+    if(_orPlanet){
+      const _rockies=planets.filter(p=>
+        p && p.type.id==='rocky' &&
+        Math.hypot(p.x-_orPlanet.x, p.y-_orPlanet.y) >= 35000
+      );
+      // Bucket by quadrant relative to Orijen.
+      const _byQuad={pp:[], pn:[], np:[], nn:[]};
+      for(const p of _rockies){
+        const _dx=p.x-_orPlanet.x, _dy=p.y-_orPlanet.y;
+        const _qkey=(_dx>=0?'p':'n')+(_dy>=0?'p':'n');
+        _byQuad[_qkey].push(p);
+      }
+      for(const _q of ['pp','pn','np','nn']){
+        const _pool=_byQuad[_q];
+        if(_pool.length>0) _rockyMissionPids.push(_pool[Math.floor(Math.random()*_pool.length)].id);
+      }
+    }
+  }
+  return {stars, planets, homeStarId, origenId, trainPlanetId: origenId, blackHoles: _blackHoles, starProxyMap, colonyTrainDestId:_colonyTrainDestId, faminePlanetId:_faminePlanetId, outbreakPlanetId:_outbreakPlanetId, bhResearchPlanetId:_bhResearchPlanetId, bhResearchPlanetIds:_bhResearchPlanetIds, nebulas:_nebulas, rockyMissionPids:_rockyMissionPids};
 }
 
 function makeGalaxyTrain(name, planetId, orbitTier, cars, isPlayer){
@@ -10159,6 +10215,35 @@ function updateCargoSupplyDemand(dtSd){
       const _stacks=Math.min(5,_activeStacks);
       if(_stacks>0) p.supply.passengers=Math.min(_pDevCap,(p.supply.passengers||0)+(p.supplyRate?.passengers||0)*0.3*_stacks*dtSd);
     }
+    // Machinery delivery boost — agri/ice/oil/storm planets get a lagged,
+    // temporary supply-rate boost to their native cargo lines whenever
+    // machinery is dropped off. Mirrors the passenger pipeline shape:
+    //   • 0.0–1.0 SD after delivery: machinery is being installed (no boost)
+    //   • 1.0–5.0 SD: full stack — each retained delivery adds 30% of base
+    //     supply rate for the biome's native cargo types (max 5 stacks)
+    //   • 5.0–10.0 SD: half stack — same 30% but counted as 0.5
+    //   • > 10.0 SD: stack drops off (pruned)
+    // Per biome:  agri → grain/livestock/fruit, ice → ice, oil → oil, storm → battery
+    if(p.machineryDeliveries?.length){
+      p.machineryDeliveries=p.machineryDeliveries.filter(t=>stardate-t<=10.0);
+      let _mStacks=0;
+      for(const t of p.machineryDeliveries){
+        const _age=stardate-t;
+        if(_age>1.0&&_age<=5.0) _mStacks+=1;
+        else if(_age>5.0&&_age<=10.0) _mStacks+=0.5;
+      }
+      _mStacks=Math.min(5,_mStacks);
+      if(_mStacks>0){
+        const _AFFECTED={agri:['grain','livestock','fruit'], ice:['ice'], oil:['oil'], storm:['battery']};
+        const _types=_AFFECTED[p.type.id]||[];
+        for(const _ct of _types){
+          const _baseRate=p.supplyRate?.[_ct]||0;
+          if(_baseRate>0){
+            p.supply[_ct]=Math.min(_pDevCap,(p.supply[_ct]||0)+_baseRate*0.30*_mStacks*dtSd);
+          }
+        }
+      }
+    }
     for(const [type,rate] of Object.entries(p.demandRate||{}))
       p.demand[type]=Math.min(_pDevCap,(p.demand[type]||0)+rate*dtSd);
     // Demand floors (inhabited non-hostile planets only)
@@ -10363,6 +10448,18 @@ function updateFoundries(dtG){
             // if the save/load wiped it.
             if(_steelMissionTimerMs===0) _steelMissionTimerMs=Date.now();
           }
+          // Hazmat byproduct: each steel unit also produces 0.5 hazmat — the
+          // forging slag from melting iron + chemicals. Mirrors the foundry's
+          // hazmat byproduct pattern (iron production → 0.5 hazmat). Also
+          // arms the Hazmat Car unlock if the foundry hasn't already done so.
+          p.supply.hazmat=Math.min(CARGO_MAX_SUPPLY,(p.supply.hazmat||0)+0.5);
+          _bf.hazmatTotal=(_bf.hazmatTotal||0)+0.5;
+          if(!_hazmatCarUnlocked&&_bf.hazmatTotal>=1){
+            _hazmatCarUnlocked=true;
+            pendingCarUnlocks.push({sprite:'car_hazmat',displayName:'Hazmat Car'});
+            _chatMsg('HAZMAT CAR UNLOCKED','rgba(255,165,40,1)');
+            _ga('car_unlocked',{car_type:'hazmat', cargo:'hazmat', sd:Math.floor(stardate)});
+          }
         }
       } else if((_bf.iron||0)>=1&&(_bf.chemical||0)>=1){
         _bf.progress=BLAST_FURNACE_PROD_TIME;
@@ -10408,6 +10505,19 @@ function updateFoundries(dtG){
           // Safety net: in the unlikely case a factory produces machinery
           // before any glassworks has fired, unlock the Machinery Car here too.
           if(!_machineryCarUnlocked){ _machineryCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_machinery',displayName:'Machinery Car'}); _chatMsg('MACHINERY CAR UNLOCKED','rgba(200,200,170,1)'); _ga('car_unlocked',{car_type:'machinery', cargo:'machinery', sd:Math.floor(stardate)}); }
+          // Hazmat byproduct: each machinery unit also produces 0.5 hazmat —
+          // metal-shop chemical solvents, oil sludge, and assembly-line waste.
+          // Mirrors the foundry (iron→0.5 hazmat) and blast-furnace
+          // (steel→0.5 hazmat) byproduct patterns. Also arms the Hazmat Car
+          // unlock if no upstream producer has already done so.
+          p.supply.hazmat=Math.min(CARGO_MAX_SUPPLY,(p.supply.hazmat||0)+0.5);
+          _ft.hazmatTotal=(_ft.hazmatTotal||0)+0.5;
+          if(!_hazmatCarUnlocked&&_ft.hazmatTotal>=1){
+            _hazmatCarUnlocked=true;
+            pendingCarUnlocks.push({sprite:'car_hazmat',displayName:'Hazmat Car'});
+            _chatMsg('HAZMAT CAR UNLOCKED','rgba(255,165,40,1)');
+            _ga('car_unlocked',{car_type:'hazmat', cargo:'hazmat', sd:Math.floor(stardate)});
+          }
         }
       } else if((_ft.iron||0)>=1&&(_ft.oil||0)>=1){
         _ft.progress=FOUNDRY_PROD_TIME*2;
@@ -11683,6 +11793,18 @@ function trackVisit(pid){
   for(const _opid of _ts.planetIds) discoveredPlanetIds.add(_opid);
   revealedOrbitedPlanetIds.add(pid);
   maybeRevealStar(pid);
+  // Gold / Diamond deposit discovery: queue the popup the moment the player
+  // visits the planet (a docked train is doing a surface survey). Previously
+  // this only fired inside trackOrbit after a FULL 360° orbit was accumulated
+  // (t._angleAcc >= 2π) — meaning fast cargo-ops + station-build + departure
+  // could finish before the orbit angle accumulator crossed the threshold,
+  // delaying the discovery by several SD as the player reported.
+  if(_tp.hasGold&&!_tp.goldRevealed&&!pendingGoldDiscoveries.includes(pid)){
+    pendingGoldDiscoveries.push(pid);
+  }
+  if(_tp.hasDiamond&&!_tp.diamondRevealed&&!pendingDiamondDiscoveries.includes(pid)){
+    pendingDiamondDiscoveries.push(pid);
+  }
   // First visit of this specific planet — award credits, log message, car unlock
   if(!visitedPlanetIds.has(pid)){
     const _bio=_tp.type.id;
@@ -11728,8 +11850,18 @@ function trackVisit(pid){
       }
       pendingAncientPopups.push({planetId:pid,planetName:_tp.name});
     }
-    // Seeking a Way Home: first visit of any Rocky planet
-    if(_tp.type.id==='rocky'&&!missions.some(mx=>mx.id==='seeking_home')&&!pendingMissionIntros.some(pi=>pi.defId==='seeking_home')){
+    // Seeking a Way Home: first visit to ONE OF the 4 pre-selected rocky
+    // trigger planets (one per quadrant, ≥35K SU from Orijen — picked at
+    // galaxy generation, stored on galaxy.rockyMissionPids). If the field
+    // is missing (older save with no pre-selection), fall back to "any rocky"
+    // so existing games still work.
+    const _rockyPool=galaxy.rockyMissionPids;
+    const _isRockyTrigger = _tp.type.id==='rocky' && (
+      (Array.isArray(_rockyPool) && _rockyPool.length>0)
+        ? _rockyPool.includes(pid)
+        : true
+    );
+    if(_isRockyTrigger&&!missions.some(mx=>mx.id==='seeking_home')&&!pendingMissionIntros.some(pi=>pi.defId==='seeking_home')){
       const _rockyOthers=galaxy.planets.filter(p=>p.type.id==='rocky'&&p.id!==pid);
       if(_rockyOthers.length>0){
         // Prefer a planet 50k-100k SU away; fall back to >25k, then >10k, then any other rocky
@@ -18382,7 +18514,8 @@ function drawPlanetDetailPopup(){
         const _medicalDemVisible=ctype==='medical'&&_medicalCarUnlocked;
         const _grainDemVisible=ctype==='grain'&&_grainCarUnlocked;
         const _fruitDemVisible=ctype==='fruit'&&_fruitCarUnlocked;
-        if(ctype!=='hazmat'&&(ctype==='water'||ctype==='livestock'||ctype==='grain'||ctype==='fruit'||ctype==='ice'||ctype==='sand'||ctype==='gold'||ctype==='oil'||ctype==='battery'||ctype==='chemical'||_flowerDemVisible||_medicalDemVisible||_grainDemVisible||_fruitDemVisible)&&dem>=0.5) _demItems.push({ctype,dem,rawDem});
+        const _machineryDemVisible=ctype==='machinery'&&_machineryCarUnlocked;
+        if(ctype!=='hazmat'&&(ctype==='water'||ctype==='livestock'||ctype==='grain'||ctype==='fruit'||ctype==='ice'||ctype==='sand'||ctype==='gold'||ctype==='oil'||ctype==='battery'||ctype==='chemical'||_flowerDemVisible||_medicalDemVisible||_grainDemVisible||_fruitDemVisible||_machineryDemVisible)&&dem>=0.5) _demItems.push({ctype,dem,rawDem});
       }
       if(p.isFlowersOrigin) _supItems.sort((a,b)=>(a.ctype==='flowers'?-1:b.ctype==='flowers'?1:b.sup-a.sup));
       else _supItems.sort((a,b)=>b.sup-a.sup);
@@ -20370,7 +20503,28 @@ function drawGalaxy(ts,dt){
       // reach just-below LOW orbit (matches Terminal's tier-aware sizing).
       (p.hasLargeStation||p.hasTerminal)?ORBIT_TIERS[p.size]['LOW']*cam.scale:null
     );
-    if(p.aiHasStation){ctx.save();ctx.filter='sepia(1) hue-rotate(-10deg) saturate(2.5) brightness(1.1)';drawPlanetStation(sx,sy,sr,(p.aiStationAngle!==undefined?p.aiStationAngle:Math.PI*0.65),SIZE_R['M']*cam.scale,false,false,null);ctx.filter='none';ctx.restore();}
+    if(p.aiHasStation){
+      // AI station rendered with the same large-station + terminal geometry
+      // as the player's, then tinted via canvas filter to the AI's orange
+      // palette. Mirrors the player drawPlanetStation call above (including
+      // the tier radii for the large/terminal towers) so an AI-owned Large
+      // Station looks structurally identical, just orange.
+      ctx.save();
+      ctx.filter='sepia(1) hue-rotate(-10deg) saturate(2.5) brightness(1.1)';
+      drawPlanetStation(
+        sx,sy,sr,
+        (p.aiStationAngle!==undefined?p.aiStationAngle:Math.PI*0.65),
+        SIZE_R['M']*cam.scale,
+        false, // not an alien relic
+        p.hasLargeStation||false,
+        (p.hasLargeStation||p.hasTerminal)?ORBIT_TIERS[p.size]['MED']*cam.scale:null,
+        p.hasTerminal||false,
+        p.hasTerminal?ORBIT_TIERS[p.size]['HIGH']*cam.scale:null,
+        (p.hasLargeStation||p.hasTerminal)?ORBIT_TIERS[p.size]['LOW']*cam.scale:null
+      );
+      ctx.filter='none';
+      ctx.restore();
+    }
     if(sr>2){
       // Bulk structure draw: gate the whole block on sr>2, then do a single
       // upgrade-set lookup pass instead of six independent .includes() walks.
@@ -24624,7 +24778,7 @@ function _restoreFromSave(save){
     _pstar.proxyPlanetId=_proxyId;
   }
   galaxy={stars, planets, homeStarId:sg.homeStarId, origenId:sg.origenId,
-          trainPlanetId:sg.origenId, blackHoles:sg.blackHoles??[], starProxyMap, colonyTrainDestId:sg.colonyTrainDestId??null, faminePlanetId:sg.faminePlanetId??null, outbreakPlanetId:sg.outbreakPlanetId??null, bhResearchPlanetId:sg.bhResearchPlanetId??null, bhResearchPlanetIds:sg.bhResearchPlanetIds??[],
+          trainPlanetId:sg.origenId, blackHoles:sg.blackHoles??[], starProxyMap, colonyTrainDestId:sg.colonyTrainDestId??null, faminePlanetId:sg.faminePlanetId??null, outbreakPlanetId:sg.outbreakPlanetId??null, bhResearchPlanetId:sg.bhResearchPlanetId??null, bhResearchPlanetIds:sg.bhResearchPlanetIds??[], rockyMissionPids:sg.rockyMissionPids??[],
           nebulas:(sg.nebulas||[]).map(n=>({...n, _canvas:null,
             // Backfill name for pre-name-feature saves — pick a deterministic
             // entry from the pool keyed by seed so it stays stable forever.
