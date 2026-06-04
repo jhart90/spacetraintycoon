@@ -12240,7 +12240,20 @@ function updateTrain(t, dt){
             pr.phase='orbit'; pr.orbitSpun=0; pr.minOrbitDone=true; pr.transitDist=0;
             pr._lockedTanLen=null; pr._lockedTanAngle=null;
             pr._departExtLen=null; pr._arrivalTimer=null; pr._blockedTime=null;
-            t.route=pr; t.queuedRoute=null; return;
+            t.route=pr; t.queuedRoute=null;
+            // Auto-diversion landed at a tier the station here can't service
+            // (e.g. arrived at HIGH at a planet that only has LARGE STATION,
+            // which services LOW + MED). Drop into descending (if a lower
+            // slot is free RIGHT NOW) or queueing (otherwise) — mirrors the
+            // same check the regular fallthrough arrival does below. Without
+            // this, a detoured train at an unserviceable arrival tier would
+            // immediately depart for the next stop without unloading.
+            {const _arrP2=_gp(pr.stops[pr.fromIdx]);
+             if(_shouldQueueForLowerOrbit(t,_arrP2)){
+               _enterQueueOrDescend(t, pr);
+               _invalidateOccOrbit();
+             }}
+            return;
           }
           // If the destination has a station, orbit once to unload any carried cargo
           // using normal demand rules before the train goes idle (parked orbit).
