@@ -17305,18 +17305,20 @@ function drawCarDetailPopup(){
   ctx.beginPath(); ctx.moveTo(px,py+32); ctx.lineTo(px+pw,py+32); ctx.stroke();
 
   // ── Top section: sprite + basic info ───────────────────────
-  // Layout y-budget (popup is 460×430, py+32 = header divider):
-  //   py+44..py+126   sprite (82×82, 16 px left margin + 18 px right margin
-  //                   before the info column at infoX = px+116)
-  //   py+62           car label (bold 13 px)
-  //   py+78           "Car X of Y · on TRAIN" (9 px subtitle)
-  //   py+96           PURCHASED label
-  //   py+110          SD value
-  //   py+124          cargo status badge ("LOADED: …" / "EMPTY")
-  //   py+126          sprite frame bottom (badge aligned with frame bottom)
-  //   py+148..py+180  cargo / origin block (loaded only — 22 px buffer
-  //                   below the sprite frame, then the two rows + 8 px
-  //                   bottom buffer to the engine-time divider)
+  // Three-column layout, fixed y-budget so the section's bottom edge is the
+  // same whether the car is loaded or empty — every section below (engine
+  // time, performance stats) sits at a fixed position regardless of cargo
+  // state, eliminating the previous "stats bleed off the bottom" jump when
+  // the car gets loaded. Columns (popup is 460×430, py+32 = header divider):
+  //   px+16..px+98       sprite frame (82×82)
+  //   px+114..px+288     middle info column (label / subtitle / PURCHASED /
+  //                       SD / cargo badge) — width is FIXED at 174 px so
+  //                       the subtitle truncation point doesn't change when
+  //                       the cargo column appears/disappears on the right.
+  //   px+296..px+444     right cargo column (ORIGIN / DIST / EST VALUE),
+  //                       rendered ONLY when loaded; otherwise the right
+  //                       column is just empty space — the section ends at
+  //                       the same y either way.
   const imgS=82, imgX=px+16, imgY=py+44;
   ctx.fillStyle='rgba(8,12,28,0.70)';
   ctx.fillRect(imgX,imgY,imgS,imgS);
@@ -17332,9 +17334,9 @@ function drawCarDetailPopup(){
     ctx.drawImage(_sprForSize(_cSprite,imgS,imgS),imgX,_cdy,imgS,imgS);
     ctx.restore();
   }
-  // Car label + subtitle column. infoX gives 18 px between sprite right edge
-  // and the label; infoMaxW keeps text 16 px clear of the popup right edge.
-  const infoX=px+16+imgS+18, infoMaxW=pw-(infoX-px)-16;
+  // Middle info column — width is FIXED (174 px) so subtitle truncation is
+  // identical loaded vs. empty. Right column lives at infoX2 below.
+  const infoX=px+114, infoMaxW=174;
   ctx.textAlign='left';
   ctx.font='bold 13px Orbitron,sans-serif';
   ctx.fillStyle='rgba(180,220,255,0.97)';
@@ -17343,9 +17345,13 @@ function drawCarDetailPopup(){
   while(ctx.measureText(_clTxt).width>infoMaxW&&_clTxt.length>4) _clTxt=_clTxt.slice(0,-1);
   if(_clTxt!==_carLabel) _clTxt=_clTxt.slice(0,-1)+'…';
   ctx.fillText(_clTxt,infoX,py+62);
-  // Car index label (e.g. "Car 3 of 7")
+  // Car index label — truncate within the same 174 px budget.
   ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,140,200,0.65)';
-  ctx.fillText('Car '+(ci+1)+' of '+t.cars.length+' · on '+t.name,infoX,py+78);
+  const _ciFull='Car '+(ci+1)+' of '+t.cars.length+' · on '+t.name;
+  let _ciTxt=_ciFull;
+  while(ctx.measureText(_ciTxt).width>infoMaxW&&_ciTxt.length>4) _ciTxt=_ciTxt.slice(0,-1);
+  if(_ciTxt!==_ciFull) _ciTxt=_ciTxt.slice(0,-1)+'…';
+  ctx.fillText(_ciTxt,infoX,py+78);
   // Purchase date — small uppercase label, value on next line.
   const _psd=t.carPurchaseSd?.[ci]??null;
   ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(110,150,210,0.70)';
@@ -17360,54 +17366,57 @@ function drawCarDetailPopup(){
   ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='left';
   ctx.fillStyle=_isCargoFull?'rgba(80,220,140,0.90)':'rgba(100,115,145,0.65)';
   ctx.fillText(_cargoBadgeTxt,infoX,py+124);
-  // ── Cargo / Origin block (full width below sprite) ─────────────────
-  // 22 px buffer between the sprite frame bottom (py+126) and the ORIGIN row
-  // top so the two zones read as distinct. Only rendered when loaded.
+  // ── Right column: ORIGIN / DIST / EST DELIVERY VALUE ───────────────
+  // Rendered ONLY when loaded. Sits in the right ~140 px of the top pane
+  // beside the middle info column, not BELOW the sprite — that way the
+  // section's bottom edge is identical whether the car is empty or full,
+  // and nothing below this point (engine-time divider, performance stats)
+  // shifts when cargo state changes.
   popupState.carDetailPlanetBounds=null;
   popupState.carDetailStarBounds=null;
-  const _cargoBlockTop=py+148, _cargoBlockH=_isCargoFull?32:0;
+  const infoX2=px+296;          // right column left edge
+  const infoX2MaxW=pw-(infoX2-px)-16;
   if(_isCargoFull&&_cargoType){
     const _srcId=t.carCargoSource?.[ci]??null;
     const _srcP=_srcId!=null?_gp(_srcId):null;
     const _srcStar=_srcP?galaxy.stars[_srcP.starId]:null;
-    // Line 1: "ORIGIN  <Planet> · <Star>"
-    const _origHov=!!popupState.carDetailPlanetHover;
+    // ORIGIN — label on one row, planet · star on the next.
     ctx.font='9px "Exo 2",sans-serif'; ctx.textAlign='left';
     ctx.fillStyle='rgba(100,140,210,0.60)';
-    ctx.fillText('ORIGIN',px+16,_cargoBlockTop);
+    ctx.fillText('ORIGIN',infoX2,py+58);
+    const _origHov=!!popupState.carDetailPlanetHover;
     ctx.font=(_origHov?'bold ':'')+' 11px "Exo 2",sans-serif';
     ctx.fillStyle=_origHov?'rgba(200,240,255,1)':'rgba(160,220,255,0.92)';
     const _pnTxt=_srcP?_srcP.name:'Unknown';
-    const _pnX=px+62;
-    ctx.fillText(_pnTxt,_pnX,_cargoBlockTop);
+    ctx.fillText(_pnTxt,infoX2,py+72);
     const _pnW=ctx.measureText(_pnTxt).width;
-    if(_origHov){ ctx.strokeStyle='rgba(160,220,255,0.8)'; ctx.lineWidth=0.7; ctx.beginPath(); ctx.moveTo(_pnX,_cargoBlockTop+1); ctx.lineTo(_pnX+_pnW,_cargoBlockTop+1); ctx.stroke(); }
-    if(_srcP) popupState.carDetailPlanetBounds={x:_pnX,y:_cargoBlockTop-11,w:_pnW+6,h:14,planet:_srcP};
-    // Star link, separated by middle dot
+    if(_origHov){ ctx.strokeStyle='rgba(160,220,255,0.8)'; ctx.lineWidth=0.7; ctx.beginPath(); ctx.moveTo(infoX2,py+73); ctx.lineTo(infoX2+_pnW,py+73); ctx.stroke(); }
+    if(_srcP) popupState.carDetailPlanetBounds={x:infoX2,y:py+61,w:_pnW+6,h:14,planet:_srcP};
+    // Star: " · <Name>" inline after planet, smaller.
     const _starHov=!!popupState.carDetailStarHover;
     const _sStarTxt=_srcStar?_srcStar.name:'?';
-    const _starX=_pnX+_pnW+10;
+    const _starX=infoX2+_pnW+8;
     ctx.font=(_starHov?'bold ':'')+' 10px "Exo 2",sans-serif';
     ctx.fillStyle=_starHov?'rgba(255,250,160,1)':'rgba(220,200,100,0.75)';
-    ctx.fillText('· '+_sStarTxt,_starX,_cargoBlockTop);
+    ctx.fillText('· '+_sStarTxt,_starX,py+72);
     const _sStarW=ctx.measureText('· '+_sStarTxt).width;
-    if(_starHov){ ctx.strokeStyle='rgba(220,200,100,0.7)'; ctx.lineWidth=0.7; ctx.beginPath(); ctx.moveTo(_starX,_cargoBlockTop+1); ctx.lineTo(_starX+_sStarW,_cargoBlockTop+1); ctx.stroke(); }
-    if(_srcStar) popupState.carDetailStarBounds={x:_starX,y:_cargoBlockTop-11,w:_sStarW+4,h:14,star:_srcStar};
-    // Line 2: distance + estimated value, two columns
+    if(_starHov){ ctx.strokeStyle='rgba(220,200,100,0.7)'; ctx.lineWidth=0.7; ctx.beginPath(); ctx.moveTo(_starX,py+73); ctx.lineTo(_starX+_sStarW,py+73); ctx.stroke(); }
+    if(_srcStar) popupState.carDetailStarBounds={x:_starX,y:py+61,w:_sStarW+4,h:14,star:_srcStar};
+    // DIST FROM ORIGIN
     const [_cwx,_cwy]=getTrainCarPos(t,ci);
     const _distAu=_srcP?Math.round(Math.hypot(_cwx-_srcP.x,_cwy-_srcP.y)):null;
+    ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,140,210,0.60)';
+    ctx.fillText('DIST FROM ORIGIN',infoX2,py+90);
+    ctx.font='bold 11px "Exo 2",sans-serif'; ctx.fillStyle='rgba(170,215,255,0.88)';
+    ctx.fillText(_distAu!=null?_distAu.toLocaleString()+' SU':'—',infoX2,py+104);
+    // EST DELIVERY VALUE
     const _baseRate=(CARGO_BASE_RATE[_cargoType]||{})[carType]||1000;
     const _dMult=_distAu!=null?(_distAu>120000?2.5:_distAu>60000?1.8:_distAu>20000?1.3:_distAu>5000?1.0:_distAu>1000?0.8:0.5):1.0;
     const _estVal=Math.round(_baseRate*_dMult);
-    const _r2Y=_cargoBlockTop+18;
     ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,140,210,0.60)';
-    ctx.fillText('DIST FROM ORIGIN',px+16,_r2Y);
-    ctx.font='bold 11px "Exo 2",sans-serif'; ctx.fillStyle='rgba(170,215,255,0.88)';
-    ctx.fillText(_distAu!=null?_distAu.toLocaleString()+' SU':'—',px+122,_r2Y);
-    ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,140,210,0.60)';
-    ctx.fillText('EST DELIVERY VALUE',px+pw/2+10,_r2Y);
+    ctx.fillText('EST DELIVERY VALUE',infoX2,py+122);
     ctx.font='bold 11px "Exo 2",sans-serif'; ctx.fillStyle='rgba(80,235,140,0.90)';
-    ctx.fillText('+'+_fmtCr(_estVal)+' cr',px+pw/2+130,_r2Y);
+    ctx.fillText('+'+_fmtCr(_estVal)+' cr',infoX2,py+136);
   }
 
   // ── Engine Time section ─────────────────────────────────────
@@ -17418,14 +17427,15 @@ function drawCarDetailPopup(){
   // rolls all historical rows over to the new name, because we read
   // train.name at draw time (no per-entry name stored).
   //
-  // Divider position depends on whether the cargo block rendered:
-  //   • loaded  → block bottom = _cargoBlockTop + 32 = py+180; divider 8 px
-  //               below that = py+188.
-  //   • empty   → no cargo block at all; divider sits just below the sprite
-  //               area at py+140 (sprite bottom py+126 + 14 px buffer) so
-  //               we don't leave a giant empty band when there's nothing
-  //               to show there.
-  const _engDivY = _isCargoFull ? (_cargoBlockTop + _cargoBlockH + 8) : (py + 140);
+  // Divider position is now FIXED at py+148 regardless of cargo state.
+  // The cargo column lives ABOVE this line (in the right side of the top
+  // pane, beside the middle info column) and its tallest content row sits
+  // at py+136. py+148 gives a 12 px buffer between that and the divider —
+  // identical to the empty-car case where the divider has only the sprite
+  // frame (bottom py+126) above it. Keeping the divider y constant means
+  // engine-time + performance-stats stay locked in place when a car
+  // transitions loaded ↔ empty, so nothing skips or bleeds off the bottom.
+  const _engDivY = py + 148;
   ctx.strokeStyle='rgba(60,120,200,0.30)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(px,_engDivY); ctx.lineTo(px+pw,_engDivY); ctx.stroke();
   ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='left';
