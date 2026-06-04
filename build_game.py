@@ -138,13 +138,121 @@ const ctx = canvas.getContext('2d');
 const W = 900, H = 500;
 canvas.width = W; canvas.height = H;
 
+// ── HIGH-DPI TEXT OVERLAY ─────────────────────────────────────
+// A second canvas is layered on top of the world canvas at the device's
+// native pixel density. Every text draw (ctx.fillText / ctx.strokeText) is
+// transparently mirrored to this overlay, where it rasterises at full DPR
+// resolution. The world canvas stays at 900×500 logical pixels — its sprites
+// + gradients + shadow blurs keep their cheap fill-rate cost — but text
+// looks sharp on Retina / 4K displays instead of soft from the CSS upscale.
+//
+// Path/clip/transform state is mirrored from ctx → tctx via intercepted
+// methods (save, restore, clip, translate, etc.) so a popup that clips text
+// inside its bounds clips it correctly on the overlay too.
+const DPR = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+const tCanvas = document.createElement('canvas');
+tCanvas.id = 'tc';
+// Match positioning to the world canvas. pointer-events:none so all mouse
+// input still hits the underlying canvas.
+tCanvas.style.position = 'absolute';
+tCanvas.style.pointerEvents = 'none';
+tCanvas.style.left = '0';
+tCanvas.style.top = '0';
+(canvas.parentElement || document.body).appendChild(tCanvas);
+const tctx = tCanvas.getContext('2d');
+
 function fitCanvas() {
   const s = Math.min(window.innerWidth/W, window.innerHeight/H);
-  canvas.style.width  = Math.floor(W*s)+'px';
-  canvas.style.height = Math.floor(H*s)+'px';
+  const cssW = Math.floor(W*s), cssH = Math.floor(H*s);
+  canvas.style.width  = cssW+'px';
+  canvas.style.height = cssH+'px';
+  // Overlay sits exactly on top of the world canvas at the same CSS size,
+  // but its bitmap is DPR×DPR larger so text rasterises at native pixels.
+  tCanvas.style.width  = cssW+'px';
+  tCanvas.style.height = cssH+'px';
+  tCanvas.width  = Math.round(W*DPR);
+  tCanvas.height = Math.round(H*DPR);
+  // Position the overlay where the canvas actually sits on the page (the
+  // game uses default block layout so it usually lines up; the absolute
+  // positioning above + getBoundingClientRect keeps it stable on reflow).
+  const r = canvas.getBoundingClientRect();
+  tCanvas.style.left = (canvas.offsetLeft||0)+'px';
+  tCanvas.style.top  = (canvas.offsetTop ||0)+'px';
+  // Re-apply the DPR scale on the fresh tctx state.
+  tctx.setTransform(DPR, 0, 0, DPR, 0, 0);
 }
 fitCanvas();
 window.addEventListener('resize', fitCanvas);
+
+// ── ctx → tctx state mirroring ────────────────────────────────
+// Path / transform / clip / save-restore commands all forward to tctx so the
+// overlay tracks the world canvas's logical state perfectly. setTransform
+// and resetTransform need DPR multiplication; everything else passes
+// arguments through unchanged.
+{
+  const _passthrough = [
+    'save','restore','clip','beginPath',
+    'moveTo','lineTo','closePath','rect','roundRect',
+    'arc','arcTo','ellipse',
+    'bezierCurveTo','quadraticCurveTo',
+    'translate','rotate','scale','transform'
+  ];
+  for(const m of _passthrough){
+    const _orig = ctx[m]?.bind(ctx);
+    if(!_orig) continue;
+    ctx[m] = function(){
+      _orig.apply(ctx, arguments);
+      try{ tctx[m].apply(tctx, arguments); }catch(e){}
+    };
+  }
+  const _origSetTransform = ctx.setTransform.bind(ctx);
+  ctx.setTransform = function(a,b,c,d,e,f){
+    if(arguments.length===6){
+      _origSetTransform(a,b,c,d,e,f);
+      tctx.setTransform(a*DPR, b*DPR, c*DPR, d*DPR, e*DPR, f*DPR);
+    } else {
+      // DOMMatrix or no-args (reset). Forward the same to ctx then re-apply
+      // DPR baseline on tctx.
+      _origSetTransform.apply(ctx, arguments);
+      if(arguments[0] && typeof arguments[0]==='object'){
+        const m = arguments[0];
+        tctx.setTransform(m.a*DPR, m.b*DPR, m.c*DPR, m.d*DPR, m.e*DPR, m.f*DPR);
+      } else {
+        tctx.setTransform(DPR,0,0,DPR,0,0);
+      }
+    }
+  };
+  const _origReset = ctx.resetTransform?.bind(ctx);
+  if(_origReset){
+    ctx.resetTransform = function(){
+      _origReset();
+      tctx.setTransform(DPR,0,0,DPR,0,0);
+    };
+  }
+  // Properties that need to be synced from ctx to tctx right before drawing
+  // text. Reading once per fillText/strokeText call is cheap.
+  const _TEXT_PROPS = ['globalAlpha','font','fillStyle','strokeStyle',
+    'textAlign','textBaseline','shadowColor','shadowBlur',
+    'shadowOffsetX','shadowOffsetY','lineWidth','direction'];
+  function _syncTextState(){
+    for(let i=0;i<_TEXT_PROPS.length;i++){
+      const p = _TEXT_PROPS[i];
+      try{ tctx[p] = ctx[p]; }catch(e){}
+    }
+  }
+  const _origFillText = ctx.fillText.bind(ctx);
+  const _origStrokeText = ctx.strokeText.bind(ctx);
+  ctx.fillText = function(){ _syncTextState(); tctx.fillText.apply(tctx, arguments); };
+  ctx.strokeText = function(){ _syncTextState(); tctx.strokeText.apply(tctx, arguments); };
+}
+// Called once at the start of each frame to wipe the overlay before the
+// new frame's text is laid down.
+function _clearTextOverlay(){
+  tctx.save();
+  tctx.setTransform(1,0,0,1,0,0);
+  tctx.clearRect(0,0,tCanvas.width,tCanvas.height);
+  tctx.restore();
+}
 
 // ── LZ-string (pieroxy/lz-string v1.5.0, MIT) ────────────────
 // Minified, inlined verbatim. Used by the save manager to compress save
@@ -6431,7 +6539,7 @@ function _aiExecuteAction(action){
     if(!(upDef.eligibleBiomes||[]).includes(p.type.id)) return;
     if(_aiCorp.credits<upDef.cost) return;
     if(!p.upgrades) p.upgrades=[];
-    p.upgrades.push(action.upgradeId);
+    p.upgrades.push(action.upgradeId); _invalidateUpgradePlanetCache();
     if(!p.upgradeData) p.upgradeData={};
     // Initialize per-upgrade data — mirrors what _processCargoQueue would
     // lazy-init on first delivery (so the AI's upgrades behave identically).
@@ -10417,8 +10525,32 @@ function updatePlanetDevLevels(dtSd){
   }
 }
 
-function updateFoundries(dtG){
+// Cache of planet IDs that currently host any production upgrade
+// (foundry/blast_furnace/glassworks/factory/bakery/juicery). Invalidated on
+// upgrade installs/removals via _invalidateUpgradePlanetCache(). Rebuilt
+// lazily on next access — far cheaper than walking all 1,117 planets every
+// frame just to discover that ~37 of them have upgrades.
+let _upgradePlanetIds=null;
+function _invalidateUpgradePlanetCache(){ _upgradePlanetIds=null; }
+function _getUpgradePlanets(){
+  if(_upgradePlanetIds) return _upgradePlanetIds;
+  const out=[];
   for(const p of galaxy.planets){
+    const u=p.upgrades;
+    if(u && u.length>0 &&
+       (u.includes('iron_foundry')||u.includes('blast_furnace')||u.includes('glassworks')
+        ||u.includes('factory')||u.includes('bakery')||u.includes('juicery'))){
+      out.push(p);
+    }
+  }
+  return (_upgradePlanetIds=out);
+}
+
+function updateFoundries(dtG){
+  // Iterate only planets that actually host a production upgrade — at the
+  // late-game scale where 99% of planets have none, this drops the per-frame
+  // foundry loop from ~1,117 iterations to ~37.
+  for(const p of _getUpgradePlanets()){
     if(_pUpg(p,'iron_foundry')&&p.upgradeData?.iron_foundry){
       const _fd=p.upgradeData.iron_foundry;
       if((_fd.progress||0)>0){
@@ -10596,15 +10728,59 @@ function updateFoundries(dtG){
   }
 }
 
+// Per-planet orbit-update accumulator. Inactive planets advance their orbital
+// angle at 10 Hz batched updates instead of every frame — they aren't visible
+// and aren't used in any tangent/cargo math this tick, so the sub-frame
+// orbital error is invisible.
+let _inactiveOrbitAcc=0;
 function updatePlanetOrbits(dtG, dt){
+  // Build the "active" set: planets that need precise per-frame positions.
+  // Anything in viewport, any train's current planet, any current/queued
+  // route stop, the selected planet, and the popup planet all qualify.
+  const _active=new Set();
+  for(const t of trains){
+    _active.add(t.planetId);
+    if(t.route){ for(const sid of t.route.stops) _active.add(sid); }
+    if(t.queuedRoute){ for(const sid of t.queuedRoute.stops) _active.add(sid); }
+    if(t._detourPermanentRoute){ for(const sid of t._detourPermanentRoute.stops) _active.add(sid); }
+  }
+  if(sel&&sel.type==='planet') _active.add(sel.data.id);
+  if(activePopup==='planet'&&popupState.planet) _active.add(popupState.planet.id);
+  // Viewport AABB in world space — anything inside is "active" for cloud/
+  // orbital precision. Adds a ~one-screen margin so planets entering from
+  // an edge don't snap when they cross.
+  const _viewPad=600/Math.max(cam.scale,1e-4);
+  const _vx0=cam.x-((W-PANEL_W)/2+_viewPad)/cam.scale;
+  const _vx1=cam.x+((W-PANEL_W)/2+_viewPad)/cam.scale;
+  const _vy0=cam.y-((H-TOP_H)/2+_viewPad)/cam.scale;
+  const _vy1=cam.y+((H-TOP_H)/2+_viewPad)/cam.scale;
+  // Inactive planets advance at 10 Hz — accumulate elapsed dt and fire a
+  // batched update when ≥ 100ms has passed.
+  _inactiveOrbitAcc+=dt;
+  const _doInactive=_inactiveOrbitAcc>=6.0; // ~100ms at 60fps (dt is game-frame units)
+  const _inactiveDtG=_doInactive?dtG*( _inactiveOrbitAcc/dt ):0;
+  const _inactiveDt =_doInactive?_inactiveOrbitAcc:0;
+  if(_doInactive) _inactiveOrbitAcc=0;
   for(const p of galaxy.planets){
-    p.orbitAngle+=p.orbitSpeed*dtG;
-    const star=galaxy.stars[p.starId];
-    p.x=star.x+p.orbitRadius*Math.cos(p.orbitAngle);
-    p.y=star.y+p.orbitRadius*Math.sin(p.orbitAngle);
-    if(p.hasStation&&p.stationSpeed) p.stationAngle=(p.stationAngle||0)+p.stationSpeed*dtG;
-    if(p.clouds) p.cloudAngle=(p.cloudAngle||0)+CLOUD_SPEED*dtG;
-    for(const m of (p.moons||[])) m.angle+=m.speed*dt; // real-time, not game-speed
+    const _isActive = _active.has(p.id) || (p.x>=_vx0&&p.x<=_vx1&&p.y>=_vy0&&p.y<=_vy1);
+    if(_isActive){
+      p.orbitAngle+=p.orbitSpeed*dtG;
+      const star=galaxy.stars[p.starId];
+      p.x=star.x+p.orbitRadius*Math.cos(p.orbitAngle);
+      p.y=star.y+p.orbitRadius*Math.sin(p.orbitAngle);
+      if(p.hasStation&&p.stationSpeed) p.stationAngle=(p.stationAngle||0)+p.stationSpeed*dtG;
+      if(p.clouds) p.cloudAngle=(p.cloudAngle||0)+CLOUD_SPEED*dtG;
+      for(const m of (p.moons||[])) m.angle+=m.speed*dt;
+    } else if(_doInactive){
+      p.orbitAngle+=p.orbitSpeed*_inactiveDtG;
+      const star=galaxy.stars[p.starId];
+      p.x=star.x+p.orbitRadius*Math.cos(p.orbitAngle);
+      p.y=star.y+p.orbitRadius*Math.sin(p.orbitAngle);
+      // station angle + cloud angle + moon angles can stay batched too
+      if(p.hasStation&&p.stationSpeed) p.stationAngle=(p.stationAngle||0)+p.stationSpeed*_inactiveDtG;
+      if(p.clouds) p.cloudAngle=(p.cloudAngle||0)+CLOUD_SPEED*_inactiveDtG;
+      for(const m of (p.moons||[])) m.angle+=m.speed*_inactiveDt;
+    }
   }
 }
 
@@ -19460,6 +19636,35 @@ function drawTrainBuilderPopup(){
   else if(trainCost===0) ctx.fillText(_isEdit?'No net new cars — free':'Engine only — add cars above',cfX+cfW+12,btnRowY+btnH/2+3);
   else { const _cTxt='-'+_fmtCr(trainCost)+' cr'; ctx.font='8px "Exo 2",sans-serif'; const _cPW=ctx.measureText(_cTxt).width+10,_cPH=13; const _cPX=cfX+cfW+12,_cPY=btnRowY+btnH/2-_cPH/2; ctx.fillStyle='rgba(110,18,18,0.92)'; ctx.beginPath(); ctx.roundRect(_cPX,_cPY,_cPW,_cPH,4); ctx.fill(); ctx.fillStyle='rgba(255,255,255,0.97)'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(_cTxt,_cPX+_cPW/2,_cPY+_cPH/2); ctx.textBaseline='alphabetic'; }
 
+  // ── Engine-failure red callout ────────────────────────────────
+  // Centered red bubble announcing the breakdown. Visible only while the
+  // builder is in failure mode. Sits above the train viz so the player
+  // can't miss it; uses the same rounded-pill styling as other callouts.
+  if(_isFail){
+    const _ft=trains[s.editTrainIdx];
+    const _tname=(_ft&&_ft.name)||'A train';
+    const _lines=[_tname+' has broken down.','Replace the ENGINE or DELETE the ROUTE.'];
+    ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    let _maxW=0;
+    for(const _ln of _lines){ const _w=ctx.measureText(_ln).width; if(_w>_maxW) _maxW=_w; }
+    const _bPad=14, _bLh=16, _bH=_lines.length*_bLh+_bPad*2;
+    const _bW=_maxW+_bPad*2;
+    const _bX=px+(pw-_bW)/2, _bY=py+12;
+    ctx.save();
+    ctx.shadowColor='rgba(220,20,20,0.85)'; ctx.shadowBlur=18;
+    ctx.fillStyle='rgba(178,18,18,0.96)';
+    ctx.beginPath(); ctx.roundRect(_bX,_bY,_bW,_bH,8); ctx.fill();
+    ctx.shadowBlur=0;
+    ctx.strokeStyle='rgba(255,180,180,0.9)'; ctx.lineWidth=1.4;
+    ctx.beginPath(); ctx.roundRect(_bX,_bY,_bW,_bH,8); ctx.stroke();
+    ctx.fillStyle='#ffe8e8';
+    for(let _li=0;_li<_lines.length;_li++){
+      ctx.fillText(_lines[_li], _bX+_bW/2, _bY+_bPad+_bLh/2+_li*_bLh);
+    }
+    ctx.textBaseline='alphabetic';
+    ctx.restore();
+  }
+
   ctx.restore();
 }
 
@@ -20906,9 +21111,15 @@ function drawGalaxy(ts,dt){
     // train completes the bypass leg (phase transitions out of 'transit') or
     // the temp route is replaced by the real one.
     const _trainOnTempTransit=!!(train.route?.isTempRoute&&train.route.phase==='transit');
+    // Performance: shadowBlur is the most expensive 2D-canvas paint op
+    // (separate offscreen blur pass per stroke). Below a zoom-out threshold
+    // we skip shadows entirely on non-active route lines and rings — the
+    // glow is invisible at that scale anyway. Active/blocked segments below
+    // still get their full shadow (the per-segment branches set it explicitly).
+    const _routeShadowOn=cam.scale>=0.16;
     for(const {r,faint,isDetourPerm} of toDraw){
       const baseAlpha=faint?0.45:(_isSel?0.32:0.22);
-      const baseShadow=faint?6:(_isSel?5:4);
+      const baseShadow=_routeShadowOn?(faint?6:(_isSel?5:4)):0;
       ctx.save();
       ctx.lineWidth=faint?1.8:(_isSel?2.1:1.3);
       const tc=train.color||'#4ad2ff';
@@ -20933,12 +21144,40 @@ function drawGalaxy(ts,dt){
       const _nextSegPhases=new Set(['orbit','waiting','blocked','queueing','descending']);
       const nextFrom=_nextSegPhases.has(r.phase)?r.fromIdx:-1;
       const nextTo  =_nextSegPhases.has(r.phase)?r.toIdx  :-1;
+      // Per-route tangent cache. Stores the last-computed tangent per
+      // segment-direction key plus the endpoint positions used to derive it.
+      // If both endpoints have moved < 2 SU (sub-pixel at any practical
+      // zoom), reuse the cached lt; otherwise recompute. Saves ~240 calls
+      // per frame in late-game saves. Cache lives on the route object so
+      // it gets cleared automatically when the route is replaced.
+      if(!r._ltCache) r._ltCache=new Map();
+      const _ltCache=r._ltCache;
+      const _LT_POS_TOL=2*2; // squared SU
       for(const [iA,iB] of pairs){
         const pA=_gp(r.stops[iA]), pB=_gp(r.stops[iB]);
         if(!pA||!pB) continue;
         const orA=(r.stopOrbitR&&r.stopOrbitR[iA])||(pA.isStarProxy?pA.starOrbitR:ORBIT_TIERS[pA.size][train.orbitTier]||ORBIT_TIERS[pA.size]['LOW']);
         const orB=(r.stopOrbitR&&r.stopOrbitR[iB])||(pB.isStarProxy?pB.starOrbitR:ORBIT_TIERS[pB.size][train.orbitTier]||ORBIT_TIERS[pB.size]['LOW']);
-        const lt=computeLiveTangent(pA, pB, orA, orB);
+        const _segKey=iA*256+iB; // dense numeric key
+        const _cE=_ltCache.get(_segKey);
+        let lt;
+        if(_cE && _cE.ax===pA.x && _cE.ay===pA.y && _cE.bx===pB.x && _cE.by===pB.y
+              && _cE.orA===orA && _cE.orB===orB){
+          lt=_cE.lt;
+        } else if(_cE && _cE.orA===orA && _cE.orB===orB){
+          // Within tolerance? Fast squared-distance check avoids the trig call.
+          const _dxA=pA.x-_cE.ax, _dyA=pA.y-_cE.ay;
+          const _dxB=pB.x-_cE.bx, _dyB=pB.y-_cE.by;
+          if(_dxA*_dxA+_dyA*_dyA<_LT_POS_TOL && _dxB*_dxB+_dyB*_dyB<_LT_POS_TOL){
+            lt=_cE.lt;
+          } else {
+            lt=computeLiveTangent(pA, pB, orA, orB);
+            _ltCache.set(_segKey,{lt, ax:pA.x, ay:pA.y, bx:pB.x, by:pB.y, orA, orB});
+          }
+        } else {
+          lt=computeLiveTangent(pA, pB, orA, orB);
+          _ltCache.set(_segKey,{lt, ax:pA.x, ay:pA.y, bx:pB.x, by:pB.y, orA, orB});
+        }
         if(!lt) continue;
         const [ax,ay]=w2s(lt.ax,lt.ay), [bx,by]=w2s(lt.bx,lt.by);
         const isActive=iA===activeFrom&&iB===activeTo;
@@ -22304,8 +22543,23 @@ function assignRouteToTrain(train){
 // Edges are validated via transitPathBlocked using predicted planet positions at ETA.
 // Greedy sort key: distance from predicted intermediate to predicted dest at arrival time.
 // Returns array of planet IDs [src, ..., dst], or null if unreachable.
+// Memoization cache for multi-hop pathfinding. Keyed by
+// `sourcePid|destPid|engineType`. Cached results are valid for 3 SD — past
+// that, planet positions have drifted enough that the cached path may no
+// longer be tangent-clear. Caller still validates the FIRST hop's tier
+// availability separately, so a stale path here only matters if the entire
+// galaxy graph has shifted, which 3 SD is short enough to bound.
+const _multiHopCache=new Map();
+const _MULTIHOP_CACHE_TTL_SD=3.0;
+const _MULTIHOP_CACHE_MAX=200;
+
 function findMultiHopPath(sourcePlanetId, destPlanetId, train){
   if(sourcePlanetId===destPlanetId) return [sourcePlanetId];
+  // Cache lookup — key includes engine type because range gates change paths.
+  const _engT=train?.cars?.[0]||'engine_constellation';
+  const _ck=sourcePlanetId+'|'+destPlanetId+'|'+_engT;
+  const _cached=_multiHopCache.get(_ck);
+  if(_cached && (stardate-_cached.sd)<_MULTIHOP_CACHE_TTL_SD) return _cached.path;
   const planets=galaxy.planets;
   const dp=_gp(destPlanetId);
   if(!dp) return null;
@@ -22335,12 +22589,29 @@ function findMultiHopPath(sourcePlanetId, destPlanetId, train){
     const fr=_pOrbitR(fp), tr2=_pOrbitR(tp);
     return !transitPathBlocked(fpP,tpP,fr,tr2,train);
   };
+  // Helper to memoize before returning. LRU-trim when the cache grows beyond
+  // _MULTIHOP_CACHE_MAX so it can't leak unbounded across long sessions.
+  const _store=(path)=>{
+    if(_multiHopCache.size>=_MULTIHOP_CACHE_MAX){
+      const _first=_multiHopCache.keys().next().value;
+      if(_first!==undefined) _multiHopCache.delete(_first);
+    }
+    _multiHopCache.set(_ck,{path, sd:stardate});
+    return path;
+  };
   // Direct hop at time 0
-  if(_edgeOk(sourcePlanetId,destPlanetId,0)) return [sourcePlanetId,destPlanetId];
+  if(_edgeOk(sourcePlanetId,destPlanetId,0)) return _store([sourcePlanetId,destPlanetId]);
   // BFS: each queue entry = [curPlanetId, pathSoFar[], accETA_frames]
+  // Cap on total nodes expanded to bound worst-case latency. With ~1,100
+  // candidate planets in late-game saves, an uncapped BFS can iterate the
+  // whole graph; the cap forces a 'no path' return after ~250 expansions
+  // which is fast enough to keep the synchronous train update under budget.
   const visited=new Set([sourcePlanetId]);
   const queue=[[sourcePlanetId,[sourcePlanetId],0]];
-  while(queue.length>0){
+  let _expansions=0;
+  const _MAX_EXPANSIONS=250;
+  while(queue.length>0 && _expansions<_MAX_EXPANSIONS){
+    _expansions++;
     const [curId,path,eta]=queue.shift();
     const cur=_gp(curId);
     if(!cur) continue;
@@ -22376,12 +22647,12 @@ function findMultiHopPath(sourcePlanetId, destPlanetId, train){
     neighbours.sort((a,b)=>a.dd-b.dd);
     for(const nb of neighbours){
       const newPath=[...path,nb.i];
-      if(nb.i===destPlanetId) return newPath;
+      if(nb.i===destPlanetId) return _store(newPath);
       visited.add(nb.i);
       queue.push([nb.i,newPath,nb.arrEta]);
     }
   }
-  return null; // no path found
+  return _store(null); // no path found — cache the negative result too
 }
 
 // Build an array of single-segment temp route objects linked via _nextQueuedRoute.
@@ -24053,7 +24324,7 @@ canvas.addEventListener('mouseup',e=>{
             if(p&&u&&credits>=_uPurchaseCost&&!(p.upgrades||[]).includes(u.id)){
               if(_uPurchaseCost>0){ credits-=_uPurchaseCost; creditDelta-=_uPurchaseCost; spawnCreditFloatScreen(b.x+b.w/2,b.y,-_uPurchaseCost); purchaseLedger.push({sd:stardate,amount:_uPurchaseCost,type:'upgrade'}); }
               if(!p.upgrades) p.upgrades=[];
-              p.upgrades.push(u.id);
+              p.upgrades.push(u.id); _invalidateUpgradePlanetCache();
               _newsLog('upgrade_built',{pln:p.name,_pln:p,upgrade:u.id});
               if(!p.playerBuiltUpgrades) p.playerBuiltUpgrades=[];
               p.playerBuiltUpgrades.push(u.id);
@@ -24405,6 +24676,19 @@ canvas.addEventListener('mouseup',e=>{
                   });
                 }
               }
+              // Engine-failure mode resolution: a fresh engine was just
+              // installed, so clear the failed flag and roll a new hidden
+              // 8–15 SD lifespan. The broken engine that was stripped off
+              // before opening the builder is NOT in the yard (intentional —
+              // it's permanently defunct), so no special yard cleanup is
+              // needed here.
+              if(s._engineFailureMode){
+                const _etRef=trains[s.editTrainIdx];
+                if(_etRef){
+                  _etRef._engineFailed=false;
+                  _etRef._engineFailureSd=_rollEngineFailureSd();
+                }
+              }
               activePopup='train'; popupState={trainIdx:s.editTrainIdx}; trainBuilderState=null;
             } else {
               // Build mode: draw from trainyard by type, purchase remainder.
@@ -24483,10 +24767,25 @@ canvas.addEventListener('mouseup',e=>{
             return;
           }
         }
-        // Cancel button
+        // Cancel button — in failure mode this is the DELETE TRAIN / ROUTE
+        // action: scrap the train and its route entirely. In normal mode it
+        // simply closes the builder and reverts.
         if(s.cancelBounds){
           const b=s.cancelBounds;
           if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+            if(s._engineFailureMode && s.editTrainIdx!=null){
+              const _idx=s.editTrainIdx;
+              const _t=trains[_idx];
+              if(_t){
+                _t.route=null; _t.queuedRoute=null; _t._detourPermanentRoute=null;
+                trains.splice(_idx,1);
+                // Update sel / route-stops if they were pointing at this train.
+                if(sel&&sel.type==='car'&&sel.data?.trainIdx===_idx){ sel=null; routeStops=[]; }
+                if(sel&&sel.type==='car'&&sel.data?.trainIdx>_idx) sel.data.trainIdx-=1;
+              }
+              activePopup='trains'; popupState={scroll:0}; trainBuilderState=null;
+              return;
+            }
             if(s.editTrainIdx!=null){ activePopup='train'; popupState={trainIdx:s.editTrainIdx}; }
             else { activePopup='trains'; popupState={scroll:0}; }
             trainBuilderState=null;
@@ -24503,6 +24802,9 @@ canvas.addEventListener('mouseup',e=>{
         const _upb=popupState._upgradePanelBounds;
         if(cp.x>=_upb.x&&cp.x<=_upb.x+_upb.w&&cp.y>=_upb.y&&cp.y<=_upb.y+_upb.h) _outsidePopup=false;
       }
+      // Engine-failure mode: ignore outside-click closes — player must use
+      // the confirm or DELETE TRAIN/ROUTE button to resolve the breakdown.
+      if(_outsidePopup&&activePopup==='trainbuilder'&&trainBuilderState?._engineFailureMode) _outsidePopup=false;
       if(_outsidePopup){ activePopup=null; popupState={}; colorPickerState=null; }
       return;
     }
@@ -24685,7 +24987,12 @@ function _fireEsc(){
   if(colorPickerState){ colorPickerState=null; return; }
   if(activePopup==='new_mission') return; // must use Accept button — cannot ESC out
   if(activePopup==='quitconfirm'){ activePopup=null; popupState={}; return; }
-  if(activePopup==='trainbuilder'){ if(trainBuilderState?.editTrainIdx!=null){ activePopup='train'; popupState={trainIdx:trainBuilderState.editTrainIdx}; } else { activePopup='trains'; popupState={scroll:0}; } trainBuilderState=null; return; }
+  if(activePopup==='trainbuilder'){
+    // Engine-failure mode: ESC is disabled — the player must either install
+    // a new engine (confirm) or scrap the train (the DELETE button).
+    if(trainBuilderState?._engineFailureMode) return;
+    if(trainBuilderState?.editTrainIdx!=null){ activePopup='train'; popupState={trainIdx:trainBuilderState.editTrainIdx}; } else { activePopup='trains'; popupState={scroll:0}; } trainBuilderState=null; return;
+  }
   // Controls popup — Esc returns to the Options popup it was opened from
   // (mirrors the clickable [ESC] label in its top-right corner).
   if(activePopup==='controls'){ activePopup='options'; popupState={}; return; }
@@ -25189,6 +25496,7 @@ function _restoreFromSave(save){
             name:n.name||NEBULA_NAME_POOL[(n.seed||0)%NEBULA_NAME_POOL.length]}))};
   makeGStars();
   // Restore flat state
+  _invalidateUpgradePlanetCache();
   stardate=save.stardate; credits=save.credits; corpName=save.corpName||'Space Tycoon Corporation';
   // Migrate v1 saves: old SPEED_OPTS was [1,2,5,10] (4 tiers), new is
   // [0,0.5,1,2,5,10] (6 tiers). Old idx N maps to new idx N+2.
@@ -26675,6 +26983,11 @@ let lastT=0;
 function loop(ts){
   try{
   const dt=Math.min((ts-lastT)/16.67,3); lastT=ts;
+  // Clear the HD text overlay at the very start of the frame so each draw
+  // pass starts with a transparent layer; the ctx → tctx text mirror writes
+  // into it during the frame and the browser composites it over the world
+  // canvas after the frame finishes.
+  _clearTextOverlay();
   // Play a "button" sound whenever activePopup transitions INTO a popup that
   // is opened by player input (keyboard shortcut, click, double-click). The
   // whitelist excludes auto-popping windows (new mission, car/engine unlock,
