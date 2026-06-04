@@ -5448,6 +5448,12 @@ function generateGalaxy(){
   return {stars, planets, homeStarId, origenId, trainPlanetId: origenId, blackHoles: _blackHoles, starProxyMap, colonyTrainDestId:_colonyTrainDestId, faminePlanetId:_faminePlanetId, outbreakPlanetId:_outbreakPlanetId, bhResearchPlanetId:_bhResearchPlanetId, bhResearchPlanetIds:_bhResearchPlanetIds, nebulas:_nebulas, rockyMissionPids:_rockyMissionPids};
 }
 
+// Pre-determined engine lifespan: every newly-installed engine fails some
+// random 8–15 stardates later. Hidden from the player; surfaced only when
+// the engine actually dies via the failure handler. Called from train
+// creation and from any path that swaps in a freshly-purchased engine.
+function _rollEngineFailureSd(){ return stardate + 8 + Math.random()*7; }
+
 function makeGalaxyTrain(name, planetId, orbitTier, cars, isPlayer){
   const planet=galaxy.planets[planetId];
   const orbitR=ORBIT_TIERS[planet.size][orbitTier];
@@ -5455,6 +5461,7 @@ function makeGalaxyTrain(name, planetId, orbitTier, cars, isPlayer){
   return {name, cars, planetId, orbitTier, orbitR, orbitGap, angle:Math.random()*Math.PI*2, isPlayer, route:null,
           orbitCounts:{}, routeCounts:{}, totalDist:0, _angleAcc:0, color:pick(TRAIN_COLORS),
           maintenance:1.0, distSinceMaint:0.0, totalRevenue:0, totalCosts:0,
+          _engineFailureSd:_rollEngineFailureSd(), _engineFailed:false,
           carFull: new Array(cars.length).fill(false),
           carCargo: new Array(cars.length).fill(null),
           carCargoSource: new Array(cars.length).fill(null),
@@ -11110,6 +11117,20 @@ function getTrainCarPos(train, carIdx){
 }
 
 function updateTrain(t, dt){
+  // Hidden engine-lifespan check — fires once per player train when stardate
+  // crosses the pre-rolled _engineFailureSd. The engine is the train's first
+  // car; for a freshly-purchased train it was rolled by _rollEngineFailureSd
+  // in makeGalaxyTrain. The handler removes the broken engine without yarding
+  // it, opens the train builder in failure mode, posts a red chat message,
+  // and waits for the player to either install a replacement or delete the
+  // train + its route entirely.
+  if(t.isPlayer && !t._engineFailed && t._engineFailureSd!=null
+     && stardate>=t._engineFailureSd && t.cars && t.cars[0]
+     && isEngineType(t.cars[0])){
+    _triggerEngineFailure(trains.indexOf(t));
+    // Don't return — train still ticks this frame (handler clears the engine
+    // but the rest of updateTrain happily runs on a train with cars[0]=null).
+  }
   if(!t.route){
     t.angle-=ORB_SPD*dt;
     if(t.isPlayer){ t._angleAcc+=ORB_SPD*dt; trackOrbit(t); }
@@ -11145,6 +11166,45 @@ function updateTrain(t, dt){
         r.minOrbitDone=true;
         r.orbitSpun=0;
         r._waitStartedSd=null;
+      }
+    }
+    // ── Multi-hop fallback for "DESTINATION IS FULL" trains ──
+    // The waiting-phase poll above only finds a slot if the immediate
+    // destination has one free. But trains can also be stuck here because
+    // the final destination is OUT OF ENGINE RANGE — they'd need a multi-hop
+    // path to get there anyway. Every 5 in-game seconds (300 dtG frame-units)
+    // we re-check whether a multi-hop path exists where the first hop can
+    // be taken NOW (the intermediate planet has an available orbital tier).
+    // If so, switch the train onto that hop chain so it stops idling.
+    r._waitingMultiHopAcc=(r._waitingMultiHopAcc||0)+dt;
+    const _MULTIHOP_INTERVAL=300; // 5 seconds × 60 dtG frame-units per second
+    if(r._waitingMultiHopAcc>=_MULTIHOP_INTERVAL){
+      r._waitingMultiHopAcc=0;
+      // Eventual final destination — if the route is on a multi-hop temp
+      // route, prefer the saved _multiHopDest; otherwise the next route stop.
+      const _finalDestId=r._multiHopDest??r.stops[r.toIdx];
+      const _newPath=findMultiHopPath(t.planetId,_finalDestId,t);
+      // Need at least one intermediate hop (path length > 2) AND the first
+      // intermediate must have an available orbital tier RIGHT NOW. A
+      // length-2 path means a direct hop, which we already know is impossible
+      // (otherwise we wouldn't be in waiting state). The first hop's start
+      // is the current planet and its end is path[1].
+      if(_newPath&&_newPath.length>2){
+        const _firstHopDestId=_newPath[1];
+        const _firstAvail=getAvailableOrbitTier(_firstHopDestId,t);
+        if(_firstAvail){
+          // Build the hop chain — same infrastructure the blocked phase uses.
+          const _isPermRoute=!r.isTempRoute&&!t._detourPermanentRoute;
+          const _hops=_buildHopChain(_newPath,t.orbitR,t,_finalDestId,_isPermRoute);
+          if(_hops&&_hops.length>0){
+            const _fh=_hops[0]; _fh.phase='orbit'; _fh.orbitSpun=0; _fh.minOrbitDone=true;
+            if(_isPermRoute) t._detourPermanentRoute=r;
+            r._destReservedFromWait=false;
+            r._waitStartedSd=null;
+            t.route=_fh; t.queuedRoute=_hops.length>1?_hops[1]:null;
+            _invalidateOccOrbit();
+          }
+        }
       }
     }
   } else if(r.phase==='blocked'){
@@ -12433,6 +12493,36 @@ function drawNewMissionPopup(){
 //     steel in any rolling 20-stardate window. Tracked via _steelProdLog.
 // This function runs every tick to prune the log and check the N700 gate.
 function _checkEngineUnlocks(){
+  // ── Class J auto-unlock (user spec) ─────────────────────────
+  // Class J unlocks immediately when EITHER trigger fires:
+  //   • Rolling last-stardate gross revenue across player trains > $400,000
+  //   • Corporate value (credits + train + station + upgrade assets) > $2,400,000
+  // The mission-based unlock path (design_better_train) still works for
+  // players who hit it that way first; this is an additional shortcut.
+  // Class R remains mission-only.
+  if(!_classJEngineUnlocked){
+    let _corpVal=Infinity;
+    let _rollRev=0;
+    for(const t of trains){
+      if(!t.isPlayer||!t._revLog) continue;
+      while(t._revLog.length&&stardate-t._revLog[0].sd>1.0) t._revLog.shift();
+      for(const e of t._revLog) if(e.rev>0) _rollRev+=e.rev;
+    }
+    if(_rollRev>400000){
+      _classJEngineUnlocked=true;
+    } else {
+      const _a=_corpAssets();
+      _corpVal=_a?_a.total:0;
+      if(_corpVal>2400000) _classJEngineUnlocked=true;
+    }
+    if(_classJEngineUnlocked){
+      pendingEngineUnlocks.push({sprite:'engine_classJ',displayName:'Class J Engine'});
+      _chatMsg('CLASS J ENGINE UNLOCKED','rgba(255,200,80,1)');
+      _ga('engine_unlocked',{engine:'classJ', sd:Math.floor(stardate),
+        via:_rollRev>400000?'rolling_revenue':'corp_value'});
+    }
+  }
+  // ── N700 auto-unlock (existing) ─────────────────────────────
   // Prune entries that fall outside the 20-SD window.
   while(_steelProdLog.length&&stardate-_steelProdLog[0].sd>20) _steelProdLog.shift();
   if(_N700EngineUnlocked) return;
@@ -15807,7 +15897,7 @@ function drawPokedex(){
     const ry=listY+i*ROW-scroll;
     if(ry+ROW<listY||ry>listY+listH) continue;
     const vis=visitedPlanetIds.has(p.id);
-    pokedexRowBounds.push({x:px+2,y:ry,w:pw-4,h:ROW,planetId:p.id});
+    pokedexRowBounds.push({x:px+2,y:ry,w:pw-4,h:ROW,planetId:p.id,rowIdx:i});
     if(_pokedexRowHover===i){ ctx.fillStyle='rgba(22,38,80,0.55)'; ctx.fillRect(px+2,ry,pw-4,ROW); }
     else if(i%2===0){ ctx.fillStyle='rgba(15,25,55,0.4)'; ctx.fillRect(px+2,ry,pw-4,ROW); }
     // Rank number
@@ -15923,7 +16013,7 @@ function drawStarRegistry(){
     const ry=listY+i*ROW-scroll;
     if(ry+ROW<listY||ry>listY+listH) continue;
     const vis=revealedStarIds.has(s.id);
-    starRegistryRowBounds.push({x:px+2,y:ry,w:pw-4,h:ROW,starId:s.id});
+    starRegistryRowBounds.push({x:px+2,y:ry,w:pw-4,h:ROW,starId:s.id,rowIdx:i});
     if(_starRegistryRowHover===i){ ctx.fillStyle='rgba(38,25,8,0.60)'; ctx.fillRect(px+2,ry,pw-4,ROW); }
     else if(i%2===0){ ctx.fillStyle='rgba(25,15,5,0.4)'; ctx.fillRect(px+2,ry,pw-4,ROW); }
     ctx.textAlign='right'; ctx.font='9px Orbitron,sans-serif';
@@ -16958,30 +17048,150 @@ function drawCarDetailPopup(){
   ctx.restore();
 }
 
+// ── Color picker helpers ─────────────────────────────────────
+// HSV ↔ RGB ↔ HEX conversions for the train color picker. All RGB values
+// are 0-255, all HSV values are 0-1.
+function _cpHsvToRgb(h, s, v){
+  const i=Math.floor(h*6), f=h*6-i, p=v*(1-s), q=v*(1-f*s), t=v*(1-(1-f)*s);
+  let r,g,b;
+  switch(i%6){
+    case 0: r=v; g=t; b=p; break;
+    case 1: r=q; g=v; b=p; break;
+    case 2: r=p; g=v; b=t; break;
+    case 3: r=p; g=q; b=v; break;
+    case 4: r=t; g=p; b=v; break;
+    case 5: r=v; g=p; b=q; break;
+  }
+  return {r:Math.round(r*255), g:Math.round(g*255), b:Math.round(b*255)};
+}
+function _cpRgbToHsv(r, g, b){
+  r/=255; g/=255; b/=255;
+  const mx=Math.max(r,g,b), mn=Math.min(r,g,b), d=mx-mn;
+  let h=0, s=mx===0?0:d/mx, v=mx;
+  if(d!==0){
+    if(mx===r) h=((g-b)/d+(g<b?6:0))/6;
+    else if(mx===g) h=((b-r)/d+2)/6;
+    else h=((r-g)/d+4)/6;
+  }
+  return {h, s, v};
+}
+function _cpHexToRgb(hex){
+  hex=String(hex||'').trim().replace(/^#/,'');
+  if(/^[0-9a-fA-F]{3}$/.test(hex)) hex=hex.split('').map(c=>c+c).join('');
+  if(!/^[0-9a-fA-F]{6}$/.test(hex)) return null;
+  return {r:parseInt(hex.slice(0,2),16), g:parseInt(hex.slice(2,4),16), b:parseInt(hex.slice(4,6),16)};
+}
+function _cpRgbToHex(r, g, b){
+  const _h=(v)=>{const s=Math.max(0,Math.min(255,Math.round(v))).toString(16); return s.length<2?'0'+s:s;};
+  return '#'+_h(r)+_h(g)+_h(b);
+}
+// Initialize the picker's HSV state from the current train color so the
+// indicator lands on the right spot when the popup opens.
+function _cpInitFromTrain(){
+  if(!colorPickerState) return;
+  if(colorPickerState.h!=null && colorPickerState.s!=null && colorPickerState.v!=null) return;
+  const t=trains[colorPickerState.trainIdx];
+  const cur=_cpHexToRgb(t?.color||'#ffffff') || {r:255,g:255,b:255};
+  const hsv=_cpRgbToHsv(cur.r,cur.g,cur.b);
+  colorPickerState.h=hsv.h; colorPickerState.s=hsv.s; colorPickerState.v=hsv.v;
+}
+// Apply the picker's current HSV to the selected train.
+function _cpApplyHsv(){
+  const t=trains[colorPickerState.trainIdx]; if(!t) return;
+  const rgb=_cpHsvToRgb(colorPickerState.h,colorPickerState.s,colorPickerState.v);
+  t.color=_cpRgbToHex(rgb.r,rgb.g,rgb.b);
+}
+
 function drawColorPickerPopup(){
   if(!colorPickerState) return;
-  const cpw=188, cph=108;
-  const cpx=(W-cpw)/2, cpy=(H-cph)/2-30; // offset slightly up from center
+  _cpInitFromTrain();
+  // Layout: SV picker on left, vertical hue strip on right, preview +
+  // hex input below, presets at the bottom.
+  const cpw=240, cph=240;
+  const cpx=(W-cpw)/2, cpy=(H-cph)/2-30;
   ctx.save();
   ctx.fillStyle='rgba(5,10,28,0.98)'; ctx.fillRect(cpx,cpy,cpw,cph);
   ctx.strokeStyle='rgba(255,160,80,0.6)'; ctx.lineWidth=2; ctx.strokeRect(cpx,cpy,cpw,cph);
-  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.fillStyle='rgba(200,140,60,0.8)';
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.fillStyle='rgba(200,140,60,0.85)';
   ctx.fillText('TRAIN COLOR',cpx+cpw/2,cpy+15);
-  const cols=4, rows=4, sw=16, sh=16, gap=4;
-  const startX=cpx+(cpw-cols*(sw+gap)+gap)/2;
-  const startY=cpy+22;
+  // ── Saturation × Value picker ──
+  const svX=cpx+12, svY=cpy+24, svW=170, svH=100;
+  colorPickerState.svBounds={x:svX,y:svY,w:svW,h:svH};
+  // Pure hue color for this picker's column
+  const _hueRgb=_cpHsvToRgb(colorPickerState.h,1,1);
+  const _hueCss='rgb('+_hueRgb.r+','+_hueRgb.g+','+_hueRgb.b+')';
+  // Horizontal gradient: white → pure hue (saturation 0 → 1)
+  const _gradH=ctx.createLinearGradient(svX,0,svX+svW,0);
+  _gradH.addColorStop(0,'#fff'); _gradH.addColorStop(1,_hueCss);
+  ctx.fillStyle=_gradH; ctx.fillRect(svX,svY,svW,svH);
+  // Vertical gradient: transparent → black (value 1 → 0)
+  const _gradV=ctx.createLinearGradient(0,svY,0,svY+svH);
+  _gradV.addColorStop(0,'rgba(0,0,0,0)'); _gradV.addColorStop(1,'rgba(0,0,0,1)');
+  ctx.fillStyle=_gradV; ctx.fillRect(svX,svY,svW,svH);
+  ctx.strokeStyle='rgba(255,255,255,0.3)'; ctx.lineWidth=1; ctx.strokeRect(svX,svY,svW,svH);
+  // Indicator dot for current S,V
+  const _ix=svX+colorPickerState.s*svW, _iy=svY+(1-colorPickerState.v)*svH;
+  ctx.beginPath(); ctx.arc(_ix,_iy,5,0,Math.PI*2);
+  ctx.strokeStyle='#000'; ctx.lineWidth=2; ctx.stroke();
+  ctx.strokeStyle='#fff'; ctx.lineWidth=1.2; ctx.stroke();
+  // ── Hue strip ──
+  const huX=cpx+190, huY=svY, huW=14, huH=svH;
+  colorPickerState.hueBounds={x:huX,y:huY,w:huW,h:huH};
+  // Vertical rainbow strip
+  for(let i=0;i<huH;i++){
+    const _hh=i/huH;
+    const _hr=_cpHsvToRgb(_hh,1,1);
+    ctx.fillStyle='rgb('+_hr.r+','+_hr.g+','+_hr.b+')';
+    ctx.fillRect(huX,huY+i,huW,1);
+  }
+  ctx.strokeStyle='rgba(255,255,255,0.3)'; ctx.lineWidth=1; ctx.strokeRect(huX,huY,huW,huH);
+  // Hue indicator
+  const _hy=huY+colorPickerState.h*huH;
+  ctx.strokeStyle='#000'; ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(huX-2,_hy); ctx.lineTo(huX+huW+2,_hy); ctx.stroke();
+  ctx.strokeStyle='#fff'; ctx.lineWidth=1.5; ctx.beginPath(); ctx.moveTo(huX-2,_hy); ctx.lineTo(huX+huW+2,_hy); ctx.stroke();
+  // ── Preview swatch + hex display ──
+  const pvY=cpy+132;
+  const _curRgb=_cpHsvToRgb(colorPickerState.h,colorPickerState.s,colorPickerState.v);
+  const _curHex=_cpRgbToHex(_curRgb.r,_curRgb.g,_curRgb.b);
+  ctx.fillStyle=_curHex; ctx.fillRect(cpx+12,pvY,28,22);
+  ctx.strokeStyle='rgba(255,255,255,0.4)'; ctx.lineWidth=1; ctx.strokeRect(cpx+12,pvY,28,22);
+  // "HEX:" label + clickable hex input field
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left'; ctx.fillStyle='rgba(200,140,60,0.85)';
+  ctx.fillText('HEX:',cpx+50,pvY+15);
+  const hexX=cpx+82, hexY=pvY, hexW=78, hexH=22;
+  colorPickerState.hexEditBounds={x:hexX,y:hexY,w:hexW,h:hexH};
+  ctx.fillStyle='rgba(0,0,0,0.45)'; ctx.fillRect(hexX,hexY,hexW,hexH);
+  const _hexHov=!!colorPickerState.hexHover;
+  ctx.strokeStyle=_hexHov?'rgba(255,200,100,0.9)':'rgba(120,90,40,0.7)';
+  ctx.lineWidth=_hexHov?1.5:1; ctx.strokeRect(hexX,hexY,hexW,hexH);
+  ctx.font='12px "Courier New",monospace'; ctx.textAlign='center';
+  ctx.fillStyle=_hexHov?'rgba(255,235,200,1)':'rgba(220,200,160,0.92)';
+  ctx.fillText(_curHex.toUpperCase(),hexX+hexW/2,pvY+15);
+  // Subtle hint: "(click to type)" under the hex field
+  ctx.font='7px "Exo 2",sans-serif'; ctx.textAlign='left';
+  ctx.fillStyle='rgba(150,110,60,0.6)';
+  ctx.fillText('click to type a hex code',cpx+50,pvY+30);
+  // ── Preset palette at the bottom (smaller) ──
+  const psY=cpy+170;
+  ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='left'; ctx.fillStyle='rgba(200,140,60,0.7)';
+  ctx.fillText('PRESETS',cpx+12,psY-2);
+  const psCols=8, psRows=2, psSw=22, psSh=22, psGap=4;
+  const psStartX=cpx+(cpw-psCols*(psSw+psGap)+psGap)/2;
+  const psStartY=psY+4;
   colorPickerState.swatchBounds=[];
-  for(let i=0;i<TRAIN_COLORS.length;i++){
-    const col=i%cols, row=Math.floor(i/cols);
-    const sx2=startX+col*(sw+gap), sy2=startY+row*(sh+gap);
+  for(let i=0;i<TRAIN_COLORS.length&&i<psCols*psRows;i++){
+    const col=i%psCols, row=Math.floor(i/psCols);
+    const sx2=psStartX+col*(psSw+psGap), sy2=psStartY+row*(psSh+psGap);
     const isSelected=trains[colorPickerState.trainIdx]?.color===TRAIN_COLORS[i];
     const _swHov=(colorPickerState.hovSwatchIdx===i);
-    ctx.fillStyle=TRAIN_COLORS[i]; ctx.fillRect(sx2,sy2,sw,sh);
-    if(isSelected){ ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.strokeRect(sx2-1,sy2-1,sw+2,sh+2); }
-    else if(_swHov){ ctx.strokeStyle='rgba(255,255,255,0.80)'; ctx.lineWidth=1.5; ctx.strokeRect(sx2-1,sy2-1,sw+2,sh+2); }
-    else { ctx.strokeStyle='rgba(255,255,255,0.15)'; ctx.lineWidth=0.5; ctx.strokeRect(sx2,sy2,sw,sh); }
-    colorPickerState.swatchBounds.push({x:sx2,y:sy2,w:sw,h:sh,colorIdx:i});
+    ctx.fillStyle=TRAIN_COLORS[i]; ctx.fillRect(sx2,sy2,psSw,psSh);
+    if(isSelected){ ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.strokeRect(sx2-1,sy2-1,psSw+2,psSh+2); }
+    else if(_swHov){ ctx.strokeStyle='rgba(255,255,255,0.80)'; ctx.lineWidth=1.5; ctx.strokeRect(sx2-1,sy2-1,psSw+2,psSh+2); }
+    else { ctx.strokeStyle='rgba(255,255,255,0.18)'; ctx.lineWidth=0.5; ctx.strokeRect(sx2,sy2,psSw,psSh); }
+    colorPickerState.swatchBounds.push({x:sx2,y:sy2,w:psSw,h:psSh,colorIdx:i});
   }
+  // Body bounds for outside-click detection
+  colorPickerState.popupBounds={x:cpx,y:cpy,w:cpw,h:cph};
   ctx.restore();
 }
 
@@ -18766,6 +18976,53 @@ function openTrainBuilderEdit(trainIdx){
     editTrainIdx:trainIdx,originalComposition:origComp,carScrollY:0};
 }
 
+// Critical engine failure: triggered from updateTrain when stardate crosses
+// the pre-rolled _engineFailureSd. Strips the engine off the train (without
+// yarding it — it's defunct), opens the train builder in failure mode, and
+// posts a red chat message announcing the breakdown.
+function _triggerEngineFailure(trainIdx){
+  const t=trains[trainIdx]; if(!t||t._engineFailed) return;
+  t._engineFailed=true;
+  // Remove engine from cars[0] (it's permanently defunct — NOT pushed to
+  // trainyard). Original-composition snapshot taken BEFORE the strip so the
+  // builder's diff logic treats the missing engine as a released slot that
+  // didn't return any inventory.
+  const _brokenEngine=t.cars?.[0];
+  if(isEngineType(_brokenEngine)){
+    t.cars=t.cars.slice(1);
+    if(t.carFull) t.carFull=t.carFull.slice(1);
+    if(t.carCargo) t.carCargo=t.carCargo.slice(1);
+    if(t.carCargoSource) t.carCargoSource=t.carCargoSource.slice(1);
+    if(t.carPurchaseSd) t.carPurchaseSd=t.carPurchaseSd.slice(1);
+    if(t.carRevenue) t.carRevenue=t.carRevenue.slice(1);
+    if(t.carSegments) t.carSegments=t.carSegments.slice(1);
+    if(t.carFullSegments) t.carFullSegments=t.carFullSegments.slice(1);
+    if(t.carUnitsLoaded) t.carUnitsLoaded=t.carUnitsLoaded.slice(1);
+    if(t.carUnitsUnloaded) t.carUnitsUnloaded=t.carUnitsUnloaded.slice(1);
+    if(t.carEngineHistory) t.carEngineHistory=t.carEngineHistory.slice(1);
+  }
+  // Red announcement in the chat log.
+  _chatMsg((t.name||'A train')+' — CRITICAL ENGINE FAILURE','rgba(255,55,55,1)',8000,true);
+  if(typeof playSound==='function') try{playSound('breakdown');}catch(e){}
+  // Snapshot the original composition for the builder's diff path. The engine
+  // slot is intentionally OMITTED from origComp so the builder's "released
+  // engine" logic doesn't try to refund/restore it via the trainyard.
+  const _midCars=(t.cars||[]).slice(0,(t.cars?.length||0)-((t.cars||[])[(t.cars||[]).length-1]==='caboose'?1:0));
+  const _hasCb=(t.cars||[])[(t.cars||[]).length-1]==='caboose';
+  const _caboose=_hasCb?'caboose':null;
+  const origComp={};
+  for(const c of _midCars) origComp[c]=(origComp[c]||0)+1;
+  if(_caboose) origComp[_caboose]=1;
+  // Open builder in FAILURE MODE — engine slot empty, confirm requires a
+  // new engine selection, cancel button is replaced by DELETE TRAIN/ROUTE.
+  activePopup='trainbuilder'; popupState={};
+  trainBuilderState={engine:null, cars:[..._midCars], caboose:_caboose, hoverVizIdx:null,
+    engineBtnBounds:[],carBtnBounds:[],cabooseBtnBounds:[],vizCarBounds:[],
+    confirmBounds:null,cancelBounds:null,
+    editTrainIdx:trainIdx, originalComposition:origComp, carScrollY:0,
+    _engineFailureMode:true};
+}
+
 // Engine details slide-out panel (left of train builder popup).
 // Returns panel width so caller can offset the popup rightward.
 function _drawEngineDetailsPanel(mainPx,mainPy,eng){
@@ -19165,14 +19422,18 @@ function drawTrainBuilderPopup(){
   // ── ACTION BUTTONS ────────────────────────────────────────
   const btnRowY=py+405, btnH=26;
 
-  // Cancel
-  const cxW=90, cxX=px+pw-12-cxW;
+  // Cancel — in engine-failure mode, the button is widened and re-labelled
+  // to "DELETE TRAIN / ROUTE" since the player cannot back out of the
+  // breakdown without either replacing the engine OR scrapping the train.
+  const _isFail=!!s._engineFailureMode;
+  const cxW=_isFail?160:90;
+  const cxX=px+pw-12-cxW;
   s.cancelBounds={x:cxX,y:btnRowY,w:cxW,h:btnH};
   const _tbCxHov=!!s.cancelHover;
   ctx.fillStyle=_tbCxHov?'rgba(155,40,40,0.95)':'rgba(100,28,28,0.82)'; ctx.fillRect(cxX,btnRowY,cxW,btnH);
   ctx.strokeStyle=_tbCxHov?'rgba(240,90,90,0.85)':'rgba(185,55,55,0.65)'; ctx.lineWidth=1; ctx.strokeRect(cxX,btnRowY,cxW,btnH);
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
-  ctx.fillStyle='#faa'; ctx.fillText('CANCEL',cxX+cxW/2,btnRowY+btnH/2+3);
+  ctx.fillStyle='#faa'; ctx.fillText(_isFail?'DELETE TRAIN / ROUTE':'CANCEL',cxX+cxW/2,btnRowY+btnH/2+3);
 
   // Confirm
   const trainCost=s.engine?_trainCost:0; // zero if no engine selected yet
@@ -20613,6 +20874,18 @@ function drawGalaxy(ts,dt){
     }
   }
 
+  // User spec: once the player owns 5+ trains, dim all drawn route segments
+  // & orbit lines (permanent or temporary) by 80%, EXCEPT for:
+  //   (a) the segment a train is actively transiting,
+  //   (b) the orbit a train is currently in,
+  //   (c) the orbit a train is descending from/towards,
+  //   (d) the "next" segment when a train is in IN ORBIT / ON ROUTE state.
+  // The opacity multiplier applies per-segment / per-orbit-ring inside the
+  // train loop below.
+  const _playerTrainCount=trains.reduce((a,t)=>a+(t.isPlayer?1:0),0);
+  const _routeDimActive=_playerTrainCount>=5;
+  const _ROUTE_DIM=0.2; // 80% opacity reduction → 20% remaining
+
   // Route lines — live external tangent lines, one per route segment direction
   for(const train of trains){
     const activePulse=0.5+0.5*Math.sin(ts*0.004);
@@ -20649,9 +20922,17 @@ function drawGalaxy(ts,dt){
       for(let i=0;i<fwdCount;i++) pairs.push([i%r.stops.length,(i+1)%r.stops.length]);
       if(!faint&&!r.isLoop) for(let i=fwdCount;i>=1;i--) pairs.push([i%r.stops.length,(i-1+r.stops.length)%r.stops.length]);
       if(faint) ctx.setLineDash([8,5]); // longer dashes so they stay readable at any zoom
-      // Determine the single actively-traveled line segment
+      // Determine the single actively-traveled line segment (transit phase) AND
+      // the "next" segment when the train is in IN ORBIT / ON ROUTE (orbit
+      // phase). Both are exempt from the route-dimming below.
       const activeFrom=(r.phase==='transit')?r.fromIdx:-1;
       const activeTo=(r.phase==='transit')?r.toIdx:-1;
+      // "Next" segment exemption — applies during orbit + the waiting/blocked/
+      // queueing/descending family of states where the train is still planning
+      // to take this exact next leg the moment it can.
+      const _nextSegPhases=new Set(['orbit','waiting','blocked','queueing','descending']);
+      const nextFrom=_nextSegPhases.has(r.phase)?r.fromIdx:-1;
+      const nextTo  =_nextSegPhases.has(r.phase)?r.toIdx  :-1;
       for(const [iA,iB] of pairs){
         const pA=_gp(r.stops[iA]), pB=_gp(r.stops[iB]);
         if(!pA||!pB) continue;
@@ -20661,6 +20942,7 @@ function drawGalaxy(ts,dt){
         if(!lt) continue;
         const [ax,ay]=w2s(lt.ax,lt.ay), [bx,by]=w2s(lt.bx,lt.by);
         const isActive=iA===activeFrom&&iB===activeTo;
+        const isNext  =iA===nextFrom  &&iB===nextTo;
         const isBlocked=r.phase==='blocked'&&iA===r.fromIdx&&iB===r.toIdx;
         // While the train is actively flying the bypass leg, hide the original
         // route's blocked segment so the red-flashing line doesn't render
@@ -20668,24 +20950,39 @@ function drawGalaxy(ts,dt){
         // the bypass (phase transitions out of 'transit', or the temp route is
         // discarded).
         if(isBlocked&&isDetourPerm&&_trainOnTempTransit) continue;
+        // Route-dim multiplier: applies to every non-exempt segment when the
+        // player owns 5+ trains. Active + next + blocked segments stay at
+        // full opacity so the player can always read what's actively going on.
+        // Also: when this train is the user's currently-selected one, the
+        // entire route (all segments + orbit rings, permanent and temporary)
+        // is exempt from dimming — the player has explicitly focused on it.
+        const _isExempt=isActive||isNext||isBlocked;
+        const _segDim=(_routeDimActive&&!_isExempt&&!_isSel)?_ROUTE_DIM:1.0;
         if(isBlocked){
           const bp=0.5+0.5*Math.sin(ts*0.004);
-          ctx.strokeStyle=`rgba(255,55,55,${0.15+0.60*bp})`;
+          ctx.strokeStyle=`rgba(255,55,55,${(0.15+0.60*bp)*_segDim})`;
           ctx.shadowColor='rgba(255,55,55,0.95)';
           ctx.shadowBlur=baseShadow;
         } else if(isActive){
-          ctx.strokeStyle=`rgba(${tcr},${tcg},${tcb},${(faint?0.55:(_isSel?0.40:0.28))+0.22*activePulse})`;
+          ctx.strokeStyle=`rgba(${tcr},${tcg},${tcb},${((faint?0.55:(_isSel?0.40:0.28))+0.22*activePulse)*_segDim})`;
           ctx.shadowColor=`rgba(${tcr},${tcg},${tcb},0.85)`;
           ctx.shadowBlur=(faint?8:(_isSel?6:4))+10*activePulse;
         } else {
-          ctx.strokeStyle=`rgba(${tcr},${tcg},${tcb},${baseAlpha})`;
+          ctx.strokeStyle=`rgba(${tcr},${tcg},${tcb},${baseAlpha*_segDim})`;
           ctx.shadowColor=`rgba(${tcr},${tcg},${tcb},0.85)`;
           ctx.shadowBlur=baseShadow;
         }
         ctx.beginPath(); ctx.moveTo(ax,ay); ctx.lineTo(bx,by); ctx.stroke();
       }
-      // Orbit rings at every stop — reset to train colour regardless of what the last segment did
-      ctx.strokeStyle=`rgba(${tcr},${tcg},${tcb},${baseAlpha})`;
+      // Orbit rings at every stop — reset to train colour regardless of what the last segment did.
+      // Per the user spec: rings the train is currently in (b) AND rings the
+      // train is currently descending from/towards (c) stay at full opacity;
+      // every other ring gets dimmed to 20% when the player has 5+ trains.
+      // For (b) we check `train.planetId === r.stops[si]`. For (c), during
+      // the descending phase, the train interpolates between two orbit radii
+      // (`_queueDescStartR` → `_queueDescTargetR`) at its current planet, so
+      // the SAME stop's ring covers the descent. queueing/orbit/waiting/blocked
+      // all map to the same exemption logic (ring at current planet).
       ctx.shadowColor=`rgba(${tcr},${tcg},${tcb},0.85)`;
       ctx.shadowBlur=baseShadow;
       for(let si=0;si<r.stops.length;si++){
@@ -20693,6 +20990,12 @@ function drawGalaxy(ts,dt){
         if(!sp) continue;
         const orR=((r.stopOrbitR&&r.stopOrbitR[si])||(sp.isStarProxy?sp.starOrbitR:ORBIT_TIERS[sp.size][train.orbitTier]||ORBIT_TIERS[sp.size]['LOW']))*cam.scale;
         const [sx,sy]=w2s(sp.x,sp.y);
+        const _isCurStopRing=train.planetId===r.stops[si];
+        // Selected-train override: when the user has this train selected,
+        // every orbit ring on its route stays at full opacity (matches the
+        // segment-side _isSel exemption above).
+        const _ringDim=(_routeDimActive&&!_isCurStopRing&&!_isSel)?_ROUTE_DIM:1.0;
+        ctx.strokeStyle=`rgba(${tcr},${tcg},${tcb},${baseAlpha*_ringDim})`;
         ctx.beginPath(); ctx.arc(sx,sy,orR,0,Math.PI*2); ctx.stroke();
       }
       ctx.restore();
@@ -22620,14 +22923,20 @@ canvas.addEventListener('mousemove',e=>{
   if(activePopup==='pokedex'){
     _pokedexSortHover=!!(pokedexSortBounds&&cp.x>=pokedexSortBounds.x&&cp.x<=pokedexSortBounds.x+pokedexSortBounds.w&&cp.y>=pokedexSortBounds.y&&cp.y<=pokedexSortBounds.y+pokedexSortBounds.h);
     _pokedexRowHover=-1;
-    for(let _ri=0;_ri<pokedexRowBounds.length;_ri++){const _rb=pokedexRowBounds[_ri];if(cp.x>=_rb.x&&cp.x<=_rb.x+_rb.w&&cp.y>=_rb.y&&cp.y<=_rb.y+_rb.h){_pokedexRowHover=_ri;break;}}
+    // Use the row's own stored list-index (rowIdx) — not its position in the
+    // bounds array — so the highlight maps to the correct row after scrolling.
+    // Without this, scrolling offsets the bounds-array indices while the
+    // draw loop's i-check stays on the absolute planet list index.
+    for(let _ri=0;_ri<pokedexRowBounds.length;_ri++){const _rb=pokedexRowBounds[_ri];if(cp.x>=_rb.x&&cp.x<=_rb.x+_rb.w&&cp.y>=_rb.y&&cp.y<=_rb.y+_rb.h){_pokedexRowHover=_rb.rowIdx!=null?_rb.rowIdx:_ri;break;}}
     if(_pokedexSortHover||_pokedexRowHover>=0) canvas.style.cursor='pointer';
   } else { _pokedexSortHover=false; _pokedexRowHover=-1; }
   // Hover tracking for star registry sort + rows
   if(activePopup==='starregistry'){
     _starRegistrySortHover=!!(starRegistrySortBounds&&cp.x>=starRegistrySortBounds.x&&cp.x<=starRegistrySortBounds.x+starRegistrySortBounds.w&&cp.y>=starRegistrySortBounds.y&&cp.y<=starRegistrySortBounds.y+starRegistrySortBounds.h);
     _starRegistryRowHover=-1;
-    for(let _ri=0;_ri<starRegistryRowBounds.length;_ri++){const _rb=starRegistryRowBounds[_ri];if(cp.x>=_rb.x&&cp.x<=_rb.x+_rb.w&&cp.y>=_rb.y&&cp.y<=_rb.y+_rb.h){_starRegistryRowHover=_ri;break;}}
+    // Use the row's stored list-index for the same reason as the planet
+    // registry above — keeps hover lined up after scrolling.
+    for(let _ri=0;_ri<starRegistryRowBounds.length;_ri++){const _rb=starRegistryRowBounds[_ri];if(cp.x>=_rb.x&&cp.x<=_rb.x+_rb.w&&cp.y>=_rb.y&&cp.y<=_rb.y+_rb.h){_starRegistryRowHover=_rb.rowIdx!=null?_rb.rowIdx:_ri;break;}}
     if(_starRegistrySortHover||_starRegistryRowHover>=0) canvas.style.cursor='pointer';
   } else { _starRegistrySortHover=false; _starRegistryRowHover=-1; }
   // Hover tracking for discovery + quit confirm popup buttons
@@ -22679,13 +22988,25 @@ canvas.addEventListener('mousemove',e=>{
     popupState.controlsEscHover=!!(_ceb&&cp.x>=_ceb.x&&cp.x<=_ceb.x+_ceb.w&&cp.y>=_ceb.y&&cp.y<=_ceb.y+_ceb.h);
     if(popupState.controlsEscHover) canvas.style.cursor='pointer';
   }
-  // Hover tracking for color picker swatches
+  // Hover tracking for color picker swatches + hex input
   if(colorPickerState&&colorPickerState.swatchBounds){
     let _hsi=-1;
     for(let _ci=0;_ci<colorPickerState.swatchBounds.length;_ci++){const _sb=colorPickerState.swatchBounds[_ci];if(cp.x>=_sb.x&&cp.x<=_sb.x+_sb.w&&cp.y>=_sb.y&&cp.y<=_sb.y+_sb.h){_hsi=_ci;break;}}
     colorPickerState.hovSwatchIdx=_hsi;
     if(_hsi>=0) canvas.style.cursor='pointer';
   } else if(colorPickerState){ colorPickerState.hovSwatchIdx=-1; }
+  if(colorPickerState){
+    const _hb=colorPickerState.hexEditBounds;
+    colorPickerState.hexHover=!!(_hb && cp.x>=_hb.x && cp.x<=_hb.x+_hb.w && cp.y>=_hb.y && cp.y<=_hb.y+_hb.h);
+    if(colorPickerState.hexHover) canvas.style.cursor='text';
+    // SV picker / hue strip cursor feedback
+    const _svb=colorPickerState.svBounds;
+    const _hub=colorPickerState.hueBounds;
+    if((_svb && cp.x>=_svb.x && cp.x<=_svb.x+_svb.w && cp.y>=_svb.y && cp.y<=_svb.y+_svb.h) ||
+       (_hub && cp.x>=_hub.x && cp.x<=_hub.x+_hub.w && cp.y>=_hub.y && cp.y<=_hub.y+_hub.h)){
+      canvas.style.cursor='crosshair';
+    }
+  }
   // Hover tracking for title screen + how-to screen
   if(gs==='title'){
     _startBtnHover=!!(startBtnBounds&&cp.x>=startBtnBounds.x&&cp.x<=startBtnBounds.x+startBtnBounds.w&&cp.y>=startBtnBounds.y&&cp.y<=startBtnBounds.y+startBtnBounds.h);
@@ -23491,17 +23812,68 @@ canvas.addEventListener('mouseup',e=>{
           return;
         }
       }
-      // Color picker swatch click (closes self)
-      if(colorPickerState&&colorPickerState.swatchBounds){
-        for(const sb of colorPickerState.swatchBounds){
-          if(cp.x>=sb.x&&cp.x<=sb.x+sb.w&&cp.y>=sb.y&&cp.y<=sb.y+sb.h){
-            const ct2=trains[colorPickerState.trainIdx];
-            if(ct2) ct2.color=TRAIN_COLORS[sb.colorIdx];
-            colorPickerState=null; return;
+      // Color picker click handling — SV picker, hue strip, hex input, preset swatches
+      if(colorPickerState){
+        // SV picker click → pick saturation+value at click position
+        if(colorPickerState.svBounds){
+          const b=colorPickerState.svBounds;
+          if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+            colorPickerState.s=Math.max(0,Math.min(1,(cp.x-b.x)/b.w));
+            colorPickerState.v=Math.max(0,Math.min(1,1-(cp.y-b.y)/b.h));
+            _cpApplyHsv();
+            return;
           }
         }
-        // Click outside color picker swatches → close it
-        colorPickerState=null; return;
+        // Hue strip click → pick hue
+        if(colorPickerState.hueBounds){
+          const b=colorPickerState.hueBounds;
+          if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+            colorPickerState.h=Math.max(0,Math.min(1,(cp.y-b.y)/b.h));
+            _cpApplyHsv();
+            return;
+          }
+        }
+        // Hex input click → open text editor
+        if(colorPickerState.hexEditBounds){
+          const b=colorPickerState.hexEditBounds;
+          if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+            const _curRgb=_cpHsvToRgb(colorPickerState.h,colorPickerState.s,colorPickerState.v);
+            const _curHex=_cpRgbToHex(_curRgb.r,_curRgb.g,_curRgb.b);
+            startEdit(_curHex, v=>{
+              const rgb=_cpHexToRgb(v);
+              if(rgb && colorPickerState){
+                const hsv=_cpRgbToHsv(rgb.r,rgb.g,rgb.b);
+                colorPickerState.h=hsv.h; colorPickerState.s=hsv.s; colorPickerState.v=hsv.v;
+                _cpApplyHsv();
+              }
+            }, b.x, b.y, b.w, b.h, '#ffcc88', 7, 12, 'center', '"Courier New",monospace');
+            return;
+          }
+        }
+        // Preset swatch click → apply preset
+        if(colorPickerState.swatchBounds){
+          for(const sb of colorPickerState.swatchBounds){
+            if(cp.x>=sb.x&&cp.x<=sb.x+sb.w&&cp.y>=sb.y&&cp.y<=sb.y+sb.h){
+              const ct2=trains[colorPickerState.trainIdx];
+              if(ct2) ct2.color=TRAIN_COLORS[sb.colorIdx];
+              // Sync HSV state so the picker indicators move to the preset
+              const _pRgb=_cpHexToRgb(TRAIN_COLORS[sb.colorIdx]);
+              if(_pRgb){
+                const _pHsv=_cpRgbToHsv(_pRgb.r,_pRgb.g,_pRgb.b);
+                colorPickerState.h=_pHsv.h; colorPickerState.s=_pHsv.s; colorPickerState.v=_pHsv.v;
+              }
+              return;
+            }
+          }
+        }
+        // Click outside the popup → close picker
+        if(colorPickerState.popupBounds){
+          const b=colorPickerState.popupBounds;
+          if(cp.x<b.x||cp.x>b.x+b.w||cp.y<b.y||cp.y>b.y+b.h){
+            colorPickerState=null;
+          }
+        }
+        return;
       }
       // Train detail viz overlay click → open edit mode
       if(activePopup==='train'&&popupState.hoverTrainViz&&popupState.trainVizBounds){
