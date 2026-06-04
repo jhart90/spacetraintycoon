@@ -2082,6 +2082,7 @@ let _versusMetric='value';     // 'value'|'credits'|'revenue'|'costs'|'stations'
 let _versusDropdownOpen=false;
 let _versusDropdownBounds=null;
 let _versusDropdownOptBounds=[];
+let _versusDropdownOptHover=-1; // option index hovered inside the open dropdown (−1 = none)
 let corpStatsHistory={};       // {sdFloor: {value,credits,revenue,costs,stations,trains}}
 let aiCorpStatsHistory={};     // same shape, only populated when _aiCorp exists at SD-tick
 let _financeTabBounds=[];
@@ -13912,9 +13913,14 @@ function _drawFinancesVersusTab(px,py,pw,ph,_tabBaseY){
   _plot(_pVals,'rgba(80,180,255,0.95)','rgba(80,180,255,1)');
   _plot(_aVals,'rgba(255,170,60,0.95)','rgba(255,170,60,1)');
 
-  // Legend inside the chart, top-right corner
+  // Legend — upper-left corner of the chart, just inside the Y-axis with a
+  // small buffer. Previously sat at the chart's top-right, where it
+  // overlapped with the metric dropdown's option panel when the dropdown
+  // was open (causing legend text to bleed visibly through the dropdown).
+  // Moving it here also keeps it out of the way of the right-most data
+  // points, which are usually the most interesting on a per-SD chart.
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
-  const _lgX=_cX+_cW-148, _lgY=_cY+8;
+  const _lgX=_cX+8, _lgY=_cY+8;
   ctx.fillStyle='rgba(10,22,16,0.78)'; ctx.fillRect(_lgX-6,_lgY-3,148,28);
   ctx.strokeStyle='rgba(60,140,90,0.35)'; ctx.strokeRect(_lgX-6,_lgY-3,148,28);
   ctx.fillStyle='rgba(80,180,255,1)'; ctx.fillRect(_lgX,_lgY+1,10,3);
@@ -13930,13 +13936,26 @@ function _drawFinancesVersusTab(px,py,pw,ph,_tabBaseY){
 function _drawVersusDropdownOptions(_ddX,_ddY,_ddW,_ddH){
   _versusDropdownOptBounds=[];
   if(!_versusDropdownOpen) return;
+  // Wipe the HD text overlay across the full dropdown column so any earlier
+  // text underneath (chart legend, axis labels, chart background grid text)
+  // doesn't bleed THROUGH the opaque option backgrounds. One sweep covers
+  // every option since they stack vertically below the toggle.
+  _clearTextOverlayRect(_ddX, _ddY+_ddH, _ddW, _VERSUS_METRICS.length*_ddH);
   for(let _oi=0;_oi<_VERSUS_METRICS.length;_oi++){
     const _oy=_ddY+_ddH+_oi*_ddH;
     const _isAct=_VERSUS_METRICS[_oi].key===_versusMetric;
-    ctx.fillStyle=_isAct?'rgba(40,120,65,0.95)':'rgba(14,32,20,0.97)';
+    const _isHov=_versusDropdownOptHover===_oi;
+    // Three-state styling: ACTIVE (bright green, locked-in look) > HOVER
+    // (muted-green wash, lets the user see what they're about to pick) >
+    // IDLE (near-black panel). Hover wins over active visually so the
+    // user gets feedback even when re-clicking the current option.
+    ctx.fillStyle=_isHov?'rgba(50,140,80,0.95)':(_isAct?'rgba(40,120,65,0.95)':'rgba(14,32,20,0.97)');
     ctx.fillRect(_ddX,_oy,_ddW,_ddH);
-    ctx.strokeStyle='rgba(60,180,100,0.4)'; ctx.lineWidth=1; ctx.strokeRect(_ddX,_oy,_ddW,_ddH);
-    ctx.font='bold 9px Orbitron,sans-serif'; ctx.fillStyle=_isAct?'#c0ffd0':'rgba(140,200,160,0.8)'; ctx.textAlign='left';
+    ctx.strokeStyle=_isHov?'rgba(120,240,160,0.85)':'rgba(60,180,100,0.4)'; ctx.lineWidth=_isHov?1.2:1;
+    ctx.strokeRect(_ddX,_oy,_ddW,_ddH);
+    ctx.font='bold 9px Orbitron,sans-serif';
+    ctx.fillStyle=_isHov?'rgba(240,255,230,1)':(_isAct?'#c0ffd0':'rgba(140,200,160,0.8)');
+    ctx.textAlign='left';
     ctx.fillText(_VERSUS_METRICS[_oi].label.toUpperCase(),_ddX+8,_oy+14);
     _versusDropdownOptBounds.push({x:_ddX,y:_oy,w:_ddW,h:_ddH,key:_VERSUS_METRICS[_oi].key});
   }
@@ -15614,6 +15633,13 @@ function _drawStationHoverTooltipOverlay(){
   if(_tty<4) _tty=4;
   if(_ttx+_ttW>W-4) _ttx=W-4-_ttW;
   if(_ttx<4) _ttx=4;
+  // Wipe the HD text overlay over the tooltip area so the planet-detail
+  // popup's text behind it (BIOME / SIZE / RADIUS / ORBIT / POPULATION /
+  // COORDS, etc.) can't bleed THROUGH the opaque tooltip background. Same
+  // pattern as drawPopupBase + every other "opaque chrome drawn after
+  // text" site. globalAlpha doesn't affect clearRect, so the tooltip's
+  // fade-in still reads correctly — text just isn't there during the fade.
+  _clearTextOverlayRect(_ttx, _tty, _ttW, _ttH);
   ctx.globalAlpha=_fa;
   ctx.fillStyle='rgba(8,14,32,0.96)';
   ctx.beginPath(); ctx.roundRect(_ttx,_tty,_ttW,_ttH,4); ctx.fill();
@@ -21310,25 +21336,81 @@ function drawGalaxy(ts,dt){
     }
   }
 
-  // Orbit lines for selected system (drawn before planets, never obstructs them)
+  // Orbit lines for selected system (drawn before planets, never obstructs them).
+  //
+  // For planet/star selections the relevant system is unambiguous — always
+  // alpha=1. For a selected TRAIN, ring opacity per system is interpolated
+  // by the engine's distance to that star:
+  //   • engine well inside the outermost planet orbit                → alpha 1
+  //   • engine past the orbit by the full FADE_WIDTH                → alpha 0
+  //   • in between                                                  → linear lerp
+  // This produces a smooth fade-out as the train leaves a system and a
+  // smooth fade-in as it approaches the next, instead of a binary snap.
+  // Multiple systems can have non-zero alpha at the same time (during the
+  // boundary cross, or while transiting through a system on the route),
+  // so we collect a list of (star, alpha) targets and draw rings for each.
+  //
+  // Interplanetary segments are unaffected: the train is always well
+  // inside its home system's outermost orbit (alpha=1), so visually the
+  // rings look identical to the previous "binary" behaviour.
   if(sel&&(sel.type==='planet'||sel.type==='star'||sel.type==='car')){
-    const starId=sel.type==='planet'?sel.data.starId:sel.type==='star'?sel.data.id:(_gp(trains[sel.data.trainIdx].planetId)?.starId??0);
-    const star=galaxy.stars[starId];
-    const [stx,sty]=w2s(star.x,star.y);
-    ctx.save(); ctx.lineWidth=1.5;
-    for(const p of galaxy.planets){
-      if(p.starId!==starId) continue;
-      if(p.isStarProxy) continue; // proxy has orbitRadius=0; skip to avoid zero-size ring
-      const orR=p.orbitRadius*cam.scale;
-      const isSelectedPlanet=(sel.type==='planet'&&p.id===sel.data.id);
-      if(isSelectedPlanet){
-        ctx.strokeStyle='rgba(255,220,60,0.4)'; ctx.shadowColor='#ffe040'; ctx.shadowBlur=14;
-      } else {
-        ctx.strokeStyle='rgba(160,160,160,0.25)'; ctx.shadowColor='rgba(200,200,200,0.6)'; ctx.shadowBlur=8;
+    const _ringTargets = []; // {starId, alpha}
+    if(sel.type==='planet') _ringTargets.push({starId: sel.data.starId, alpha: 1});
+    else if(sel.type==='star') _ringTargets.push({starId: sel.data.id, alpha: 1});
+    else {
+      const _selT = trains[sel.data.trainIdx];
+      if(_selT){
+        const [_tx,_ty] = getTrainCarPos(_selT, 0);
+        // FADE_WIDTH = distance over which alpha ramps from 1→0 once the
+        // engine has crossed outside the outermost orbit. 1200 SU at typical
+        // engine speeds (~5-20 SU/s) = ~60s-4min of fade — visually a slow,
+        // smooth transition rather than a snap. Increase for slower fade,
+        // decrease for snappier.
+        const _FADE_WIDTH = 1200;
+        for(const _s of galaxy.stars){
+          // Lazy-cache the outermost planet orbit radius per star — pure
+          // function of the static planet list, so once is enough.
+          if(_s._maxPlanetOrbit == null){
+            let _mx = 0;
+            for(const _p of galaxy.planets){
+              if(_p.starId === _s.id && !_p.isStarProxy && _p.orbitRadius > _mx) _mx = _p.orbitRadius;
+            }
+            _s._maxPlanetOrbit = _mx;
+          }
+          const _innerR = _s._maxPlanetOrbit;        // alpha=1 inside this
+          const _outerR = _innerR + _FADE_WIDTH;     // alpha=0 outside this
+          const _dx = _tx - _s.x, _dy = _ty - _s.y;
+          const _d2 = _dx*_dx + _dy*_dy;
+          if(_d2 >= _outerR*_outerR) continue;       // fully off — skip
+          const _d = Math.sqrt(_d2);
+          const _alpha = _d <= _innerR ? 1 : 1 - (_d - _innerR) / _FADE_WIDTH;
+          if(_alpha > 0.01) _ringTargets.push({starId: _s.id, alpha: _alpha});
+        }
       }
-      ctx.beginPath(); ctx.arc(stx,sty,orR,0,Math.PI*2); ctx.stroke();
     }
-    ctx.restore();
+    if(_ringTargets.length){
+      ctx.save(); ctx.lineWidth=1.5;
+      for(const {starId, alpha} of _ringTargets){
+        const star = galaxy.stars[starId];
+        const [stx,sty] = w2s(star.x, star.y);
+        for(const p of galaxy.planets){
+          if(p.starId!==starId) continue;
+          if(p.isStarProxy) continue; // proxy has orbitRadius=0; skip to avoid zero-size ring
+          const orR = p.orbitRadius*cam.scale;
+          const isSelectedPlanet = (sel.type==='planet' && p.id===sel.data.id);
+          if(isSelectedPlanet){
+            ctx.strokeStyle = `rgba(255,220,60,${0.4*alpha})`;
+            ctx.shadowColor = '#ffe040'; ctx.shadowBlur = 14;
+          } else {
+            ctx.strokeStyle = `rgba(160,160,160,${0.25*alpha})`;
+            ctx.shadowColor = `rgba(200,200,200,${0.6*alpha})`;
+            ctx.shadowBlur = 8;
+          }
+          ctx.beginPath(); ctx.arc(stx,sty,orR,0,Math.PI*2); ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
   }
 
   // Planets
@@ -22686,6 +22768,49 @@ function drawGalaxy(ts,dt){
   if(_newspaper) _drawNewspaper();
 }
 
+// Force the right-side panel to the Trains tab and scroll it so the row for
+// the given train sits at the top of the panel viewport — used after a
+// galaxy-view click selects a train, so the player can immediately see the
+// row they just picked. If scrolling-to-top would land past the panel's
+// max scroll (train is near the bottom of the list), the clamp inside the
+// formula keeps it at maxScroll, which guarantees the selected row is still
+// fully visible just farther down the viewport.
+function _focusTrainInPanel(trainIdx){
+  if(!trains[trainIdx]||!trains[trainIdx].isPlayer) return;
+  panelTab='trains';
+  // Build the same playerTrains projection drawTrainsPanel uses.
+  const _pt=trains.reduce((a,t,i)=>(t.isPlayer&&a.push(i),a),[]);
+  const _ri=_pt.indexOf(trainIdx);
+  if(_ri<0) return;
+  const _ROW_H=82;
+  const _viewH=GH-TOP_H;
+  // +1 for the "Add new train" pseudo-slot at the bottom of the list.
+  const _contentH=(_pt.length+1)*_ROW_H;
+  const _maxScroll=Math.max(0,_contentH-_viewH);
+  panelScroll=Math.max(0,Math.min(_maxScroll,_ri*_ROW_H));
+}
+
+// Force the right-side panel to the Stations tab and scroll it so the row
+// for the given planet sits at the top of the panel viewport. Mirrors
+// _focusTrainInPanel for stations. The filter here must match drawTrainsPanel's
+// station-row build exactly: any planet with a player-built station
+// (p.hasStation), excluding alien relics that haven't been visited yet —
+// otherwise the row index we compute won't line up with what the panel
+// actually shows.
+function _focusStationInPanel(planet){
+  if(!planet||!planet.hasStation) return;
+  if(planet.isAlienRelic&&!visitedPlanetIds.has(planet.id)) return;
+  panelTab='stations';
+  const _sp=galaxy.planets.filter(p2=>p2.hasStation&&(!p2.isAlienRelic||visitedPlanetIds.has(p2.id)));
+  const _ri=_sp.indexOf(planet);
+  if(_ri<0) return;
+  const _ROW_H=82;
+  const _viewH=GH-TOP_H;
+  const _contentH=_sp.length*_ROW_H;
+  const _maxScroll=Math.max(0,_contentH-_viewH);
+  stationPanelScroll=Math.max(0,Math.min(_maxScroll,_ri*_ROW_H));
+}
+
 // ── click handling ───────────────────────────────────────────
 function galaxyClick(sx,sy,shiftKey){
   if(sy<TOP_H) return; // top bar
@@ -22766,13 +22891,25 @@ function galaxyClick(sx,sy,shiftKey){
     for(let i=0;i<train.cars.length;i++){
       const [cx,cy]=getTrainCarPos(train,i);
       if(Math.hypot(wx-cx,wy-cy)<hitCarR){
-        sel={type:'car',data:{trainIdx:ti,carIdx:i,car:train.cars[i]}}; routeStops=[]; assignPending=false; routeHerePending=false; return;
+        sel={type:'car',data:{trainIdx:ti,carIdx:i,car:train.cars[i]}}; routeStops=[]; assignPending=false; routeHerePending=false;
+        // Switch the right-side panel to Trains and scroll so the selected
+        // train's row sits at the top (or as close as the panel can show
+        // it without scrolling past the end). Only fires for player trains
+        // since AI trains aren't in the panel list anyway.
+        if(train.isPlayer) _focusTrainInPanel(ti);
+        return;
       }
     }
   }
   for(const p of galaxy.planets){
     if(Math.hypot(wx-p.x,wy-p.y)<Math.max(p.radius,20/cam.scale)){
-      sel={type:'planet',data:p}; routeStops=[p]; return;
+      sel={type:'planet',data:p}; routeStops=[p];
+      // Switch the right-side panel to Stations and scroll so this planet's
+      // row sits at the top — but only when there's actually a player-built
+      // station here. Selecting a stationless planet doesn't auto-jump the
+      // panel (the user might just be planning a route).
+      if(p.hasStation) _focusStationInPanel(p);
+      return;
     }
   }
   for(const s of galaxy.stars){
@@ -23783,6 +23920,17 @@ canvas.addEventListener('mousemove',e=>{
     // Speed arrow hover
     _speedLeftHover=!!(speedLeftBounds&&cp.x>=speedLeftBounds.x&&cp.x<=speedLeftBounds.x+speedLeftBounds.w&&cp.y>=speedLeftBounds.y&&cp.y<=speedLeftBounds.y+speedLeftBounds.h);
     _speedRightHover=!!(speedRightBounds&&cp.x>=speedRightBounds.x&&cp.x<=speedRightBounds.x+speedRightBounds.w&&cp.y>=speedRightBounds.y&&cp.y<=speedRightBounds.y+speedRightBounds.h);
+    // Versus-tab metric dropdown option hover. Reset to -1 (none) every
+    // frame, then re-scan when the dropdown is actually open on the VS RIVAL
+    // tab. Lets the option panel render a hover highlight so the player
+    // can see which metric they're about to pick before clicking.
+    _versusDropdownOptHover=-1;
+    if(activePopup==='finances'&&_financeTab==='versus'&&_versusDropdownOpen){
+      for(let _vi=0;_vi<(_versusDropdownOptBounds||[]).length;_vi++){
+        const b=_versusDropdownOptBounds[_vi];
+        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ _versusDropdownOptHover=_vi; break; }
+      }
+    }
     // Loan-pane hover + Take Loan button hover + Active-loan row/Repay button hover.
     // All only relevant when the finances/loans tab is active.
     _financeLoanHover=null;
@@ -23819,7 +23967,7 @@ canvas.addEventListener('mousemove',e=>{
     // Right-panel "Add new train" pseudo-slot hover (Trains tab only — bounds
     // are nulled when scrolled out of view or when the Stations tab is active)
     _addTrainPanelHover=!!(panelTab==='trains'&&_addTrainPanelBounds&&cp.x>=_addTrainPanelBounds.x&&cp.x<=_addTrainPanelBounds.x+_addTrainPanelBounds.w&&cp.y>=_addTrainPanelBounds.y&&cp.y<=_addTrainPanelBounds.y+_addTrainPanelBounds.h);
-    if(_corpHover||_creditsHover||_panelTabHover||_speedLeftHover||_speedRightHover||_routeHereBtnHover||_planetDetailsBtnHover||_assignBtnHover||_cancelRouteBtnHover||_planetStarNameHover||_starPanelPlanetHover>=0||_addTrainPanelHover||_financeTakeLoanHover||(_financeLoanHover&&!(_financeLoanPaneBounds||[]).find(b=>b.id===_financeLoanHover)?.locked)||(_financeRepayBtnHover>=0&&(_financeRepayBtnBounds||[])[_financeRepayBtnHover]?.affordable)) canvas.style.cursor='pointer';
+    if(_corpHover||_creditsHover||_panelTabHover||_speedLeftHover||_speedRightHover||_routeHereBtnHover||_planetDetailsBtnHover||_assignBtnHover||_cancelRouteBtnHover||_planetStarNameHover||_starPanelPlanetHover>=0||_addTrainPanelHover||_financeTakeLoanHover||(_financeLoanHover&&!(_financeLoanPaneBounds||[]).find(b=>b.id===_financeLoanHover)?.locked)||(_financeRepayBtnHover>=0&&(_financeRepayBtnBounds||[])[_financeRepayBtnHover]?.affordable)||_versusDropdownOptHover>=0) canvas.style.cursor='pointer';
     else canvas.style.cursor='default';
   } else { _corpHover=false; _creditsHover=false; _panelTabHover=null; _speedLeftHover=false; _speedRightHover=false; _routeHereBtnHover=false; _planetDetailsBtnHover=false; _assignBtnHover=false; _cancelRouteBtnHover=false; _planetStarNameHover=false; _starPanelPlanetHover=-1; _addTrainPanelHover=false; }
   // Hover tracking for bottom hint bar + chat log
