@@ -128,7 +128,8 @@
       "Bash(cd \"C:/Users/jackh/Desktop/Claude/Train Game\" && git checkout HEAD -- .claude/settings.local.json && git stash pop && python build_game.py 2>&1 | head -1 *)",
       "Bash(curl -sI http://127.0.0.1:9876/index.html)",
       "Bash(git fetch *)",
-      "Bash(awk '/^function __TRACKED_VAR__/,/^function /' build_game.py)"
+      "Bash(awk '/^function __TRACKED_VAR__/,/^function /' build_game.py)",
+      "Bash(awk 'NR>=21000 && NR<=22500 && /^function/' build_game.py)"
     ]
   },
   "hooks": {

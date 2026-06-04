@@ -9979,15 +9979,25 @@ function _panelRowCacheKey(train, isSelected){
   const broken = ((train.maintenance??1)<=0) ? 'B' : 'O';
   const st = getTrainStatus(train);
   const locK = (fromP?.id||'-')+'>'+(toP?.id||'-')+'/'+(planet?.id||'-')+'/'+(star?.id||'-');
-  return train.name+'|'+(train.color||'')+'|'+carsK+'|'+phase+'|'+(train.orbitTier||'')+'|'+locK+'|'+broken+'|'+(isSelected?'S':'-')+'|'+st.text+'|'+st.color;
+  // DPR is part of the key so a window-move between low- and high-DPI
+  // monitors triggers a re-render at the new resolution (cache canvases
+  // are also resized below when this changes).
+  return train.name+'|'+(train.color||'')+'|'+carsK+'|'+phase+'|'+(train.orbitTier||'')+'|'+locK+'|'+broken+'|'+(isSelected?'S':'-')+'|'+st.text+'|'+st.color+'|d'+DPR;
 }
 // Render a single panel row to an offscreen canvas at local (0..PANEL_W, 0..ROW_H)
-// coordinates. The given canvas is sized PANEL_W × ROW_H. Pulls the same
-// styling + draws the same elements as the original inline per-row code.
+// LOGICAL coordinates. The given canvas is sized PANEL_W*DPR × ROW_H*DPR (HD
+// backing store); the renderer scales by DPR so all drawing remains in
+// logical coords. On blit, the live drawImage downsamples HD → screen,
+// keeping panel-row text sharp on Retina/4K. Pulls the same styling +
+// draws the same elements as the original inline per-row code.
 function _renderPanelRowToCanvas(train, isSelected, c, PANEL_W_local, ROW_H, STRIP_H, STRIP_W, carPW){
   const cc = c.getContext('2d');
   cc.save();
+  // Reset any inherited transform, clear the full HD backing store, then
+  // re-apply the DPR scale so every draw call below uses logical units.
+  cc.setTransform(1,0,0,1,0,0);
   cc.clearRect(0,0,c.width,c.height);
+  cc.scale(DPR, DPR);
   // Selection highlight
   if(isSelected){
     cc.fillStyle='rgba(80,140,255,0.10)';
@@ -10121,19 +10131,30 @@ function drawTrainsPanel(){
       // when the pct ticks; even those still hit the row-strip cache).
       const _key=_panelRowCacheKey(train, isSelected);
       let _cc=train._panelRowCache;
+      // HD backing store: PANEL_W*DPR × ROW_H*DPR. The renderer scales by
+      // DPR so its draw calls stay in logical coords, and the blit below
+      // downsamples HD → screen for crisp text on Retina/4K. If DPR has
+      // changed since the canvas was created, resize it (and the key
+      // mismatch on 'd<DPR>' forces a re-render at the new size).
+      const _hdW = (PANEL_W*DPR)|0, _hdH = (ROW_H*DPR)|0;
       if(!_cc){
         _cc={key:'', canvas:document.createElement('canvas')};
-        _cc.canvas.width=PANEL_W; _cc.canvas.height=ROW_H;
+        _cc.canvas.width=_hdW; _cc.canvas.height=_hdH;
         train._panelRowCache=_cc;
+      } else if(_cc.canvas.width!==_hdW || _cc.canvas.height!==_hdH){
+        _cc.canvas.width=_hdW; _cc.canvas.height=_hdH;
+        _cc.key=''; // force re-render at new size
       }
       if(_cc.key!==_key){
         _renderPanelRowToCanvas(train, isSelected, _cc.canvas, PANEL_W, ROW_H, STRIP_H, STRIP_W, carPW);
         _cc.key=_key;
       }
-      // Blit the cached row in one drawImage. The cached canvas's local
-      // (0,0) maps to the panel-row top-left (px, ry-1) — the -1 accounts
-      // for the original selection highlight's offset.
-      ctx.drawImage(_cc.canvas, px, ry-1);
+      // Blit the cached HD row in one drawImage. The 4-arg form maps the
+      // full HD source canvas to a (PANEL_W × ROW_H) logical destination,
+      // letting the browser downsample at native quality. The cached
+      // canvas's logical (0,0) maps to the panel-row top-left (px, ry-1)
+      // — the -1 accounts for the original selection highlight's offset.
+      ctx.drawImage(_cc.canvas, 0, 0, _hdW, _hdH, px, ry-1, PANEL_W, ROW_H);
       // ── Live broken icon (flashing wrench) ──
       // Drawn on top of the cached row so the flash animates without forcing
       // cache invalidation. The cache renderer stashes the icon X-position on
@@ -10785,11 +10806,46 @@ function updateFoundries(dtG){
 // angle at 10 Hz batched updates instead of every frame — they aren't visible
 // and aren't used in any tangent/cargo math this tick, so the sub-frame
 // orbital error is invisible.
+//
+// Per-frame iteration cost is the dominant overhead for 1100+-planet saves:
+// the original "for(const p of galaxy.planets)" loop ate ~0.5 ms just doing
+// viewport-membership checks. The current implementation buckets planets by
+// star (`star.planetIds`, which already exists from galaxy generation) and
+// caches a per-star `_orbitMaxR` (max planet orbit radius in that system) so
+// each frame can:
+//   1. process the explicit _active set (trains, routes, popups, selection)
+//   2. iterate ~300 stars, cull by (star pos ± maxOrbitR) vs viewport AABB
+//   3. for each surviving star, walk its planet bucket (~3-8 planets)
+// With ~8 stars in view at typical zooms, this touches ~30-50 planets per
+// frame instead of 1117. The 10 Hz inactive batch still walks every planet
+// (it's the only thing keeping off-screen orbits roughly accurate over
+// time), but that cost is amortized to ~110 ops/frame average.
 let _inactiveOrbitAcc=0;
+function _ensureStarOrbitMaxCache(){
+  // Lazy — built once per galaxy. Since save-load replaces galaxy with a
+  // fresh object, the cache disappears automatically. Cleared explicitly
+  // if a station/upgrade build changes orbit radii (it doesn't today).
+  if(galaxy._orbitBucketsBuilt) return;
+  for(let si=0;si<galaxy.stars.length;si++){
+    let mx=0;
+    const ids=galaxy.stars[si].planetIds||[];
+    for(let i=0;i<ids.length;i++){
+      const p=galaxy.planets[ids[i]];
+      if(!p) continue;
+      const r=p.orbitRadius||0;
+      if(r>mx) mx=r;
+    }
+    // Pad by a planet-radius slack so a body just outside the orbit ring is
+    // still picked up (planets are ≤ ~70 SU radius; pad generously).
+    galaxy.stars[si]._orbitMaxR = mx + 200;
+  }
+  galaxy._orbitBucketsBuilt = true;
+}
 function updatePlanetOrbits(dtG, dt){
-  // Build the "active" set: planets that need precise per-frame positions.
-  // Anything in viewport, any train's current planet, any current/queued
-  // route stop, the selected planet, and the popup planet all qualify.
+  _ensureStarOrbitMaxCache();
+  // Build the "active" set: planets that always need precise per-frame
+  // positions regardless of where the camera is — train homes, every stop on
+  // every route/queue/detour, the selection, and the popup target.
   const _active=new Set();
   for(const t of trains){
     _active.add(t.planetId);
@@ -10814,22 +10870,91 @@ function updatePlanetOrbits(dtG, dt){
   const _inactiveDtG=_doInactive?dtG*( _inactiveOrbitAcc/dt ):0;
   const _inactiveDt =_doInactive?_inactiveOrbitAcc:0;
   if(_doInactive) _inactiveOrbitAcc=0;
-  for(const p of galaxy.planets){
-    const _isActive = _active.has(p.id) || (p.x>=_vx0&&p.x<=_vx1&&p.y>=_vy0&&p.y<=_vy1);
-    if(_isActive){
-      p.orbitAngle+=p.orbitSpeed*dtG;
-      const star=galaxy.stars[p.starId];
-      p.x=star.x+p.orbitRadius*Math.cos(p.orbitAngle);
-      p.y=star.y+p.orbitRadius*Math.sin(p.orbitAngle);
-      if(p.hasStation&&p.stationSpeed) p.stationAngle=(p.stationAngle||0)+p.stationSpeed*dtG;
-      if(p.clouds) p.cloudAngle=(p.cloudAngle||0)+CLOUD_SPEED*dtG;
-      for(const m of (p.moons||[])) m.angle+=m.speed*dt;
-    } else if(_doInactive){
+  // Per-frame "active update" — precise tick on one planet.
+  const _doActive = (p) => {
+    p.orbitAngle+=p.orbitSpeed*dtG;
+    const star=galaxy.stars[p.starId];
+    p.x=star.x+p.orbitRadius*Math.cos(p.orbitAngle);
+    p.y=star.y+p.orbitRadius*Math.sin(p.orbitAngle);
+    if(p.hasStation&&p.stationSpeed) p.stationAngle=(p.stationAngle||0)+p.stationSpeed*dtG;
+    if(p.clouds) p.cloudAngle=(p.cloudAngle||0)+CLOUD_SPEED*dtG;
+    for(const m of (p.moons||[])) m.angle+=m.speed*dt;
+  };
+  // ── Fast path: viewport covers most of the world ─────────────────────
+  // When fully (or nearly) zoomed out, the AABB cull rejects nothing, so
+  // the bucket walk just adds Set ops + a second viewport check on top of
+  // the original flat loop. Detect that case (view width >= world width)
+  // and fall back to a single flat pass over galaxy.planets — same code
+  // as the legacy implementation. Break-even is around scale ≈ 0.04.
+  if((_vx1-_vx0) >= WORLD_W*2){
+    const _planets=galaxy.planets;
+    for(let i=0;i<_planets.length;i++){
+      const p=_planets[i]; if(!p) continue;
+      const _isActive=_active.has(p.id)||(p.x>=_vx0&&p.x<=_vx1&&p.y>=_vy0&&p.y<=_vy1);
+      if(_isActive){
+        _doActive(p);
+      } else if(_doInactive){
+        p.orbitAngle+=p.orbitSpeed*_inactiveDtG;
+        const star=galaxy.stars[p.starId];
+        p.x=star.x+p.orbitRadius*Math.cos(p.orbitAngle);
+        p.y=star.y+p.orbitRadius*Math.sin(p.orbitAngle);
+        if(p.hasStation&&p.stationSpeed) p.stationAngle=(p.stationAngle||0)+p.stationSpeed*_inactiveDtG;
+        if(p.clouds) p.cloudAngle=(p.cloudAngle||0)+CLOUD_SPEED*_inactiveDtG;
+        for(const m of (p.moons||[])) m.angle+=m.speed*_inactiveDt;
+      }
+    }
+    return;
+  }
+  // Track which planet IDs we already actively-updated this frame so the
+  // 10 Hz inactive batch below doesn't redo their math.
+  const _processed=new Set();
+  // ── Step 1: explicit active set ────────────────────────────────────
+  // Trains/routes/popups/selection. Always updated even when their star
+  // is off-screen — train math depends on it.
+  for(const pid of _active){
+    const p=galaxy.planets[pid];
+    if(!p) continue;
+    _doActive(p);
+    _processed.add(pid);
+  }
+  // ── Step 2: visible-star walk ──────────────────────────────────────
+  // Cull whole systems with an AABB test (star pos ± system max orbit R).
+  // For surviving systems, walk the planet bucket. The user-visible win:
+  // 1117 outer-loop iterations collapse to ~300 star checks + ~30-50
+  // surviving-system planets per frame.
+  const _stars=galaxy.stars;
+  for(let si=0;si<_stars.length;si++){
+    const star=_stars[si];
+    const mR=star._orbitMaxR;
+    if(star.x+mR<_vx0||star.x-mR>_vx1||star.y+mR<_vy0||star.y-mR>_vy1) continue;
+    const ids=star.planetIds;
+    for(let i=0;i<ids.length;i++){
+      const pid=ids[i];
+      if(_processed.has(pid)) continue;
+      const p=galaxy.planets[pid];
+      if(!p) continue;
+      // Fine per-planet viewport check — a system that intersects the view
+      // can still have planets on the far side that don't.
+      if(p.x>=_vx0&&p.x<=_vx1&&p.y>=_vy0&&p.y<=_vy1){
+        _doActive(p);
+        _processed.add(pid);
+      }
+    }
+  }
+  // ── Step 3: 10 Hz inactive batch ───────────────────────────────────
+  // Everything not processed this frame gets a batched advance so its
+  // position stays roughly correct over time. Visible/invisible doesn't
+  // matter here — we just skip the already-processed ones.
+  if(_doInactive){
+    const _planets=galaxy.planets;
+    for(let i=0;i<_planets.length;i++){
+      const p=_planets[i];
+      if(!p) continue;
+      if(_processed.has(p.id)) continue;
       p.orbitAngle+=p.orbitSpeed*_inactiveDtG;
       const star=galaxy.stars[p.starId];
       p.x=star.x+p.orbitRadius*Math.cos(p.orbitAngle);
       p.y=star.y+p.orbitRadius*Math.sin(p.orbitAngle);
-      // station angle + cloud angle + moon angles can stay batched too
       if(p.hasStation&&p.stationSpeed) p.stationAngle=(p.stationAngle||0)+p.stationSpeed*_inactiveDtG;
       if(p.clouds) p.cloudAngle=(p.cloudAngle||0)+CLOUD_SPEED*_inactiveDtG;
       for(const m of (p.moons||[])) m.angle+=m.speed*_inactiveDt;
@@ -13196,16 +13321,24 @@ function drawCorpPopup(){
   ctx.beginPath(); ctx.arc(px+32,py+30,20,0,Math.PI*2); ctx.stroke();
 
   // Corp name + pencil — always rendered in ALL CAPS on this screen.
+  // Skip the static name text and pencil entirely while the user is editing
+  // the name (the DOM <input> floats in the same spot — drawing the static
+  // text behind it just bleeds dark glyphs through the input's background).
   ctx.font='bold 15px Orbitron,sans-serif'; ctx.textAlign='left'; ctx.fillStyle='rgba(180,210,255,0.95)';
   const _cnFull=(corpName||'').toUpperCase();
   let _cn=_cnFull;
   while(ctx.measureText(_cn).width>pw-200&&_cn.length>3) _cn=_cn.slice(0,-1);
   if(_cn.length<_cnFull.length) _cn=_cn.slice(0,-1)+'…';
-  ctx.fillText(_cn,px+60,py+32);
   const _cnW=ctx.measureText(_cn).width;
-  const _picX=px+60+_cnW+8, _picY=py+28;
-  drawPencilIcon(_picX,_picY,'rgba(140,180,255,0.75)');
-  popupState.corpNamePencilBounds={x:_picX-8,y:_picY-8,w:18,h:18};
+  if(!popupState._editingCorpName){
+    ctx.fillText(_cn,px+60,py+32);
+    const _picX=px+60+_cnW+8, _picY=py+28;
+    drawPencilIcon(_picX,_picY,'rgba(140,180,255,0.75)');
+    popupState.corpNamePencilBounds={x:_picX-8,y:_picY-8,w:18,h:18};
+  } else {
+    // Hide click target so a stray click during edit doesn't re-trigger.
+    popupState.corpNamePencilBounds=null;
+  }
   popupState.corpNameEditBounds={x:px+60,y:py+15,w:Math.min(250,_cnW+4),h:24};
 
   // ESC
@@ -17109,12 +17242,13 @@ function drawCarDetailPopup(){
   // Car index label (e.g. "Car 3 of 7")
   ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,140,200,0.65)';
   ctx.fillText('Car '+(ci+1)+' of '+t.cars.length+' · on '+t.name,infoX,py+70);
-  // Purchase date
+  // Purchase date — compact: small label + value on adjacent lines, tighter
+  // spacing than before to leave room for the cargo block below.
   const _psd=t.carPurchaseSd?.[ci]??null;
   ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(110,150,210,0.70)';
-  ctx.fillText('Purchased:',infoX,py+88);
+  ctx.fillText('PURCHASED',infoX,py+86);
   ctx.font='11px "Exo 2",sans-serif'; ctx.fillStyle='rgba(170,210,255,0.85)';
-  ctx.fillText(_psd!=null?'SD '+_psd.toFixed(2):'—',infoX,py+101);
+  ctx.fillText(_psd!=null?'SD '+_psd.toFixed(2):'—',infoX,py+100);
   // Cargo status badge
   const _isCargoFull=t.carFull?.[ci]??false;
   const _cargoType=t.carCargo?.[ci]??null;
@@ -17122,47 +17256,118 @@ function drawCarDetailPopup(){
   ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='left';
   ctx.fillStyle=_isCargoFull?'rgba(80,220,140,0.90)':'rgba(100,115,145,0.65)';
   ctx.fillText(_cargoBadgeTxt,infoX,py+118);
+  // ── Cargo / Origin block (top panel; replaces the old bottom section) ──
+  // Lives BELOW the sprite, spanning the full popup width. Only shown when
+  // the car is actually loaded. Origin planet + star are clickable; bounds
+  // get registered on popupState for the existing click router.
+  popupState.carDetailPlanetBounds=null;
+  popupState.carDetailStarBounds=null;
+  const _cargoBlockTop=py+138, _cargoBlockH=_isCargoFull?34:0;
+  if(_isCargoFull&&_cargoType){
+    const _srcId=t.carCargoSource?.[ci]??null;
+    const _srcP=_srcId!=null?_gp(_srcId):null;
+    const _srcStar=_srcP?galaxy.stars[_srcP.starId]:null;
+    // Line 1: "Origin: <Planet> · <Star>"
+    const _origHov=!!popupState.carDetailPlanetHover;
+    ctx.font='9px "Exo 2",sans-serif'; ctx.textAlign='left';
+    ctx.fillStyle='rgba(100,140,210,0.60)';
+    ctx.fillText('ORIGIN',px+14,_cargoBlockTop);
+    ctx.font=(_origHov?'bold ':'')+' 11px "Exo 2",sans-serif';
+    ctx.fillStyle=_origHov?'rgba(200,240,255,1)':'rgba(160,220,255,0.92)';
+    const _pnTxt=_srcP?_srcP.name:'Unknown';
+    const _pnX=px+58;
+    ctx.fillText(_pnTxt,_pnX,_cargoBlockTop);
+    const _pnW=ctx.measureText(_pnTxt).width;
+    if(_origHov){ ctx.strokeStyle='rgba(160,220,255,0.8)'; ctx.lineWidth=0.7; ctx.beginPath(); ctx.moveTo(_pnX,_cargoBlockTop+1); ctx.lineTo(_pnX+_pnW,_cargoBlockTop+1); ctx.stroke(); }
+    if(_srcP) popupState.carDetailPlanetBounds={x:_pnX,y:_cargoBlockTop-11,w:_pnW+6,h:14,planet:_srcP};
+    // Star link, separated by middle dot
+    const _starHov=!!popupState.carDetailStarHover;
+    const _sStarTxt=_srcStar?_srcStar.name:'?';
+    const _starX=_pnX+_pnW+10;
+    ctx.font=(_starHov?'bold ':'')+' 10px "Exo 2",sans-serif';
+    ctx.fillStyle=_starHov?'rgba(255,250,160,1)':'rgba(220,200,100,0.75)';
+    ctx.fillText('· '+_sStarTxt,_starX,_cargoBlockTop);
+    const _sStarW=ctx.measureText('· '+_sStarTxt).width;
+    if(_starHov){ ctx.strokeStyle='rgba(220,200,100,0.7)'; ctx.lineWidth=0.7; ctx.beginPath(); ctx.moveTo(_starX,_cargoBlockTop+1); ctx.lineTo(_starX+_sStarW,_cargoBlockTop+1); ctx.stroke(); }
+    if(_srcStar) popupState.carDetailStarBounds={x:_starX,y:_cargoBlockTop-11,w:_sStarW+4,h:14,star:_srcStar};
+    // Line 2: distance + estimated value, packed in two columns
+    const [_cwx,_cwy]=getTrainCarPos(t,ci);
+    const _distAu=_srcP?Math.round(Math.hypot(_cwx-_srcP.x,_cwy-_srcP.y)):null;
+    const _baseRate=(CARGO_BASE_RATE[_cargoType]||{})[carType]||1000;
+    const _dMult=_distAu!=null?(_distAu>120000?2.5:_distAu>60000?1.8:_distAu>20000?1.3:_distAu>5000?1.0:_distAu>1000?0.8:0.5):1.0;
+    const _estVal=Math.round(_baseRate*_dMult);
+    const _r2Y=_cargoBlockTop+16;
+    ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,140,210,0.60)';
+    ctx.fillText('DIST FROM ORIGIN',px+14,_r2Y);
+    ctx.font='bold 11px "Exo 2",sans-serif'; ctx.fillStyle='rgba(170,215,255,0.88)';
+    ctx.fillText(_distAu!=null?_distAu.toLocaleString()+' SU':'—',px+118,_r2Y);
+    ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,140,210,0.60)';
+    ctx.fillText('EST DELIVERY VALUE',px+pw/2+10,_r2Y);
+    ctx.font='bold 11px "Exo 2",sans-serif'; ctx.fillStyle='rgba(80,235,140,0.90)';
+    ctx.fillText('+'+_fmtCr(_estVal)+' cr',px+pw/2+130,_r2Y);
+  }
 
   // ── Engine Time section ─────────────────────────────────────
+  // Aggregate by engine type, displayed as "<train name> (<engine nice
+  // name>)" with summed duration. Multiple stretches on the same engine
+  // type collapse into one row (e.g. swap to Galaxy and back to
+  // Constellation → still two rows). Renaming the train transparently
+  // rolls all historical rows over to the new name, because we read
+  // train.name at draw time (no per-entry name stored).
+  const _engDivY = _cargoBlockTop + _cargoBlockH + 4;
   ctx.strokeStyle='rgba(60,120,200,0.30)'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.moveTo(px,py+142); ctx.lineTo(px+pw,py+142); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(px,_engDivY); ctx.lineTo(px+pw,_engDivY); ctx.stroke();
   ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='left';
   ctx.fillStyle='rgba(120,180,255,0.72)';
-  ctx.fillText('ENGINE TIME',px+14,py+156);
-  // Build engine time list from this car's own engineHistory (falling back to
-  // the train's _engineHistory or a single-entry default for old saves).
+  ctx.fillText('ENGINE TIME',px+14,_engDivY+14);
+  // Build engine time list from this car's own engineHistory (falling back
+  // to the train's _engineHistory or a single-entry default for old saves).
   const _eh=(t.carEngineHistory?.[ci]?.length)
     ? t.carEngineHistory[ci]
     : (t._engineHistory||[{type:t.cars[0]||'engine_constellation',startSd:t.carPurchaseSd?.[ci]??stardate}]);
-  const _cdBounds=[];
-  let _eRowY=py+172;
+  // Sum durations per engine type. The newest entry's type is the
+  // "active" one (●) — that's whichever engine is currently coupled.
+  const _eDurByType=new Map();
+  let _eActiveType=null;
   for(let _ei=0;_ei<_eh.length;_ei++){
     const _eEntry=_eh[_ei];
     const _eNext=_eh[_ei+1];
-    const _eDur=(_eNext?_eNext.startSd:stardate)-_eEntry.startSd;
-    const _eDurRnd=Math.max(0,Math.round(_eDur*10)/10);
-    const _eLabel=CAR_LABELS[_eEntry.type]||_eEntry.type||'Unknown Engine';
-    // Engine type accent color
-    const _eCol={engine_constellation:'rgba(120,200,255,0.90)',engine_galaxy:'rgba(180,140,255,0.90)',engine_classJ:'rgba(255,180,80,0.90)',engine_classR:'rgba(255,100,80,0.90)',engine_N700:'rgba(80,255,200,0.90)'}[_eEntry.type]||'rgba(160,200,255,0.85)';
-    const _isActive=_ei===_eh.length-1;
-    // Clickable link → open Train Details popup
-    const _eLinkHov=popupState.carDetailEngineHover===_ei;
-    ctx.font=(_eLinkHov?'bold ':'')+(_isActive?'bold ':'')+' 11px "Exo 2",sans-serif';
-    ctx.fillStyle=_eLinkHov?'rgba(255,255,255,1.0)':_eCol;
-    const _eTxt=_eLabel+(_isActive?' ●':'');
+    const _eDur=Math.max(0,(_eNext?_eNext.startSd:stardate)-_eEntry.startSd);
+    _eDurByType.set(_eEntry.type,(_eDurByType.get(_eEntry.type)||0)+_eDur);
+    if(_ei===_eh.length-1) _eActiveType=_eEntry.type;
+  }
+  const _eNice={engine_constellation:'Constellation',engine_galaxy:'Galaxy',engine_classJ:'Class J',engine_classR:'Class R',engine_N700:'N700'};
+  const _eCol={engine_constellation:'rgba(120,200,255,0.90)',engine_galaxy:'rgba(180,140,255,0.90)',engine_classJ:'rgba(255,180,80,0.90)',engine_classR:'rgba(255,100,80,0.90)',engine_N700:'rgba(80,255,200,0.90)'};
+  const _eRows=[];
+  for(const [_type,_dur] of _eDurByType) _eRows.push({type:_type,dur:_dur,isActive:_type===_eActiveType});
+  // Active row first, then descending by duration.
+  _eRows.sort((a,b)=>(b.isActive?1:0)-(a.isActive?1:0)||b.dur-a.dur);
+  const _cdBounds=[];
+  let _eRowY=_engDivY+30;
+  for(let _ri=0;_ri<_eRows.length;_ri++){
+    const _row=_eRows[_ri];
+    const _eDurRnd=Math.max(0,Math.round(_row.dur*10)/10);
+    const _eNiceLabel=_eNice[_row.type]||(CAR_LABELS[_row.type]||_row.type||'Unknown Engine');
+    const _rowCol=_eCol[_row.type]||'rgba(160,200,255,0.85)';
+    const _eLinkHov=popupState.carDetailEngineHover===_ri;
+    ctx.font=(_eLinkHov?'bold ':'')+(_row.isActive?'bold ':'')+' 11px "Exo 2",sans-serif';
+    ctx.fillStyle=_eLinkHov?'rgba(255,255,255,1.0)':_rowCol;
+    const _eTxt=t.name+' ('+_eNiceLabel+')'+(_row.isActive?' ●':'');
     ctx.fillText(_eTxt,px+14,_eRowY);
     const _eTxtW=ctx.measureText(_eTxt).width;
-    if(_eLinkHov){ ctx.strokeStyle=_eCol; ctx.lineWidth=0.7; ctx.beginPath(); ctx.moveTo(px+14,_eRowY+1); ctx.lineTo(px+14+_eTxtW,_eRowY+1); ctx.stroke(); }
+    if(_eLinkHov){ ctx.strokeStyle=_rowCol; ctx.lineWidth=0.7; ctx.beginPath(); ctx.moveTo(px+14,_eRowY+1); ctx.lineTo(px+14+_eTxtW,_eRowY+1); ctx.stroke(); }
     ctx.font='11px "Exo 2",sans-serif'; ctx.textAlign='right'; ctx.fillStyle='rgba(180,210,255,0.75)';
     ctx.fillText(_eDurRnd.toFixed(1)+' SD',px+pw-14,_eRowY);
     ctx.textAlign='left';
-    _cdBounds.push({x:px+14,y:_eRowY-13,w:_eTxtW+8,h:16, trainIdx:popupState.trainIdx, eIdx:_ei});
+    _cdBounds.push({x:px+14,y:_eRowY-13,w:_eTxtW+8,h:16, trainIdx:popupState.trainIdx, eIdx:_ri});
     _eRowY+=18;
   }
   popupState.carDetailEngineBounds=_cdBounds;
 
   // ── Stats section ─────────────────────────────────────────
-  const _statsY=Math.max(py+220, _eRowY+10);
+  // Floats below the engine-time list with a small gap. Minimum y locks
+  // it to a predictable position even when there are 0-1 engine rows.
+  const _statsY=Math.max(py+260, _eRowY+10);
   ctx.strokeStyle='rgba(60,120,200,0.30)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(px,_statsY-4); ctx.lineTo(px+pw,_statsY-4); ctx.stroke();
   ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='left';
@@ -17224,60 +17429,8 @@ function drawCarDetailPopup(){
   if(_fillPct>0){ ctx.fillStyle=_frCol; ctx.beginPath(); ctx.roundRect(_frBarX,_frBarY,_frBarW*(_fillPct/100),_frBarH,2); ctx.fill(); }
   ctx.strokeStyle='rgba(60,100,180,0.35)'; ctx.lineWidth=0.7; ctx.beginPath(); ctx.roundRect(_frBarX,_frBarY,_frBarW,_frBarH,2); ctx.stroke();
   _sv('UNLOADS / SEGMENT',_unloadsPerSeg.toFixed(2),null,px+14,_statsY+112);
-
-  // ── Current Cargo section (only if full) ─────────────────────
-  const _crgSectY=_statsY+140;
-  ctx.strokeStyle='rgba(60,120,200,0.30)'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.moveTo(px,_crgSectY-4); ctx.lineTo(px+pw,_crgSectY-4); ctx.stroke();
-  ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='left';
-  ctx.fillStyle='rgba(120,180,255,0.72)';
-  ctx.fillText('CURRENT CARGO',px+14,_crgSectY+10);
-  popupState.carDetailPlanetBounds=null;
-  popupState.carDetailStarBounds=null;
-  if(!_isCargoFull||!_cargoType){
-    ctx.font='11px "Exo 2",sans-serif'; ctx.fillStyle='rgba(80,100,140,0.55)';
-    ctx.fillText('No cargo loaded.',px+14,_crgSectY+28);
-  } else {
-    const _srcId=t.carCargoSource?.[ci]??null;
-    const _srcP=_srcId!=null?_gp(_srcId):null;
-    const _srcStar=_srcP?galaxy.stars[_srcP.starId]:null;
-    // Origin planet
-    const _origHov=!!popupState.carDetailPlanetHover;
-    ctx.font=(_origHov?'bold ':'')+' 11px "Exo 2",sans-serif'; ctx.textAlign='left';
-    ctx.fillStyle=_origHov?'rgba(255,255,255,1)':'rgba(120,200,255,0.85)';
-    ctx.fillText('Origin:',px+14,_crgSectY+28);
-    const _pnTxt=_srcP?_srcP.name:'Unknown';
-    ctx.fillStyle=_origHov?'rgba(200,240,255,1)':'rgba(160,220,255,0.92)';
-    ctx.fillText(_pnTxt,px+70,_crgSectY+28);
-    const _pnW=ctx.measureText(_pnTxt).width;
-    if(_origHov){ ctx.strokeStyle='rgba(160,220,255,0.8)'; ctx.lineWidth=0.7; ctx.beginPath(); ctx.moveTo(px+70,_crgSectY+29); ctx.lineTo(px+70+_pnW,_crgSectY+29); ctx.stroke(); }
-    if(_srcP) popupState.carDetailPlanetBounds={x:px+70,y:_crgSectY+17,w:_pnW+6,h:16,planet:_srcP};
-    // Star system link
-    const _starHov=!!popupState.carDetailStarHover;
-    const _sStarTxt=_srcStar?_srcStar.name:'?';
-    const _starX=px+70+_pnW+12;
-    ctx.font=(_starHov?'bold ':'')+' 10px "Exo 2",sans-serif';
-    ctx.fillStyle=_starHov?'rgba(255,250,160,1)':'rgba(220,200,100,0.75)';
-    ctx.fillText('· '+_sStarTxt,_starX,_crgSectY+28);
-    const _sStarW=ctx.measureText('· '+_sStarTxt).width;
-    if(_starHov){ ctx.strokeStyle='rgba(220,200,100,0.7)'; ctx.lineWidth=0.7; ctx.beginPath(); ctx.moveTo(_starX,_crgSectY+29); ctx.lineTo(_starX+_sStarW,_crgSectY+29); ctx.stroke(); }
-    if(_srcStar) popupState.carDetailStarBounds={x:_starX,y:_crgSectY+17,w:_sStarW+4,h:16,star:_srcStar};
-    // Distance from origin
-    const [_cwx,_cwy]=getTrainCarPos(t,ci);
-    const _distAu=_srcP?Math.round(Math.hypot(_cwx-_srcP.x,_cwy-_srcP.y)):null;
-    ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,140,210,0.55)'; ctx.textAlign='left';
-    ctx.fillText('DISTANCE FROM ORIGIN',px+14,_crgSectY+46);
-    ctx.font='bold 11px "Exo 2",sans-serif'; ctx.fillStyle='rgba(170,215,255,0.88)';
-    ctx.fillText(_distAu!=null?_distAu.toLocaleString()+' SU':'—',px+14,_crgSectY+60);
-    // Cargo value estimate (using distance-based formula approximation)
-    const _baseRate=(CARGO_BASE_RATE[_cargoType]||{})[carType]||1000;
-    const _dMult=_distAu!=null?(_distAu>120000?2.5:_distAu>60000?1.8:_distAu>20000?1.3:_distAu>5000?1.0:_distAu>1000?0.8:0.5):1.0;
-    const _estVal=Math.round(_baseRate*_dMult);
-    ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,140,210,0.55)';
-    ctx.fillText('ESTIMATED DELIVERY VALUE',px+pw/2,_crgSectY+46);
-    ctx.font='bold 11px "Exo 2",sans-serif'; ctx.fillStyle='rgba(80,235,140,0.90)';
-    ctx.textAlign='left'; ctx.fillText('+'+_fmtCr(_estVal)+' cr',px+pw/2,_crgSectY+60);
-  }
+  // Current Cargo block was moved into the top panel above (see the
+  // `_cargoBlockTop` section near the sprite). No bottom section here.
 
   ctx.restore();
 }
@@ -19788,8 +19941,16 @@ function drawTrainsPopup(){
       else{ ctx.fillStyle=ci===0?'#4af':ci===train.cars.length-1?'#f84':'#888'; ctx.fillRect(_scx2,SY,_cw2-1,SH); }
       _scx2+=_cw2;
     }}
+    // Fade gradient — the gradient end color must match whatever's actually
+    // behind the row (the popup bg rgba(3,6,20,0.97) + any per-row bg layered
+    // on top). Hover rows get a brighter end so the train's rear doesn't
+    // fade into a dark rectangle on a now-lightened pane. Effective hover bg
+    // = rgba(30,50,110,0.40) over rgba(3,6,20,0.97) ≈ rgba(14,24,56).
+    const _isHov=(_trainRowHover===ri);
+    const _fadeEnd=_isHov?'rgba(14,24,56,0.95)':'rgba(3,6,20,0.95)';
+    const _fadeStart=_isHov?'rgba(14,24,56,0)':'rgba(3,6,20,0)';
     const fg2=ctx.createLinearGradient(px+10+SW*0.65,0,px+10+SW,0);
-    fg2.addColorStop(0,'rgba(3,6,20,0)'); fg2.addColorStop(1,'rgba(3,6,20,0.95)');
+    fg2.addColorStop(0,_fadeStart); fg2.addColorStop(1,_fadeEnd);
     ctx.fillStyle=fg2; ctx.fillRect(px+10,SY,SW,SH);
     ctx.restore();
     // Stats row 1
@@ -21152,6 +21313,32 @@ function drawGalaxy(ts,dt){
   const _routeDimActive=_playerTrainCount>=5;
   const _ROUTE_DIM=0.2; // 80% opacity reduction → 20% remaining
 
+  // ── Route-cull viewport AABB (world coords) ─────────────────────────
+  // Computed once per frame and reused inside the route loop. Margin is
+  // generous (1500 SU) so a route whose stops are just outside the view
+  // but whose orbit ring (max 1105 SU for XXL HIGH) crosses into view
+  // still draws. With 36+ routes and a focused camera, most routes lie
+  // entirely outside this AABB and can be culled in one cheap test.
+  const _RCULL_MARGIN=1500;
+  const _rcHwView=(W-PANEL_W)/(2*cam.scale);
+  const _rcHhView=(GH-TOP_H)/(2*cam.scale);
+  const _rcViewMinX=cam.x-_rcHwView-_RCULL_MARGIN;
+  const _rcViewMaxX=cam.x+_rcHwView+_RCULL_MARGIN;
+  const _rcViewMinY=cam.y-_rcHhView-_RCULL_MARGIN;
+  const _rcViewMaxY=cam.y+_rcHhView+_RCULL_MARGIN;
+  // Tighter viewport AABB (no margin) for per-segment / per-orbit-ring
+  // culling INSIDE a surviving route. The route-level cull above uses a
+  // generous margin because it gates the entire route's draw work; the
+  // inner culls operate on the actual geometry being painted, so they
+  // only need a small slack (200 SU) for stroke width + shadow blur.
+  // 200 SU is ~350 px of margin at MAX zoom and ~3 px at MIN zoom — both
+  // bigger than the worst-case route stroke/blur (≤ 18 px).
+  const _segCullMargin=200;
+  const _vMinX=cam.x-_rcHwView;
+  const _vMaxX=cam.x+_rcHwView;
+  const _vMinY=cam.y-_rcHhView;
+  const _vMaxY=cam.y+_rcHhView;
+
   // Route lines — live external tangent lines, one per route segment direction
   for(const train of trains){
     const activePulse=0.5+0.5*Math.sin(ts*0.004);
@@ -21179,6 +21366,24 @@ function drawGalaxy(ts,dt){
     // still get their full shadow (the per-segment branches set it explicitly).
     const _routeShadowOn=cam.scale>=0.16;
     for(const {r,faint,isDetourPerm} of toDraw){
+      // ── Coarse route AABB vs viewport cull ───────────────────────────
+      // Build the route's stop AABB on the fly and reject if it doesn't
+      // intersect the (margin-extended) viewport. Skips the whole route —
+      // segment loop, orbit rings, queueing/descending decorations. With
+      // 36+ active routes and a focused camera, the vast majority lie
+      // entirely outside the view AABB; this is ~10 cheap comparisons
+      // per route in the common case, replacing ~6 computeLiveTangent
+      // calls + segment paints + orbit-ring strokes that would otherwise
+      // burn time only to clip on the framebuffer.
+      let _rMinX=Infinity,_rMaxX=-Infinity,_rMinY=Infinity,_rMaxY=-Infinity;
+      for(let _si=0;_si<r.stops.length;_si++){
+        const _sp=_gp(r.stops[_si]); if(!_sp) continue;
+        if(_sp.x<_rMinX) _rMinX=_sp.x;
+        if(_sp.x>_rMaxX) _rMaxX=_sp.x;
+        if(_sp.y<_rMinY) _rMinY=_sp.y;
+        if(_sp.y>_rMaxY) _rMaxY=_sp.y;
+      }
+      if(_rMaxX<_rcViewMinX||_rMinX>_rcViewMaxX||_rMaxY<_rcViewMinY||_rMinY>_rcViewMaxY) continue;
       const baseAlpha=faint?0.45:(_isSel?0.32:0.22);
       const baseShadow=_routeShadowOn?(faint?6:(_isSel?5:4)):0;
       ctx.save();
@@ -21240,6 +21445,19 @@ function drawGalaxy(ts,dt){
           _ltCache.set(_segKey,{lt, ax:pA.x, ay:pA.y, bx:pB.x, by:pB.y, orA, orB});
         }
         if(!lt) continue;
+        // ── Per-segment AABB cull ──────────────────────────────────────
+        // Skip this single tangent line if its world-space AABB doesn't
+        // intersect the viewport. Routes that span the screen (e.g. a long
+        // hub→spoke chain) survive the route-level cull but most of their
+        // individual segments still sit off-screen; this trims those one
+        // by one. Cheap: 4 number compares per segment, after the lt
+        // compute which already paid the trig cost.
+        {
+          const _sx0=lt.ax<lt.bx?lt.ax:lt.bx, _sx1=lt.ax<lt.bx?lt.bx:lt.ax;
+          const _sy0=lt.ay<lt.by?lt.ay:lt.by, _sy1=lt.ay<lt.by?lt.by:lt.ay;
+          if(_sx1+_segCullMargin<_vMinX||_sx0-_segCullMargin>_vMaxX||
+             _sy1+_segCullMargin<_vMinY||_sy0-_segCullMargin>_vMaxY) continue;
+        }
         const [ax,ay]=w2s(lt.ax,lt.ay), [bx,by]=w2s(lt.bx,lt.by);
         const isActive=iA===activeFrom&&iB===activeTo;
         const isNext  =iA===nextFrom  &&iB===nextTo;
@@ -21288,7 +21506,14 @@ function drawGalaxy(ts,dt){
       for(let si=0;si<r.stops.length;si++){
         const sp=_gp(r.stops[si]);
         if(!sp) continue;
-        const orR=((r.stopOrbitR&&r.stopOrbitR[si])||(sp.isStarProxy?sp.starOrbitR:ORBIT_TIERS[sp.size][train.orbitTier]||ORBIT_TIERS[sp.size]['LOW']))*cam.scale;
+        const _orRWorld=(r.stopOrbitR&&r.stopOrbitR[si])||(sp.isStarProxy?sp.starOrbitR:ORBIT_TIERS[sp.size][train.orbitTier]||ORBIT_TIERS[sp.size]['LOW']);
+        // ── Per-orbit-ring AABB cull ─────────────────────────────────
+        // Bounding box for the ring = (sp ± orbitR_world). Skip if it
+        // doesn't intersect the viewport. Most off-screen stops on a long
+        // multi-hop route hit this path.
+        if(sp.x+_orRWorld+_segCullMargin<_vMinX||sp.x-_orRWorld-_segCullMargin>_vMaxX||
+           sp.y+_orRWorld+_segCullMargin<_vMinY||sp.y-_orRWorld-_segCullMargin>_vMaxY) continue;
+        const orR=_orRWorld*cam.scale;
         const [sx,sy]=w2s(sp.x,sp.y);
         const _isCurStopRing=train.planetId===r.stops[si];
         // Selected-train override: when the user has this train selected,
@@ -23678,7 +23903,12 @@ canvas.addEventListener('mouseup',e=>{
         if(popupState.ceoPortraitBounds){const _cpb=popupState.ceoPortraitBounds; if(cp.x>=_cpb.x&&cp.x<=_cpb.x+_cpb.w&&cp.y>=_cpb.y&&cp.y<=_cpb.y+_cpb.h){ const _cc=_corp.lastHireSD!=null?Math.max(0,1.0-(stardate-_corp.lastHireSD)):0; if(_cc<=0.001){activePopup='ceohire'; popupState={}; return;} }}
         if(popupState.corpNamePencilBounds){const b=popupState.corpNamePencilBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
           const eb=popupState.corpNameEditBounds||b;
-          startEdit(corpName,v=>{corpName=v;},eb.x,eb.y,Math.max(180,eb.w),eb.h,'rgba(180,210,255,0.95)',32);
+          // Flag the popup as editing so drawCorpPopup hides the static name
+          // and pencil for the duration of the input box being visible. Flag
+          // clears in the confirm/blur callback (Enter, Escape, or the user
+          // clicking outside the input).
+          popupState._editingCorpName=true;
+          startEdit(corpName,v=>{corpName=v; if(popupState) popupState._editingCorpName=false;},eb.x,eb.y,Math.max(180,eb.w),eb.h,'rgba(180,210,255,0.95)',32);
           return;
         }}
         return;
@@ -26939,6 +27169,17 @@ function _drawNewspaper(){
   // (canvas default is 'alphabetic'), which shifted every subsequent text
   // draw by ~10px once the newspaper had popped at SD 830.
   ctx.save();
+  // ── Wipe HD text overlay below the top bar ───────────────────────────
+  // Everything drawn earlier in the frame to the HD text overlay (chat log,
+  // mission objectives tracker, game-speed multiplier, ZOOM label, bottom
+  // hint bar, callouts, info-bar watermark, route labels, etc.) would
+  // otherwise show through the newspaper's dim+paper because the overlay
+  // sits on top of the world canvas. Clearing y=TOP_H..H removes those;
+  // top bar (y=0..TOP_H) is preserved so STARDATE / credits / corp name
+  // stay readable above the newspaper. The newspaper paints its own text
+  // (masthead, headlines, body, buttons) after this clear, so they end up
+  // on the freshly-cleaned overlay.
+  _clearTextOverlayRect(0, TOP_H, W, H-TOP_H);
   // Dim overlay
   ctx.fillStyle='rgba(0,0,0,0.72)';ctx.fillRect(0,0,W,H);
   // Paper background
