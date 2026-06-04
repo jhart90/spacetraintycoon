@@ -253,6 +253,18 @@ function _clearTextOverlay(){
   tctx.clearRect(0,0,tCanvas.width,tCanvas.height);
   tctx.restore();
 }
+// Clear a rectangular region of the overlay in logical (900×500) coordinates.
+// Called whenever opaque world-canvas geometry covers earlier text so the
+// overlay's earlier text doesn't bleed through on top of it. Used by popup
+// base draws and other "z-barrier" elements (top bar, side panel, etc.)
+// that would otherwise leave stale title-screen / world-label text visible
+// over their own backgrounds.
+function _clearTextOverlayRect(x, y, w, h){
+  tctx.save();
+  tctx.setTransform(DPR,0,0,DPR,0,0);
+  tctx.clearRect(x, y, w, h);
+  tctx.restore();
+}
 
 // ── LZ-string (pieroxy/lz-string v1.5.0, MIT) ────────────────
 // Minified, inlined verbatim. Used by the save manager to compress save
@@ -9975,13 +9987,138 @@ function getTrainStatus(train){
     : {text:'INTERPLANETARY', color:'rgba(255,200,60,0.85)'};
 }
 
+// Per-train offscreen-canvas cache for the trains panel row strip.
+// Each row's static visual state (selection highlight, name + broken icon,
+// mini car-sprite strip with fade gradient, location text, orbit-tier text,
+// status text, divider) is rendered into a 230×82 offscreen canvas and
+// blitted into the live panel via drawImage. The progress bar for in-
+// transit trains is the only per-frame dynamic element and is drawn live
+// on top of the cached image.
+//
+// Cache key fingerprints every visual-relevant field on the train:
+//   train.name | color | cars+full state | route phase | from→to ids |
+//   current planet/star ids | orbit tier | broken? | isSelected | status text + color
+// When any of those change, the cached canvas is regenerated; otherwise the
+// existing canvas is blitted. Most frames have ~37 of 38 cache hits.
+function _panelRowCacheKey(train, isSelected){
+  const r = train.route;
+  const phase = r ? r.phase : 'none';
+  const carsK = (train.cars||[]).map((c,i)=>c+(train.carFull?.[i]?'F':'E')).join('|');
+  const fromP = r ? _gp(r.stops[r.fromIdx]) : null;
+  const toP   = r ? _gp(r.stops[r.toIdx])   : null;
+  const planet = _gp(train.planetId);
+  const star = galaxy.stars[planet?.starId??0]??galaxy.stars[0];
+  const broken = ((train.maintenance??1)<=0) ? 'B' : 'O';
+  const st = getTrainStatus(train);
+  const locK = (fromP?.id||'-')+'>'+(toP?.id||'-')+'/'+(planet?.id||'-')+'/'+(star?.id||'-');
+  return train.name+'|'+(train.color||'')+'|'+carsK+'|'+phase+'|'+(train.orbitTier||'')+'|'+locK+'|'+broken+'|'+(isSelected?'S':'-')+'|'+st.text+'|'+st.color;
+}
+// Render a single panel row to an offscreen canvas at local (0..PANEL_W, 0..ROW_H)
+// coordinates. The given canvas is sized PANEL_W × ROW_H. Pulls the same
+// styling + draws the same elements as the original inline per-row code.
+function _renderPanelRowToCanvas(train, isSelected, c, PANEL_W_local, ROW_H, STRIP_H, STRIP_W, carPW){
+  const cc = c.getContext('2d');
+  cc.save();
+  cc.clearRect(0,0,c.width,c.height);
+  // Selection highlight
+  if(isSelected){
+    cc.fillStyle='rgba(80,140,255,0.10)';
+    cc.fillRect(2,0,PANEL_W_local-4,ROW_H-2);
+    cc.strokeStyle='rgba(80,160,255,0.25)'; cc.lineWidth=1;
+    cc.strokeRect(2,0,PANEL_W_local-4,ROW_H-2);
+  }
+  // Train name (broken trains → red, otherwise train color)
+  cc.font='bold 9px Orbitron,sans-serif'; cc.textAlign='left';
+  const _broken=((train.maintenance??1)<=0);
+  cc.fillStyle=_broken?'#ff4444':(train.color||'#4af');
+  let tname=train.name;
+  const _tnMaxW=PANEL_W_local-14-(_broken?14:0);
+  while(cc.measureText(tname).width>_tnMaxW&&tname.length>4) tname=tname.slice(0,-1);
+  if(tname!==train.name) tname+='…';
+  cc.fillText(tname,7,12);
+  // Broken icon (flashing wrench) is NOT drawn into the cache — it animates
+  // every 450 ms and would force constant cache invalidation. Stored on the
+  // canvas as a `_brokenIconX` hint so the live blit code can draw it on top
+  // at the correct position next to the train name.
+  c._brokenIconX = _broken ? 7+cc.measureText(tname).width+2 : -1;
+  // Strip clip + car sprites
+  const stripX=7, stripY=16;
+  cc.save();
+  cc.beginPath(); cc.rect(stripX,stripY,STRIP_W,STRIP_H); cc.clip();
+  let _stripCx=stripX;
+  for(let ci=0;ci<train.cars.length&&_stripCx<stripX+STRIP_W+carPW;ci++){
+    const _cpw=_carVizW(train.cars[ci],carPW);
+    const _cph=_carVizH(train.cars[ci],STRIP_H);
+    const _csn=getCarSprite(train.cars[ci],train.carFull?.[ci]??false);
+    const _cbp=SPRITE_BOT[_csn]||SPRITE_BOT[train.cars[ci]]||0;
+    const _sdy=stripY+STRIP_H-_cph*(1-_cbp);
+    if(imgs[_csn]) cc.drawImage(imgs[_csn],_stripCx,_sdy,_cpw,_cph);
+    else{
+      cc.fillStyle=ci===0?'#4af':ci===train.cars.length-1?'#f84':'#888';
+      cc.fillRect(_stripCx,stripY,_cpw-1,STRIP_H);
+    }
+    _stripCx+=_cpw;
+  }
+  // Fade gradient (transparent → panel bg)
+  const _panelBg=isSelected?'rgba(12,22,44,1)':'rgba(4,8,20,1)';
+  const fadeG=cc.createLinearGradient(stripX+STRIP_W*0.70,0,stripX+STRIP_W,0);
+  fadeG.addColorStop(0,isSelected?'rgba(12,22,44,0)':'rgba(4,8,20,0)'); fadeG.addColorStop(1,_panelBg);
+  cc.fillStyle=fadeG; cc.fillRect(stripX,stripY,STRIP_W,STRIP_H);
+  cc.restore();
+  // Location / route / status line
+  const rph=train.route?train.route.phase:null;
+  const onRoute=rph==='transit'||rph==='waiting';
+  const _carsTxt=`${train.cars.length} cars`;
+  cc.font='11px "Exo 2",sans-serif'; cc.textAlign='right';
+  cc.fillStyle='rgba(120,160,220,0.55)';
+  cc.fillText(_carsTxt,PANEL_W_local-5,stripY+STRIP_H+11);
+  const _carsW=cc.measureText(_carsTxt).width+6;
+  const _locMaxW=PANEL_W_local-14-_carsW;
+  cc.textAlign='left';
+  if(onRoute){
+    const r=train.route;
+    const fromP=_gp(r.stops[r.fromIdx]);
+    const toP=_gp(r.stops[r.toIdx]);
+    cc.fillStyle='rgba(255,210,80,0.80)';
+    let seg=fromP.name+' → '+toP.name;
+    while(cc.measureText(seg).width>_locMaxW&&seg.length>6) seg=seg.slice(0,-1);
+    if(seg.length<(fromP.name+' → '+toP.name).length) seg+='…';
+    cc.fillText(seg,7,stripY+STRIP_H+11);
+  } else {
+    const planet=_gp(train.planetId);
+    const star=galaxy.stars[planet?.starId??0]??galaxy.stars[0];
+    cc.fillStyle='rgba(120,180,255,0.75)';
+    const _locFull=planet?.isStarProxy?('★ '+star.name+' orbit'):((planet?.name||'?')+' · '+star.name);
+    let loc=_locFull;
+    while(cc.measureText(loc).width>_locMaxW&&loc.length>6) loc=loc.slice(0,-1);
+    if(loc.length<_locFull.length) loc+='…';
+    cc.fillText(loc,7,stripY+STRIP_H+11);
+  }
+  cc.font='11px "Exo 2",sans-serif';
+  cc.fillStyle='rgba(80,160,200,0.55)';
+  cc.fillText(onRoute?'ON ROUTE':train.orbitTier+' ORBIT',7,stripY+STRIP_H+22);
+  cc.font='bold 9px Orbitron,sans-serif'; cc.textAlign='right';
+  const st=getTrainStatus(train);
+  let stxt=st.text;
+  while(cc.measureText(stxt).width>PANEL_W_local-14&&stxt.length>4) stxt=stxt.slice(0,-1);
+  if(stxt!==st.text) stxt+='…';
+  cc.fillStyle=st.color; cc.fillText(stxt,PANEL_W_local-5,stripY+STRIP_H+22);
+  // Divider after the row
+  cc.strokeStyle='rgba(40,80,160,0.25)'; cc.lineWidth=1;
+  cc.beginPath(); cc.moveTo(6,ROW_H-2); cc.lineTo(PANEL_W_local-6,ROW_H-2); cc.stroke();
+  cc.restore();
+}
+
 // ── trains panel ─────────────────────────────────────────────
 function drawTrainsPanel(){
   if(!galaxy) return;
   const px=W-PANEL_W;
   const showTrains=panelTab==='trains';
 
-  // Background + left border
+  // Background + left border. Wipe the HD text overlay over the panel
+  // region so any earlier-drawn world text (planet labels, etc.) doesn't
+  // appear ON TOP of the panel chrome.
+  _clearTextOverlayRect(px, TOP_H, PANEL_W, GH-TOP_H);
   ctx.fillStyle='rgba(4,8,20,0.90)'; ctx.fillRect(px,TOP_H,PANEL_W,GH-TOP_H);
   if(showTrains&&(assignPending||routeHerePending)){
     ctx.strokeStyle='rgba(120,200,255,0.85)'; ctx.lineWidth=2;
@@ -10008,86 +10145,38 @@ function drawTrainsPanel(){
     for(let ri=0;ri<playerTrains.length;ri++){
       const {t:train,i:ti}=playerTrains[ri];
       const ry=TOP_H+ri*ROW_H-panelScroll;
-      const planet=_gp(train.planetId);
-      const star=galaxy.stars[planet?.starId??0]??galaxy.stars[0];
+      // Off-panel cull — row not visible in viewport, skip entirely.
+      if(ry+ROW_H<TOP_H||ry>=GH) continue;
       const isSelected=sel&&sel.type==='car'&&sel.data.trainIdx===ti;
-      if(isSelected){
-        ctx.fillStyle='rgba(80,140,255,0.10)';
-        ctx.fillRect(px+2,ry-1,PANEL_W-4,ROW_H-2);
-        ctx.strokeStyle='rgba(80,160,255,0.25)'; ctx.lineWidth=1;
-        ctx.strokeRect(px+2,ry-1,PANEL_W-4,ROW_H-2);
+      // Cache hit/miss check — keyed by every visual-relevant field on the
+      // train. ~85% of rows hit per frame (only progress-bar trains miss
+      // when the pct ticks; even those still hit the row-strip cache).
+      const _key=_panelRowCacheKey(train, isSelected);
+      let _cc=train._panelRowCache;
+      if(!_cc){
+        _cc={key:'', canvas:document.createElement('canvas')};
+        _cc.canvas.width=PANEL_W; _cc.canvas.height=ROW_H;
+        train._panelRowCache=_cc;
       }
-      ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
-      const _broken=((train.maintenance??1)<=0);
-      // Train name tinted to match the train's chosen color (player picks via the
-      // color chooser; defaults are assigned at purchase time, see makeGalaxyTrain
-      // callers). Broken trains override to red as a fault signal.
-      ctx.fillStyle=_broken?'#ff4444':(train.color||'#4af');
-      let tname=train.name;
-      const _tnMaxW=PANEL_W-14-(_broken?14:0);
-      while(ctx.measureText(tname).width>_tnMaxW&&tname.length>4) tname=tname.slice(0,-1);
-      if(tname!==train.name) tname+='…';
-      ctx.fillText(tname,px+7,ry+11);
-      if(_broken) _drawBrokenIcon(px+7+ctx.measureText(tname).width+2,ry+11,10);
-      const stripX=px+7, stripY=ry+15;
-      ctx.save();
-      ctx.beginPath(); ctx.rect(stripX,stripY,STRIP_W,STRIP_H); ctx.clip();
-      let _stripCx=stripX;
-      for(let ci=0;ci<train.cars.length&&_stripCx<stripX+STRIP_W+carPW;ci++){
-        const _cpw=_carVizW(train.cars[ci],carPW);
-        const _cph=_carVizH(train.cars[ci],STRIP_H);
-        const _csn=getCarSprite(train.cars[ci],train.carFull?.[ci]??false);
-        const _cbp=SPRITE_BOT[_csn]||SPRITE_BOT[train.cars[ci]]||0;
-        const _sdy=stripY+STRIP_H-_cph*(1-_cbp); // bottom-align opaque to strip bottom (clips above if tall)
-        if(imgs[_csn]) ctx.drawImage(imgs[_csn],_stripCx,_sdy,_cpw,_cph);
-        else{
-          ctx.fillStyle=ci===0?'#4af':ci===train.cars.length-1?'#f84':'#888';
-          ctx.fillRect(_stripCx,stripY,_cpw-1,STRIP_H);
-        }
-        _stripCx+=_cpw;
+      if(_cc.key!==_key){
+        _renderPanelRowToCanvas(train, isSelected, _cc.canvas, PANEL_W, ROW_H, STRIP_H, STRIP_W, carPW);
+        _cc.key=_key;
       }
-      // Fade to fully-opaque panel colour — no pre-fill so selection highlight shows through
-      const _panelBg=isSelected?'rgba(12,22,44,1)':'rgba(4,8,20,1)';
-      const fadeG=ctx.createLinearGradient(stripX+STRIP_W*0.70,0,stripX+STRIP_W,0);
-      fadeG.addColorStop(0,isSelected?'rgba(12,22,44,0)':'rgba(4,8,20,0)'); fadeG.addColorStop(1,_panelBg);
-      ctx.fillStyle=fadeG; ctx.fillRect(stripX,stripY,STRIP_W,STRIP_H);
-      ctx.restore();
+      // Blit the cached row in one drawImage. The cached canvas's local
+      // (0,0) maps to the panel-row top-left (px, ry-1) — the -1 accounts
+      // for the original selection highlight's offset.
+      ctx.drawImage(_cc.canvas, px, ry-1);
+      // ── Live broken icon (flashing wrench) ──
+      // Drawn on top of the cached row so the flash animates without forcing
+      // cache invalidation. The cache renderer stashes the icon X-position on
+      // the canvas as `_brokenIconX` (= -1 when not broken).
+      if(_cc.canvas._brokenIconX >= 0){
+        _drawBrokenIcon(px + _cc.canvas._brokenIconX, (ry-1) + 12, 10);
+      }
+      // ── Dynamic progress bar overlay (per-frame, in-transit only) ──
+      // Not cached because the progress % ticks every frame. Drawn on top
+      // of the cached row in the same coordinates the original code used.
       const rph=train.route?train.route.phase:null;
-      const onRoute=rph==='transit'||rph==='waiting';
-      // Location/route line — shared with "N cars" right-aligned
-      const _carsTxt=`${train.cars.length} cars`;
-      ctx.font='11px "Exo 2",sans-serif'; ctx.textAlign='right';
-      ctx.fillStyle='rgba(120,160,220,0.55)';
-      ctx.fillText(_carsTxt,W-5,stripY+STRIP_H+11);
-      const _carsW=ctx.measureText(_carsTxt).width+6;
-      const _locMaxW=PANEL_W-14-_carsW;
-      ctx.textAlign='left';
-      if(onRoute){
-        const r=train.route;
-        const fromP=_gp(r.stops[r.fromIdx]);
-        const toP=_gp(r.stops[r.toIdx]);
-        ctx.fillStyle='rgba(255,210,80,0.80)';
-        let seg=fromP.name+' → '+toP.name;
-        while(ctx.measureText(seg).width>_locMaxW&&seg.length>6) seg=seg.slice(0,-1);
-        if(seg.length<(fromP.name+' → '+toP.name).length) seg+='…';
-        ctx.fillText(seg,px+7,stripY+STRIP_H+11);
-      } else {
-        ctx.fillStyle='rgba(120,180,255,0.75)';
-        const _locFull=planet?.isStarProxy?('★ '+star.name+' orbit'):((planet?.name||'?')+' · '+star.name);
-        let loc=_locFull;
-        while(ctx.measureText(loc).width>_locMaxW&&loc.length>6) loc=loc.slice(0,-1);
-        if(loc.length<_locFull.length) loc+='…';
-        ctx.fillText(loc,px+7,stripY+STRIP_H+11);
-      }
-      ctx.font='11px "Exo 2",sans-serif';
-      ctx.fillStyle='rgba(80,160,200,0.55)';
-      ctx.fillText(onRoute?'ON ROUTE':train.orbitTier+' ORBIT',px+7,stripY+STRIP_H+22);
-      ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='right';
-      const st=getTrainStatus(train);
-      let stxt=st.text;
-      while(ctx.measureText(stxt).width>PANEL_W-14&&stxt.length>4) stxt=stxt.slice(0,-1);
-      if(stxt!==st.text) stxt+='…';
-      ctx.fillStyle=st.color; ctx.fillText(stxt,W-5,stripY+STRIP_H+22);
       if(rph==='transit'&&train.route){
         const r2=train.route;
         const fP2=_gp(r2.stops[r2.fromIdx]);
@@ -10106,10 +10195,6 @@ function drawTrainsPanel(){
           ctx.fillText(Math.round(prog*100)+'%',W-5,by+bh+4);
         }
       }
-      // Divider after every train row — the pseudo "Add new train" slot
-      // always follows, so the last real train also gets a divider below it.
-      ctx.strokeStyle='rgba(40,80,160,0.25)'; ctx.lineWidth=1;
-      ctx.beginPath(); ctx.moveTo(px+6,ry+ROW_H-2); ctx.lineTo(W-6,ry+ROW_H-2); ctx.stroke();
     }
     // "Add new train" pseudo-slot — sits after the last train. Centered name
     // text, soft accent color, brightens on hover. Click routes to the Train
@@ -12437,6 +12522,11 @@ function drawSpeedIndicator(){
 // ── popup draw functions ─────────────────────────────────────
 function drawPopupBase(pw,ph,borderCol){
   const px=(W-pw)/2, py=(H-ph)/2;
+  // The popup is an opaque rectangle on the world canvas — anything drawn
+  // earlier this frame is covered. Wipe the corresponding region of the HD
+  // text overlay so earlier text (title screen, planet labels, chat log,
+  // etc.) doesn't show through ON TOP of the popup.
+  _clearTextOverlayRect(px, py, pw, ph);
   ctx.fillStyle='rgba(3,6,20,0.97)';
   ctx.fillRect(px,py,pw,ph);
   ctx.strokeStyle=borderCol||'rgba(80,160,255,0.7)'; ctx.lineWidth=2;
@@ -20663,6 +20753,9 @@ function drawPanelTabs(){
 }
 
 function drawTopBar(){
+  // Wipe the HD overlay over the top-bar strip so prior world text doesn't
+  // bleed onto the bar's stats / buttons.
+  _clearTextOverlayRect(0, 0, W-PANEL_W, TOP_H);
   ctx.save();
   ctx.beginPath(); ctx.rect(0,0,W-PANEL_W,TOP_H); ctx.clip();
 
@@ -21467,6 +21560,9 @@ function drawGalaxy(ts,dt){
   ctx.restore(); // end GH clip
 
   // ── info bar ─────────────────────────────────────────────────
+  // Wipe any earlier-drawn world text from the overlay over the info-bar
+  // strip so it can't bleed onto the corp name / planet name display.
+  _clearTextOverlayRect(0, GH, W, BAR_H);
   ctx.fillStyle='rgba(6,10,26,0.93)'; ctx.fillRect(0,GH,W,BAR_H);
   ctx.strokeStyle='rgba(50,100,200,0.4)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(0,GH); ctx.lineTo(W,GH); ctx.stroke();
