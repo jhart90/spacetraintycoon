@@ -129,7 +129,10 @@
       "Bash(curl -sI http://127.0.0.1:9876/index.html)",
       "Bash(git fetch *)",
       "Bash(awk '/^function __TRACKED_VAR__/,/^function /' build_game.py)",
-      "Bash(awk 'NR>=21000 && NR<=22500 && /^function/' build_game.py)"
+      "Bash(awk 'NR>=21000 && NR<=22500 && /^function/' build_game.py)",
+      "Bash(awk 'NR>=19840 && NR<=19850' build_game.py)",
+      "Bash(awk '/sel\\\\.type===.planet./' build_game.py)",
+      "Bash(awk -F: '$1>=21780 && $1<=22500')"
     ]
   },
   "hooks": {

@@ -105,6 +105,19 @@ const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 const W = 900, H = 500;
 canvas.width = W; canvas.height = H;
+// ── Sprite-render quality ──────────────────────────────────────────────
+// Keep the browser's default low-quality bilinear smoothing on the final
+// drawImage step — empirically `'high'` (Lanczos-style) over-smoothed train
+// sprites and looked worse than `'low'`. Sharpness comes instead from the
+// per-sprite mip cache built in `_sprForSize()` below, which pre-renders
+// every loaded sprite to a few intermediate sizes (256/128/64) on first
+// use. At draw time we pick the smallest mip ≥ the destination — so the
+// browser does a mild ~1-2× downscale from the chosen mip instead of an
+// aggressive ~8-10× downscale from the 1254×1254 source PNG, which is
+// what produced the moiré streaks across car bodies and window grids.
+ctx.imageSmoothingEnabled = true;
+ctx.imageSmoothingQuality = 'low';
+canvas.style.imageRendering = 'auto'; // some browsers default to 'pixelated' for canvas
 
 // ── HIGH-DPI TEXT OVERLAY ─────────────────────────────────────
 // A second canvas is layered on top of the world canvas at the device's
@@ -249,6 +262,72 @@ const total = Object.keys(ASSETS).length;
 function onLoad() { if(++loaded===total) document.fonts.ready.then(init); }
 for(const [k,v] of Object.entries(ASSETS)) {
   const im = new Image(); im.onload = onLoad; im.src = v; imgs[k] = im;
+}
+
+// ── Sprite mip cache ─────────────────────────────────────────────────
+// Source sprite PNGs are large (typically 1254×1254 to 1341×1173). Drawing
+// them directly via `ctx.drawImage(imgs[name], dx, dy, dw, dh)` at common
+// destination sizes (~30-200 px) makes the browser perform an aggressive
+// 6-10× downscale every frame — that's where the moiré-streak artifacts on
+// car bodies, roofs, and window grids come from with default bilinear
+// smoothing. Pre-baking each sprite to a few intermediate sizes once, then
+// drawing from the smallest mip ≥ the destination, leaves only a mild
+// 1-2× downscale and shrinks the streaks below visibility.
+//
+// Mip "size" refers to the LONG side. Aspect ratio is preserved from the
+// source. Three levels cover every real draw site:
+//   • SPRITE_MIPS[0] = 384 — high-zoom in-galaxy train cars (≤ ~250 px)
+//   • SPRITE_MIPS[1] = 192 — panel rows + info-bar strip (~30-130 px)
+//   • SPRITE_MIPS[2] =  96 — tiny embedded icons (≤ ~50 px)
+// `_sprForSize(name, dw, dh)` picks the smallest mip whose long side is
+// ≥ max(dw, dh). If the destination is bigger than every mip (rare —
+// only the train builder's huge sprite preview hits this), we fall back
+// to the source PNG, which avoids any quality regression vs. the previous
+// behaviour. Mips are generated lazily per (name × size) the first time
+// they're needed, so the cost is paid once per real visit to a draw site.
+const SPRITE_MIPS = [384, 192, 96];
+const _spriteMipCache = new Map(); // key: name|size → HTMLCanvasElement
+function _bakeSpriteMip(name, longSide){
+  const src = imgs[name];
+  if(!src || !src.complete || !src.naturalWidth) return null;
+  const sw = src.naturalWidth, sh = src.naturalHeight;
+  const longSrc = Math.max(sw, sh);
+  if(longSrc <= longSide) return src; // source already smaller than mip; skip baking
+  const scale = longSide / longSrc;
+  const mipW = Math.max(1, Math.round(sw * scale));
+  const mipH = Math.max(1, Math.round(sh * scale));
+  const c = document.createElement('canvas');
+  c.width = mipW; c.height = mipH;
+  const cx = c.getContext('2d');
+  // Use HIGH quality just for the one-time bake — it's a single downscale
+  // pass that runs once per (sprite × mip size), so the better resampler
+  // is worth the extra time. Per-frame drawImage from the mip stays at
+  // the world ctx's `low` setting, which is the user-preferred look.
+  cx.imageSmoothingEnabled = true;
+  cx.imageSmoothingQuality = 'high';
+  cx.drawImage(src, 0, 0, mipW, mipH);
+  return c;
+}
+function _sprForSize(name, destW, destH){
+  const src = imgs[name];
+  if(!src) return null;
+  // Pick the smallest mip whose long side covers the destination's long side.
+  // SPRITE_MIPS is sorted descending so we walk it backwards: smallest first
+  // that still fits the destination. Fall through to source PNG if nothing
+  // is large enough (e.g. the train-builder preview drawn at 300 px).
+  const destLong = Math.max(destW, destH);
+  let chosen = -1;
+  for(let i = SPRITE_MIPS.length - 1; i >= 0; i--){
+    if(SPRITE_MIPS[i] >= destLong){ chosen = SPRITE_MIPS[i]; break; }
+  }
+  if(chosen < 0) return src; // destination bigger than largest mip — use source
+  const key = name + '|' + chosen;
+  let mip = _spriteMipCache.get(key);
+  if(mip === undefined){
+    mip = _bakeSpriteMip(name, chosen);
+    _spriteMipCache.set(key, mip);
+  }
+  return mip || src;
 }
 
 // ── sound system ─────────────────────────────────────────────
@@ -2336,7 +2415,7 @@ function drawTitleScreen(ts,dt){
     if(imgs[c.name]){
       const bp=SPRITE_BOT[c.name]||0;
       const _tch=_carVizH(c.name,CAR_H); // height with engine-size multiplier
-      ctx.drawImage(imgs[c.name],c.x,rT-_tch*(1-bp),CAR_W,_tch);
+      ctx.drawImage(_sprForSize(c.name,CAR_W,_tch),c.x,rT-_tch*(1-bp),CAR_W,_tch);
     }
   }
   const last=tTrain[tTrain.length-1];
@@ -2584,7 +2663,7 @@ function _htpPanel0(ts,elapsed){
     ctx.save();
     ctx.translate(px,py);
     ctx.rotate(rAng+Math.PI); // sprite faces left in image, so +π aligns it with route direction
-    ctx.drawImage(imgs[cname],-cw/2,-opaqueH/2,cw,ch);
+    ctx.drawImage(_sprForSize(cname,cw,ch),-cw/2,-opaqueH/2,cw,ch);
     ctx.restore();
   }
   ctx.restore();
@@ -2724,7 +2803,7 @@ function _htpPanel1(ts,elapsed){
       // 3-car train above button
       for(let ci=0;ci<assignCars.length;ci++){
         const cname=assignCars[ci];
-        if(imgs[cname]){const bp=SPRITE_BOT[cname]||0;ctx.drawImage(imgs[cname],tTrainX+ci*dcw,tTrainY-dch*(1-bp),dcw,dch);}
+        if(imgs[cname]){const bp=SPRITE_BOT[cname]||0;ctx.drawImage(_sprForSize(cname,dcw,dch),tTrainX+ci*dcw,tTrainY-dch*(1-bp),dcw,dch);}
       }
       // Orange ellipse ring around train
       const tCx=tTrainX+assignCars.length*dcw/2, tCy=tTrainY-dch*0.35;
@@ -2831,7 +2910,7 @@ function _htpPanel2(ts,elapsed){
   } else {
     const sc=['engine_constellation','car_passenger','caboose'];
     const sw=50,sh=34,sx0=inspCx-sc.length*sw/2;
-    for(let ci=0;ci<sc.length;ci++){const cn=sc[ci];if(imgs[cn]){const bp=SPRITE_BOT[cn]||0;ctx.drawImage(imgs[cn],sx0+ci*sw,inspCy-sh*(1-bp)+sh*0.2,sw,sh);}}
+    for(let ci=0;ci<sc.length;ci++){const cn=sc[ci];if(imgs[cn]){const bp=SPRITE_BOT[cn]||0;ctx.drawImage(_sprForSize(cn,sw,sh),sx0+ci*sw,inspCy-sh*(1-bp)+sh*0.2,sw,sh);}}
   }
   ctx.restore();
   // Double-click cursor + callout (drawn outside clip so it can overlap slightly)
@@ -10030,7 +10109,7 @@ function _renderPanelRowToCanvas(train, isSelected, c, PANEL_W_local, ROW_H, STR
     const _csn=getCarSprite(train.cars[ci],train.carFull?.[ci]??false);
     const _cbp=SPRITE_BOT[_csn]||SPRITE_BOT[train.cars[ci]]||0;
     const _sdy=stripY+STRIP_H-_cph*(1-_cbp);
-    if(imgs[_csn]) cc.drawImage(imgs[_csn],_stripCx,_sdy,_cpw,_cph);
+    if(imgs[_csn]) cc.drawImage(_sprForSize(_csn,_cpw,_cph),_stripCx,_sdy,_cpw,_cph);
     else{
       cc.fillStyle=ci===0?'#4af':ci===train.cars.length-1?'#f84':'#888';
       cc.fillRect(_stripCx,stripY,_cpw-1,STRIP_H);
@@ -14896,6 +14975,18 @@ function _drawTutorialChain(stage){
     const _shadowCol = _blue ? 'rgba(0,80,180,0.55)'  : 'rgba(180,140,0,0.55)';
     const _fillCol   = _blue ? 'rgba(25,155,255,0.97)' : 'rgba(245,200,40,0.97)';
     const _textCol   = _blue ? '#000000'               : '#1a1308';
+    // Wipe HD text overlay under the bubble (including its tail) so any
+    // earlier text drawn to the overlay — trains-panel rows, info-bar text,
+    // planet labels, chat log — can't bleed THROUGH the opaque yellow fill
+    // and read as garbage behind the bubble's own text. Tail extends
+    // vertically beyond the bubble rect by ~_tailH, so we widen the clear
+    // rect to include it on both placements (above + below).
+    {
+      const _anchY = (anchorScreen ? anchorScreen.y : _by);
+      const _clearY0 = Math.min(_by, _anchY-4) - 2;
+      const _clearY1 = Math.max(_by+_bH, _anchY+4) + 2;
+      _clearTextOverlayRect(_bx-2, _clearY0, _bW+4, _clearY1-_clearY0);
+    }
     ctx.globalAlpha=alpha;
     ctx.shadowColor=_shadowCol; ctx.shadowBlur=8;
     ctx.fillStyle=_fillCol;
@@ -17023,7 +17114,7 @@ function drawTrainDetailPopup(){
     const _bpsn=getCarSprite(t.cars[ci],t.carFull?.[ci]??false);
     const _bp=SPRITE_BOT[_bpsn]||SPRITE_BOT[t.cars[ci]]||0;
     const _dy=~~(SY+SH*_bp);
-    if(imgs[_bpsn]) ctx.drawImage(imgs[_bpsn],_scx,_dy,_cw,SH);
+    if(imgs[_bpsn]) ctx.drawImage(_sprForSize(_bpsn,_cw,SH),_scx,_dy,_cw,SH);
     else{ ctx.fillStyle=ci===0?'#4af':ci===t.cars.length-1?'#f84':'#888'; ctx.fillRect(_scx,SY,_cw-1,SH); }
     _scx+=_cw;
   }}
@@ -17213,8 +17304,20 @@ function drawCarDetailPopup(){
   ctx.strokeStyle='rgba(60,140,220,0.35)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(px,py+32); ctx.lineTo(px+pw,py+32); ctx.stroke();
 
-  // ── Top section: large sprite + basic info ──────────────────
-  const imgS=90, imgX=px+12, imgY=py+40;
+  // ── Top section: sprite + basic info ───────────────────────
+  // Layout y-budget (popup is 460×430, py+32 = header divider):
+  //   py+44..py+126   sprite (82×82, 16 px left margin + 18 px right margin
+  //                   before the info column at infoX = px+116)
+  //   py+62           car label (bold 13 px)
+  //   py+78           "Car X of Y · on TRAIN" (9 px subtitle)
+  //   py+96           PURCHASED label
+  //   py+110          SD value
+  //   py+124          cargo status badge ("LOADED: …" / "EMPTY")
+  //   py+126          sprite frame bottom (badge aligned with frame bottom)
+  //   py+148..py+180  cargo / origin block (loaded only — 22 px buffer
+  //                   below the sprite frame, then the two rows + 8 px
+  //                   bottom buffer to the engine-time divider)
+  const imgS=82, imgX=px+16, imgY=py+44;
   ctx.fillStyle='rgba(8,12,28,0.70)';
   ctx.fillRect(imgX,imgY,imgS,imgS);
   ctx.strokeStyle='rgba(80,140,220,0.40)'; ctx.lineWidth=1; ctx.strokeRect(imgX,imgY,imgS,imgS);
@@ -17226,11 +17329,12 @@ function drawCarDetailPopup(){
     const _cdh=imgS*(1-_sbp)*1.1; // slightly larger than raw, centered
     const _cdy=imgY+imgS-Math.round(imgS*_sbp)-Math.round(_cdh);
     ctx.save(); ctx.beginPath(); ctx.rect(imgX+2,imgY+2,imgS-4,imgS-4); ctx.clip();
-    ctx.drawImage(_cImg,imgX,_cdy,imgS,imgS);
+    ctx.drawImage(_sprForSize(_cSprite,imgS,imgS),imgX,_cdy,imgS,imgS);
     ctx.restore();
   }
-  // Car label and type
-  const infoX=imgX+imgS+14, infoMaxW=pw-(infoX-px)-14;
+  // Car label + subtitle column. infoX gives 18 px between sprite right edge
+  // and the label; infoMaxW keeps text 16 px clear of the popup right edge.
+  const infoX=px+16+imgS+18, infoMaxW=pw-(infoX-px)-16;
   ctx.textAlign='left';
   ctx.font='bold 13px Orbitron,sans-serif';
   ctx.fillStyle='rgba(180,220,255,0.97)';
@@ -17238,44 +17342,43 @@ function drawCarDetailPopup(){
   let _clTxt=_carLabel;
   while(ctx.measureText(_clTxt).width>infoMaxW&&_clTxt.length>4) _clTxt=_clTxt.slice(0,-1);
   if(_clTxt!==_carLabel) _clTxt=_clTxt.slice(0,-1)+'…';
-  ctx.fillText(_clTxt,infoX,py+56);
+  ctx.fillText(_clTxt,infoX,py+62);
   // Car index label (e.g. "Car 3 of 7")
   ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,140,200,0.65)';
-  ctx.fillText('Car '+(ci+1)+' of '+t.cars.length+' · on '+t.name,infoX,py+70);
-  // Purchase date — compact: small label + value on adjacent lines, tighter
-  // spacing than before to leave room for the cargo block below.
+  ctx.fillText('Car '+(ci+1)+' of '+t.cars.length+' · on '+t.name,infoX,py+78);
+  // Purchase date — small uppercase label, value on next line.
   const _psd=t.carPurchaseSd?.[ci]??null;
   ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(110,150,210,0.70)';
-  ctx.fillText('PURCHASED',infoX,py+86);
+  ctx.fillText('PURCHASED',infoX,py+96);
   ctx.font='11px "Exo 2",sans-serif'; ctx.fillStyle='rgba(170,210,255,0.85)';
-  ctx.fillText(_psd!=null?'SD '+_psd.toFixed(2):'—',infoX,py+100);
-  // Cargo status badge
+  ctx.fillText(_psd!=null?'SD '+_psd.toFixed(2):'—',infoX,py+110);
+  // Cargo status badge — sits at the sprite-frame bottom so the info column
+  // visually grounds against the frame.
   const _isCargoFull=t.carFull?.[ci]??false;
   const _cargoType=t.carCargo?.[ci]??null;
   const _cargoBadgeTxt=_isCargoFull?('LOADED: '+(CARGO_LABEL[_cargoType]||_cargoType||'?')):'EMPTY';
   ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='left';
   ctx.fillStyle=_isCargoFull?'rgba(80,220,140,0.90)':'rgba(100,115,145,0.65)';
-  ctx.fillText(_cargoBadgeTxt,infoX,py+118);
-  // ── Cargo / Origin block (top panel; replaces the old bottom section) ──
-  // Lives BELOW the sprite, spanning the full popup width. Only shown when
-  // the car is actually loaded. Origin planet + star are clickable; bounds
-  // get registered on popupState for the existing click router.
+  ctx.fillText(_cargoBadgeTxt,infoX,py+124);
+  // ── Cargo / Origin block (full width below sprite) ─────────────────
+  // 22 px buffer between the sprite frame bottom (py+126) and the ORIGIN row
+  // top so the two zones read as distinct. Only rendered when loaded.
   popupState.carDetailPlanetBounds=null;
   popupState.carDetailStarBounds=null;
-  const _cargoBlockTop=py+138, _cargoBlockH=_isCargoFull?34:0;
+  const _cargoBlockTop=py+148, _cargoBlockH=_isCargoFull?32:0;
   if(_isCargoFull&&_cargoType){
     const _srcId=t.carCargoSource?.[ci]??null;
     const _srcP=_srcId!=null?_gp(_srcId):null;
     const _srcStar=_srcP?galaxy.stars[_srcP.starId]:null;
-    // Line 1: "Origin: <Planet> · <Star>"
+    // Line 1: "ORIGIN  <Planet> · <Star>"
     const _origHov=!!popupState.carDetailPlanetHover;
     ctx.font='9px "Exo 2",sans-serif'; ctx.textAlign='left';
     ctx.fillStyle='rgba(100,140,210,0.60)';
-    ctx.fillText('ORIGIN',px+14,_cargoBlockTop);
+    ctx.fillText('ORIGIN',px+16,_cargoBlockTop);
     ctx.font=(_origHov?'bold ':'')+' 11px "Exo 2",sans-serif';
     ctx.fillStyle=_origHov?'rgba(200,240,255,1)':'rgba(160,220,255,0.92)';
     const _pnTxt=_srcP?_srcP.name:'Unknown';
-    const _pnX=px+58;
+    const _pnX=px+62;
     ctx.fillText(_pnTxt,_pnX,_cargoBlockTop);
     const _pnW=ctx.measureText(_pnTxt).width;
     if(_origHov){ ctx.strokeStyle='rgba(160,220,255,0.8)'; ctx.lineWidth=0.7; ctx.beginPath(); ctx.moveTo(_pnX,_cargoBlockTop+1); ctx.lineTo(_pnX+_pnW,_cargoBlockTop+1); ctx.stroke(); }
@@ -17290,17 +17393,17 @@ function drawCarDetailPopup(){
     const _sStarW=ctx.measureText('· '+_sStarTxt).width;
     if(_starHov){ ctx.strokeStyle='rgba(220,200,100,0.7)'; ctx.lineWidth=0.7; ctx.beginPath(); ctx.moveTo(_starX,_cargoBlockTop+1); ctx.lineTo(_starX+_sStarW,_cargoBlockTop+1); ctx.stroke(); }
     if(_srcStar) popupState.carDetailStarBounds={x:_starX,y:_cargoBlockTop-11,w:_sStarW+4,h:14,star:_srcStar};
-    // Line 2: distance + estimated value, packed in two columns
+    // Line 2: distance + estimated value, two columns
     const [_cwx,_cwy]=getTrainCarPos(t,ci);
     const _distAu=_srcP?Math.round(Math.hypot(_cwx-_srcP.x,_cwy-_srcP.y)):null;
     const _baseRate=(CARGO_BASE_RATE[_cargoType]||{})[carType]||1000;
     const _dMult=_distAu!=null?(_distAu>120000?2.5:_distAu>60000?1.8:_distAu>20000?1.3:_distAu>5000?1.0:_distAu>1000?0.8:0.5):1.0;
     const _estVal=Math.round(_baseRate*_dMult);
-    const _r2Y=_cargoBlockTop+16;
+    const _r2Y=_cargoBlockTop+18;
     ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,140,210,0.60)';
-    ctx.fillText('DIST FROM ORIGIN',px+14,_r2Y);
+    ctx.fillText('DIST FROM ORIGIN',px+16,_r2Y);
     ctx.font='bold 11px "Exo 2",sans-serif'; ctx.fillStyle='rgba(170,215,255,0.88)';
-    ctx.fillText(_distAu!=null?_distAu.toLocaleString()+' SU':'—',px+118,_r2Y);
+    ctx.fillText(_distAu!=null?_distAu.toLocaleString()+' SU':'—',px+122,_r2Y);
     ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,140,210,0.60)';
     ctx.fillText('EST DELIVERY VALUE',px+pw/2+10,_r2Y);
     ctx.font='bold 11px "Exo 2",sans-serif'; ctx.fillStyle='rgba(80,235,140,0.90)';
@@ -17314,7 +17417,15 @@ function drawCarDetailPopup(){
   // Constellation → still two rows). Renaming the train transparently
   // rolls all historical rows over to the new name, because we read
   // train.name at draw time (no per-entry name stored).
-  const _engDivY = _cargoBlockTop + _cargoBlockH + 4;
+  //
+  // Divider position depends on whether the cargo block rendered:
+  //   • loaded  → block bottom = _cargoBlockTop + 32 = py+180; divider 8 px
+  //               below that = py+188.
+  //   • empty   → no cargo block at all; divider sits just below the sprite
+  //               area at py+140 (sprite bottom py+126 + 14 px buffer) so
+  //               we don't leave a giant empty band when there's nothing
+  //               to show there.
+  const _engDivY = _isCargoFull ? (_cargoBlockTop + _cargoBlockH + 8) : (py + 140);
   ctx.strokeStyle='rgba(60,120,200,0.30)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(px,_engDivY); ctx.lineTo(px+pw,_engDivY); ctx.stroke();
   ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='left';
@@ -17366,13 +17477,15 @@ function drawCarDetailPopup(){
 
   // ── Stats section ─────────────────────────────────────────
   // Floats below the engine-time list with a small gap. Minimum y locks
-  // it to a predictable position even when there are 0-1 engine rows.
-  const _statsY=Math.max(py+260, _eRowY+10);
+  // it to a predictable position even when there are 0-1 engine rows,
+  // and the rows below are spaced to fill the popup's remaining height
+  // rather than crowding at the top with empty space at the bottom.
+  const _statsY=Math.max(py+264, _eRowY+12);
   ctx.strokeStyle='rgba(60,120,200,0.30)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(px,_statsY-4); ctx.lineTo(px+pw,_statsY-4); ctx.stroke();
   ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='left';
   ctx.fillStyle='rgba(120,180,255,0.72)';
-  ctx.fillText('PERFORMANCE STATS',px+14,_statsY+10);
+  ctx.fillText('PERFORMANCE STATS',px+16,_statsY+14);
 
   const _rev=t.carRevenue?.[ci]??0;
   const _segs=t.carSegments?.[ci]??0;
@@ -17405,30 +17518,46 @@ function drawCarDetailPopup(){
   };
   const _rankLine=(metric)=>('#'+_rankIn(metric,'train')+' in Train · #'+_rankIn(metric,'fleet')+' in Fleet');
 
+  // Stat row renderer. Layout per row:
+  //   • <LABEL>  (small uppercase, dim)
+  //   • <VALUE>  (bold, coloured)   <RANK>  (legible gray, inline-right of value)
+  // Rank is the "#3 in Train · #9 in Fleet" callout — moved off its own line
+  // and bumped from 7 px to 10 px so it reads cleanly. It sits a fixed 12 px
+  // to the right of the value's bounding box.
   const _sv=(lbl,val,col,x,y,rank)=>{
     ctx.font='8px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,140,210,0.55)'; ctx.textAlign='left';
     ctx.fillText(lbl,x,y);
     ctx.font='bold 11px "Exo 2",sans-serif'; ctx.fillStyle=col||'rgba(180,215,255,0.90)';
     ctx.fillText(val,x,y+14);
     if(rank){
-      ctx.font='7px "Exo 2",sans-serif'; ctx.fillStyle='rgba(115,130,155,0.70)';
-      ctx.fillText(rank,x,y+24);
+      const _vw = ctx.measureText(val).width;
+      ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(150,170,210,0.85)';
+      ctx.fillText(rank, x + _vw + 12, y+14);
     }
   };
-  const _hc=pw/2-6, _col2X=px+14+_hc+4;
-  _sv('TOTAL REVENUE','+'+_fmtCr(Math.round(_rev))+' cr','rgba(80,230,140,0.92)',px+14,_statsY+26,_rankLine('revenue'));
-  _sv('AVG REVENUE / SEGMENT','+'+_fmtCr(_avgRev)+' cr','rgba(80,200,140,0.82)',_col2X,_statsY+26,_rankLine('avg'));
-  _sv('SEGMENTS TRAVELLED',_segs.toLocaleString(),null,px+14,_statsY+58,_rankLine('segments'));
-  _sv('UNITS LOADED / UNLOADED',_loaded+' / '+_unloaded,null,_col2X,_statsY+58);
+  // Stats are spread across the available vertical space between the section
+  // divider (_statsY-4) and the popup bottom (py+ph). With _statsY around
+  // py+264 and popup bottom at py+430, that's ~166 px of body. Spacing chosen
+  // to leave ~14 px breathing room above + below each row:
+  //   • +14   PERFORMANCE STATS label
+  //   • +36   row 1 (TOTAL REVENUE / AVG REVENUE per SEG)
+  //   • +76   row 2 (SEGMENTS / UNITS LOADED·UNLOADED)
+  //   • +112  FILL RATE label (+ 120 bar)
+  //   • +144  UNLOADS / SEGMENT (last row, value at +158)
+  const _hc=pw/2-6, _col2X=px+16+_hc+4;
+  _sv('TOTAL REVENUE','+'+_fmtCr(Math.round(_rev))+' cr','rgba(80,230,140,0.92)',px+16,_statsY+36,_rankLine('revenue'));
+  _sv('AVG REVENUE / SEGMENT','+'+_fmtCr(_avgRev)+' cr','rgba(80,200,140,0.82)',_col2X,_statsY+36,_rankLine('avg'));
+  _sv('SEGMENTS TRAVELLED',_segs.toLocaleString(),null,px+16,_statsY+76,_rankLine('segments'));
+  _sv('UNITS LOADED / UNLOADED',_loaded+' / '+_unloaded,null,_col2X,_statsY+76);
   // Fill rate bar
   ctx.font='8px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,140,210,0.55)'; ctx.textAlign='left';
-  ctx.fillText('FILL RATE  ('+_fillPct+'%)',px+14,_statsY+90);
-  const _frBarX=px+14, _frBarY=_statsY+96, _frBarW=pw-28, _frBarH=7;
+  ctx.fillText('FILL RATE  ('+_fillPct+'%)',px+16,_statsY+112);
+  const _frBarX=px+16, _frBarY=_statsY+120, _frBarW=pw-32, _frBarH=7;
   const _frCol=_fillPct>=70?'rgba(60,220,120,0.85)':_fillPct>=40?'rgba(220,200,60,0.85)':'rgba(120,190,255,0.78)';
   ctx.fillStyle='rgba(15,25,55,0.7)'; ctx.beginPath(); ctx.roundRect(_frBarX,_frBarY,_frBarW,_frBarH,2); ctx.fill();
   if(_fillPct>0){ ctx.fillStyle=_frCol; ctx.beginPath(); ctx.roundRect(_frBarX,_frBarY,_frBarW*(_fillPct/100),_frBarH,2); ctx.fill(); }
   ctx.strokeStyle='rgba(60,100,180,0.35)'; ctx.lineWidth=0.7; ctx.beginPath(); ctx.roundRect(_frBarX,_frBarY,_frBarW,_frBarH,2); ctx.stroke();
-  _sv('UNLOADS / SEGMENT',_unloadsPerSeg.toFixed(2),null,px+14,_statsY+112);
+  _sv('UNLOADS / SEGMENT',_unloadsPerSeg.toFixed(2),null,px+16,_statsY+144);
   // Current Cargo block was moved into the top panel above (see the
   // `_cargoBlockTop` section near the sprite). No bottom section here.
 
@@ -17714,6 +17843,13 @@ function drawStarDetailPopup(){
 
 function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
   const upW=196, upX=mainPx-upW+2;
+  // The upgrades side-panel sits to the LEFT of the main planet-detail popup,
+  // outside the popup's bounds. drawPopupBase clears the HD overlay over the
+  // main popup but NOT over this side panel — so without the clear below,
+  // any text rendered earlier in the frame (mission objectives tracker,
+  // chat log, bottom hint bar [P]/[Y]/[T] etc., info-bar planet name like
+  // "Atreaath") shows THROUGH the opaque dark side-panel background.
+  _clearTextOverlayRect(upX, mainPy, upW, mainPh);
   ctx.fillStyle='rgba(3,5,16,0.96)';
   ctx.strokeStyle='rgba(60,120,220,0.38)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.roundRect(upX,mainPy,upW,mainPh,6); ctx.fill(); ctx.stroke();
@@ -18012,7 +18148,7 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
           ctx.textAlign='left';
           ctx.fillText(_tPlusLbl,_tPlusX,_tVCtr);
           const _tStX=_tPlusX+_tPlusW+_tPillsGap;
-          if(imgs['car_steel']) ctx.drawImage(imgs['car_steel'],_tStX+3,_tPY+(_ctPH-_tSz)/2,_tSz,_tSz);
+          if(imgs['car_steel']) ctx.drawImage(_sprForSize('car_steel',_tSz,_tSz),_tStX+3,_tPY+(_ctPH-_tSz)/2,_tSz,_tSz);
           ctx.font='8px "Exo 2",sans-serif'; ctx.textAlign='left'; ctx.textBaseline='middle';
           ctx.fillStyle='rgba(210,220,235,0.9)';
           ctx.fillText(_tLbl,_tStX+3+_tSz+2,_tVCtr);
@@ -18078,7 +18214,7 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
           ctx.fillText(_plusLbl,_plusX,_vCtr);
           // Iron sprite (2×) + ×4 label
           const _irX=_plusX+_plusW+_pillsGap;
-          if(imgs['car_iron']) ctx.drawImage(imgs['car_iron'],_irX+3,_pY+(_cPH-_iSz)/2,_iSz,_iSz);
+          if(imgs['car_iron']) ctx.drawImage(_sprForSize('car_iron',_iSz,_iSz),_irX+3,_pY+(_cPH-_iSz)/2,_iSz,_iSz);
           ctx.font='8px "Exo 2",sans-serif'; ctx.textAlign='left'; ctx.textBaseline='middle';
           ctx.fillStyle='rgba(200,210,235,0.9)';
           ctx.fillText(_iLbl,_irX+3+_iSz+2,_vCtr);
@@ -19434,7 +19570,7 @@ function _drawEngineDetailsPanel(mainPx,mainPy,eng){
   if(imgs[eng]){
     ctx.save();
     ctx.shadowColor='rgba(80,160,255,0.45)'; ctx.shadowBlur=14;
-    ctx.drawImage(imgs[eng],sprX,sprY,sprW,sprH);
+    ctx.drawImage(_sprForSize(eng,sprW,sprH),sprX,sprY,sprW,sprH);
     ctx.restore();
   }
   // Engine name
@@ -19492,7 +19628,7 @@ function _drawCarBtn(bx,by,bw,bh,carType,isSelected,isGreyed,tyCount=0,isHov=fal
     const _bp=SPRITE_BOT[carType]||0;
     const _opaqueH=sprH*(1-_bp);
     const _drawY=by+sprH/2-_opaqueH/2;
-    ctx.drawImage(imgs[carType],sprX,_drawY,sprW,sprH);
+    ctx.drawImage(_sprForSize(carType,sprW,sprH),sprX,_drawY,sprW,sprH);
   }
   ctx.restore();
   if(isSelected){ ctx.strokeStyle='rgba(80,160,255,0.95)'; ctx.lineWidth=2; ctx.strokeRect(bx,by,bw,sprH); }
@@ -19783,7 +19919,8 @@ function drawTrainBuilderPopup(){
       s.vizCarBounds.push({x:cx,y:drawY,w:cw,h:_cvh,vizIdx:i});
       ctx.save();
       if(isHov) ctx.filter='brightness(1.8) saturate(1.15)';
-      if(imgs[getCarSprite(vizCars[i].type,true)]) ctx.drawImage(imgs[getCarSprite(vizCars[i].type,true)],cx,drawY,cw,_cvh);
+      const _vcsn=getCarSprite(vizCars[i].type,true);
+      if(imgs[_vcsn]) ctx.drawImage(_sprForSize(_vcsn,cw,_cvh),cx,drawY,cw,_cvh);
       else{
         ctx.fillStyle=i===0&&s.engine?'#4af':i===vizCars.length-1&&s.caboose?'#f84':'#888';
         ctx.fillRect(cx,drawY,cw-1,_cvh);
@@ -19937,7 +20074,7 @@ function drawTrainsPopup(){
       const _sn2=getCarSprite(train.cars[ci],train.carFull?.[ci]??false);
       const _bp2=SPRITE_BOT[_sn2]||SPRITE_BOT[train.cars[ci]]||0;
       const _dy2=~~(SY+SH*_bp2);
-      if(imgs[_sn2]) ctx.drawImage(imgs[_sn2],_scx2,_dy2,_cw2,SH);
+      if(imgs[_sn2]) ctx.drawImage(_sprForSize(_sn2,_cw2,SH),_scx2,_dy2,_cw2,SH);
       else{ ctx.fillStyle=ci===0?'#4af':ci===train.cars.length-1?'#f84':'#888'; ctx.fillRect(_scx2,SY,_cw2-1,SH); }
       _scx2+=_cw2;
     }}
@@ -20128,7 +20265,7 @@ function drawRoutesPopup(){
         const _sn=getCarSprite(train.cars[ci],train.carFull?.[ci]??false);
         const _bp=SPRITE_BOT[_sn]||SPRITE_BOT[train.cars[ci]]||0;
         const _dy=~~(_vizY+_vizH*_bp);
-        if(imgs[_sn]) ctx.drawImage(imgs[_sn],_scx,_dy,_cw,_vizH);
+        if(imgs[_sn]) ctx.drawImage(_sprForSize(_sn,_cw,_vizH),_scx,_dy,_cw,_vizH);
         else{ ctx.fillStyle=ci===0?'#4af':ci===train.cars.length-1?'#f84':'#888'; ctx.fillRect(_scx,_vizY,_cw-1,_vizH); }
         _scx+=_cw;
       }
@@ -20836,6 +20973,12 @@ function drawPanelTabs(){
   const px=W-PANEL_W, tabW=PANEL_W/2;
   const r=5; // corner radius
   const showTrains=panelTab==='trains';
+  // Wipe the HD text overlay over the tab strip so any earlier text — planet
+  // labels at the top of the galaxy view, route-cargo tooltips, etc. — can't
+  // bleed THROUGH the opaque tab chrome. drawTopBar clears the rest of the
+  // top strip (0..W-PANEL_W) but stops at the panel edge; without this clear
+  // a planet name renders on top of "TRAINS"/"STATIONS".
+  _clearTextOverlayRect(px, 0, PANEL_W, TOP_H);
   ctx.save();
 
   const activeTabX=showTrains?px:px+tabW;
@@ -21416,9 +21559,25 @@ function drawGalaxy(ts,dt){
       // zoom), reuse the cached lt; otherwise recompute. Saves ~240 calls
       // per frame in late-game saves. Cache lives on the route object so
       // it gets cleared automatically when the route is replaced.
-      if(!r._ltCache) r._ltCache=new Map();
+      // Reinitialize the cache if it's missing OR isn't a Map. Saves round-trip
+      // through JSON.stringify, which turns a Map into `{}`; on restore the
+      // field is a plain object (truthy, so the old `if(!r._ltCache)` check
+      // silently kept it), and the first `.get()` call below throws
+      // `_ltCache.get is not a function` and aborts drawGalaxy — taking the
+      // top bar, side panel, info bar, route lines and trains down with it.
+      // The instanceof check makes the load-after-save path safe.
+      if(!(r._ltCache instanceof Map)) r._ltCache=new Map();
       const _ltCache=r._ltCache;
-      const _LT_POS_TOL=2*2; // squared SU
+      // Position tolerance for cache reuse, in squared world units. We need
+      // the cached tangent endpoint to land within ~½ screen pixel of the
+      // live planet — anything more and the route line visibly jitters as
+      // the planet orbits while the cached endpoint snaps in 2-SU steps.
+      // Scaling by 1/cam.scale² keeps it sub-pixel at every zoom: at MAX
+      // zoom (1.75) the tolerance is ~0.08 SU², at fully zoomed out it
+      // grows to ~1300 SU² (still invisible at that scale). With a flat
+      // 2-SU tolerance, MAX-zoom drift was up to ~3.5 screen px (visibly
+      // jittery); now it's capped at ~0.5 px (smooth).
+      const _LT_POS_TOL=0.25/(cam.scale*cam.scale);
       for(const [iA,iB] of pairs){
         const pA=_gp(r.stops[iA]), pB=_gp(r.stops[iB]);
         if(!pA||!pB) continue;
@@ -21585,7 +21744,7 @@ function drawGalaxy(ts,dt){
       const _esn=getCarSprite(train.cars[i],train.carFull?.[i]??false);
       const _ebp=SPRITE_BOT[_esn]||SPRITE_BOT[train.cars[i]]||0; // transparent bottom fraction
       ctx.save(); ctx.translate(sx,sy); ctx.rotate(rot); ctx.scale(-1,1);
-      if(imgs[_esn]&&_wcw>8) ctx.drawImage(imgs[_esn],-_wcw/2,-_ech*(1-_ebp),_wcw,_ech);
+      if(imgs[_esn]&&_wcw>8) ctx.drawImage(_sprForSize(_esn,_wcw,_ech),-_wcw/2,-_ech*(1-_ebp),_wcw,_ech);
       else{ ctx.fillStyle=i===0?'#4af':i===train.cars.length-1?'#f84':'#ccc'; ctx.fillRect(-_wcw/2,-_ech*(1-_ebp),_wcw,_ech*(1-_ebp)); }
       ctx.restore();
       // Hazmat warning light: flashing yellow glow when car is full
