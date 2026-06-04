@@ -4,14 +4,14 @@
     "gameStartSd": 829,
     "age": 11,
     "phase": "late",
-    "credits": 68717,
-    "totalRevenue": 527717,
-    "totalCosts": 1209000,
-    "netProfit": -681283,
-    "netWorth": 1365717,
-    "trainCount": 11,
-    "purchasedTrains": 8,
-    "stationsBuilt": 12,
+    "credits": 47098,
+    "totalRevenue": 196098,
+    "totalCosts": 899000,
+    "netProfit": -702902,
+    "netWorth": 794098,
+    "trainCount": 8,
+    "purchasedTrains": 5,
+    "stationsBuilt": 5,
     "foundries": 1,
     "trainDetails": [
       {
@@ -20,8 +20,8 @@
         "routePhase": "transit",
         "cargo": "empty",
         "idleTimer": 0,
-        "assetVal": 46000,
-        "route": "Cerionzan -> New Venus"
+        "assetVal": 86000,
+        "route": "Eldarilzan -> Cerionen"
       },
       {
         "num": 2,
@@ -29,26 +29,26 @@
         "routePhase": "queueing",
         "cargo": "empty",
         "idleTimer": 0,
-        "assetVal": 46000,
-        "route": "Temprisix -> New Venus"
+        "assetVal": 56000,
+        "route": "Luminethvon -> Cerionen"
       },
       {
         "num": 3,
         "isStarter": true,
-        "routePhase": "orbit",
+        "routePhase": "waiting",
         "cargo": "empty",
-        "idleTimer": 1.5,
-        "assetVal": 75000,
-        "route": "Emblathax -> Temprisix"
+        "idleTimer": 2.8,
+        "assetVal": 59000,
+        "route": "Cerionen -> Straldonum"
       },
       {
         "num": 4,
         "isStarter": false,
-        "routePhase": "transit",
+        "routePhase": "waiting",
         "cargo": "empty",
-        "idleTimer": 0,
-        "assetVal": 41000,
-        "route": "Ilvethvon -> Avenalen"
+        "idleTimer": 2.8,
+        "assetVal": 47000,
+        "route": "Corvethis Colony -> Cerionen -> Zerkonar -> Cerionen"
       },
       {
         "num": 5,
@@ -56,83 +56,56 @@
         "routePhase": "queueing",
         "cargo": "empty",
         "idleTimer": 0,
-        "assetVal": 61000,
-        "route": "Temprisix -> Denebvon Station -> New Venus"
+        "assetVal": 45000,
+        "route": "Luminethvon -> Eldarilzan -> Zerkonar"
       },
       {
         "num": 6,
         "isStarter": false,
-        "routePhase": "transit",
+        "routePhase": "queueing",
         "cargo": "empty",
         "idleTimer": 0,
-        "assetVal": 46000,
-        "route": "Avenalen -> Straldonas"
+        "assetVal": 72000,
+        "route": "Cerionen -> Zerkonar"
       },
       {
         "num": 7,
         "isStarter": false,
-        "routePhase": "waiting",
+        "routePhase": "queueing",
         "cargo": "empty",
-        "idleTimer": 5.8,
-        "assetVal": 62000,
-        "route": "New Venus -> Denebvon Station -> Ilvethvon"
+        "idleTimer": 0,
+        "assetVal": 74000,
+        "route": "Luminethvon -> Eldarilzan -> Straldonum"
       },
       {
         "num": 8,
         "isStarter": false,
-        "routePhase": "waiting",
+        "routePhase": "queueing",
         "cargo": "empty",
-        "idleTimer": 1.8,
-        "assetVal": 85000,
-        "route": "Zovratha -> New Venus"
-      },
-      {
-        "num": 9,
-        "isStarter": false,
-        "routePhase": "waiting",
-        "cargo": "empty",
-        "idleTimer": 1.8,
-        "assetVal": 91000,
-        "route": "Denebvon Station -> New Venus"
-      },
-      {
-        "num": 10,
-        "isStarter": false,
-        "routePhase": "waiting",
-        "cargo": "empty",
-        "idleTimer": 1.8,
-        "assetVal": 72000,
-        "route": "Cherona -> New Venus"
-      },
-      {
-        "num": 11,
-        "isStarter": false,
-        "routePhase": "orbit",
-        "cargo": "empty",
-        "idleTimer": 1.5,
-        "assetVal": 72000,
-        "route": "New Venus -> Toldonix"
+        "idleTimer": 0,
+        "assetVal": 58000,
+        "route": "Zerkonar -> Athosyx"
       }
     ],
     "actionQueue": [],
     "nextTrainCost": 63000,
     "nextTrainThreshold": 69300,
     "canBuyTrain": false,
-    "credits_vs_threshold": -583,
+    "credits_vs_threshold": -22202,
     "trainCooldownRemaining": 0,
     "lastTrainBuildSd": -999,
-    "canBuyStation": true,
+    "canBuyStation": false,
     "stationCooldownRemaining": 0,
-    "lastStationBuildSd": 839.01,
-    "discoveredStars": 8,
+    "lastStationBuildSd": 830.09,
+    "discoveredStars": 16,
     "exploreTarget": 15,
-    "explorationComplete": false,
+    "explorationComplete": true,
     "activeExplorers": 0,
-    "idleTrains": 1,
-    "revenuePerSd": 47974,
-    "trainAssetVal": 697000,
-    "stationAssetVal": 600000,
+    "idleTrains": 0,
+    "revenuePerSd": 17827,
+    "trainAssetVal": 497000,
+    "stationAssetVal": 250000,
     "run": 1,
-    "elapsed_s": 26.7
+    "elapsed_s": 18.3
   }
 ]

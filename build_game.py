@@ -3908,10 +3908,14 @@ function computeDemandRate(p){
     const _ucpf=pop>0?Math.min(2,0.5+pop/2e9):1.0;
     r.chemical=(r.chemical||0)+3.5*_ucpf;
   }
-  // Flowers demand: jungle/desert/resort worlds always want flowers for decoration & seeding
-  if(['jungle','desert','resort'].includes(bio)){
+  // Flowers demand: jungle/desert/resort/urban worlds always want flowers for
+  // decoration & seeding — urban planets crave flowers for parks, atriums,
+  // ceremonies, gifting, and hospitality services across their billions of
+  // inhabitants (higher base rate than the natural-world biomes).
+  if(['jungle','desert','resort','urban'].includes(bio)){
     const _fpf=pop>0?Math.min(2,0.5+pop/1e9):0.3;
-    r.flowers=2.0*_fpf;
+    const _fBase=(bio==='urban')?3.5:2.0;
+    r.flowers=_fBase*_fpf;
   }
   // Medical demand: all inhabited habitable planets consume medical supplies.
   // Urban: hospital systems for billions.
@@ -4078,13 +4082,27 @@ function _startLoadPhase(t, p){
       if(r.stopPlanetId===p.id && r.threshold===0) _emptyRuleCargos.add(r.cargoType);
     }
   }
+  // Track REMAINING supply per cargo type as we walk the cars so multiple
+  // cars of the same cargo type don't all get queued when only the first N
+  // can actually load. Without this, surplus cars still get their loading
+  // beam animation drawn — and the load-tick later silently skips them
+  // because supply is gone. (User-reported visual bug: beam plays, car
+  // stays empty.)
+  const _remaining={};
   const lq=[];
   for(let i=0;i<t.cars.length;i++){
     if(!t.carFull?.[i]){
       const cargo=CAR_CARGO_TYPE[t.cars[i]];
       const _cU=CAR_CARGO_UNITS[t.cars[i]]||1.0;
+      if(!cargo) continue;
       if(_emptyRuleCargos.has(cargo)) continue;
-      if(cargo&&(p.supply?.[cargo]||0)>=_cU&&(cargo!=='gold'||p.goldRevealed)&&(cargo!=='diamond'||p.diamondRevealed)) lq.push(i);
+      if(cargo==='gold'&&!p.goldRevealed) continue;
+      if(cargo==='diamond'&&!p.diamondRevealed) continue;
+      if(!(cargo in _remaining)) _remaining[cargo]=(p.supply?.[cargo]||0);
+      if(_remaining[cargo]>=_cU){
+        _remaining[cargo]-=_cU;
+        lq.push(i);
+      }
     }
   }
   if(lq.length){ t.cargoPhase='loading'; t.cargoQueue=lq; t.cargoTimer=CARGO_OP_TIME; return; }
@@ -5789,75 +5807,126 @@ function _aiMaintainScriptedSetup(){
       }
     }
   }
-  // ── #3 SECOND FOUNDRY ──────────────────────────────────────────
-  // After the first foundry has produced iron for 2+ SD, queue a build_upgrade
-  // for iron_foundry on the next AI-owned desert planet. Each additional
-  // foundry doubles iron output.
-  if(ss.foundryBuilt && !ss.secondFoundryBuilt){
+  // ── #6 FOUNDRY SLOTS SCALE WITH FLEET ──────────────────────────
+  // Replaces the one-then-stop "2nd foundry" logic. Allowed foundry count =
+  // floor(fleetSize / 5), so every 5 trains added unlocks +1 foundry slot.
+  // Each existing foundry doubles iron output; this prevents supply-side
+  // saturation in the late game when the iron-train fleet grows.
+  if(ss.foundryBuilt){
     if(ss.firstIronSeenSd==null && desert && (desert.supply?.iron||0)>0){
       ss.firstIronSeenSd=stardate;
     }
-    if(ss.firstIronSeenSd!=null && (stardate-ss.firstIronSeenSd)>=2.0 && !ss.secondFoundryQueued){
-      // Pick a non-foundry desert AI-owned planet. Fallback: any visited
-      // desert (we'd build the station first as part of the normal cycle).
-      let _2dDesert=null;
+    const _foundryCount=[..._aiCorp.ownedPlanetIds].filter(id=>{
+      const p=galaxy.planets[id]; return p && (p.upgrades||[]).includes('iron_foundry');
+    }).length;
+    const _pendingFoundryBuilds=(_aiCorp.actionQueue||[]).filter(a=>a&&a.type==='build_upgrade'&&a.upgradeId==='iron_foundry').length;
+    const _fleetSize=_aiCorp.trainIndices.length;
+    const _allowedFoundries=Math.max(1, Math.floor(_fleetSize/5));
+    if((_foundryCount+_pendingFoundryBuilds)<_allowedFoundries
+       && ss.firstIronSeenSd!=null
+       && (stardate-ss.firstIronSeenSd)>=2.0){
+      // Pick a non-foundry desert AI-owned planet.
+      let _nextDesert=null;
       for(const _pid of _aiCorp.ownedPlanetIds){
         const _p=galaxy.planets[_pid];
         if(!_p||_p.type.id!=='desert') continue;
         if((_p.upgrades||[]).includes('iron_foundry')) continue;
-        _2dDesert=_p; break;
+        _nextDesert=_p; break;
       }
-      if(_2dDesert){
-        // Reuse the same input-source logic as the first foundry.
+      if(_nextDesert){
         const _waterSrc=galaxy.planets.find(p=>p&&(p.supply?.water||0)>0&&_aiCorp.visitedPlanetIds.has(p.id));
         const _oreSrc=galaxy.planets.find(p=>p&&(p.supply?.molten_ore||0)>0&&_aiCorp.visitedPlanetIds.has(p.id));
         const _inputSources={};
         if(_waterSrc) _inputSources.water=_waterSrc.id;
         if(_oreSrc) _inputSources.molten_ore=_oreSrc.id;
         _aiCorp.actionQueue.push({
-          type:'build_upgrade', planetId:_2dDesert.id,
+          type:'build_upgrade', planetId:_nextDesert.id,
           upgradeId:'iron_foundry', inputSources:_inputSources, outputPid:null,
         });
-        ss.secondFoundryQueued=true;
       }
     }
-    // Mark completion the moment a 2nd foundry exists anywhere on AI planets.
-    const _foundryCount=[..._aiCorp.ownedPlanetIds].filter(id=>{
-      const p=galaxy.planets[id]; return p && (p.upgrades||[]).includes('iron_foundry');
-    }).length;
-    if(_foundryCount>=2) ss.secondFoundryBuilt=true;
   }
-  // ── #4 BLAST FURNACE ───────────────────────────────────────────
-  // After iron pipeline is "stable" (total iron delivered across AI planets
-  // ≥ 4), build a blast_furnace on a rocky AI-owned planet for steel
-  // production. Steel is a 1.5× revenue-multiplied 2nd-tier cargo.
-  if(!ss.blastFurnaceQueued){
+  // ── #1 AUTO-BUILD 2ND-TIER UPGRADES ────────────────────────────
+  // Loosened conditions vs the old "blast furnace once at iron≥4" path:
+  //   • blast_furnace: iron flow ≥ 4 anywhere → build on any AI rocky planet
+  //   • glassworks: AI has visited a sand supplier AND a chemical supplier
+  //                 → build on any AI agri/jungle/ocean/desert/rocky planet
+  //                 (any biome listed in glassworks.eligibleBiomes)
+  //   • factory:    AI has any machinery-demanding planet in network
+  //                 → build on any AI urban planet
+  // Each is one-shot per tier (queued once, then completion-tracked). When
+  // multiple tiers qualify in the same tick they all queue together.
+  // Sync these with UPGRADES table's eligibleBiomes — the executor enforces
+  // that gate too, so a mismatch would re-queue the same upgrade forever.
+  const _UPG_BIOMES={blast_furnace:['rocky'], glassworks:['resort'], factory:['urban']};
+  const _hasUpg=(uid)=>[..._aiCorp.ownedPlanetIds].some(id=>(galaxy.planets[id]?.upgrades||[]).includes(uid));
+  const _isPending=(uid)=>(_aiCorp.actionQueue||[]).some(a=>a&&a.type==='build_upgrade'&&a.upgradeId===uid);
+  const _findVisitedSupply=(crg)=>galaxy.planets.find(p=>p&&(p.supply?.[crg]||0)>0&&_aiCorp.visitedPlanetIds.has(p.id));
+  const _findAiSinkForDemand=(crg)=>{
+    for(const _pid of _aiCorp.ownedPlanetIds){
+      const _p=galaxy.planets[_pid];
+      if(_p && (_p.demand?.[crg]||0)>=0.5) return _p;
+    }
+    return null;
+  };
+  const _findAiTargetForUpgrade=(uid)=>{
+    const biomes=_UPG_BIOMES[uid]||[];
+    for(const _pid of _aiCorp.ownedPlanetIds){
+      const _p=galaxy.planets[_pid];
+      if(!_p || !_p.aiHasStation) continue;
+      if(!biomes.includes(_p.type.id)) continue;
+      if((_p.upgrades||[]).includes(uid)) continue;
+      return _p;
+    }
+    return null;
+  };
+  // blast_furnace — when ≥4 iron have flowed anywhere on AI planets
+  if(!_hasUpg('blast_furnace') && !_isPending('blast_furnace')){
     let _totalIronDel=0;
     for(const _pid of _aiCorp.ownedPlanetIds){
       const _p=galaxy.planets[_pid];
       if(_p) _totalIronDel+=(_p.ironDelivered||0);
     }
     if(_totalIronDel>=4){
-      // Find a rocky AI-owned station planet without a blast_furnace already.
-      let _rockyTarget=null;
-      for(const _pid of _aiCorp.ownedPlanetIds){
-        const _p=galaxy.planets[_pid];
-        if(!_p||_p.type.id!=='rocky'||!_p.aiHasStation) continue;
-        if((_p.upgrades||[]).includes('blast_furnace')) continue;
-        _rockyTarget=_p; break;
-      }
-      if(_rockyTarget){
-        // Inputs: iron (from foundry) + chemical (find a chemical-supplier).
-        const _ironSrc=desert; // foundry-bearing desert
-        const _chemSrc=galaxy.planets.find(p=>p&&(p.supply?.chemical||0)>0&&_aiCorp.visitedPlanetIds.has(p.id));
+      const _tgt=_findAiTargetForUpgrade('blast_furnace');
+      if(_tgt){
+        const _ironSrc=desert;
+        const _chemSrc=_findVisitedSupply('chemical');
         const _inputSources={};
         if(_ironSrc) _inputSources.iron=_ironSrc.id;
         if(_chemSrc) _inputSources.chemical=_chemSrc.id;
-        _aiCorp.actionQueue.push({
-          type:'build_upgrade', planetId:_rockyTarget.id,
-          upgradeId:'blast_furnace', inputSources:_inputSources, outputPid:null,
-        });
-        ss.blastFurnaceQueued=true;
+        _aiCorp.actionQueue.push({type:'build_upgrade', planetId:_tgt.id,
+          upgradeId:'blast_furnace', inputSources:_inputSources, outputPid:null});
+      }
+    }
+  }
+  // glassworks — when a sand source AND a chemical source have both been visited
+  if(!_hasUpg('glassworks') && !_isPending('glassworks')){
+    const _sandSrc=_findVisitedSupply('sand');
+    const _chemSrc=_findVisitedSupply('chemical');
+    if(_sandSrc && _chemSrc){
+      const _tgt=_findAiTargetForUpgrade('glassworks');
+      if(_tgt){
+        const _inputSources={sand:_sandSrc.id, chemical:_chemSrc.id};
+        _aiCorp.actionQueue.push({type:'build_upgrade', planetId:_tgt.id,
+          upgradeId:'glassworks', inputSources:_inputSources, outputPid:null});
+      }
+    }
+  }
+  // factory — when any AI-owned planet has machinery demand (urban naturally do)
+  if(!_hasUpg('factory') && !_isPending('factory')){
+    const _machineryDemander=_findAiSinkForDemand('machinery');
+    // Factory inputs: iron + oil
+    const _oilSrc=_findVisitedSupply('oil');
+    if(_machineryDemander && _oilSrc){
+      const _tgt=_findAiTargetForUpgrade('factory');
+      if(_tgt){
+        const _ironSrc=desert;
+        const _inputSources={};
+        if(_ironSrc) _inputSources.iron=_ironSrc.id;
+        if(_oilSrc) _inputSources.oil=_oilSrc.id;
+        _aiCorp.actionQueue.push({type:'build_upgrade', planetId:_tgt.id,
+          upgradeId:'factory', inputSources:_inputSources, outputPid:_machineryDemander.id});
       }
     }
   }
@@ -5917,9 +5986,13 @@ function _aiMaintainExplorationCycle(){
     if(trains[ti]?._aiExploringRoute) _activeCount++;
   }
   if(_activeCount>=_maxActive) return;
-  // Pick 3 unvisited planets within 25,000 SU (or 60K in emergency) of any
-  // AI-station planet.
-  const _EXPLORE_RANGE=_emergency?60000:25000;
+  // Pick 3 unvisited planets within the dynamic exploration radius (user spec #5).
+  // Base 25,000 SU grows by 5,000 SU per train in the fleet above 5 — a
+  // 15-train AI explores out to 75K SU, a 25-train AI to 125K. Emergency
+  // mode floors at 60K when revenue is still struggling at SD 835.
+  const _fleetSize=_aiCorp.trainIndices.length;
+  const _baseRange=25000 + Math.max(0, (_fleetSize-5))*5000;
+  const _EXPLORE_RANGE=Math.max(_baseRange, _emergency?60000:0);
   const _aiStations=[..._aiCorp.ownedPlanetIds].map(id=>galaxy.planets[id]).filter(Boolean);
   if(_aiStations.length<1) return;
   const _candidates=[];
@@ -5975,22 +6048,152 @@ function _aiMaintainExplorationCycle(){
 function _aiMaintainProfitLocks(){
   if(!_aiCorp||!galaxy) return;
   const PROFIT_LOCK_THRESHOLD=10000;
+  // Decay-unlock parameters (user spec #2): a profit-locked non-starter train
+  // tracks its peak rolling 1-SD profit since it was locked. If the current
+  // rolling profit falls below 50% of that peak for 3 consecutive SDs, the
+  // train is auto-unlocked so it can refit cars and pick a new route.
+  if(!_aiCorp._profitPeak) _aiCorp._profitPeak={};       // ti -> peak rolling rev
+  if(!_aiCorp._decayStartSd) _aiCorp._decayStartSd={};   // ti -> stardate decay began
   for(let i=0;i<_aiCorp.trainIndices.length;i++){
-    if(i<3) continue; // skip starter trains — they already have their permanent locks/iron flag
     const ti=_aiCorp.trainIndices[i];
-    const t=trains[ti]; if(!t||t._aiStarterLocked) continue;
-    if(!t._revLog||!t._revLog.length) continue;
+    const t=trains[ti]; if(!t) continue;
+    if(!t._revLog||!t._revLog.length){
+      // No revenue logged this window — skip lock/unlock evaluation.
+      continue;
+    }
     // Prune anything older than 1 SD just in case (idempotent with the
     // delivery-site prune).
     while(t._revLog.length&&stardate-t._revLog[0].sd>1.0) t._revLog.shift();
     let _net=0;
     for(const _e of t._revLog) _net+=_e.rev;
-    if(_net>PROFIT_LOCK_THRESHOLD){
-      // Lock the train in its current route + car setup.
-      t._aiStarterLocked=true;
-      _chatMsg(_aiCorp.name+' locked '+(t.name||'a train')+' into its profitable route','rgba(120,220,160,0.9)',5000,true);
+    // Starter-three trains (indices 0-2) keep their permanent locks; profit
+    // locking/unlocking only applies to bought trains.
+    if(i<3) continue;
+    if(!t._aiStarterLocked){
+      // ── Lock-acquire path ──
+      if(_net>PROFIT_LOCK_THRESHOLD){
+        t._aiStarterLocked=true;
+        _aiCorp._profitPeak[ti]=_net;
+        _aiCorp._decayStartSd[ti]=null;
+        _chatMsg(_aiCorp.name+' locked '+(t.name||'a train')+' into its profitable route','rgba(120,220,160,0.9)',5000,true);
+      }
+    } else {
+      // ── Decay-unlock path ──
+      const _peak=_aiCorp._profitPeak[ti]||_net;
+      if(_net>_peak){
+        _aiCorp._profitPeak[ti]=_net;
+        _aiCorp._decayStartSd[ti]=null;
+      } else if(_net < _peak*0.5){
+        if(_aiCorp._decayStartSd[ti]==null) _aiCorp._decayStartSd[ti]=stardate;
+        else if((stardate - _aiCorp._decayStartSd[ti])>=3.0){
+          // 3 SD of sub-50%-peak revenue → unlock and let the route picker
+          // / car refit reshuffle this train.
+          t._aiStarterLocked=false;
+          _aiCorp._profitPeak[ti]=0;
+          _aiCorp._decayStartSd[ti]=null;
+          _chatMsg(_aiCorp.name+' unlocked '+(t.name||'a train')+' — route revenue decayed','rgba(220,150,60,0.9)',5000,true);
+        }
+      } else {
+        _aiCorp._decayStartSd[ti]=null;
+      }
     }
   }
+}
+
+// User spec #3: detect AI trains that are hitting ≥90% of their engine's
+// range repeatedly OR that are running on saturated corridors, and queue an
+// engine retrofit to the next tier (constellation → galaxy → Class-J).
+// Class-R / N700 are intentionally NOT auto-issued — those are premium tiers
+// that should be reserved for higher-skill scenarios.
+function _aiMaintainEngineUpgrades(){
+  if(!_aiCorp||!galaxy) return;
+  const ORDER=['engine_constellation','engine_galaxy','engine_classJ'];
+  if(!_aiCorp._engineMaxoutSeen) _aiCorp._engineMaxoutSeen={};
+  // Corridor saturation map — same logic as the route picker
+  const _corKey=(a,b)=>a<b?a+'|'+b:b+'|'+a;
+  const _corridorCounts=new Map();
+  for(const _ti of _aiCorp.trainIndices){
+    const _t=trains[_ti];
+    if(!_t?.route?.stops||_t.route.stops.length<2) continue;
+    const s=_t.route.stops;
+    _corridorCounts.set(_corKey(s[0],s[s.length-1]), (_corridorCounts.get(_corKey(s[0],s[s.length-1]))||0)+1);
+  }
+  for(let i=0;i<_aiCorp.trainIndices.length;i++){
+    const ti=_aiCorp.trainIndices[i];
+    const t=trains[ti]; if(!t||!t.cars||!t.cars.length) continue;
+    const _curEng=t.cars[0];
+    const _engIdx=ORDER.indexOf(_curEng);
+    if(_engIdx<0||_engIdx>=ORDER.length-1) continue; // already top-tier or unrecognised
+    const _curRange=ENGINE_MAX_RANGE[_curEng]||15000;
+    // Detect: longest current-route segment ≥ 90% of engine range.
+    let _maxLeg=0;
+    const _stops=t.route?.stops||[];
+    for(let s=0;s<_stops.length-1;s++){
+      const a=galaxy.planets[_stops[s]], b=galaxy.planets[_stops[s+1]];
+      if(!a||!b) continue;
+      const d=Math.hypot(a.x-b.x,a.y-b.y);
+      if(d>_maxLeg) _maxLeg=d;
+    }
+    const _nearMax=_maxLeg>=0.9*_curRange;
+    // Detect: train's corridor is at the saturation cap (3 trains on same A↔B).
+    const _onSatCorridor=(_stops.length>=2) &&
+      ((_corridorCounts.get(_corKey(_stops[0],_stops[_stops.length-1]))||0)>=3);
+    if(_nearMax||_onSatCorridor){
+      _aiCorp._engineMaxoutSeen[ti]=(_aiCorp._engineMaxoutSeen[ti]||0)+1;
+    }
+    if((_aiCorp._engineMaxoutSeen[ti]||0)>=3){
+      const _newEng=ORDER[_engIdx+1];
+      const _engCost={engine_constellation:10000,engine_galaxy:20000,engine_classJ:50000}[_newEng]||20000;
+      // Affordability gate: don't issue an engine upgrade when credits are
+      // tight. Yard accounting may discount it but we don't know the yard
+      // state here — better to wait than tip the corp into negative credits.
+      if(_aiCorp.credits < _engCost*2) continue;
+      const _newCars=t.cars.slice();
+      _newCars[0]=_newEng;
+      const _alreadyQ=(_aiCorp.actionQueue||[]).some(a=>a&&a.type==='swap_cars'&&a.trainIdx===ti);
+      if(!_alreadyQ){
+        _aiCorp.actionQueue.push({type:'swap_cars',trainIdx:ti,newCars:_newCars,cost:_engCost});
+        _aiCorp._engineMaxoutSeen[ti]=0;
+      }
+    }
+  }
+}
+
+// User spec #4: when ≥5 AI trains have been idle for 2+ SD, fire a global
+// "reshuffle round" — temporarily break locked-route preservation and force
+// every idle train to re-route via _aiPickRoute, picking the highest-scoring
+// open corridor. Runs at most once per 4 SD to avoid thrashing.
+function _aiMaintainIdleReshuffle(){
+  if(!_aiCorp||!galaxy) return;
+  if(_aiCorp._lastReshuffleSd!=null && (stardate-_aiCorp._lastReshuffleSd)<4.0) return;
+  // Count trains that have been idle for ≥ 2 SD. idleTimers is in game-minutes
+  // (~60 minutes per SD), so 2 SD ≈ 120 game-min.
+  if(!_aiCorp.idleTimers) _aiCorp.idleTimers={};
+  const _IDLE_THRESH_MIN=120;
+  const _idleTrainIds=[];
+  for(const ti of _aiCorp.trainIndices){
+    if((_aiCorp.idleTimers[ti]||0)>=_IDLE_THRESH_MIN) _idleTrainIds.push(ti);
+  }
+  if(_idleTrainIds.length<5) return;
+  _aiCorp._lastReshuffleSd=stardate;
+  // Reshuffle only UNLOCKED idle trains. Locked trains (starters + profit-
+  // locked productive routes) are left alone — their lock either represents
+  // a known-good route (profit-locked) or a permanent assignment (starters).
+  // The profit-lock decay path is responsible for releasing stale locks
+  // separately; the reshuffle just rescues unlocked drifters.
+  let _reshuffled=0;
+  for(const ti of _idleTrainIds){
+    const t=trains[ti]; if(!t) continue;
+    if(t._aiIronTrain) continue;
+    if(t._aiStarterLocked) continue;
+    const _route=_aiPickRoute(ti);
+    if(_route){
+      _aiDoAssignRoute(ti,_route);
+      _aiCorp.idleTimers[ti]=0;
+      _reshuffled++;
+    }
+  }
+  if(_reshuffled>0) _chatMsg(_aiCorp.name+' reshuffled '+_reshuffled+' idle trains','rgba(100,200,240,0.9)',5000,true);
 }
 
 function updateAICorp(dt){
@@ -5998,6 +6201,8 @@ function updateAICorp(dt){
   _aiMaintainScriptedSetup();
   _aiMaintainExplorationCycle();
   _aiMaintainProfitLocks();
+  _aiMaintainEngineUpgrades();
+  _aiMaintainIdleReshuffle();
   for(const ti of _aiCorp.trainIndices){
     const t=trains[ti];if(!t) continue;
     _aiCorp.visitedPlanetIds.add(t.planetId);
@@ -6216,6 +6421,8 @@ function _aiExecuteAction(action){
     p.hasLargeStation=true;
     _aiCorp.credits-=50000;_aiCorp.totalCosts+=50000;
     _chatMsg(_aiCorp.name+' upgraded '+p.name+' to a Large Station','rgba(232,147,32,0.9)',5000,true);
+    // User spec #4: queueing trains at MED orbit are now cargo-ready.
+    _promoteQueueingTrainsAtPlanet(p);
   }
 }
 
@@ -6505,7 +6712,7 @@ function _aiDecide(){
       // to prevent over-commit — at $63K/train, 3 buys = $189K which is the
       // largest single-batch spend we want without sanity-checking interim
       // revenue first. Subsequent batches keep buying if credits stay high.
-      const _maxBuys=_forceBuy ? 3 : 1;
+      const _maxBuys=_forceBuy ? 2 : 1;
       let _runningTrCount=_trCount;
       for(let _bi=0; _bi<_maxBuys; _bi++){
         if(_runningTrCount>=AI_MAX_TRAINS[diff]) break;
@@ -10009,7 +10216,11 @@ function updateCargoSupplyDemand(dtSd){
     // floor above so the Terminal-upgrade material can build up in inventory
     // even right after a delivery zeroes the demand.
     if(p.hasLargeStation&&(p.demand.steel||0)<1) p.demand.steel=1;
-    // Flowers demand floor: eligible planets that have never received flowers always want at least 1
+    // Flowers demand floor: jungle/desert/resort planets that have never
+    // received flowers always want at least 1 — this gates the
+    // first-delivery unlock event for those biomes. Urban is intentionally
+    // EXCLUDED: urban planets are a pure demand sink with no unlock moment
+    // and no permanent floor (demand can be fully satisfied to 0).
     if(!p.flowersReceived&&['jungle','desert','resort'].includes(p.type.id)){
       if((p.demand.flowers||0)<1) p.demand.flowers=1;
     }
@@ -10162,6 +10373,13 @@ function updateFoundries(dtG){
           _bf.progress=0;
           _bf.iron    =Math.max(0,(_bf.iron    ||0)-1);
           _bf.chemical=Math.max(0,(_bf.chemical||0)-1);
+          // Blast furnace consumes 1 unit of iron from the planet's iron
+          // inventory too — iron going into the furnace bin was previously
+          // bumped into ironDelivered on intake, so we mirror the consumption
+          // here. Also drains supply.iron in lockstep when present (dual-
+          // counter sync, matching the foundry-produced-iron pattern).
+          if((p.ironDelivered||0)>0) p.ironDelivered=Math.max(0,(p.ironDelivered||0)-1);
+          if((p.supply?.iron||0)>0) p.supply.iron=Math.max(0,(p.supply.iron||0)-1);
           p.supply.steel  =Math.min(CARGO_MAX_SUPPLY,(p.supply.steel||0)+1);
           p.steelDelivered=(p.steelDelivered||0)+1;
           // Sliding-window log of steel production (per-tick units), used for the
@@ -10567,8 +10785,65 @@ function _enterQueueOrDescend(t, r){
   } else {
     r.phase='queueing';
     r._queueAngleAcc=0;
+    // Timestamp queueing-entry so the priority-aware polling can give the
+    // freed slot to the train that's been queueing longest at this planet.
+    r._queueStartedSd=stardate;
   }
   t._cargoCheckedThisStop=false;
+}
+
+// User spec #3 priority dispatcher. Returns true if the caller (a polling
+// train) should YIELD the freed slot to a higher-priority claimant. Priority:
+//   1. QUEUEING trains at planet `planetId` whose next-lower tier == `tier`
+//      (older queueing-start time wins among ties)
+//   2. WAITING trains heading to `planetId` (longer wait time wins)
+//   3. Anyone else (no yield)
+// `caller` is the polling train; `callerCategory` is 'queueing' or 'waiting'.
+function _shouldYieldOrbitSlot(caller, planetId, tier, callerCategory){
+  // (1) Higher-priority queueing claimants at the same planet wanting this tier
+  for(const ot of trains){
+    if(ot===caller) continue;
+    if(!ot.route||ot.route.phase!=='queueing') continue;
+    if(ot.planetId!==planetId) continue;
+    if(_nextLowerOrbitTier(ot.orbitTier)!==tier) continue;
+    if(callerCategory==='waiting') return true; // queueing always beats waiting
+    // Both queueing: older wait wins
+    const _ot_t=ot.route._queueStartedSd ?? stardate;
+    const _ca_t=caller.route._queueStartedSd ?? stardate;
+    if(_ot_t < _ca_t) return true;
+  }
+  // (2) Older waiting claimants at the same destination
+  if(callerCategory==='waiting'){
+    for(const ot of trains){
+      if(ot===caller) continue;
+      if(!ot.route||ot.route.phase!=='waiting') continue;
+      const _otDest=ot.route.stops?.[ot.route.toIdx];
+      if(_otDest!==planetId) continue;
+      const _ot_t=ot.route._waitStartedSd ?? stardate;
+      const _ca_t=caller.route._waitStartedSd ?? stardate;
+      if(_ot_t < _ca_t) return true;
+    }
+  }
+  return false;
+}
+
+// User spec #4: when a planet's hasLargeStation or hasTerminal flag flips on,
+// any train currently in `queueing` phase at THAT planet whose current orbit
+// tier is now cargo-ready can leave queueing immediately and start cargo ops.
+function _promoteQueueingTrainsAtPlanet(p){
+  if(!p||!trains) return;
+  for(const t of trains){
+    if(!t.route||t.route.phase!=='queueing') continue;
+    if(t.planetId!==p.id) continue;
+    if(_trainTierIsCargoReady(t,p)){
+      // Cargo gate fires on next frame via the orbit-phase cargo check.
+      t.route.phase='orbit';
+      t.route.orbitSpun=0;
+      t.route.minOrbitDone=true;
+      t._cargoCheckedThisStop=false;
+      _invalidateOccOrbit();
+    }
+  }
 }
 
 // Returns the departure angle — the orbit angle at the external tangent touch point.
@@ -10745,11 +11020,13 @@ function updateTrain(t, dt){
     r.orbitSpun+=ORB_SPD*dt;
     if(t.isPlayer){ t._angleAcc+=ORB_SPD*dt; trackOrbit(t); }
     r._waitingPollAcc=(r._waitingPollAcc||0)+ORB_SPD*dt;
+    // Record entry time once so the priority dispatcher can rank waiters.
+    if(r._waitStartedSd==null) r._waitStartedSd=stardate;
     const _WAIT_POLL_DA=(Math.PI*2)/32;
     if(r._waitingPollAcc>=_WAIT_POLL_DA){
       r._waitingPollAcc=0;
       const avail=getAvailableOrbitTier(r.stops[r.toIdx],t);
-      if(avail){
+      if(avail && !_shouldYieldOrbitSlot(t, r.stops[r.toIdx], avail.tier, 'waiting')){
         r.arrivalOrbitR=avail.orbitR;
         r.arrivalOrbitTier=avail.tier;
         if(r.stopOrbitR) r.stopOrbitR[r.toIdx]=avail.orbitR;
@@ -10757,6 +11034,7 @@ function updateTrain(t, dt){
         r.phase='orbit';
         r.minOrbitDone=true;
         r.orbitSpun=0;
+        r._waitStartedSd=null;
       }
     }
   } else if(r.phase==='blocked'){
@@ -11060,11 +11338,13 @@ function updateTrain(t, dt){
     r.orbitSpun+=ORB_SPD*dt;
     if(t.isPlayer){ t._angleAcc+=ORB_SPD*dt; trackOrbit(t); }
     r._queueAngleAcc=(r._queueAngleAcc||0)+ORB_SPD*dt;
+    if(r._queueStartedSd==null) r._queueStartedSd=stardate;
     const _CHECK_DA=(Math.PI*2)/32;
     if(r._queueAngleAcc>=_CHECK_DA){
       r._queueAngleAcc=0;
       const _nextTier=_nextLowerOrbitTier(t.orbitTier);
-      if(_nextTier && _isOrbitTierFree(t.planetId,_nextTier,t)){
+      if(_nextTier && _isOrbitTierFree(t.planetId,_nextTier,t)
+         && !_shouldYieldOrbitSlot(t, t.planetId, _nextTier, 'queueing')){
         _startOrbitDescent(t, r, _nextTier);
       }
     }
@@ -23186,6 +23466,8 @@ canvas.addEventListener('mouseup',e=>{
             p.hasLargeStation=true;
             _ga('station_upgraded_large',{biome:p.type.id, planet:p.name, sd:Math.floor(stardate)});
             playSound('construction_complete');
+            // User spec #4: queueing trains at MED tier here are now cargo-ready.
+            _promoteQueueingTrainsAtPlanet(p);
           }
           return;
         }
@@ -23209,6 +23491,8 @@ canvas.addEventListener('mouseup',e=>{
             p.hasTerminal=true;
             _ga('station_upgraded_terminal',{biome:p.type.id, planet:p.name, sd:Math.floor(stardate)});
             playSound('construction_complete');
+            // User spec #4: any tier (LOW/MED/HIGH) is cargo-ready under Terminal.
+            _promoteQueueingTrainsAtPlanet(p);
           }
           return;
         }
