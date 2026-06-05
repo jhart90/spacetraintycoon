@@ -1365,8 +1365,8 @@ let _introSkipBtnHover=false;
 // source script the user provided.
 const _INTRO_TEXT=[
   "STARDATE 829.\n\nThirty Stardates have passed since the catastrophic implosion of the Dutch East Earth Interstellar Trading Company (DEEITC), the once-dominant commercial power whose vast network of trade routes, orbital infrastructure, and wormhole technology bound 1,000s of planets together into a single galactic economy.\n\nIn the aftermath, entire star systems were cut off from one another, industries collapsed, and countless worlds have endured decades of economic isolation.",
-  "Now, a new age of opportunity has begun.\n\nAcross the galaxy, ambitious CORPORATIONs are racing to fill the void left behind. As the newly appointed CEO of one such enterprise, your mission is to reconnect the stars through a new network of SPACE TRAINs...\n\nEstablish profitable trade routes. Transport CARGO from worlds of abundance to worlds in need. Re-BUILD the foundations of interstellar civilization, one star system at a time.",
-  "But commerce alone is not enough. Hidden among the ruins of DEEITC's fallen empire lie the components and knowledge required to reconstruct the legendary WORMHOLE APPARATUS — a colossal device capable of bending space itself.\n\nThe Corporation that is able to re-build this ancient technology first will unlock access to THE MULTI-VERSE...\n\nand the secrets within that powered both DEEITC's inter-galactic domination, as well as its catastrophic demise...\n\nThe race has begun. The stars await.",
+  "Now, a new age of opportunity has begun.\n\nAcross the galaxy, ambitious CORPORATIONs are racing to fill the void left behind. As the newly appointed CEO of one such enterprise, your mission is to reconnect the stars through a new network of SPACE TRAINs...\n\nEstablish profitable trade ROUTEs.\n\nTransport CARGO from worlds of abundance to worlds in need.\n\nRe-BUILD the foundations of interstellar civilization, one star system at a time.",
+  "But commerce alone is not enough. Hidden among the ruins of DEEITC's fallen empire lie the components and knowledge required to reconstruct the legendary WORMHOLE APPARATUS — a colossal device capable of bending space itself.\n\nThe Corporation that is able to re-build this ancient technology first will unlock access to\nTHE MULTI-VERSE...\n\n...and the secrets within that powered both DEEITC's inter-galactic domination, as well as its catastrophic demise!\n\nThe race has begun. The stars await.",
 ];
 // Char-by-char typing. User asked for 2/3 of the previous total time and a
 // switch from word-by-word to char-by-char. Previous timing was 200 ms/
@@ -1387,14 +1387,17 @@ const _INTRO_CHAR_TIMINGS=(function(){
   const _all=[];
   for(let _idx=0; _idx<_INTRO_TEXT.length; _idx++){
     const _t=_INTRO_TEXT[_idx];
-    // Locate the "demise..." dots (screen 2) if present.
-    let _demiseDots=null;
+    // Locate the dramatic-pause dots (screen 2) — slow 500 ms/dot.
+    // Per latest user spec, the slow dots are the TRAILING ellipsis on
+    // "THE MULTI-VERSE..." (the dramatic dwell after the multiverse
+    // reveal). The leading "...and the secrets" prints at normal speed.
+    let _slowDots=null;
     if(_idx===2){
-      const _dIdx=_t.indexOf('demise');
-      if(_dIdx>=0){
-        const _after=_dIdx+'demise'.length;
+      const _mv=_t.indexOf('MULTI-VERSE');
+      if(_mv>=0){
+        const _after=_mv+'MULTI-VERSE'.length;
         if(_t.substr(_after,3)==='...'){
-          _demiseDots=new Set([_after, _after+1, _after+2]);
+          _slowDots=new Set([_after, _after+1, _after+2]);
         }
       }
     }
@@ -1402,12 +1405,25 @@ const _INTRO_CHAR_TIMINGS=(function(){
     // We add a 1-second pause to the NEXT char so the eye lingers on the
     // header before the body text begins arriving.
     const _stardatePauseChar=(_idx===0?13:-1); // index of the '\n' right after "STARDATE 829."
+    // Paragraph-break pause set: every char that sits IMMEDIATELY AFTER
+    // a "\n\n" pair in the source string gets an extra 500 ms before it
+    // appears. This pauses the typewriter for half a second at every
+    // explicit blank line so each paragraph lands as its own beat —
+    // mid-sentence word-wrap (which happens at render time, not in the
+    // source string) is unaffected. The pause STACKS with the STARDATE
+    // 829 pause and is suppressed on the slow-dot positions (those have
+    // their own dedicated cadence).
+    const _paraBreakChars=new Set();
+    for(let _i=2; _i<_t.length; _i++){
+      if(_t[_i-1]==='\n' && _t[_i-2]==='\n') _paraBreakChars.add(_i);
+    }
     const _timings=[];
     let _acc=0;
     for(let _i=0; _i<_t.length; _i++){
       let _dt=_INTRO_CHAR_MS;
       if(_i===_stardatePauseChar) _dt+=1000;
-      if(_demiseDots&&_demiseDots.has(_i)) _dt=500;
+      if(_paraBreakChars.has(_i)) _dt+=500;
+      if(_slowDots&&_slowDots.has(_i)) _dt=500;
       _acc+=_dt;
       _timings.push(_acc);
     }
@@ -1963,6 +1979,13 @@ let _tutorialPhase='inactive'; // 'inactive'|'pre_zoom'|'look_around'|'look_arou
 let _tutorialPhaseStartMs=0;   // real-time ms when the current phase started
 let _tutorialFadeOutStartMs=0; // real-time ms when the current bubble began fading out (0 = not yet)
 let _tutorialLavaPlanetId=-1;  // planet id of the lava planet in Orijen's home system
+// Per-phase frozen anchor for the secondary BLUE "HOVER your cursor" callout
+// in the supply_demand phase. The molten ore sprite shifts a few pixels each
+// frame (per-cargo bobble + supply/demand row recompute), which would drag
+// the bubble around with it; user spec is for it to LATCH to its first
+// position. Re-armed (set back to null) by _advanceTo() so a future phase
+// re-entry starts fresh.
+let _blueHoverAnchorFrozen=null; // {x,y} once captured; null until then
 let _zoomBarCenter={x:0,y:0}; // cached screen centre of the zoom bar (set each frame by drawSpeedIndicator)
 let _createRouteTimerMs=0; // real-time ms when player first visited a non-home-star planet (0=not yet). Used by stellar_cartography fallback.
 let _visitPlanetCompletedMs=0; // (legacy) real-time ms when visit_planet mission completed. Superseded by _tutorialDoneMs but kept reset for save compat.
@@ -2144,6 +2167,13 @@ function _regScrollbar(b){ if(!b.axis) b.axis='y'; _sbBounds.push(b); }
 
 // ── top bar / economy ────────────────────────────────────────
 let stardate=829.00;
+// Tracks the highest "tenth" (0–9) we've already posted a "Rival Corporation
+// established in N tenths of a stardate" warning for. Each tenth between
+// SD 829.1 and SD 829.9 gets exactly one red chat-log message, counting
+// DOWN to the rival corp's actual founding at SD 830.05. Reset to 0 on
+// new-game; persists through saves so reloading a save at SD 829.5 doesn't
+// re-emit the earlier warnings.
+let _rivalCorpWarnTenth=0;
 let credits=250000;
 let corpName='Space Tycoon Corporation';
 let creditSnapshots=[]; // [{sd, cr}]
@@ -2752,43 +2782,84 @@ function _buildIntroShots(){
   for(const _p of [_ringP,_urbanP,_stormP]){
     const _sh=_planetShot(_p); if(_sh){ _sh.kind='planet'; shots.push(_sh); }
   }
-  // ── Resort planet WITH moons: stationary camera, 5 seconds. ──────
-  // Replaces the old separate "resort" + "moons" portrait shots with
-  // one combined beat. The camera locks in place and the planet drifts
-  // ACROSS the frame on its orbit while its moons swing around it.
-  // The orbital arc carries it about 30 SU/sec at typical orbit radii,
-  // which at this zoom (~130/radius px per SU) translates to a clear
-  // visible drift across the 5-second shot.
+  // ── ANCIENT planet portrait, fully zoomed in: stationary camera. ──
+  // Per user spec the planet is forced to be ringed, have 3 moons, and
+  // host an ALIEN RELIC (the green-tinted station type — `isAlienRelic
+  // + hasStation` together render the cyan/green relic palette via
+  // drawPlanetStation). All overrides are restored at the end of the
+  // cutscene so the gameplay galaxy starts in its real generated state.
   {
-    let _resortMoonP=_pickPlanet(p=>p.type&&p.type.id==='resort'&&p.moons&&p.moons.length>=1);
-    // Fallback: any resort planet (rare to have a resort without moons,
-    // but don't drop the shot if we hit one of those galaxies).
-    if(!_resortMoonP) _resortMoonP=_pickPlanet(p=>p.type&&p.type.id==='resort');
-    // Last-resort fallback: any planet with at least 2 moons (so the
-    // "watch the moons swing past" beat still lands).
-    if(!_resortMoonP) _resortMoonP=_pickPlanet(p=>p.moons&&p.moons.length>=2);
-    if(_resortMoonP){
-      // Cutscene-only override: dress the resort planet with a LARGE
-      // STATION already constructed — the planet portrait then shows
-      // an established commercial outpost rather than a bare world.
-      // The flags are restored at the end of the cutscene so the player
-      // doesn't actually inherit a free station on this planet.
-      _setIntroOverride(_resortMoonP, 'hasStation', true);
-      _setIntroOverride(_resortMoonP, 'hasLargeStation', true);
-      // Station angle/speed: if the planet didn't have these already
-      // (it usually won't — only stationed planets get them at gen),
-      // pick deterministic values that look good with the static
-      // framing (the station's leading edge faces the camera at
-      // shot start, then slowly rotates).
-      if(_resortMoonP.stationAngle==null) _setIntroOverride(_resortMoonP, 'stationAngle', Math.PI*0.35);
-      if(_resortMoonP.stationSpeed==null) _setIntroOverride(_resortMoonP, 'stationSpeed', 0.00025);
+    let _ancientP=_pickPlanet(p=>p.type&&p.type.id==='ancient');
+    // Fallback chain so the shot never silently drops if the galaxy
+    // happened not to roll an ancient world: try urban (the other
+    // ruin-style biome), then any planet.
+    if(!_ancientP) _ancientP=_pickPlanet(p=>p.type&&p.type.id==='urban');
+    if(!_ancientP) _ancientP=_pickPlanet(p=>true);
+    if(_ancientP){
+      // Force size L (planet radius 192 SU). The cutscene framing math
+      // downstream (zoom = 130/radius, moon orbit offsets, etc.) reads
+      // _ancientP.radius, so override radius FIRST so every downstream
+      // calculation uses the L-sized value. Tiny ancient worlds were
+      // reading as "rings the size of a grape" in the static portrait;
+      // forcing L gives a planet with visible surface detail filling
+      // a meaningful chunk of the frame.
+      _setIntroOverride(_ancientP, 'size',   'L');
+      _setIntroOverride(_ancientP, 'radius', SIZE_R['L']);
+      // SLOW the planet's orbital motion by 8× for the cutscene only.
+      // _drawCutsceneBg calls updatePlanetOrbits(1.5, 1) every frame so
+      // moons swing around visibly within the 5-second static shot —
+      // that 1.5× dtG is fine for moons (their `speed` is already large
+      // because periods are 22-35 s), but the PLANET's own `orbitSpeed`
+      // around its star is enough to slingshot it clear across the
+      // locked-camera frame in 5 s. Multiplying by 0.125 keeps it
+      // drifting gently — visible motion, but no fly-by — and the
+      // override is rolled back at corp-setup so the gameplay galaxy's
+      // orbital periods are untouched.
+      if(typeof _ancientP.orbitSpeed === 'number'){
+        _setIntroOverride(_ancientP, 'orbitSpeed', _ancientP.orbitSpeed * 0.125);
+      }
+      // Force RING. If the planet didn't roll one at gen, synthesise a
+      // tasteful default (sand-coloured to match the ancient biome
+      // palette — sandy rim shows nicely against the warm planet body).
+      if(!_ancientP.ring){
+        _setIntroOverride(_ancientP, 'ring', {
+          innerFrac:1.24, outerFrac:1.50, rot:0.45, incl:0.34,
+          rgb:[210,190,150], // ancient-rim colour palette
+        });
+      }
+      // Force exactly 3 MOONS. We always overwrite (even if the planet
+      // already had moons) so the count is deterministic. Period/tilt/
+      // angle deterministic-but-varied so the three moons don't all
+      // ride the same orbit position.
+      _setIntroOverride(_ancientP, 'moons', [
+        {r:MOON_RADS[1], orbitR:_ancientP.radius*2.10, angle:0.6,
+         speed: 2*Math.PI/(22*60), tilt:Math.PI/4,    incl:0.22,
+         pocks:[{dx:-0.3,dy:0.2,r:0.25},{dx:0.4,dy:-0.1,r:0.20},{dx:0.0,dy:-0.4,r:0.18}]},
+        {r:MOON_RADS[0], orbitR:_ancientP.radius*2.70, angle:2.2,
+         speed:-2*Math.PI/(28*60), tilt:Math.PI/2,    incl:0.30,
+         pocks:[{dx:0.2,dy:0.3,r:0.22},{dx:-0.5,dy:-0.2,r:0.18},{dx:0.3,dy:-0.4,r:0.15}]},
+        {r:MOON_RADS[2], orbitR:_ancientP.radius*3.20, angle:4.1,
+         speed: 2*Math.PI/(35*60), tilt:Math.PI*3/4,  incl:0.18,
+         pocks:[{dx:-0.4,dy:-0.3,r:0.30},{dx:0.3,dy:0.4,r:0.24},{dx:-0.2,dy:0.0,r:0.20},{dx:0.5,dy:-0.2,r:0.16}]},
+      ]);
+      // Force ALIEN RELIC (the cutscene's green station). drawPlanetStation
+      // reads `isAlienRelic` to swap to the relic palette + structures.
+      _setIntroOverride(_ancientP, 'hasStation',   true);
+      _setIntroOverride(_ancientP, 'isAlienRelic', true);
+      if(_ancientP.stationAngle==null) _setIntroOverride(_ancientP, 'stationAngle', Math.PI*0.35);
+      if(_ancientP.stationSpeed==null) _setIntroOverride(_ancientP, 'stationSpeed', 0.00025);
       // Fully zoomed in — planet body at ~130 px radius dominates the
       // frame the same way the regular planet portraits do.
-      const _sc=Math.min(_maxSc, 130/Math.max(1,_resortMoonP.radius));
+      const _sc=Math.min(_maxSc, 130/Math.max(1,_ancientP.radius));
       shots.push({
         mode:'planetStatic',
+        // Treat as `resort` for the ordering constraint: it's the
+        // showcase planet portrait that mustn't sit immediately after
+        // the Orijen opener (which is also a planet portrait). The
+        // constraint logic just checks `kind!=='resort'` for pool[0],
+        // so this tag keeps that rule active for the new ancient shot.
         kind:'resort',
-        pid:_resortMoonP.id,
+        pid:_ancientP.id,
         scale:_sc,
         // capturedX/Y filled on the first frame of the shot — see
         // drawHowToPlay. We cache the planet's CURRENT position when
@@ -2803,8 +2874,15 @@ function _buildIntroShots(){
   //   • Second star: ZOOM-OUT — starts close on the star body and ends
   //     wide enough to show the entire host solar system (the host star's
   //     outermost planet orbit comfortably fits inside the viewport).
+  // EXCLUDE size 'L' stars (the largest tier — 2048 SU radius). Even at
+  // the dyson shot's adaptive zoom they over-dominate the frame; at the
+  // dense-cluster pan's fixed zoom they fill the entire screen vertically.
+  // The fallback to the original list keeps the shots working in the
+  // pathological galaxy where every star happened to roll L.
   {
-    const _stars=[...galaxy.stars].sort((a,b)=>a.radius-b.radius);
+    const _nonHugeStars=galaxy.stars.filter(s=>s.size!=='L');
+    const _starsSrc=_nonHugeStars.length>=2?_nonHugeStars:galaxy.stars;
+    const _stars=[..._starsSrc].sort((a,b)=>a.radius-b.radius);
     if(_stars.length>=2){
       // Pick a mid-sized star for the static pan (orbit rings clearly
       // legible) and a SMALL-to-medium star for the zoom-out so the close
@@ -2891,10 +2969,19 @@ function _buildIntroShots(){
     const _inFrameR=Math.min(_vpHwW,_vpHhW)*0.85;
     const _inFrameR2=_inFrameR*_inFrameR;
     let _bestStar=null, _bestCount=-1;
+    // Exclude size 'L' stars from the ANCHOR candidate set. At this
+    // shot's fixed zoom (_maxSc*0.18 ≈ 0.317) an L-radius star body
+    // would render at ~650 px screen-radius — filling the entire 900-px
+    // viewport vertically. Smaller stars still count as NEIGHBORS so a
+    // cluster around an L star can still be picked via an adjacent S/M
+    // star anchor. Falls back to the unfiltered set in the unusual case
+    // where every star in the galaxy is L.
+    const _anchorCands=galaxy.stars.filter(s=>s.size!=='L');
+    const _anchorSrc=_anchorCands.length>0?_anchorCands:galaxy.stars;
     // Score every star by how many neighbors fall inside the in-frame
     // radius. Quadratic in star count but the galaxy only has a few
     // hundred stars, and this runs once when the shot list is built.
-    for(const _s of galaxy.stars){
+    for(const _s of _anchorSrc){
       let _cnt=0;
       for(const _t of galaxy.stars){
         const _dx=_s.x-_t.x, _dy=_s.y-_t.y;
@@ -2934,6 +3021,22 @@ function _buildIntroShots(){
   //       sequence. "Star shots" = the Dyson-sphere static pan, the
   //       star solar-system zoom-out, and the dense-cluster pan
   //       (all of which feature a star as the dominant subject).
+  //   (c) no two ZOOM-OUT shots may sit back-to-back anywhere in the
+  //       sequence — and because the Orijen OPENER is itself a 10-second
+  //       zoom-out (close on Orijen → MIN_SC), pool[0] must also not
+  //       be a zoom-out (otherwise the cutscene opens with 15 seconds
+  //       of continuous "pull back" framing). Zoom-out detection is
+  //       structural: any shot whose start scale is meaningfully larger
+  //       than its end scale qualifies (planetStatic + static pans are
+  //       trivially excluded).
+  const _isZoomOut=(_s)=>{
+    if(!_s) return false;
+    if(_s.mode==='planetStatic') return false;
+    if(typeof _s.s0!=='number' || typeof _s.s1!=='number') return false;
+    // 5% margin so floating-point wobble on "equal" scales (static pans)
+    // doesn't slip through as a false positive.
+    return _s.s0 > _s.s1 * 1.05;
+  };
   // Strategy: random Fisher–Yates shuffle, then validate. Retry up
   // to N times. With only ~9 items in the pool and gentle
   // constraints, retry converges in 1–3 attempts. Fallback: walk
@@ -2941,8 +3044,10 @@ function _buildIntroShots(){
   // first non-violating successor.
   const _validate=(_arr)=>{
     if(_arr.length>0 && _arr[0].kind==='resort') return false;
+    if(_arr.length>0 && _isZoomOut(_arr[0])) return false; // opener is also a zoom-out
     for(let _i=1; _i<_arr.length; _i++){
       if(_arr[_i].kind==='star' && _arr[_i-1].kind==='star') return false;
+      if(_isZoomOut(_arr[_i]) && _isZoomOut(_arr[_i-1])) return false;
     }
     return true;
   };
@@ -2953,25 +3058,31 @@ function _buildIntroShots(){
     }
   };
   let _attempts=0;
-  do { _shuffle(shots); _attempts++; } while(!_validate(shots) && _attempts<100);
-  // Deterministic fallback if 100 random attempts failed (essentially
-  // never happens for these sizes — included for safety).
+  do { _shuffle(shots); _attempts++; } while(!_validate(shots) && _attempts<200);
+  // Deterministic fallback if 200 random attempts failed (rare — only
+  // a galaxy that rolled mostly zoom-out-shaped shots could hit this).
   if(!_validate(shots)){
+    const _violatesAt=(_arr, _i)=>{
+      if(_i===0){
+        if(_arr[_i].kind==='resort') return true;
+        if(_isZoomOut(_arr[_i])) return true; // back-to-back with Orijen opener
+        return false;
+      }
+      if(_arr[_i].kind==='star' && _arr[_i-1].kind==='star') return true;
+      if(_isZoomOut(_arr[_i]) && _isZoomOut(_arr[_i-1])) return true;
+      return false;
+    };
     for(let _i=0; _i<shots.length; _i++){
-      const _bad=(_i===0 && shots[_i].kind==='resort') ||
-                 (_i>0 && shots[_i].kind==='star' && shots[_i-1].kind==='star');
-      if(!_bad) continue;
-      // Find the first later shot we can swap in without creating a
-      // fresh violation.
+      if(!_violatesAt(shots, _i)) continue;
+      // Find a later shot we can swap in without creating a fresh
+      // violation at i OR at i+1.
       for(let _j=_i+1; _j<shots.length; _j++){
-        const _cand=shots[_j];
-        const _newOk=
-          (_i===0 ? _cand.kind!=='resort' : !(_cand.kind==='star' && shots[_i-1].kind==='star')) &&
-          (_i+1>=shots.length || !(shots[_i+1].kind==='star' && _cand.kind==='star'));
-        if(_newOk){
-          const _t=shots[_i]; shots[_i]=_cand; shots[_j]=_t;
-          break;
-        }
+        // Tentatively swap, re-check at i and i+1, accept if both clean.
+        const _tmp=shots[_i]; shots[_i]=shots[_j]; shots[_j]=_tmp;
+        const _ok=!_violatesAt(shots,_i) && (_i+1>=shots.length || !_violatesAt(shots,_i+1));
+        if(_ok) break;
+        // Undo and try next candidate.
+        const _tmp2=shots[_i]; shots[_i]=shots[_j]; shots[_j]=_tmp2;
       }
     }
   }
@@ -3125,7 +3236,6 @@ function _introRenderText(ts){
   // ("STARDATE 829." pause, "demise..." slow dots) without rewriting the
   // typing engine.
   const _charsShown=Math.min(_full.length, _introCharsShownAt(_introParaIdx, _elapsed));
-  const _txt=_full.slice(0, _charsShown);
   // Layout: centered block, ~640 px wide.
   const _maxW=640;
   const _lx=Math.round((W-_maxW)/2);
@@ -3134,71 +3244,183 @@ function _introRenderText(ts){
   ctx.fillStyle='rgba(232,238,250,0.97)';
   ctx.shadowColor='rgba(0,0,0,0.85)'; ctx.shadowBlur=4;
   ctx.textAlign='left';
-  // Build wrapped lines, respecting forced "\n" breaks for blank/paragraph
-  // separators. Greedy word-wrap inside each forced-break segment.
-  const _lines=[];
-  const _segments=_txt.split('\n');
-  for(let _si=0; _si<_segments.length; _si++){
-    const _seg=_segments[_si];
-    if(_seg===''){
-      // Empty line — explicit paragraph spacer.
-      _lines.push('');
-      continue;
+  // ── Pre-wrap the WHOLE paragraph (not just the typed prefix) so the
+  // final line layout is computed once and never changes as new chars
+  // arrive. This is what keeps earlier lines anchored: previously the
+  // wrap ran over the typed substring, so the block grew line-by-line
+  // and was re-centered each frame, jerking already-typed text upward.
+  // Each fullLine entry records its `consumedBefore` — the count of
+  // characters of `_full` consumed before this line starts (including
+  // the trailing space / `\n` from the line above). That index lets us
+  // slice the live partial render out of the static layout.
+  const _fullLines=[];
+  {
+    let _consumed=0;
+    const _segments=_full.split('\n');
+    for(let _si=0; _si<_segments.length; _si++){
+      const _seg=_segments[_si];
+      if(_seg===''){
+        // Blank line (explicit paragraph spacer).
+        _fullLines.push({text:'', consumedBefore:_consumed});
+      } else {
+        let _cur='';
+        let _curStart=_consumed;
+        let _segIdx=0;
+        const _words=_seg.split(' ');
+        for(let _wi=0; _wi<_words.length; _wi++){
+          const _w=_words[_wi];
+          const _trial=_cur?(_cur+' '+_w):_w;
+          if(ctx.measureText(_trial).width<=_maxW){
+            _cur=_trial;
+          } else {
+            if(_cur) _fullLines.push({text:_cur, consumedBefore:_curStart});
+            _curStart=_consumed+_segIdx;
+            _cur=_w;
+          }
+          _segIdx+=_w.length;
+          if(_wi<_words.length-1) _segIdx+=1; // separator space
+        }
+        if(_cur) _fullLines.push({text:_cur, consumedBefore:_curStart});
+        _consumed+=_seg.length;
+      }
+      if(_si<_segments.length-1) _consumed+=1; // separator \n
     }
-    let _cur='';
-    for(const _w of _seg.split(' ')){
-      const _trial=_cur?(_cur+' '+_w):_w;
-      if(ctx.measureText(_trial).width<=_maxW) _cur=_trial;
-      else { if(_cur) _lines.push(_cur); _cur=_w; }
-    }
-    if(_cur) _lines.push(_cur);
   }
-  // Vertical centering — measure once, then paint top-down.
+  // Vertical centering — measure once from the FULL line count, then
+  // paint top-down. Y position per line is now fixed for the whole
+  // paragraph; nothing shifts as chars arrive.
   const _lh=22;
-  const _totalH=Math.max(_lh, _lines.length*_lh);
-  let _y=Math.round((H-_totalH)/2)+15;
-  // Track where the last non-empty line is rendered (for caret placement).
-  let _lastY=_y, _lastLine='', _lastBoldEndX=null;
+  const _totalH=Math.max(_lh, _fullLines.length*_lh);
+  const _yStart=Math.round((H-_totalH)/2)+15;
+  // Track caret position (end-of-current-typing-line) for the blinker.
+  let _lastY=_yStart, _lastLine='', _lastBoldEndX=null, _caretSet=false;
   // Screen 2 closes with the line "The race has begun. The stars await." —
   // per spec it renders FULL bold (parallels the bolded "STARDATE 829."
-  // header on screen 0). Detect it by exact-prefix match against the
-  // typed substring so partial chars during typing also draw bold.
+  // header on screen 0). Detect via exact-prefix match against the
+  // FULL pre-wrapped line so mid-typing partials draw bold too.
   const _CLOSING_BOLD='The race has begun. The stars await.';
-  for(let _li=0; _li<_lines.length; _li++){
-    const _ln=_lines[_li];
-    if(_ln){
-      // Screen 0, first non-empty line: the bolded "STARDATE 829." header.
-      // Render the first 13 chars (or fewer if mid-typing) in bold + rest
-      // in regular weight. The header sits on its own line (it's followed
-      // by "\n\n" in source), so we never have to handle mid-line wraps
-      // straddling the bold range.
-      if(_introParaIdx===0 && _li===0){
-        const _boldLen=Math.min(_ln.length, 13);
-        const _boldPart=_ln.slice(0,_boldLen);
-        const _restPart=_ln.slice(_boldLen);
-        ctx.font='bold 15px "Exo 2",sans-serif';
-        ctx.fillText(_boldPart, _lx, _y);
-        const _bw=_boldPart?ctx.measureText(_boldPart).width:0;
-        ctx.font='15px "Exo 2",sans-serif';
-        if(_restPart) ctx.fillText(_restPart, _lx+_bw, _y);
-        _lastY=_y; _lastLine=_ln;
-        // Save bold-aware end-x for caret placement (regular-weight
-        // measureText would mis-place the caret a few pixels left).
-        _lastBoldEndX=_lx+_bw+ctx.measureText(_restPart).width;
-      } else if(_introParaIdx===2 && _CLOSING_BOLD.startsWith(_ln) && _ln.startsWith('The race')){
-        // Screen 2 closing line — fully bold. The startsWith check lets
-        // mid-typing partials ("The r…" / "The race h…") render bold too.
-        ctx.font='bold 15px "Exo 2",sans-serif';
-        ctx.fillText(_ln, _lx, _y);
-        const _bw=ctx.measureText(_ln).width;
-        ctx.font='15px "Exo 2",sans-serif';
-        _lastY=_y; _lastLine=_ln; _lastBoldEndX=_lx+_bw;
+  // ── All-caps detection: find every run of UPPERCASE characters (≥2
+  // chars long, joining adjacent runs across single spaces and hyphens
+  // so multi-word phrases like "SPACE TRAIN", "THE MULTI-VERSE", and
+  // "WORMHOLE APPARATUS" are detected as one bold range). Digits are
+  // allowed INSIDE a run (so "STARDATE 829" ranges through the digits)
+  // but never as a starter. A trailing space/hyphen is trimmed off the
+  // range end so the bold style doesn't bleed into the following word.
+  // Per spec all such runs render BOLD across every screen of the
+  // cutscene — replaces the old special-case "first 13 chars of screen 0"
+  // bolding (STARDATE 829 is now caught by this generic rule).
+  const _findAllCapsRanges=(_text)=>{
+    const _out=[];
+    let _i=0;
+    while(_i<_text.length){
+      const _c=_text[_i];
+      if(_c>='A'&&_c<='Z'){
+        let _j=_i, _hasUpper=false;
+        while(_j<_text.length){
+          const _ch=_text[_j];
+          if(_ch>='A'&&_ch<='Z'){ _hasUpper=true; _j++; continue; }
+          // Digits are ALWAYS part of an all-caps run (e.g. the "829" in
+          // "STARDATE 829"). The earlier logic treated digits like
+          // separators that needed an uppercase/digit successor — which
+          // silently dropped the FINAL digit because the char after it
+          // (a period, comma, etc.) failed the successor check, so the
+          // range ended one character short.
+          if(_ch>='0'&&_ch<='9'){ _j++; continue; }
+          // Spaces and hyphens are joiners — only valid as part of the
+          // run when followed by another uppercase letter or digit
+          // (otherwise we'd gobble whitespace into the bold range).
+          if(_ch===' '||_ch==='-'){
+            if(_j+1<_text.length){
+              const _nx=_text[_j+1];
+              if((_nx>='A'&&_nx<='Z')||(_nx>='0'&&_nx<='9')){ _j++; continue; }
+            }
+            break;
+          }
+          break;
+        }
+        // Trim trailing space/hyphen if the walk ended on one (paranoia —
+        // the inner break should have handled this, but guard anyway).
+        while(_j>_i && (_text[_j-1]===' '||_text[_j-1]==='-')) _j--;
+        if(_hasUpper && (_j-_i)>=2) _out.push({start:_i, end:_j});
+        _i=Math.max(_j, _i+1);
       } else {
-        ctx.fillText(_ln, _lx, _y);
-        _lastY=_y; _lastLine=_ln; _lastBoldEndX=null;
+        _i++;
       }
     }
-    _y+=_lh;
+    return _out;
+  };
+  // Italic targets — screen 2 only.
+  const _ITAL_TARGETS=(_introParaIdx===2)?['domination','catastrophic demise!']:[];
+  for(let _li=0; _li<_fullLines.length; _li++){
+    const _fl=_fullLines[_li];
+    const _y=_yStart+_li*_lh;
+    // How many chars of THIS line are visible right now?
+    const _avail=Math.max(0, _charsShown-_fl.consumedBefore);
+    const _renderText=_fl.text.slice(0, Math.min(_fl.text.length, _avail));
+    // Mark the currently-typing line for caret placement: the first
+    // line whose visible-char count is less than its full length.
+    const _isTypingHere=!_caretSet && _avail<_fl.text.length;
+    if(_renderText){
+      // Build per-char style flags from the FULL line text — using the
+      // partial slice would mid-typing flip a bold range off when a
+      // typed prefix isn't yet a complete all-caps word ("STARDATE"
+      // alone would lose bold if we re-detected per partial). All
+      // detection runs once over `_fl.text`, then the per-char flags
+      // are consumed only over `_renderText.length` chars.
+      const _capsRanges=_findAllCapsRanges(_fl.text);
+      const _italRanges=[];
+      for(const _t of _ITAL_TARGETS){
+        const _idx=_fl.text.indexOf(_t);
+        if(_idx>=0) _italRanges.push({start:_idx, end:_idx+_t.length});
+      }
+      // Screen 2 closing line — the whole line renders bold (parallels
+      // screen 0's "STARDATE 829." beat). startsWith-match on the FULL
+      // line text so partial typing on this line stays bold too.
+      const _wholeLineBold=(_introParaIdx===2 && _CLOSING_BOLD.startsWith(_fl.text) && _fl.text.startsWith('The race'));
+      const _styleAt=(_idx)=>{
+        if(_wholeLineBold) return {bold:true, italic:false};
+        let _b=false, _it=false;
+        for(const _r of _capsRanges){ if(_idx>=_r.start && _idx<_r.end){ _b=true; break; } }
+        for(const _r of _italRanges){ if(_idx>=_r.start && _idx<_r.end){ _it=true; break; } }
+        return {bold:_b, italic:_it};
+      };
+      // Walk the visible substring, grouping consecutive chars with
+      // identical style into one fillText call per segment so font
+      // changes happen O(segments) times not O(chars).
+      let _xPos=_lx, _cursor=0;
+      while(_cursor<_renderText.length){
+        const _ss=_styleAt(_cursor);
+        let _runEnd=_cursor+1;
+        while(_runEnd<_renderText.length){
+          const _ss2=_styleAt(_runEnd);
+          if(_ss2.bold!==_ss.bold || _ss2.italic!==_ss.italic) break;
+          _runEnd++;
+        }
+        const _seg=_renderText.slice(_cursor, _runEnd);
+        const _prefix=(_ss.bold?'bold ':'')+(_ss.italic?'italic ':'');
+        ctx.font=_prefix+'15px "Exo 2",sans-serif';
+        ctx.fillText(_seg, _xPos, _y);
+        _xPos+=ctx.measureText(_seg).width;
+        _cursor=_runEnd;
+      }
+      // Restore base font + record caret position for the blinker.
+      ctx.font='15px "Exo 2",sans-serif';
+      if(_isTypingHere){
+        _lastY=_y; _lastLine=_renderText; _lastBoldEndX=_xPos; _caretSet=true;
+      } else { _lastY=_y; _lastLine=_renderText; _lastBoldEndX=_xPos; }
+    } else if(_isTypingHere){
+      // Cursor sits at the START of a not-yet-typed line (we've consumed
+      // through the previous line's \n but no chars of this line yet).
+      _lastY=_y; _lastLine=''; _lastBoldEndX=null; _caretSet=true;
+    }
+  }
+  // Fallback: if no line was flagged as "currently typing" (everything
+  // typed), park _lastY/_lastLine on the last non-empty line so the
+  // "press any key" prompt anchors correctly below the paragraph.
+  if(!_caretSet){
+    for(let _li=_fullLines.length-1; _li>=0; _li--){
+      if(_fullLines[_li].text){ _lastY=_yStart+_li*_lh; _lastLine=_fullLines[_li].text; break; }
+    }
   }
   // Blinking caret while typing (cosmetic) — hides once paragraph done.
   const _typingDone=_charsShown>=_full.length;
@@ -3215,7 +3437,9 @@ function _introRenderText(ts){
     ctx.fillStyle=`rgba(170,200,240,${_hintAlpha})`;
     ctx.textAlign='center';
     const _isLast=_introParaIdx===_INTRO_TEXT.length-1;
-    ctx.fillText(_isLast?'PRESS ANY KEY OR CLICK TO BEGIN':'PRESS ANY KEY OR CLICK FOR NEXT', W/2, Math.min(H-60, _y+10));
+    // Position the prompt just under the bottom of the fixed text block.
+    const _promptY=_yStart+_fullLines.length*_lh+10;
+    ctx.fillText(_isLast?'PRESS ANY KEY OR CLICK TO BEGIN':'PRESS ANY KEY OR CLICK FOR NEXT', W/2, Math.min(H-60, _promptY));
   }
   ctx.restore();
 }
@@ -16087,6 +16311,12 @@ function _drawTutorialChain(stage){
       _bx=Math.max(8,Math.min(W-8-_bW,_bx));
       if(_forceBelow){
         _by=anchorScreen.y+_tailH+4;
+        // opts.belowY: override the bubble's Y position while keeping the
+        // tail aimed at the anchor. Used by the supply/demand HOVER tip
+        // to plant the bubble OUTSIDE the supply/demand panel (clear of
+        // every cargo car sprite in supply + demand rows) while the
+        // tail keeps pointing UP at the molten ore supply sprite.
+        if(opts && typeof opts.belowY === 'number') _by=opts.belowY;
         _belowPlacement=true;
       } else {
         const _tipY=anchorScreen.y-12;
@@ -16162,6 +16392,10 @@ function _drawTutorialChain(stage){
   };
   const _advanceTo=(nextPhase)=>{
     _tutorialPhase=nextPhase; _tutorialPhaseStartMs=_now; _tutorialFadeOutStartMs=0;
+    // Clear per-phase frozen-anchor caches so a re-entry into supply_demand
+    // (e.g. via tutorial rollback) re-captures a fresh position from the
+    // current sprite layout instead of using a stale one.
+    _blueHoverAnchorFrozen=null;
   };
   // ── Phase: look_around ─────────────────────────────────────
   // First tutorial bubble — sits in the same spot as the upcoming ZOOM OUT
@@ -16269,23 +16503,44 @@ function _drawTutorialChain(stage){
         _hintAlpha=Math.min(1,(_elapsed-_hintDelayMs)/FADE_MS);
       }
       if(_hintAlpha>0){
-        // Find the Molten Ore supply row in the rendered sprite bounds.
-        const _rows=popupState.stationTabRowBounds||[];
-        let _oreRow=null;
-        for(const _row of _rows){
-          if(_row.ctype==='molten_ore' && _row.isSupply){ _oreRow=_row; break; }
+        // Anchor sourcing: on the FIRST frame we render this bubble (i.e.
+        // _blueHoverAnchorFrozen is still null) we capture the live Molten
+        // Ore supply sprite position and freeze it. Every later frame
+        // reuses that frozen pair — even when the row bounds shift because
+        // of cargo-strip bobble or supply/demand recompute. This is what
+        // makes the bubble "stick" once it's appeared (per user spec).
+        if(_blueHoverAnchorFrozen===null){
+          const _rows=popupState.stationTabRowBounds||[];
+          let _oreRow=null;
+          for(const _row of _rows){
+            if(_row.ctype==='molten_ore' && _row.isSupply){ _oreRow=_row; break; }
+          }
+          if(_oreRow){
+            // Anchor at the BOTTOM-CENTER of the molten ore sprite so the
+            // tail naturally points UP into the sprite from below — and
+            // cache the supply/demand panel bottom Y so we can position
+            // the bubble OUTSIDE the panel entirely (clear of every car
+            // sprite in the supply + demand columns).
+            const _panel=popupState.supplyDemandPanelBounds;
+            _blueHoverAnchorFrozen={
+              x:_oreRow.x+9,
+              y:_oreRow.y+_oreRow.h-1, // bottom edge of the sprite
+              belowY:(_panel?_panel.y+_panel.h+10:_oreRow.y+_oreRow.h+50),
+            };
+          }
         }
-        if(_oreRow){
-          // Anchor the bubble at the first sprite slot in the strip (left edge).
-          // Sprites draw starting at row.x, with sprW≈18 (matches drawCargoStrip
-          // local sprW). Centring on the first sprite avoids occluding the rest.
-          const _anchorX=_oreRow.x+9; // first sprite centre
-          const _anchorY=_oreRow.y;   // sprite top — bubble will sit above
+        if(_blueHoverAnchorFrozen){
+          // Position the bubble OUTSIDE the supply/demand panel — the
+          // tail still aims UP at the molten ore supply sprite (anchored
+          // at its bottom edge), but the bubble body sits below the
+          // entire panel so no cargo car sprite (supply or demand row)
+          // is covered. The yellow bubble continues to sit at the TOP of
+          // the panel, well clear of the blue one.
           _drawBubble(
             ['HOVER your cursor over supplied/demanded','resources for details'],
-            {x:_anchorX, y:_anchorY},
+            _blueHoverAnchorFrozen,
             _hintAlpha,
-            {color:'blue'}
+            {color:'blue', below:true, belowY:_blueHoverAnchorFrozen.belowY}
           );
         }
       }
@@ -17048,7 +17303,10 @@ function updateMissions(dtSd){
     for(const obj of m.objectives){
       if(!obj.done&&def.checkObj(obj.id,m)){
         obj.done=true;
-        if(m.objectives.length>1) _chatMsg(m.name+': objective done — '+obj.text.slice(0,30)+'…','rgba(160,230,200,1)');
+        // Log the FULL objective text (no slice/ellipsis). The chat-log
+        // renderer already word-wraps long messages into as many rows as
+        // needed, so the player sees the entire completed-objective text.
+        if(m.objectives.length>1) _chatMsg(m.name+': objective done — '+(obj.text||''),'rgba(160,230,200,1)');
       }
       if(!obj.done) allDone=false;
     }
@@ -20054,6 +20312,11 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
     const _ltW=_lt.upW-8, _ltH=24;
     const _ltX=Math.max(4,_lt.upX+4);
     const _ltY=_lt.by-_ltH-4;
+    // Wipe any HD-overlay text (card title + description, drawn earlier
+    // in this frame) sitting behind the tooltip — without this clear,
+    // those characters bleed THROUGH the opaque tooltip background
+    // because HD overlay is composited on top of the main ctx layer.
+    _clearTextOverlayRect(_ltX, _ltY, _ltW, _ltH);
     ctx.fillStyle='rgba(6,10,28,0.97)';
     ctx.strokeStyle='rgba(160,120,50,0.65)'; ctx.lineWidth=1;
     ctx.beginPath(); ctx.roundRect(_ltX,_ltY,_ltW,_ltH,4); ctx.fill(); ctx.stroke();
@@ -20072,6 +20335,7 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
     const _utW=_ut.upW-8, _utH=20+_utReqs.length*10+10;
     const _utX=Math.max(4,_ut.upX+4);
     const _utY=_ut.by-_utH-4;
+    _clearTextOverlayRect(_utX, _utY, _utW, _utH);
     ctx.fillStyle='rgba(6,10,28,0.97)';
     ctx.strokeStyle='rgba(80,140,255,0.55)';
     ctx.lineWidth=1;
@@ -20093,6 +20357,7 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
     const _ttW=_tt.upW-8, _ttH=56;
     const _ttX=Math.max(4,_tt.upX+4);
     const _ttY=_tt.by-_ttH-4;
+    _clearTextOverlayRect(_ttX, _ttY, _ttW, _ttH);
     ctx.fillStyle='rgba(6,10,28,0.97)';
     ctx.strokeStyle='rgba(80,140,255,0.55)';
     ctx.lineWidth=1;
@@ -20119,6 +20384,7 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
     const _ttW=_tt.upW-8, _ttH=56;
     const _ttX=Math.max(4,_tt.upX+4);
     const _ttY=_tt.by-_ttH-4;
+    _clearTextOverlayRect(_ttX, _ttY, _ttW, _ttH);
     ctx.fillStyle='rgba(6,10,28,0.97)';
     ctx.strokeStyle='rgba(80,140,255,0.55)';
     ctx.lineWidth=1;
@@ -27253,7 +27519,7 @@ function _buildSaveObject(){
     // version 2 introduces the expanded SPEED_OPTS [0,0.5,1,2,5,10] (was [1,2,5,10]).
     // Loader accepts both v1 and v2 and migrates gameSpeedIdx accordingly.
     version:2,
-    stardate, credits, corpName, gameSpeedIdx,
+    stardate, credits, corpName, gameSpeedIdx, _rivalCorpWarnTenth,
     cam:{x:cam.x,y:cam.y,scale:cam.scale},
     sel:_savedSel, tracking, trackingOffset:{x:trackingOffset.x,y:trackingOffset.y},
     fogEnabled, panelTab, panelScroll, stationPanelScroll,
@@ -27361,6 +27627,13 @@ function _restoreFromSave(save){
   // Restore flat state
   _invalidateUpgradePlanetCache();
   stardate=save.stardate; credits=save.credits; corpName=save.corpName||'Space Tycoon Corporation';
+  // Restore the rival-corp countdown watermark. Saves from before this
+  // feature shipped don't carry the field — in that case, infer the
+  // tenth from the current stardate so we don't re-emit warnings for
+  // ground we've already covered. Clamped to [0,9] so weird saves with
+  // stardate >= 830 (rival already founded) don't fire spurious tenths.
+  if(typeof save._rivalCorpWarnTenth==='number') _rivalCorpWarnTenth=save._rivalCorpWarnTenth;
+  else _rivalCorpWarnTenth=Math.max(0, Math.min(9, Math.floor((stardate-829)*10)));
   // Migrate v1 saves: old SPEED_OPTS was [1,2,5,10] (4 tiers), new is
   // [0,0.5,1,2,5,10] (6 tiers). Old idx N maps to new idx N+2.
   {
@@ -27993,6 +28266,7 @@ function startGame(){
   revealedOrbitedPlanetIds=new Set(); discoveredPlanetIds=new Set();
   panelScroll=0; stationPanelScroll=0; panelTab='trains';
   stardate=829.00; credits=250000; creditSnapshots=[]; lastCreditSnapshotSd=829.00; creditDelta=0;
+  _rivalCorpWarnTenth=0; // arm the 9 pre-founding chat warnings for the new game
   cargoParticles=[]; creditFloats=[]; pendingCreditDeltas=[]; trainyard={}; zoomReturnPos=null; zoomReturnTimer=0;
   pendingGoldDiscoveries=[];
   pendingDiamondDiscoveries=[];
@@ -29195,6 +29469,21 @@ function loop(ts){
         cam.scale=Math.max(MIN_SC,Math.min(MAX_SC,_zTarget));
         cam.x=_ddP.x+(PANEL_W)/(2*cam.scale); cam.y=_ddP.y; clampCamera();
         tracking=true; trackingOffset={x:cam.x-_ddP.x,y:cam.y-_ddP.y};
+      }
+    }
+    // Pre-founding countdown: one red chat-log message per tenth of a
+    // stardate between SD 829.1 and SD 829.9, warning the player how
+    // many tenths remain until the rival corporation arrives. With
+    // _rivalCorpWarnTenth tracking the last tenth we posted, each step
+    // fires exactly once even at fast game speeds (where multiple frames
+    // may cross the threshold). Suppressed entirely when AI is disabled
+    // — there's no rival to count down to.
+    if(_aiDifficulty!=='none' && stardate<830){
+      const _tenth=Math.floor((stardate-829)*10); // 0..9 across [829.0, 830.0)
+      while(_rivalCorpWarnTenth<_tenth && _rivalCorpWarnTenth<9){
+        _rivalCorpWarnTenth++;
+        const _remaining=10-_rivalCorpWarnTenth; // 9, 8, ..., 1
+        _chatMsg('0.'+_remaining+' Stardates until a Rival Corporation is established.', 'rgba(245,80,80,1)', 5000, true);
       }
     }
     // Delayed rival corp initialization: fires once at SD 830.05
