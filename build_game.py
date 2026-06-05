@@ -1345,6 +1345,35 @@ let tStars=[], tPlanets=[], tTrain=[], tSpeed=1.8, nebula=null;
 let btnPulse=0, startBtnBounds=null;
 let _htpPanel=0, _htpPanelTs=0, _htpBtnBounds=null, _htpSkipBounds=null, _htpDemoClouds=null, _htpDotBounds=[];
 let _htpPrevTPos=null, _htpCredFloats=[];
+// ── Intro cutscene state ──────────────────────────────────────
+// The gs='howtoplay' state now plays the intro cutscene instead of the
+// old three-panel tutorial preview. Paragraph-by-paragraph word-typed
+// monologue over a cinematic camera that loops through scripted shots
+// of the actual generated galaxy.
+let _introStartTs=0;          // timestamp the cutscene first ran
+let _introParaIdx=0;           // which paragraph is currently being typed
+let _introParaStartTs=0;       // when the current paragraph's typing began
+let _introShots=null;          // lazy-built array of cinematic shot descriptors
+let _introShotIdx=0;           // which shot the camera is currently on (also runs while text types)
+let _introShotStartTs=0;       // when the current shot started
+let _introSkipBtnBounds=null;  // skip → corp setup
+let _introSkipBtnHover=false;
+// Three combined "screens" of intro narration. Each screen contains two
+// logical paragraphs separated by a blank line (\n\n) and gets typed out
+// together — the user only needs to click/key once between screens, not
+// six times. Triple-spaces and "the the" are preserved verbatim per the
+// source script the user provided.
+const _INTRO_TEXT=[
+  "Stardate 829.\n\n30 STARDATES have passed since the catastrophic implosion of the Dutch East Earth Interstellar Trading Company (DEEITC), the once-dominant commercial power whose vast network of trade routes, orbital infrastructure, and wormhole technology bound 1,000s of planets together into a single galactic economy. In the aftermath, entire star systems were cut off from one another, industries collapsed, and countless worlds have endured decades of economic isolation.",
+  "Now, a new age of opportunity has begun.\n\nAcross the galaxy, ambitious CORPORATIONs are racing to fill the void left behind. As the newly appointed CEO of one such enterprise, your mission is to reconnect the stars through the growing network of Space Trains—establishing profitable trade routes, transporting vital cargo from worlds of abundance to worlds in need, and rebuilding the foundations of interstellar civilization one star system at a time.",
+  "But commerce alone is not enough. Hidden among the ruins of DEEITC's fallen empire lie the components and knowledge required to reconstruct the legendary WORMHOLE APPARATUS — a colossal device capable of bending space itself. Whichever Corporation is able to restore this ancient technology first will unlock the access to the multi-verse, and the secrets that powered both DEEITC's unparalleled influence over galactic trade, as well as its catastrophic demise...\n\nThe race has begun. The stars await.",
+];
+// Char-by-char typing. User asked for 2/3 of the previous total time and a
+// switch from word-by-word to char-by-char. Previous timing was 200 ms/
+// word × ~5.5 chars per word ≈ 36 ms/char; 2/3 of that is ~24 ms/char.
+const _INTRO_CHAR_MS=24;
+const _INTRO_SHOT_MS=5000;
+const _INTRO_PARA_MIN_LINGER_MS=600; // ensure short paragraphs don't vanish before the eye can grab them
 let _hintHover=null, _hintBounds=[];
 
 let galaxy=null, cam={x:0,y:0,scale:MIN_SC};
@@ -2510,47 +2539,528 @@ function drawTitleScreen(ts,dt){
 }
 
 // ── How-To-Play screen ───────────────────────────────────────
-function drawHowToPlay(ts){
-  const elapsed=ts-_htpPanelTs;
-  // ── shared background (same starfield as title) ──────────────
-  ctx.fillStyle='#060810'; ctx.fillRect(0,0,W,H);
-  if(nebula) ctx.drawImage(nebula,0,0);
-  for(const s of tStars){
-    ctx.globalAlpha=s.b*(0.55+0.25*Math.sin(ts*.001+s.x));
-    ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(s.x,s.y,s.r,0,Math.PI*2); ctx.fill();
+// Lazy-build the cinematic camera shot list once the galaxy is generated.
+// Each shot is a {x0,y0,s0,x1,y1,s1} that linearly interpolates the camera
+// position + zoom over `_INTRO_SHOT_MS` ms. Shots loop until the player
+// dismisses the cutscene.
+//
+// Shot menu (matches the user's spec):
+//   1. Pan across an empty area at full zoom-in (parallax stars only)
+//   2-6. Diagonal pans across ringed / mooned / urban / resort / storm planets
+//        at full zoom-in
+//   7-9. Three different stars at zoom levels showing or not showing planets
+//   10.  Nebula starting full zoom, slowly zooming out
+//   11.  Black hole starting fully zoomed out, slowly zooming in
+function _buildIntroShots(){
+  if(!galaxy) return [];
+  const shots=[];
+  const _maxSc=typeof MAX_SC!=='undefined'?MAX_SC:1.7;
+  const _minSc=typeof MIN_SC!=='undefined'?MIN_SC:0.014;
+  // ── Empty starfield: long diagonal drift at full zoom so the parallax
+  // depths visibly separate over the 5-second shot. The pan amount is
+  // sized to ~half the viewport width in world units so foreground
+  // parallax stars (depth ~0.38) trace ~half a screen worth of motion
+  // while background stars stay nearly fixed.
+  {
+    const _cands=[];
+    for(let _t=0; _t<60; _t++){
+      const _tx=rand(-WORLD_W*0.8, WORLD_W*0.8);
+      const _ty=rand(-WORLD_H*0.8, WORLD_H*0.8);
+      let _nearest=Infinity;
+      for(const _s of galaxy.stars){
+        const _d2=(_tx-_s.x)*(_tx-_s.x)+(_ty-_s.y)*(_ty-_s.y);
+        if(_d2<_nearest) _nearest=_d2;
+      }
+      _cands.push({x:_tx, y:_ty, d:_nearest});
+    }
+    _cands.sort((a,b)=>b.d-a.d);
+    const _ec=_cands[0];
+    // Pan ~half a viewport (in world units at MAX zoom) diagonally — big
+    // enough that the closest parallax layer slides 200+ px on screen and
+    // the depth separation reads clearly as "stars moving past us".
+    const _pan=(W/2)/_maxSc * 0.65;
+    shots.push({x0:_ec.x-_pan, y0:_ec.y-_pan*0.6, s0:_maxSc, x1:_ec.x+_pan, y1:_ec.y+_pan*0.6, s1:_maxSc});
   }
-  ctx.globalAlpha=1;
+  // ── Planet portraits: slow edge-to-edge pan ──────────────────────
+  // Per user spec: planet starts PARTIALLY on screen (its body is clipped
+  // by the viewport edge), drifts across in ONE of 8 randomly-chosen
+  // directions, and ends still FULLY on screen but tucked against the
+  // OPPOSITE edge. The 8 directions are the screen-space velocity of the
+  // planet itself (i.e. where the player WATCHES the planet slide to):
+  //   ( 0,+1) top-to-bottom            (+1, 0) left-to-right
+  //   ( 0,-1) bottom-to-top            (-1, 0) right-to-left
+  //   (+1,+1) top-left-to-bottom-right (-1,+1) top-right-to-bottom-left
+  //   (+1,-1) bottom-left-to-top-right (-1,-1) bottom-right-to-top-left
+  // Sampling without replacement so a playthrough's 5 planet shots take 5
+  // distinct directions (every replay re-rolls the assignment).
+  const _PLANET_DIRS=[
+    [ 0, 1],[ 0,-1],[ 1, 0],[-1, 0],
+    [ 1, 1],[-1, 1],[ 1,-1],[-1,-1],
+  ];
+  // Fisher–Yates shuffle a working copy.
+  const _dirPool=_PLANET_DIRS.slice();
+  for(let _i=_dirPool.length-1; _i>0; _i--){
+    const _j=Math.floor(Math.random()*(_i+1));
+    const _tmp=_dirPool[_i]; _dirPool[_i]=_dirPool[_j]; _dirPool[_j]=_tmp;
+  }
+  let _dirCursor=0;
+  const _nextDir=()=>{
+    // If we ever build more planet shots than directions, wrap around — but
+    // the cutscene only emits 5 planet shots, well under 8 directions.
+    const _d=_dirPool[_dirCursor%_dirPool.length]; _dirCursor++; return _d;
+  };
+  const _pickPlanet=(pred)=>galaxy.planets.find(p=>p&&pred(p));
+  const _planetShot=(p)=>{
+    if(!p) return null;
+    const _targetScale=Math.min(_maxSc, 130 / Math.max(1, p.radius));
+    // Viewport half-extents in world units at this zoom.
+    const _vpHwW=(W/2)/_targetScale;
+    const _vpHhW=(H/2)/_targetScale;
+    const _R=p.radius;
+    const _d=_nextDir();
+    const _dx=_d[0], _dy=_d[1];
+    // ── Planet shots store OFFSETS from the planet, not absolute world
+    // coords. updatePlanetOrbits() runs every cutscene frame to keep
+    // moons + station structures animated, which means the planet's
+    // p.x/p.y is drifting along its orbit — about 4-30 SU/sec at typical
+    // orbit radii. A 5-second shot at MAX zoom (~1.7 px/SU) translates
+    // to 30-260 px of orbital drift, which is enough to slide the
+    // planet completely off the cinematic frame if the cam coords were
+    // frozen at build-time. Storing offsets and re-anchoring on the
+    // planet's CURRENT position every frame keeps it locked in the
+    // cinematic regardless of orbital motion.
+    return {
+      pid: p.id,
+      ox0: _dx*(_vpHwW - _R*0.5), oy0: _dy*(_vpHhW - _R*0.5),
+      ox1: -_dx*(_vpHwW - _R*2),  oy1: -_dy*(_vpHhW - _R*2),
+      s0: _targetScale, s1: _targetScale,
+    };
+  };
+  const _ringP =_pickPlanet(p=>!!p.ring);
+  const _moonP =_pickPlanet(p=>p.moons&&p.moons.length>=2&&!p.ring);
+  const _urbanP=_pickPlanet(p=>p.type&&p.type.id==='urban');
+  const _resortP=_pickPlanet(p=>p.type&&p.type.id==='resort');
+  const _stormP =_pickPlanet(p=>p.type&&p.type.id==='storm');
+  for(const _p of [_ringP,_moonP,_urbanP,_resortP,_stormP]){
+    const _sh=_planetShot(_p); if(_sh) shots.push(_sh);
+  }
+  // ── Star portraits: orbit-visible zooms only.
+  //   • First star: STATIC mid-zoom pan — orbits visible the whole shot.
+  //   • Second star: ZOOM-OUT — starts close on the star body and ends
+  //     wide enough to show the entire host solar system (the host star's
+  //     outermost planet orbit comfortably fits inside the viewport).
+  {
+    const _stars=[...galaxy.stars].sort((a,b)=>a.radius-b.radius);
+    if(_stars.length>=2){
+      const _picks=[_stars[Math.floor(_stars.length*0.30)], _stars[Math.floor(_stars.length*0.75)]];
+      // Helper — find the outermost planet orbit at a given star.
+      const _maxOrbitAt=(_s)=>{
+        let _mx=0;
+        for(const _p of galaxy.planets){
+          if(_p&&_p.starId===_s.id&&!_p.isStarProxy&&_p.orbitRadius>_mx) _mx=_p.orbitRadius;
+        }
+        return _mx;
+      };
+      // Shot 1: static mid-zoom pan around the smaller star.
+      {
+        const _s=_picks[0];
+        if(_s){
+          const _scaleAt=_maxSc*0.45;
+          const _drift=240 / _scaleAt;
+          shots.push({x0:_s.x-_drift, y0:_s.y-_drift*0.4, s0:_scaleAt, x1:_s.x+_drift, y1:_s.y+_drift*0.4, s1:_scaleAt});
+        }
+      }
+      // Shot 2: ZOOM-OUT on the larger star. Start close-up on the disc,
+      // end framed so the whole solar system fits in the viewport.
+      {
+        const _s=_picks[1];
+        if(_s){
+          const _orb=Math.max(800, _maxOrbitAt(_s));
+          // End zoom: fit the system's diameter (2×outermost orbit) into
+          // ~80% of the viewport width.
+          const _wideScale=Math.max(_minSc*5, (W*0.40)/_orb);
+          // Start zoom: close on the star body — much tighter than the end.
+          // Capped at MAX_SC so it can't exceed the global max zoom.
+          const _closeScale=Math.min(_maxSc*0.95, Math.max(_wideScale*4, 110/Math.max(20,_s.radius)));
+          // Subtle drift across the system, biased so the cam ends slightly
+          // off-centre — keeps the framing dynamic without breaking the
+          // "see the whole system" beat.
+          const _driftEnd=_orb*0.10;
+          shots.push({x0:_s.x, y0:_s.y, s0:_closeScale, x1:_s.x+_driftEnd, y1:_s.y-_driftEnd*0.5, s1:_wideScale});
+        }
+      }
+    }
+  }
+  // ── Dense cluster pan: medium-zoomed-out sweep across the most
+  // densely-starred 9000×6000-ish region of the galaxy. Found by
+  // sampling random anchor points and scoring by "stars within 8000 SU".
+  {
+    let _bestAnchor=null, _bestCount=-1;
+    for(let _t=0; _t<70; _t++){
+      const _ax=rand(-WORLD_W*0.7, WORLD_W*0.7);
+      const _ay=rand(-WORLD_H*0.7, WORLD_H*0.7);
+      let _cnt=0;
+      for(const _s of galaxy.stars){
+        const _dx=_ax-_s.x, _dy=_ay-_s.y;
+        if(_dx*_dx+_dy*_dy < 8000*8000) _cnt++;
+      }
+      if(_cnt>_bestCount){ _bestCount=_cnt; _bestAnchor={x:_ax, y:_ay}; }
+    }
+    if(_bestAnchor){
+      // Mid-zoom where ~5-10 stars + their orbits fit comfortably.
+      const _denseScale=_maxSc*0.18;
+      const _pan=(W/2)/_denseScale * 0.55;
+      shots.push({x0:_bestAnchor.x-_pan, y0:_bestAnchor.y-_pan*0.5, s0:_denseScale, x1:_bestAnchor.x+_pan, y1:_bestAnchor.y+_pan*0.5, s1:_denseScale});
+    }
+  }
+  // ── Nebula zoom-out ──────────────────────────────────────────────
+  if(galaxy.nebulas && galaxy.nebulas.length){
+    const _n=galaxy.nebulas[0];
+    const _midScale=Math.min(_maxSc*0.3, (Math.min(W,GH)*0.6) / Math.max(_n.rx,_n.ry));
+    const _outScale=Math.max(_minSc*2, _midScale*0.35);
+    shots.push({x0:_n.x, y0:_n.y, s0:_midScale, x1:_n.x, y1:_n.y, s1:_outScale});
+  }
+  // ── Black hole zoom-in ───────────────────────────────────────────
+  if(galaxy.blackHoles && galaxy.blackHoles.length){
+    const _bh=galaxy.blackHoles[0];
+    const _farScale=_minSc*3;
+    const _closeScale=Math.min(_maxSc*0.7, 220 / Math.max(20,_bh.radius));
+    shots.push({x0:_bh.x, y0:_bh.y, s0:_farScale, x1:_bh.x, y1:_bh.y, s1:_closeScale});
+  }
+  // ── Fisher–Yates shuffle so each playthrough orders the shots
+  // differently. The cutscene loops, so a player who reads slowly still
+  // sees every shot at least once before the order repeats.
+  for(let _i=shots.length-1; _i>0; _i--){
+    const _j=Math.floor(Math.random()*(_i+1));
+    const _tmp=shots[_i]; shots[_i]=shots[_j]; shots[_j]=_tmp;
+  }
+  return shots;
+}
 
-  // ── panel content ────────────────────────────────────────────
-  if(_htpPanel===0) _htpPanel0(ts,elapsed);
-  else if(_htpPanel===1) _htpPanel1(ts,elapsed);
-  else if(_htpPanel===2) _htpPanel2(ts,elapsed);
+// Smooth ease (smoothstep) for camera lerp — eases in/out so the start and
+// end of each shot don't feel mechanical.
+function _introEase(t){
+  const _t=Math.max(0, Math.min(1, t));
+  return _t*_t*(3-2*_t);
+}
 
-  // ── panel dots (single panel — no dot shown) ─────────────────
-  _htpDotBounds=[];
+function drawHowToPlay(ts){
+  // Lazy-init shot list when the cutscene first runs (galaxy was just
+  // generated by startGame() — it's ready by the time we land here).
+  if(!_introShots||!_introShots.length){
+    _introShots=_buildIntroShots();
+    _introStartTs=ts;
+    _introParaStartTs=ts;
+    _introShotStartTs=ts;
+    _introShotIdx=0;
+    _introParaIdx=0;
+    // Also reset newspaper / popup / tutorial state so they can't bleed
+    // into the cutscene through drawGalaxy.
+    _newspaper=null; activePopup=null; popupState={};
+  }
+  // ── Step the cinematic camera ──────────────────────────────────
+  if(_introShots.length){
+    const _shotElapsed=ts-_introShotStartTs;
+    if(_shotElapsed>=_INTRO_SHOT_MS){
+      _introShotIdx=(_introShotIdx+1)%_introShots.length;
+      _introShotStartTs=ts;
+    }
+    const _shot=_introShots[_introShotIdx];
+    const _t=_introEase(Math.min(1, (ts-_introShotStartTs)/_INTRO_SHOT_MS));
+    // Planet shots store (ox0,oy0)→(ox1,oy1) as cam OFFSETS from the
+    // planet's live position; re-anchor on the planet every frame so
+    // the planet stays locked in the cinematic frame even as its
+    // orbital motion drifts it through world space. Non-planet shots
+    // (stars, nebulas, black holes, empty starfield, dense cluster)
+    // use absolute world coords.
+    if(_shot.pid!=null){
+      const _ap=galaxy.planets[_shot.pid];
+      if(_ap){
+        const _ox=_shot.ox0+(_shot.ox1-_shot.ox0)*_t;
+        const _oy=_shot.oy0+(_shot.oy1-_shot.oy0)*_t;
+        cam.x=_ap.x+_ox; cam.y=_ap.y+_oy;
+      }
+    } else {
+      cam.x=_shot.x0+(_shot.x1-_shot.x0)*_t;
+      cam.y=_shot.y0+(_shot.y1-_shot.y0)*_t;
+    }
+    cam.scale=_shot.s0*Math.pow(_shot.s1/_shot.s0, _t);
+    // NO clampCamera() here. The galaxy-view clamp is designed for the
+    // playable galaxy view (it includes a panel-width inset, and prevents
+    // panning past WORLD_W/H + half-viewport). For cinematic shots, that
+    // clamp can SHOVE the camera away from a planet that lives near the
+    // world edge — leaving the planet off-screen and the frame totally
+    // black. The cutscene shot offsets are pre-computed sensibly, so we
+    // let cam.x/y land wherever the shot wants.
+  } else {
+    // No galaxy fallback — paint a starfield-only bg.
+    ctx.fillStyle='#060810'; ctx.fillRect(0,0,W,H);
+  }
+  // ── Render the galaxy as cinematic background ──────────────────
+  // We deliberately AVOID drawGalaxy() here because it paints UI chrome
+  // onto the world canvas (speed bar, zoom slider, info-bar planet/star
+  // viz, [P]/[Y]/[T] hint bar, train sprites, mission tracker, etc.)
+  // which would visibly leak through the cinematic dim layer. Instead a
+  // bespoke minimal renderer handles ONLY the galaxy-content layers we
+  // care about for the cutscene: parallax stars, nebulas, star bodies,
+  // planet bodies + clouds + cityscape, black holes, dyson spheres.
+  if(galaxy){
+    // Advance planet + moon angles every frame so the cinematic isn't a
+    // frozen still life — moons orbit visibly, planet positions drift,
+    // station structures rotate. updatePlanetOrbits doesn't run from the
+    // main loop while gs==='howtoplay' (the main loop only steps the
+    // sim while gs==='galaxy' or 'fadein'), so we step it here.
+    if(typeof updatePlanetOrbits==='function'){
+      // dt ~= frame budget at 60 fps. Use a fixed slice rather than
+      // wall-clock so an idle tab doesn't fast-forward orbits when the
+      // cutscene resumes. dtG scales orbit speed; a tiny boost (1.5×)
+      // makes moon motion read more clearly within a 5-second shot
+      // without looking unnaturally fast.
+      try { updatePlanetOrbits(1.5, 1); } catch(e) { /* swallow */ }
+    }
+    _drawCutsceneBg(ts);
+    _clearTextOverlay(); // nothing in the cutscene bg writes HD text
+  } else {
+    ctx.fillStyle='#060810'; ctx.fillRect(0,0,W,H);
+  }
+  // ── Cinematic dim overlay so the narration text reads cleanly. ─
+  // Light enough that parallax stars + nebulas + planet glows still
+  // shimmer through, dark enough that 15-px Exo 2 reads cleanly.
+  ctx.fillStyle='rgba(0,0,0,0.42)';
+  ctx.fillRect(0, 0, W, H);
+  // ── Narration text (typed one word at a time) ──────────────────
+  _introRenderText(ts);
+  // ── Skip button (bottom-right) ─────────────────────────────────
+  _introRenderSkipBtn(ts);
+}
 
-  // ── NEXT / GOOD LUCK button ───────────────────────────────────
-  const isLast=false; // single panel; Next always leads to corp setup
-  const bLabel=isLast?'GOOD LUCK!':'NEXT  ▶';
-  const bw=isLast?170:140, bh=40, bx=W-bw-32, by=H-bh-28;
-  _htpBtnBounds={x:bx,y:by,w:bw,h:bh};
-  const pulse=0.6+0.4*Math.sin(ts*.003);
+// Render the current screen, typing it one CHARACTER at a time. Respects
+// embedded "\n\n" as a forced paragraph break (rendered as a blank line).
+// Once the last char lands, hold until the player clicks/presses a key.
+function _introRenderText(ts){
+  if(_introParaIdx>=_INTRO_TEXT.length) return;
+  const _full=_INTRO_TEXT[_introParaIdx];
+  const _elapsed=ts-_introParaStartTs;
+  const _charsShown=Math.min(_full.length, Math.floor(_elapsed/_INTRO_CHAR_MS)+1);
+  const _txt=_full.slice(0, _charsShown);
+  // Layout: centered block, ~640 px wide.
+  const _maxW=640;
+  const _lx=Math.round((W-_maxW)/2);
   ctx.save();
-  ctx.shadowColor=isLast?'#ffd060':'#4af'; ctx.shadowBlur=_htpBtnHover?22:14*pulse;
-  ctx.strokeStyle=_htpBtnHover?(isLast?'rgba(255,230,110,0.98)':'rgba(120,200,255,0.98)'):isLast?`rgba(255,210,80,${0.55+0.45*pulse})`:`rgba(60,160,255,${0.55+0.45*pulse})`; ctx.lineWidth=_htpBtnHover?2.5:2;
-  ctx.beginPath(); ctx.roundRect(bx,by,bw,bh,6); ctx.stroke();
-  ctx.fillStyle=_htpBtnHover?(isLast?'rgba(55,38,6,0.97)':'rgba(12,30,80,0.97)'):isLast?`rgba(40,28,4,${0.78+0.15*pulse})`:`rgba(8,22,58,${0.78+0.15*pulse})`;
-  ctx.beginPath(); ctx.roundRect(bx,by,bw,bh,6); ctx.fill();
-  ctx.shadowBlur=_htpBtnHover?10:8*pulse; ctx.font=`bold 14px Orbitron,sans-serif`; ctx.textAlign='center';
-  ctx.fillStyle=_htpBtnHover?(isLast?'#ffe8a0':'#c8eaff'):isLast?'#ffe080':'#aadcff';
-  ctx.fillText(bLabel,bx+bw/2,by+bh*.65);
+  ctx.font='15px "Exo 2",sans-serif';
+  ctx.fillStyle='rgba(232,238,250,0.97)';
+  ctx.shadowColor='rgba(0,0,0,0.85)'; ctx.shadowBlur=4;
+  ctx.textAlign='left';
+  // Build wrapped lines, respecting forced "\n" breaks for blank/paragraph
+  // separators. Greedy word-wrap inside each forced-break segment.
+  const _lines=[];
+  const _segments=_txt.split('\n');
+  for(let _si=0; _si<_segments.length; _si++){
+    const _seg=_segments[_si];
+    if(_seg===''){
+      // Empty line — explicit paragraph spacer.
+      _lines.push('');
+      continue;
+    }
+    let _cur='';
+    for(const _w of _seg.split(' ')){
+      const _trial=_cur?(_cur+' '+_w):_w;
+      if(ctx.measureText(_trial).width<=_maxW) _cur=_trial;
+      else { if(_cur) _lines.push(_cur); _cur=_w; }
+    }
+    if(_cur) _lines.push(_cur);
+  }
+  // Vertical centering — measure once, then paint top-down.
+  const _lh=22;
+  const _totalH=Math.max(_lh, _lines.length*_lh);
+  let _y=Math.round((H-_totalH)/2)+15;
+  // Track where the last non-empty line is rendered (for caret placement).
+  let _lastY=_y, _lastLine='';
+  for(const _ln of _lines){
+    if(_ln){ ctx.fillText(_ln, _lx, _y); _lastY=_y; _lastLine=_ln; }
+    _y+=_lh;
+  }
+  // Blinking caret while typing (cosmetic) — hides once paragraph done.
+  const _typingDone=_charsShown>=_full.length;
+  if(!_typingDone){
+    const _caretX=_lx+ctx.measureText(_lastLine).width+3;
+    ctx.fillStyle=`rgba(180,220,255,${0.4+0.5*Math.sin(ts*0.012)})`;
+    ctx.fillRect(_caretX, _lastY-14, 2, 16);
+  } else {
+    // "Press any key for next" hint, pulsing. (Wording adapts on the last
+    // screen.) Mouse click also advances — see _introAdvance hook on the
+    // canvas mousedown handler.
+    const _hintAlpha=0.45+0.35*Math.sin(ts*0.004);
+    ctx.font='11px "Exo 2",sans-serif';
+    ctx.fillStyle=`rgba(170,200,240,${_hintAlpha})`;
+    ctx.textAlign='center';
+    const _isLast=_introParaIdx===_INTRO_TEXT.length-1;
+    ctx.fillText(_isLast?'PRESS ANY KEY OR CLICK TO BEGIN':'PRESS ANY KEY OR CLICK FOR NEXT', W/2, Math.min(H-60, _y+10));
+  }
   ctx.restore();
+}
 
-  // ── ESC skip hint ─────────────────────────────────────────────
-  ctx.font='11px "Exo 2",sans-serif'; ctx.textAlign='left';
-  ctx.fillStyle=_htpSkipHover?'rgba(180,210,255,0.90)':'rgba(120,150,190,0.55)';
-  _htpSkipBounds={x:28,y:H-52,w:120,h:28};
-  ctx.fillText('ESC — main menu',32,H-36);
+function _introRenderSkipBtn(ts){
+  const _bw=110, _bh=28, _bx=W-_bw-22, _by=H-_bh-18;
+  _introSkipBtnBounds={x:_bx, y:_by, w:_bw, h:_bh};
+  ctx.save();
+  ctx.fillStyle=_introSkipBtnHover?'rgba(30,50,90,0.95)':'rgba(15,25,55,0.85)';
+  ctx.beginPath(); ctx.roundRect(_bx, _by, _bw, _bh, 4); ctx.fill();
+  ctx.strokeStyle=_introSkipBtnHover?'rgba(160,200,255,0.95)':'rgba(80,130,200,0.55)';
+  ctx.lineWidth=_introSkipBtnHover?1.4:1;
+  ctx.beginPath(); ctx.roundRect(_bx, _by, _bw, _bh, 4); ctx.stroke();
+  ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle=_introSkipBtnHover?'rgba(225,240,255,0.99)':'rgba(170,200,235,0.92)';
+  ctx.fillText('SKIP  ▶▶', _bx+_bw/2, _by+18);
+  ctx.restore();
+  // Legacy globals kept null so the old click handlers no-op cleanly.
+  _htpBtnBounds=null; _htpSkipBounds=null; _htpDotBounds=[];
+}
+
+// Try to advance the cutscene (called on click anywhere outside the skip
+// button, or on any keypress). If the current screen is still typing,
+// snap-finish it; if it's typed-out, advance to the next screen; if we're
+// on the last screen, exit to corpsetup.
+//
+// Caller passes a `ts` from performance.now() so this function can compute
+// its own elapsed-time math without depending on rAF-loop closures (the
+// canvas mousedown handler doesn't have the rAF `ts` in scope).
+function _introAdvance(ts){
+  if(_introParaIdx>=_INTRO_TEXT.length){ _introToCorpSetup(); return; }
+  const _full=_INTRO_TEXT[_introParaIdx];
+  const _elapsed=ts-_introParaStartTs;
+  const _charsShown=Math.min(_full.length, Math.floor(_elapsed/_INTRO_CHAR_MS)+1);
+  const _typingDone=_charsShown>=_full.length;
+  if(!_typingDone){
+    // Snap-finish the typing animation by backdating the screen start.
+    _introParaStartTs=ts - _full.length*_INTRO_CHAR_MS;
+    return;
+  }
+  // Linger guard so a flash-screen isn't dismissed before the player can read.
+  if(_elapsed<_INTRO_PARA_MIN_LINGER_MS+_full.length*_INTRO_CHAR_MS) return;
+  _introParaIdx++;
+  _introParaStartTs=ts;
+  if(_introParaIdx>=_INTRO_TEXT.length){ _introToCorpSetup(); }
+}
+
+// Minimal galaxy renderer for the intro cutscene. Draws the same layers
+// drawGalaxy does for the galaxy *content* (background, parallax stars,
+// nebulas, star bodies + glows, planet bodies + clouds + cityscape +
+// rings, black holes, dyson spheres), then stops — no train sprites,
+// route lines, info bar, top bar, hint bar, speed indicator, panel
+// tabs, etc. The result is a clean cinematic frame with no UI bleed.
+function _drawCutsceneBg(ts){
+  // Background gradient (mirrors drawGalaxy's bg fill).
+  ctx.fillStyle='#060810';
+  ctx.fillRect(0,0,W,H);
+  // Nebula bg sheet — adds soft colour gradients behind everything.
+  if(typeof _drawNebulaBackground==='function') _drawNebulaBackground();
+  // Parallax stars — same math drawGalaxy uses.
+  {
+    const _zt=Math.max(0,Math.min(1,(Math.log(cam.scale)-Math.log(MIN_SC))/(Math.log(MAX_SC)-Math.log(MIN_SC))));
+    const drawCount=Math.round(80+620*Math.pow(1-_zt,0.65));
+    const sizeScale=0.38+_zt*0.62;
+    for(let i=0;i<Math.min(drawCount,gStars.length);i++){
+      const s=gStars[i];
+      const px2=((s.bx-starPan.x*s.depth)%W+W)%W;
+      const py2=((s.by-starPan.y*s.depth)%H+H)%H;
+      ctx.globalAlpha=s.b*(.55+.45*Math.sin(ts*.0008+s.bx*.1));
+      ctx.fillStyle='#fff';
+      ctx.beginPath(); ctx.arc(px2,py2,s.r*sizeScale,0,Math.PI*2); ctx.fill();
+    }
+    ctx.globalAlpha=1;
+  }
+  // Galaxy-content draws clipped to the full viewport (no UI strips).
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0,0,W,H); ctx.clip();
+  // Nebulas (in-world labels suppressed — handled in the names pass which we skip).
+  if(typeof _drawNebulas==='function') _drawNebulas();
+  // Stars.
+  for(const s of galaxy.stars){
+    const [sx,sy]=w2s(s.x,s.y);
+    const sr=s.radius*cam.scale;
+    const glowR=Math.max(sr*2.8,8);
+    if(sx+glowR<0||sx-glowR>W||sy+glowR<0||sy-glowR>H) continue;
+    drawStar(sx,sy,sr,s.color,!!s.hasDysonSphere);
+    if(sr>5){
+      ctx.save();
+      const fs=Math.min(13,Math.max(10,sr*.14+9));
+      ctx.font=fs+'px "Exo 2",sans-serif'; ctx.textAlign='center';
+      ctx.fillStyle='rgba(255,230,150,0.85)';
+      ctx.fillText(s.name,sx,sy+sr+14);
+      ctx.restore();
+    }
+  }
+  // Black holes.
+  for(const _bh of (galaxy.blackHoles||[])){
+    const [_bhsx,_bhsy]=w2s(_bh.x,_bh.y);
+    const _bhsr=_bh.radius*cam.scale;
+    const _bhGlowR=_bhsr*4.2;
+    if(!(_bhsx+_bhGlowR<0||_bhsx-_bhGlowR>W||_bhsy+_bhGlowR<0||_bhsy-_bhGlowR>H)){
+      drawBlackHole(_bhsx,_bhsy,_bhsr,ts);
+    }
+  }
+  // Planets.
+  for(const p of galaxy.planets){
+    const [sx,sy]=w2s(p.x,p.y), sr=p.radius*cam.scale;
+    const _glowR=Math.max(sr*4.5,9);
+    if(sx+_glowR<-20||sx-_glowR>W+20||sy+_glowR<-20||sy-_glowR>H+20) continue;
+    // Back-half moons (drawn before planet so they sit behind).
+    if(p.moons&&p.moons.length){
+      ctx.save();
+      for(const m of p.moons){
+        const mr=m.r*cam.scale; if(mr<0.4) continue;
+        const pos=getMoonScreenPos(sx,sy,m,cam.scale);
+        if(!pos.behind) continue;
+        const sinA=Math.abs(Math.sin(m.angle));
+        ctx.globalAlpha=Math.min(1,sinA/0.18);
+        drawMoon(pos.mx,pos.my,mr,m.pocks);
+      }
+      ctx.restore();
+    }
+    // Ring (drawn behind planet body for back-half).
+    const _bras=p.ring&&p.hasStation;
+    if(_bras) drawPlanetRing(sx,sy,sr,p.ring,false);
+    // Planet body.
+    drawPlanet(sx,sy,sr,p.type,p.ring,4.5,undefined,undefined,_bras,p.flowerPositions||null);
+    if(p.type.id==='urban'&&sr>2) drawCityscape(sx,sy,sr);
+    else if(p.type.id==='ancient'&&sr>2) drawAncientRuins(sx,sy,sr);
+    if(p.clouds&&sr>8) drawPlanetClouds(sx,sy,sr,p);
+    if(_bras) drawPlanetRing(sx,sy,sr,p.ring,true);
+    // Front-half moons (drawn after planet so they sit in front).
+    if(p.moons&&p.moons.length){
+      ctx.save();
+      for(const m of p.moons){
+        const mr=m.r*cam.scale; if(mr<0.4) continue;
+        const pos=getMoonScreenPos(sx,sy,m,cam.scale);
+        if(pos.behind) continue;
+        const sinA=Math.abs(Math.sin(m.angle));
+        ctx.globalAlpha=Math.min(1,sinA/0.18);
+        drawMoon(pos.mx,pos.my,mr,m.pocks);
+      }
+      ctx.restore();
+    }
+    // Planet name label (zoomed-in enough to be readable).
+    if(sr>13){
+      ctx.save();
+      const fs=Math.min(14,Math.max(10,sr*.38));
+      ctx.font=fs+'px "Exo 2",sans-serif'; ctx.textAlign='center';
+      ctx.textBaseline='top';
+      ctx.fillStyle='rgba(170,205,255,0.8)';
+      ctx.fillText(p.name,sx,sy+sr+5);
+      ctx.restore();
+    }
+  }
+  // Nebula name labels (so the nebula shot has the nebula's name show).
+  if(typeof _drawNebulaNames==='function') _drawNebulaNames();
+  ctx.restore();
+}
+
+function _introToCorpSetup(){
+  gs='corpsetup';
+  corpName=_genRandomCorpName(); _csCeoOptions=_genStartingCeos(); _csSelectedCeo=0; _csAutoEdit=true; _aiSelectSeen=false;
+  // Reset cutscene state so a future replay (LOAD GAME → fresh intro) starts clean.
+  _introShots=null; _introParaIdx=0; _introShotIdx=0;
 }
 
 function _htpBg(ts){
@@ -24232,12 +24742,13 @@ canvas.addEventListener('mousemove',e=>{
     canvas.style.cursor=(_startBtnHover||_loadBtnHover)?'pointer':'default';
   } else { _startBtnHover=false; _loadBtnHover=false; }
   if(gs==='howtoplay'){
-    _htpBtnHover=!!(_htpBtnBounds&&cp.x>=_htpBtnBounds.x&&cp.x<=_htpBtnBounds.x+_htpBtnBounds.w&&cp.y>=_htpBtnBounds.y&&cp.y<=_htpBtnBounds.y+_htpBtnBounds.h);
-    _htpSkipHover=!!(_htpSkipBounds&&cp.x>=_htpSkipBounds.x&&cp.x<=_htpSkipBounds.x+_htpSkipBounds.w&&cp.y>=_htpSkipBounds.y&&cp.y<=_htpSkipBounds.y+_htpSkipBounds.h);
-    _htpDotHover=-1;
-    if(_htpDotBounds){for(let _di=0;_di<_htpDotBounds.length;_di++){const _db=_htpDotBounds[_di];if(Math.hypot(cp.x-_db.x,cp.y-_db.y)<=_db.r){_htpDotHover=_di;break;}}}
-    canvas.style.cursor=(_htpBtnHover||_htpSkipHover||_htpDotHover>=0)?'pointer':'default';
-  } else { _htpBtnHover=false; _htpSkipHover=false; _htpDotHover=-1; }
+    // Intro cutscene hover: only the new SKIP button has a hover state.
+    // Legacy htp/dot hovers are kept at default values so other code
+    // paths that read them don't see undefined.
+    _introSkipBtnHover=!!(_introSkipBtnBounds&&cp.x>=_introSkipBtnBounds.x&&cp.x<=_introSkipBtnBounds.x+_introSkipBtnBounds.w&&cp.y>=_introSkipBtnBounds.y&&cp.y<=_introSkipBtnBounds.y+_introSkipBtnBounds.h);
+    _htpBtnHover=false; _htpSkipHover=false; _htpDotHover=-1;
+    canvas.style.cursor=_introSkipBtnHover?'pointer':'default';
+  } else { _htpBtnHover=false; _htpSkipHover=false; _htpDotHover=-1; _introSkipBtnHover=false; }
   // Hover tracking for corpsetup screen
   if(gs==='corpsetup'){
     _csNameHover=!!(_csNameBounds&&cp.x>=_csNameBounds.x&&cp.x<=_csNameBounds.x+_csNameBounds.w&&cp.y>=_csNameBounds.y&&cp.y<=_csNameBounds.y+_csNameBounds.h);
@@ -24398,15 +24909,19 @@ canvas.addEventListener('mouseup',e=>{
     const lb=loadBtnBounds;
     if(lb&&cp.x>=lb.x&&cp.x<=lb.x+lb.w&&cp.y>=lb.y&&cp.y<=lb.y+lb.h) loadGame();
   } else if(gs==='howtoplay'){
-    const b=_htpBtnBounds;
-    if(b&&cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
-      gs='corpsetup'; corpName=_genRandomCorpName(); _csCeoOptions=_genStartingCeos(); _csSelectedCeo=0; _csAutoEdit=true; _aiSelectSeen=false;
+    // Intro cutscene clicks (mouse-click is treated as "press any key"):
+    //   • SKIP button → jump straight to corpsetup
+    //   • Anywhere else → advance the typed paragraph (or snap-finish typing,
+    //     or move to the next paragraph if typing is already complete)
+    // performance.now() (not the outer `ts`, which isn't in scope inside the
+    // mouseup handler) keeps the timing math consistent with the rAF clock.
+    const sb=_introSkipBtnBounds;
+    if(sb&&cp.x>=sb.x&&cp.x<=sb.x+sb.w&&cp.y>=sb.y&&cp.y<=sb.y+sb.h){
+      _introToCorpSetup();
+      return;
     }
-    const sb=_htpSkipBounds;
-    if(sb&&cp.x>=sb.x&&cp.x<=sb.x+sb.w&&cp.y>=sb.y&&cp.y<=sb.y+sb.h){ gs='title'; }
-    for(const d of _htpDotBounds){
-      if(Math.hypot(cp.x-d.x,cp.y-d.y)<=d.r){ _htpPanel=d.panel; _htpPanelTs=ts; break; }
-    }
+    _introAdvance(performance.now());
+    return;
   } else if(gs==='corpsetup'){
     if(_csNameBounds&&cp.x>=_csNameBounds.x&&cp.x<=_csNameBounds.x+_csNameBounds.w&&cp.y>=_csNameBounds.y&&cp.y<=_csNameBounds.y+_csNameBounds.h){
       startEdit(corpName,v=>{corpName=v.trim()||corpName;},_csNameBounds.x,_csNameBounds.y,_csNameBounds.w,_csNameBounds.h,'rgba(130,185,255,0.97)',48,20,'center','"Exo 2",sans-serif');
@@ -26006,10 +26521,14 @@ document.addEventListener('keydown',e=>{
     return;
   }
   if(gs==='howtoplay'){
-    if(e.key==='Escape'){ gs='title'; return; }
-    if(e.key==='ArrowRight'||e.key===' '){
-      gs='corpsetup'; corpName=_genRandomCorpName(); _csCeoOptions=_genStartingCeos(); _csSelectedCeo=0; _csAutoEdit=true; _aiSelectSeen=false; return;
-    }
+    // Intro cutscene keys:
+    //   • Escape → SKIP straight to corpsetup (no point exposing the player
+    //     to the title screen mid-cutscene; the SKIP button label sets the
+    //     expectation that ESC behaves the same)
+    //   • Any other key → advance paragraph (or snap-finish typing)
+    if(e.key==='Escape'){ _introToCorpSetup(); return; }
+    _introAdvance(typeof performance!=='undefined'?performance.now():Date.now());
+    return;
   }
   if(gs==='corpsetup'){
     if(e.key==='Enter'){ _doStartGame(); return; }
