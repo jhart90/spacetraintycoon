@@ -1324,6 +1324,9 @@ function _stationBuildCost(){
   if(_stationCostDiscount>0) cost=Math.round(cost*(1-_stationCostDiscount));
   return cost;
 }
+// Flat 1,000,000 cr fixed price for the Dyson Sphere star upgrade. No
+// discounts apply — purely a money-sink late-game flex purchase.
+const DYSON_SPHERE_COST = 1000000;
 function _upgradeBuildCost(u){
   let cost=u.cost;
   if(_corp?.primaryPerk?.cat==='upg_cost_red') cost=Math.round(cost*(1-_corp.primaryPerk.val/100));
@@ -9088,7 +9091,7 @@ function getMoonScreenPos(sx,sy,m,scale){
   };
 }
 
-function drawStar(cx,cy,r,color){
+function drawStar(cx,cy,r,color,hasDyson){
   // Wide corona glow
   const glowR=Math.max(r*2.8,8);
   const glow=ctx.createRadialGradient(cx,cy,0,cx,cy,glowR);
@@ -9104,6 +9107,145 @@ function drawStar(cx,cy,r,color){
   core.addColorStop(0.45,color.core);
   core.addColorStop(1,color.edge);
   ctx.beginPath(); ctx.arc(cx,cy,pr,0,Math.PI*2); ctx.fillStyle=core; ctx.fill();
+  // Dyson sphere overlay (if constructed) — drawn after the star body so the
+  // front-facing panels appear over the star. Star light still shines through
+  // the gaps between panels because each hex is a separate fill that leaves
+  // the star pixels visible in between.
+  if(hasDyson) drawDysonSphere(cx,cy,pr);
+}
+
+// ── Dyson sphere overlay ─────────────────────────────────────
+// Renders a sphere of hexagonal solar panels around a star at (cx,cy,r).
+// Panels are distributed on a unit sphere via the Fibonacci-spiral
+// arrangement, rotated slowly around the Y-axis (animated), and drawn in
+// painter's order (back-to-front by Z) so the closer panels overlap the
+// farther ones correctly. Back panels whose 2D projection lies inside the
+// star disc are skipped (occluded by the star); back panels at the rim of
+// the sphere are kept (they peek out around the silhouette). Each panel
+// gets a per-face lighting computation — diffuse from view dot normal —
+// so panels facing the camera read brightest, panels at the silhouette
+// dim, with a small specular highlight on near-face-on panels for the
+// "reflective" look you see in the reference image.
+const _DYSON_PANEL_COUNT = 220;
+const _DYSON_PHI = Math.PI * (3 - Math.sqrt(5)); // golden angle
+function drawDysonSphere(cx, cy, r){
+  if(r < 4) return; // below this the hexagons are sub-pixel; skip
+  // Panel shell is offset just inside the train's LOW orbit
+  // (`_starOrbitR = star.radius × 1.40`) by 1.5 train-heights, so the
+  // train's inner edge clears the sphere's outer edge by exactly one
+  // train-height of empty space. Train cars are drawn at `28 × cam.scale`
+  // pixels tall in galaxy view (see drawGalaxy's `ch = Math.max(2,
+  // 28*cam.scale)`); the same value gives us the per-zoom screen-pixel
+  // height here. In contexts without a live `cam` (the star-detail popup,
+  // for instance), fall back to cam.scale = 1 so the popup still picks a
+  // sensible shrink amount relative to the popup's display radius.
+  const _camS = (typeof cam !== 'undefined' && cam) ? cam.scale : 1;
+  const _trainH = Math.max(2, 28 * _camS);
+  // 1.40r = train orbit. Subtract half a train-height (the half of the
+  // sprite that extends INWARD from the orbit line) plus a full train-
+  // height of clear gap = 1.5 train-heights total.
+  const sphereR = Math.max(r * 1.05, r * 1.40 - 1.5 * _trainH);
+  const hexR = sphereR * 0.072; // hex inscribed radius in pixels
+  // Slow Y-axis rotation. Single global animation phase keeps all visible
+  // Dyson stars rotating in lock-step (looks coherent across the galaxy).
+  const _rot = (typeof _drawTs === 'number' ? _drawTs : 0) * 0.00006;
+  const _cR = Math.cos(_rot), _sR = Math.sin(_rot);
+  // Build panel list with rotation applied. Reused arrays would avoid GC
+  // but with 220 entries this is sub-ms per star.
+  const panels = [];
+  for(let i = 0; i < _DYSON_PANEL_COUNT; i++){
+    const y0 = 1 - (i / (_DYSON_PANEL_COUNT - 1)) * 2;
+    const rd = Math.sqrt(Math.max(0, 1 - y0*y0));
+    const theta = _DYSON_PHI * i;
+    let px = Math.cos(theta) * rd;
+    let pz = Math.sin(theta) * rd;
+    const py = y0;
+    // Rotate around Y axis: (x,z) → (x·cosR + z·sinR, -x·sinR + z·cosR)
+    const nrx = px*_cR + pz*_sR;
+    const nrz = -px*_sR + pz*_cR;
+    panels.push({nx: nrx, ny: py, nz: nrz});
+  }
+  // Painter sort: smallest z first → drawn first → ends up behind larger-z
+  panels.sort((a,b) => a.nz - b.nz);
+  // Single per-panel render helper — used twice below (back panels under a
+  // clip, front panels without). Keeps geometry + lighting identical.
+  const _renderPanel = (p) => {
+    const nx = p.nx, ny = p.ny, nz = p.nz;
+    // Build a tangent basis at the panel center. Use world-up (0,1,0)
+    // unless we're near the pole, where (1,0,0) is used to avoid a
+    // degenerate cross product.
+    let ux = 0, uy = 1, uz = 0;
+    if(Math.abs(ny) > 0.96){ ux = 1; uy = 0; uz = 0; }
+    const upDotN = ux*nx + uy*ny + uz*nz;
+    let tx = ux - upDotN*nx, ty = uy - upDotN*ny, tz = uz - upDotN*nz;
+    const tLen = Math.sqrt(tx*tx + ty*ty + tz*tz) || 1;
+    tx /= tLen; ty /= tLen; tz /= tLen;
+    // Bitangent = normal × tangent (we don't need bz)
+    const bx = ny*tz - nz*ty;
+    const by = nz*tx - nx*tz;
+    // Project six hex vertices to 2D. Each vertex sits in the panel's
+    // tangent plane at offset (cos·t + sin·b) · hexR from the panel center
+    // (which itself is at (nx,ny,nz)·sphereR).
+    const cxn = nx * sphereR, cyn = ny * sphereR;
+    const px2 = new Array(6), py2 = new Array(6);
+    for(let v = 0; v < 6; v++){
+      const ang = v * (Math.PI / 3);
+      const ca = Math.cos(ang) * hexR;
+      const sa = Math.sin(ang) * hexR;
+      px2[v] = cx + cxn + ca*tx + sa*bx;
+      py2[v] = cy + cyn + ca*ty + sa*by;
+    }
+    // Lighting: view direction is +Z (toward camera). Diffuse ≈ N·V = nz.
+    const diffuse = Math.max(0, nz);
+    const _bright = nz > 0 ? (0.32 + 0.55 * diffuse) : (0.20 + 0.20 * (1 + nz));
+    const ri = Math.round(58 + 110 * _bright);
+    const gi = Math.round(78 + 110 * _bright);
+    const bi = Math.round(108 + 105 * _bright);
+    ctx.beginPath();
+    ctx.moveTo(px2[0], py2[0]);
+    for(let v = 1; v < 6; v++) ctx.lineTo(px2[v], py2[v]);
+    ctx.closePath();
+    ctx.fillStyle = `rgba(${ri},${gi},${bi},0.93)`;
+    ctx.fill();
+    ctx.strokeStyle = `rgba(225,235,255,${0.5 * _bright + 0.18})`;
+    ctx.lineWidth = Math.max(0.5, hexR * 0.09);
+    ctx.stroke();
+    if(diffuse > 0.86){
+      const sp = (diffuse - 0.86) / 0.14;
+      ctx.fillStyle = `rgba(255,255,255,${0.42 * sp})`;
+      ctx.fill();
+    }
+  };
+  // ── Back panels: clipped to "outside the star disc" ────────────────
+  // The clip uses the even-odd fill rule against a bounding rect + the
+  // star disc — pixels INSIDE the rect but OUTSIDE the disc end up inside
+  // the clip region. That way a back-half panel near the silhouette draws
+  // only the slice that lies past the star's edge, while the half that
+  // would be behind the star is clipped to invisible. As the sphere
+  // rotates, panels SLIDE smoothly out from behind the star at the left
+  // limb and BACK behind it at the right limb, instead of popping in/out
+  // as discrete sprites the way a hard cull does.
+  const _starClipR = Math.max(r, 1.5);
+  const _rectPad = sphereR + hexR + 8;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(cx - _rectPad, cy - _rectPad, _rectPad*2, _rectPad*2);
+  ctx.arc(cx, cy, _starClipR, 0, Math.PI*2);
+  ctx.clip('evenodd');
+  ctx.lineJoin = 'miter';
+  for(let i = 0; i < panels.length; i++){
+    if(panels[i].nz >= 0) continue;
+    _renderPanel(panels[i]);
+  }
+  ctx.restore();
+  // ── Front panels: unclipped, drawn over the star body ──────────────
+  ctx.save();
+  ctx.lineJoin = 'miter';
+  for(let i = 0; i < panels.length; i++){
+    if(panels[i].nz < 0) continue;
+    _renderPanel(panels[i]);
+  }
+  ctx.restore();
 }
 
 
@@ -10209,7 +10351,9 @@ function drawTrainsPanel(){
   // region so any earlier-drawn world text (planet labels, etc.) doesn't
   // appear ON TOP of the panel chrome.
   _clearTextOverlayRect(px, TOP_H, PANEL_W, GH-TOP_H);
-  ctx.fillStyle='rgba(4,8,20,0.90)'; ctx.fillRect(px,TOP_H,PANEL_W,GH-TOP_H);
+  // Fully opaque so the galaxy-content clip can safely exclude this entire
+  // strip — see drawGalaxy's `ctx.rect(0,TOP_H,W-PANEL_W,GH-TOP_H)` clip.
+  ctx.fillStyle='rgb(4,8,20)'; ctx.fillRect(px,TOP_H,PANEL_W,GH-TOP_H);
   if(showTrains&&(assignPending||routeHerePending)){
     ctx.strokeStyle='rgba(120,200,255,0.85)'; ctx.lineWidth=2;
     ctx.strokeRect(px+1,TOP_H+1,PANEL_W-2,GH-TOP_H-2);
@@ -12638,9 +12782,45 @@ function drawFog(){
       sc.fillStyle=g; sc.beginPath(); sc.arc(100,100,100,0,Math.PI*2); sc.fill();
     }
     const dia=sr*2.4, margin=dia/2;
-    for(const {wx,wy} of fogPoints){
+    // ── Zoom-aware bucketing ────────────────────────────────────────
+    // At low zoom each stamp covers a large fraction of the viewport.
+    // With ~14k fog points in a late-game save, the old per-point loop
+    // produced ~3 GB worth of destination-out alpha-blend pixel ops per
+    // frame (most stamps overlapping by 99%) and pushed drawFog to ~4 s
+    // per call between cam.scale ≈ 0.02 and 0.07 — the zoom band a
+    // player passes through every time they hold the down-arrow.
+    //
+    // Bucketing collapses fog points that would produce visually
+    // identical stamps. Cell size = sr/2 screen pixels (≈ stamp radius
+    // ÷ 2), converted to world units. Adjacent stamps still overlap
+    // generously inside a cell so coverage stays continuous; we just
+    // skip the redundant ~99% of stamps that would land in already-
+    // covered cells. At cam.scale=0.02 this drops 14,000 stamps to
+    // ~120 (one per visible cell) — a ~115× reduction. Cells are also
+    // dedup-keyed via a numeric hash so the inner loop avoids string
+    // concatenation for the Set lookup. The w2s + viewport check is
+    // moved AFTER the bucket check so we skip those calls too for
+    // points landing in already-claimed cells.
+    //
+    // At higher zoom (sr large but still below the fast-path threshold)
+    // cellSize naturally bottoms out at FOG_GRID, matching the source
+    // fog-point spacing — bucketing becomes a no-op and the original
+    // behaviour is preserved exactly.
+    const _cellSizeScreen = sr * 0.5;
+    const _cellWorld = Math.max(FOG_GRID, _cellSizeScreen / cam.scale);
+    const _seen = new Set();
+    const _maxX = W-PANEL_W, _maxY = GH;
+    for(let _fi=0; _fi<fogPoints.length; _fi++){
+      const fp = fogPoints[_fi];
+      const wx = fp.wx, wy = fp.wy;
+      // Bucket key first (cheap integer hash), skip if already covered.
+      const _bx = Math.floor(wx / _cellWorld);
+      const _by = Math.floor(wy / _cellWorld);
+      const _key = (_bx * 65537) ^ _by;
+      if(_seen.has(_key)) continue;
+      _seen.add(_key);
       const [sx,sy]=w2s(wx,wy);
-      if(sx+margin<0||sx-margin>W-PANEL_W||sy+margin<0||sy-margin>GH) continue;
+      if(sx+margin<0||sx-margin>_maxX||sy+margin<0||sy-margin>_maxY) continue;
       fctx.drawImage(fogStampCanvas,sx-dia/2,sy-dia/2,dia,dia);
     }
   }
@@ -16550,7 +16730,7 @@ function drawStarRegistry(){
     ctx.fillText('#'+(i+1),px+32,ry+ROW/2+4);
     const dr=9;
     if(vis){
-      ctx.save(); drawStar(px+46,ry+ROW/2,dr,s.color); ctx.restore();
+      ctx.save(); drawStar(px+46,ry+ROW/2,dr,s.color,!!s.hasDysonSphere); ctx.restore();
     } else {
       ctx.fillStyle='rgba(10,8,4,0.9)';
       ctx.beginPath(); ctx.arc(px+46,ry+ROW/2,dr,0,Math.PI*2); ctx.fill();
@@ -17825,7 +18005,7 @@ function drawStarDetailPopup(){
   const lx=starCX+sDR+8;
   ctx.save();
   ctx.beginPath(); ctx.rect(px,py+46,pw,150); ctx.clip(); // clamp to body section
-  if(vis){ drawStar(starCX,starCY,sDR,s.color); }
+  if(vis){ drawStar(starCX,starCY,sDR,s.color,!!s.hasDysonSphere); }
   else {
     // Unvisited: subtle dark orb visible near left edge of clip
     ctx.fillStyle='rgba(8,6,2,0.92)'; ctx.beginPath(); ctx.arc(px+40,starCY,28,0,Math.PI*2); ctx.fill();
@@ -17857,6 +18037,55 @@ function drawStarDetailPopup(){
     ctx.fillText('Classification: UNKNOWN',lx,ls);
     ctx.fillText('— unvisited —',lx,ls+19);
   }
+  // ── Construct Dyson Sphere button (visible stars only) ────────
+  // Cost pill (red, 1M cr) sits directly above the button. Button is greyed
+  // when credits are short; replaced by a "CONSTRUCTED" indicator once built
+  // — same pattern as planet upgrades (cost pill → purchase button).
+  popupState.dysonBtnBounds = null;
+  if(vis){
+    const _btnW = 220, _btnH = 28;
+    const _btnX = px + pw - _btnW - 18;
+    const _btnY = py + 156;
+    const _hasDyson = !!s.hasDysonSphere;
+    if(_hasDyson){
+      ctx.fillStyle = 'rgba(40,120,200,0.22)';
+      ctx.fillRect(_btnX, _btnY, _btnW, _btnH);
+      ctx.strokeStyle = 'rgba(140,210,255,0.65)'; ctx.lineWidth = 1;
+      ctx.strokeRect(_btnX, _btnY, _btnW, _btnH);
+      ctx.font = 'bold 10px Orbitron,sans-serif'; ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(190,235,255,0.95)';
+      ctx.fillText('DYSON SPHERE CONSTRUCTED', _btnX + _btnW/2, _btnY + 18);
+    } else {
+      const _cost = DYSON_SPHERE_COST;
+      const _canAfford = credits >= _cost;
+      const _hov = !!popupState.dysonBtnHover;
+      // Red cost pill above the button — same style as planet upgrade pills.
+      const _pillW = 72, _pillH = 18;
+      const _pillX = _btnX + (_btnW - _pillW) / 2;
+      const _pillY = _btnY - _pillH - 4;
+      ctx.fillStyle = _canAfford ? 'rgba(180,40,40,0.95)' : 'rgba(85,55,55,0.85)';
+      ctx.beginPath(); ctx.roundRect(_pillX, _pillY, _pillW, _pillH, 4); ctx.fill();
+      ctx.strokeStyle = _canAfford ? 'rgba(255,120,120,0.85)' : 'rgba(140,90,90,0.6)';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.roundRect(_pillX, _pillY, _pillW, _pillH, 4); ctx.stroke();
+      ctx.font = 'bold 9px Orbitron,sans-serif'; ctx.textAlign = 'center';
+      ctx.fillStyle = _canAfford ? 'rgba(255,240,240,0.98)' : 'rgba(200,170,170,0.85)';
+      ctx.fillText('1M cr', _pillX + _pillW/2, _pillY + 13);
+      // Button
+      ctx.fillStyle = !_canAfford ? 'rgba(40,40,46,0.78)' : (_hov ? 'rgba(80,160,220,0.95)' : 'rgba(40,100,170,0.88)');
+      ctx.fillRect(_btnX, _btnY, _btnW, _btnH);
+      ctx.strokeStyle = !_canAfford ? 'rgba(80,80,90,0.45)' : (_hov ? 'rgba(160,230,255,0.95)' : 'rgba(90,170,255,0.80)');
+      ctx.lineWidth = _hov ? 1.5 : 1;
+      ctx.strokeRect(_btnX, _btnY, _btnW, _btnH);
+      ctx.font = 'bold 10px Orbitron,sans-serif'; ctx.textAlign = 'center';
+      ctx.fillStyle = !_canAfford ? 'rgba(140,140,150,0.6)' : (_hov ? '#fff' : 'rgba(220,240,255,0.95)');
+      ctx.fillText('CONSTRUCT DYSON SPHERE', _btnX + _btnW/2, _btnY + 18);
+      // Bounds only registered when affordable — non-affordable clicks no-op
+      // (same as planet UPGRADE buttons that grey-out below cost).
+      if(_canAfford) popupState.dysonBtnBounds = {x: _btnX, y: _btnY, w: _btnW, h: _btnH};
+    }
+  }
+
   // ── Divider + planets section ─────────────────────────────────
   ctx.strokeStyle='rgba(140,90,20,0.35)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(px,py+196); ctx.lineTo(px+pw,py+196); ctx.stroke();
@@ -21118,7 +21347,10 @@ function drawTopBar(){
   const S2X=S1W, S3X=S1W+S2W;
 
   // ── Background ────────────────────────────────────────────
-  ctx.fillStyle='rgba(4,8,22,0.97)';
+  // Fully opaque — the galaxy clip in drawGalaxy now excludes the strip
+  // y=0..TOP_H entirely (no galaxy pixels drawn beneath this bar), so the
+  // 0.03 alpha bleed-through the chrome used to show no longer applies.
+  ctx.fillStyle='rgb(4,8,22)';
   ctx.fillRect(0,0,barW,TOP_H);
   // Subtle top-edge shine
   const _shine=ctx.createLinearGradient(0,0,0,TOP_H);
@@ -21316,7 +21548,16 @@ function drawGalaxy(ts,dt){
     ctx.globalAlpha=1;
   }
 
-  ctx.save(); ctx.beginPath(); ctx.rect(0,0,W,GH); ctx.clip();
+  // Galaxy-content clip: only the actual viewport between the top bar and
+  // the info bar, AND to the left of the right side panel. Everything outside
+  // this rect is covered by opaque chrome (top bar / info bar / right panel)
+  // and rendering galaxy content there is pure waste — fog stamps, planet
+  // glows, route lines, train sprites, nebula tiles, etc. all bail at the
+  // clip edge before they touch a pixel that would just be overwritten by
+  // chrome anyway. Combined with the chrome backgrounds being made fully
+  // opaque (rgba alpha = 1), the GPU never blends a galaxy pixel against a
+  // chrome pixel.
+  ctx.save(); ctx.beginPath(); ctx.rect(0,TOP_H,W-PANEL_W,GH-TOP_H); ctx.clip();
 
   // Nebulas — drawn after parallax background stars but before everything
   // else in world coords (in-galaxy stars, orbits, planets, trains, etc.)
@@ -21332,7 +21573,7 @@ function drawGalaxy(ts,dt){
     const sr=s.radius*cam.scale;
     const glowR=Math.max(sr*2.8,8);
     if(sx+glowR<0||sx-glowR>W||sy+glowR<0||sy-glowR>GH) continue;
-    drawStar(sx,sy,sr,s.color);
+    drawStar(sx,sy,sr,s.color,!!s.hasDysonSphere);
     // High orbit ring (HazMat disposal zone)
     const _horR=sr*1.6;
     if(_horR>4){
@@ -22043,16 +22284,20 @@ function drawGalaxy(ts,dt){
   });
   }
 
-  // ── trains panel ─────────────────────────────────────────────
-  drawTrainsPanel();
+  ctx.restore(); // end galaxy-viewport clip
 
-  ctx.restore(); // end GH clip
+  // ── trains panel ─────────────────────────────────────────────
+  // Drawn AFTER the galaxy clip restore so its draws aren't restricted by
+  // the viewport-only clip set above. The panel sits at (W-PANEL_W..W,
+  // TOP_H..GH) — entirely outside that clip — so it has to render with no
+  // outer clip active.
+  drawTrainsPanel();
 
   // ── info bar ─────────────────────────────────────────────────
   // Wipe any earlier-drawn world text from the overlay over the info-bar
   // strip so it can't bleed onto the corp name / planet name display.
   _clearTextOverlayRect(0, GH, W, BAR_H);
-  ctx.fillStyle='rgba(6,10,26,0.93)'; ctx.fillRect(0,GH,W,BAR_H);
+  ctx.fillStyle='rgb(6,10,26)'; ctx.fillRect(0,GH,W,BAR_H);
   ctx.strokeStyle='rgba(50,100,200,0.4)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(0,GH); ctx.lineTo(W,GH); ctx.stroke();
 
@@ -22224,7 +22469,7 @@ function drawGalaxy(ts,dt){
     ctx.save();
     ctx.beginPath(); ctx.rect(0,GH,W-PANEL_W,BAR_H); ctx.clip();
     if(_ibSVis){
-      drawStar(0,GH+BAR_H/2,sDR,s.color);
+      drawStar(0,GH+BAR_H/2,sDR,s.color,!!s.hasDysonSphere);
     } else {
       ctx.fillStyle='rgba(4,6,16,0.97)';
       ctx.beginPath(); ctx.arc(0,GH+BAR_H/2,sDR,0,Math.PI*2); ctx.fill();
@@ -23758,14 +24003,17 @@ canvas.addEventListener('mousemove',e=>{
     popupState.buildStationOverlayHover=!!(_bsob&&cp.x>=_bsob.x&&cp.x<=_bsob.x+_bsob.w&&cp.y>=_bsob.y&&cp.y<=_bsob.y+_bsob.h);
     if(_ptHov||popupState.orbitStarLinkHover||popupState.namePencilHover||popupState.buildStationOverlayHover) canvas.style.cursor='pointer';
   } else { if(popupState) { popupState.hovTabKey=null; popupState.orbitStarLinkHover=false; popupState.buildStationOverlayHover=false; } }
-  // Hover tracking for star detail popup — name/pencil, planet thumbs
+  // Hover tracking for star detail popup — name/pencil, planet thumbs,
+  // Construct Dyson Sphere button.
   if(activePopup==='star'){
     const _snb=popupState.nameEditBounds, _spb=popupState.pencilBounds;
     popupState.namePencilHover=!!( (_snb&&cp.x>=_snb.x&&cp.x<=_snb.x+_snb.w&&cp.y>=_snb.y&&cp.y<=_snb.y+_snb.h)||(_spb&&cp.x>=_spb.x&&cp.x<=_spb.x+_spb.w&&cp.y>=_spb.y&&cp.y<=_spb.y+_spb.h) );
     let _sdpH=-1;
     if(popupState.starDetailPlanetBounds){for(let _si=0;_si<popupState.starDetailPlanetBounds.length;_si++){const _sb=popupState.starDetailPlanetBounds[_si];if(cp.x>=_sb.x&&cp.x<=_sb.x+_sb.w&&cp.y>=_sb.y&&cp.y<=_sb.y+_sb.h){_sdpH=_si;break;}}}
     popupState.starDetailPlanetHover=_sdpH;
-    if(popupState.namePencilHover||_sdpH>=0) canvas.style.cursor='pointer';
+    const _dyb=popupState.dysonBtnBounds;
+    popupState.dysonBtnHover=!!(_dyb&&cp.x>=_dyb.x&&cp.x<=_dyb.x+_dyb.w&&cp.y>=_dyb.y&&cp.y<=_dyb.y+_dyb.h);
+    if(popupState.namePencilHover||_sdpH>=0||popupState.dysonBtnHover) canvas.style.cursor='pointer';
   }
   // Hover tracking for trains popup rows + add button
   if(activePopup==='trains'){
@@ -25040,6 +25288,25 @@ canvas.addEventListener('mouseup',e=>{
           const s=popupState.star;
           const eb=popupState.nameEditBounds;
           if(s&&eb) startEdit(s.name,v=>{ s.name=v; },eb.x,eb.y,eb.w,eb.h,'#ffc060');
+          return;
+        }
+      }
+      // Star detail Construct Dyson Sphere button → deduct 1M cr + mark
+      // the star as having a Dyson sphere. Bounds are only registered by
+      // the renderer when the player can afford it, so the affordability
+      // check here is belt-and-suspenders.
+      if(activePopup==='star'&&popupState.dysonBtnBounds){
+        const b=popupState.dysonBtnBounds;
+        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+          const s=popupState.star;
+          if(s&&!s.hasDysonSphere&&credits>=DYSON_SPHERE_COST){
+            credits-=DYSON_SPHERE_COST; creditDelta-=DYSON_SPHERE_COST;
+            spawnCreditFloatScreen(b.x+b.w/2,b.y,-DYSON_SPHERE_COST);
+            purchaseLedger.push({sd:stardate,amount:DYSON_SPHERE_COST,type:'dyson_sphere',starName:s.name});
+            s.hasDysonSphere=true;
+            _chatMsg(s.name+': DYSON SPHERE CONSTRUCTED','rgba(120,200,255,1)');
+            playSound('purchase');
+          }
           return;
         }
       }
