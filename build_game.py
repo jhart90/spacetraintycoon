@@ -1364,9 +1364,9 @@ let _introSkipBtnHover=false;
 // six times. Triple-spaces and "the the" are preserved verbatim per the
 // source script the user provided.
 const _INTRO_TEXT=[
-  "Stardate 829.\n\n30 STARDATES have passed since the catastrophic implosion of the Dutch East Earth Interstellar Trading Company (DEEITC), the once-dominant commercial power whose vast network of trade routes, orbital infrastructure, and wormhole technology bound 1,000s of planets together into a single galactic economy. In the aftermath, entire star systems were cut off from one another, industries collapsed, and countless worlds have endured decades of economic isolation.",
-  "Now, a new age of opportunity has begun.\n\nAcross the galaxy, ambitious CORPORATIONs are racing to fill the void left behind. As the newly appointed CEO of one such enterprise, your mission is to reconnect the stars through the growing network of Space Trains—establishing profitable trade routes, transporting vital cargo from worlds of abundance to worlds in need, and rebuilding the foundations of interstellar civilization one star system at a time.",
-  "But commerce alone is not enough. Hidden among the ruins of DEEITC's fallen empire lie the components and knowledge required to reconstruct the legendary WORMHOLE APPARATUS — a colossal device capable of bending space itself. Whichever Corporation is able to restore this ancient technology first will unlock the access to the multi-verse, and the secrets that powered both DEEITC's unparalleled influence over galactic trade, as well as its catastrophic demise...\n\nThe race has begun. The stars await.",
+  "STARDATE 829.\n\nThirty Stardates have passed since the catastrophic implosion of the Dutch East Earth Interstellar Trading Company (DEEITC), the once-dominant commercial power whose vast network of trade routes, orbital infrastructure, and wormhole technology bound 1,000s of planets together into a single galactic economy.\n\nIn the aftermath, entire star systems were cut off from one another, industries collapsed, and countless worlds have endured decades of economic isolation.",
+  "Now, a new age of opportunity has begun.\n\nAcross the galaxy, ambitious CORPORATIONs are racing to fill the void left behind. As the newly appointed CEO of one such enterprise, your mission is to reconnect the stars through a new network of SPACE TRAINs...\n\nEstablish profitable trade routes. Transport CARGO from worlds of abundance to worlds in need. Re-BUILD the foundations of interstellar civilization, one star system at a time.",
+  "But commerce alone is not enough. Hidden among the ruins of DEEITC's fallen empire lie the components and knowledge required to reconstruct the legendary WORMHOLE APPARATUS — a colossal device capable of bending space itself.\n\nThe Corporation that is able to re-build this ancient technology first will unlock access to THE MULTI-VERSE...\n\nand the secrets within that powered both DEEITC's inter-galactic domination, as well as its catastrophic demise...\n\nThe race has begun. The stars await.",
 ];
 // Char-by-char typing. User asked for 2/3 of the previous total time and a
 // switch from word-by-word to char-by-char. Previous timing was 200 ms/
@@ -1374,6 +1374,63 @@ const _INTRO_TEXT=[
 const _INTRO_CHAR_MS=24;
 const _INTRO_SHOT_MS=5000;
 const _INTRO_PARA_MIN_LINGER_MS=600; // ensure short paragraphs don't vanish before the eye can grab them
+// Per-screen, per-char cumulative typing timings (ms from screen start).
+// Lets us insert dramatic pauses without rewriting the typing engine:
+//   • Screen 0: a 1-SECOND beat after the bolded "STARDATE 829." period
+//     before the rest of the opening paragraph starts typing.
+//   • Screen 2: the three dots in "demise..." each take 500 ms (instead
+//     of 24 ms), so there is a 1.5-second total beat between "demise" and
+//     the start of typing "The race has begun."
+// Built once at script init from _INTRO_TEXT — _introRenderText reads it
+// each frame to decide how many chars to show.
+const _INTRO_CHAR_TIMINGS=(function(){
+  const _all=[];
+  for(let _idx=0; _idx<_INTRO_TEXT.length; _idx++){
+    const _t=_INTRO_TEXT[_idx];
+    // Locate the "demise..." dots (screen 2) if present.
+    let _demiseDots=null;
+    if(_idx===2){
+      const _dIdx=_t.indexOf('demise');
+      if(_dIdx>=0){
+        const _after=_dIdx+'demise'.length;
+        if(_t.substr(_after,3)==='...'){
+          _demiseDots=new Set([_after, _after+1, _after+2]);
+        }
+      }
+    }
+    // Position of the "." that closes the bolded STARDATE 829 header.
+    // We add a 1-second pause to the NEXT char so the eye lingers on the
+    // header before the body text begins arriving.
+    const _stardatePauseChar=(_idx===0?13:-1); // index of the '\n' right after "STARDATE 829."
+    const _timings=[];
+    let _acc=0;
+    for(let _i=0; _i<_t.length; _i++){
+      let _dt=_INTRO_CHAR_MS;
+      if(_i===_stardatePauseChar) _dt+=1000;
+      if(_demiseDots&&_demiseDots.has(_i)) _dt=500;
+      _acc+=_dt;
+      _timings.push(_acc);
+    }
+    _all.push(_timings);
+  }
+  return _all;
+})();
+// Lookup: how many chars of screen `idx` should be visible at `elapsedMs`?
+function _introCharsShownAt(_idx, _elapsedMs){
+  const _tm=_INTRO_CHAR_TIMINGS[_idx];
+  if(!_tm||!_tm.length) return 0;
+  // Linear scan is fine — paragraphs are short (a few hundred chars).
+  let _n=0;
+  for(let _i=0; _i<_tm.length; _i++){
+    if(_tm[_i]<=_elapsedMs) _n=_i+1; else break;
+  }
+  return _n;
+}
+// Total ms required to fully type screen `idx`.
+function _introTypeTotalMs(_idx){
+  const _tm=_INTRO_CHAR_TIMINGS[_idx];
+  return (_tm&&_tm.length)?_tm[_tm.length-1]:0;
+}
 let _hintHover=null, _hintBounds=[];
 
 let galaxy=null, cam={x:0,y:0,scale:MIN_SC};
@@ -2551,36 +2608,70 @@ function drawTitleScreen(ts,dt){
 //   7-9. Three different stars at zoom levels showing or not showing planets
 //   10.  Nebula starting full zoom, slowly zooming out
 //   11.  Black hole starting fully zoomed out, slowly zooming in
+// ── Intro scene override stack ───────────────────────────────────────
+// The cutscene mutates a small number of game-state fields to make its
+// shots look lived-in (e.g. add a Dyson Sphere to the star we pan over,
+// add a Large Station + Factory to the resort/urban planets we frame).
+// Every mutation is captured here so _introToCorpSetup can roll the
+// galaxy back to its real starting state before gameplay begins. The
+// restore preserves "was-undefined" vs "was-set-to-false" so we don't
+// accidentally serialize spurious keys.
+let _introOverrides=[];
+function _setIntroOverride(_obj, _key, _value){
+  _introOverrides.push({obj:_obj, key:_key, original:_obj[_key], hadKey:Object.prototype.hasOwnProperty.call(_obj,_key)});
+  _obj[_key]=_value;
+}
+function _restoreIntroOverrides(){
+  // Restore in reverse order so layered overrides on the same key unwind
+  // correctly (last-write-wins).
+  for(let _i=_introOverrides.length-1; _i>=0; _i--){
+    const _r=_introOverrides[_i];
+    if(_r.hadKey) _r.obj[_r.key]=_r.original;
+    else delete _r.obj[_r.key];
+  }
+  _introOverrides.length=0;
+}
+
 function _buildIntroShots(){
   if(!galaxy) return [];
-  const shots=[];
+  // Re-entering the build (e.g. after a fresh galaxy generation): clear
+  // any leftover overrides from a previous cutscene pass so we don't
+  // double-apply.
+  _restoreIntroOverrides();
+  const _openingShots=[];   // played first, in order, NOT shuffled
+  const shots=[];           // shuffled pool (random order each playthrough)
   const _maxSc=typeof MAX_SC!=='undefined'?MAX_SC:1.7;
   const _minSc=typeof MIN_SC!=='undefined'?MIN_SC:0.014;
-  // ── Empty starfield: long diagonal drift at full zoom so the parallax
-  // depths visibly separate over the 5-second shot. The pan amount is
-  // sized to ~half the viewport width in world units so foreground
-  // parallax stars (depth ~0.38) trace ~half a screen worth of motion
-  // while background stars stay nearly fixed.
+  // ── Opening shot: Orijen → galaxy-wide zoom-out (10 seconds). ─────
+  // Starts framed tight on Orijen (the player's home world — the same
+  // planet they'll be staring at when the cutscene ends and gameplay
+  // begins) and pulls back across 10 seconds to MIN_SC, revealing the
+  // whole galaxy. Pairs naturally with the "STARDATE 829" text beat —
+  // by the time the bolded header + 1-second pause finish, the camera
+  // has barely begun moving; by the time the player has read the
+  // opening paragraph, the entire galaxy is in view.
   {
-    const _cands=[];
-    for(let _t=0; _t<60; _t++){
-      const _tx=rand(-WORLD_W*0.8, WORLD_W*0.8);
-      const _ty=rand(-WORLD_H*0.8, WORLD_H*0.8);
-      let _nearest=Infinity;
-      for(const _s of galaxy.stars){
-        const _d2=(_tx-_s.x)*(_tx-_s.x)+(_ty-_s.y)*(_ty-_s.y);
-        if(_d2<_nearest) _nearest=_d2;
-      }
-      _cands.push({x:_tx, y:_ty, d:_nearest});
+    const _orijen=galaxy.planets[galaxy.origenId];
+    if(_orijen){
+      const _startSc=Math.min(_maxSc, 130/Math.max(1,_orijen.radius));
+      const _endSc=_minSc; // full galaxy width fits at MIN_SC
+      _openingShots.push({
+        mode:'orijenZoomOut',
+        kind:'orijen',
+        pid:_orijen.id,
+        s0:_startSc, s1:_endSc,
+        durMs:10000,
+      });
     }
-    _cands.sort((a,b)=>b.d-a.d);
-    const _ec=_cands[0];
-    // Pan ~half a viewport (in world units at MAX zoom) diagonally — big
-    // enough that the closest parallax layer slides 200+ px on screen and
-    // the depth separation reads clearly as "stars moving past us".
-    const _pan=(W/2)/_maxSc * 0.65;
-    shots.push({x0:_ec.x-_pan, y0:_ec.y-_pan*0.6, s0:_maxSc, x1:_ec.x+_pan, y1:_ec.y+_pan*0.6, s1:_maxSc});
   }
+  // (Removed: "empty starfield" shot. Per the cutscene audit it was the
+  // only shot whose frame contained nothing but parallax stars + faint
+  // nebula tint — the player consistently read it as "the screen went
+  // blank for a moment". Every remaining shot now has substantial
+  // foreground content: Orijen → galaxy zoom-out, Dyson-sphere'd star
+  // pan, star body + solar-system zoom-out, dense star cluster pan,
+  // nebula zoom-out, black hole zoom-in, ringed/urban/storm planet
+  // portraits, plus the resort-with-moons-and-station static shot.)
   // ── Planet portraits: slow edge-to-edge pan ──────────────────────
   // Per user spec: planet starts PARTIALLY on screen (its body is clipped
   // by the viewport edge), drifts across in ONE of 8 randomly-chosen
@@ -2609,7 +2700,15 @@ function _buildIntroShots(){
     // the cutscene only emits 5 planet shots, well under 8 directions.
     const _d=_dirPool[_dirCursor%_dirPool.length]; _dirCursor++; return _d;
   };
-  const _pickPlanet=(pred)=>galaxy.planets.find(p=>p&&pred(p));
+  // Track planets we've already picked so a planet matching two
+  // predicates (e.g. an urban planet that also has rings) doesn't show
+  // up twice — the cinematic would then have two near-identical shots.
+  const _usedPlanetIds=new Set();
+  const _pickPlanet=(pred)=>{
+    const _p=galaxy.planets.find(p=>p&&!_usedPlanetIds.has(p.id)&&pred(p));
+    if(_p) _usedPlanetIds.add(_p.id);
+    return _p;
+  };
   const _planetShot=(p)=>{
     if(!p) return null;
     const _targetScale=Math.min(_maxSc, 130 / Math.max(1, p.radius));
@@ -2619,6 +2718,8 @@ function _buildIntroShots(){
     const _R=p.radius;
     const _d=_nextDir();
     const _dx=_d[0], _dy=_d[1];
+    // see end of function — `kind` is filled in by the caller via
+    // Object.assign so all planet portraits get kind:'planet'.
     // ── Planet shots store OFFSETS from the planet, not absolute world
     // coords. updatePlanetOrbits() runs every cutscene frame to keep
     // moons + station structures animated, which means the planet's
@@ -2636,13 +2737,66 @@ function _buildIntroShots(){
       s0: _targetScale, s1: _targetScale,
     };
   };
+  // Skip Orijen — it stars in the opening 10-second shot already.
+  if(galaxy.origenId!=null) _usedPlanetIds.add(galaxy.origenId);
   const _ringP =_pickPlanet(p=>!!p.ring);
-  const _moonP =_pickPlanet(p=>p.moons&&p.moons.length>=2&&!p.ring);
   const _urbanP=_pickPlanet(p=>p.type&&p.type.id==='urban');
-  const _resortP=_pickPlanet(p=>p.type&&p.type.id==='resort');
   const _stormP =_pickPlanet(p=>p.type&&p.type.id==='storm');
-  for(const _p of [_ringP,_moonP,_urbanP,_resortP,_stormP]){
-    const _sh=_planetShot(_p); if(_sh) shots.push(_sh);
+  // ── Cutscene-only mark: the urban planet shown in its portrait shot
+  // appears with a FACTORY already constructed on it. This is a purely
+  // visual override (drawn by _drawCutsceneBg) — the gameplay galaxy
+  // sees no factory until the player actually purchases the upgrade.
+  // The marker is restored to undefined by _restoreIntroOverrides at
+  // the end of the cutscene so save files don't carry it.
+  if(_urbanP){ _setIntroOverride(_urbanP, '_introHasFactory', true); }
+  for(const _p of [_ringP,_urbanP,_stormP]){
+    const _sh=_planetShot(_p); if(_sh){ _sh.kind='planet'; shots.push(_sh); }
+  }
+  // ── Resort planet WITH moons: stationary camera, 5 seconds. ──────
+  // Replaces the old separate "resort" + "moons" portrait shots with
+  // one combined beat. The camera locks in place and the planet drifts
+  // ACROSS the frame on its orbit while its moons swing around it.
+  // The orbital arc carries it about 30 SU/sec at typical orbit radii,
+  // which at this zoom (~130/radius px per SU) translates to a clear
+  // visible drift across the 5-second shot.
+  {
+    let _resortMoonP=_pickPlanet(p=>p.type&&p.type.id==='resort'&&p.moons&&p.moons.length>=1);
+    // Fallback: any resort planet (rare to have a resort without moons,
+    // but don't drop the shot if we hit one of those galaxies).
+    if(!_resortMoonP) _resortMoonP=_pickPlanet(p=>p.type&&p.type.id==='resort');
+    // Last-resort fallback: any planet with at least 2 moons (so the
+    // "watch the moons swing past" beat still lands).
+    if(!_resortMoonP) _resortMoonP=_pickPlanet(p=>p.moons&&p.moons.length>=2);
+    if(_resortMoonP){
+      // Cutscene-only override: dress the resort planet with a LARGE
+      // STATION already constructed — the planet portrait then shows
+      // an established commercial outpost rather than a bare world.
+      // The flags are restored at the end of the cutscene so the player
+      // doesn't actually inherit a free station on this planet.
+      _setIntroOverride(_resortMoonP, 'hasStation', true);
+      _setIntroOverride(_resortMoonP, 'hasLargeStation', true);
+      // Station angle/speed: if the planet didn't have these already
+      // (it usually won't — only stationed planets get them at gen),
+      // pick deterministic values that look good with the static
+      // framing (the station's leading edge faces the camera at
+      // shot start, then slowly rotates).
+      if(_resortMoonP.stationAngle==null) _setIntroOverride(_resortMoonP, 'stationAngle', Math.PI*0.35);
+      if(_resortMoonP.stationSpeed==null) _setIntroOverride(_resortMoonP, 'stationSpeed', 0.00025);
+      // Fully zoomed in — planet body at ~130 px radius dominates the
+      // frame the same way the regular planet portraits do.
+      const _sc=Math.min(_maxSc, 130/Math.max(1,_resortMoonP.radius));
+      shots.push({
+        mode:'planetStatic',
+        kind:'resort',
+        pid:_resortMoonP.id,
+        scale:_sc,
+        // capturedX/Y filled on the first frame of the shot — see
+        // drawHowToPlay. We cache the planet's CURRENT position when
+        // the shot starts and lock the camera there, so subsequent
+        // orbital motion slides the planet across the static frame.
+        capturedX:null, capturedY:null, capturedTs:-1,
+      });
+    }
   }
   // ── Star portraits: orbit-visible zooms only.
   //   • First star: STATIC mid-zoom pan — orbits visible the whole shot.
@@ -2652,7 +2806,12 @@ function _buildIntroShots(){
   {
     const _stars=[...galaxy.stars].sort((a,b)=>a.radius-b.radius);
     if(_stars.length>=2){
-      const _picks=[_stars[Math.floor(_stars.length*0.30)], _stars[Math.floor(_stars.length*0.75)]];
+      // Pick a mid-sized star for the static pan (orbit rings clearly
+      // legible) and a SMALL-to-medium star for the zoom-out so the close
+      // zoom can frame the star body tightly without exceeding MAX_SC.
+      // Very-large stars (>500 SU radius) have orbit systems that don't
+      // fit in a single shot anyway, so we avoid them here.
+      const _picks=[_stars[Math.floor(_stars.length*0.55)], _stars[Math.floor(_stars.length*0.25)]];
       // Helper — find the outermost planet orbit at a given star.
       const _maxOrbitAt=(_s)=>{
         let _mx=0;
@@ -2661,56 +2820,94 @@ function _buildIntroShots(){
         }
         return _mx;
       };
-      // Shot 1: static mid-zoom pan around the smaller star.
+      // Shot 1: pan past the DYSON-SPHERED smaller star — framed so the
+      // entire star + Dyson sphere envelope sits inside the viewport
+      // throughout, with subtle drift for cinematic motion. Per the
+      // intro spec this star is dressed with a Dyson Sphere (a
+      // megastructure of hexagonal solar panels) revealing an
+      // evidently advanced civilization. drawDysonSphere reads
+      // `_drawTs` for panel rotation — `_drawCutsceneBg` stamps it on
+      // every frame so the panels visibly rotate.
       {
         const _s=_picks[0];
         if(_s){
-          const _scaleAt=_maxSc*0.45;
-          const _drift=240 / _scaleAt;
-          shots.push({x0:_s.x-_drift, y0:_s.y-_drift*0.4, s0:_scaleAt, x1:_s.x+_drift, y1:_s.y+_drift*0.4, s1:_scaleAt});
+          _setIntroOverride(_s, 'hasDysonSphere', true);
+          // Dyson shell extends to ~1.4× the star radius (the LOW
+          // train orbit). For the whole sphere to fit in the viewport
+          // height with breathing room, we want the shell diameter at
+          // ~70% of viewport height:
+          //   2 * (radius * 1.4) * scale  ≈  H * 0.70
+          //   → scale  ≈  H * 0.25 / radius
+          const _shellSc=(H*0.25)/Math.max(1,_s.radius);
+          const _scaleAt=Math.min(_maxSc, _shellSc);
+          // Pan ~1/3 of the viewport horizontally so the camera glides
+          // past the star at constant speed without ever losing the
+          // sphere from frame.
+          const _pan=(W/2)/_scaleAt * 0.33;
+          shots.push({kind:'star', x0:_s.x-_pan, y0:_s.y-_pan*0.35, s0:_scaleAt, x1:_s.x+_pan, y1:_s.y+_pan*0.35, s1:_scaleAt});
         }
       }
-      // Shot 2: ZOOM-OUT on the larger star. Start close-up on the disc,
-      // end framed so the whole solar system fits in the viewport.
+      // Shot 2: ZOOM-OUT on the larger star. Start VERY close on the
+      // disc (star body fills a third of the viewport), end framed so
+      // the host star's whole solar system fits in the viewport.
       {
         const _s=_picks[1];
         if(_s){
           const _orb=Math.max(800, _maxOrbitAt(_s));
           // End zoom: fit the system's diameter (2×outermost orbit) into
           // ~80% of the viewport width.
-          const _wideScale=Math.max(_minSc*5, (W*0.40)/_orb);
-          // Start zoom: close on the star body — much tighter than the end.
-          // Capped at MAX_SC so it can't exceed the global max zoom.
-          const _closeScale=Math.min(_maxSc*0.95, Math.max(_wideScale*4, 110/Math.max(20,_s.radius)));
-          // Subtle drift across the system, biased so the cam ends slightly
-          // off-centre — keeps the framing dynamic without breaking the
-          // "see the whole system" beat.
+          const _wideScale=Math.max(_minSc*4, (W*0.40)/_orb);
+          // Start zoom: target a star-body radius of ~220 px on screen
+          // (so the bright disc dominates the frame and the player
+          // *feels* zoomed in). Capped at MAX_SC.
+          const _closeScale=Math.min(_maxSc, 220/Math.max(50,_s.radius));
+          // Subtle drift across the system, biased so the cam ends
+          // slightly off-centre — keeps the framing dynamic without
+          // breaking the "see the whole system" beat.
           const _driftEnd=_orb*0.10;
-          shots.push({x0:_s.x, y0:_s.y, s0:_closeScale, x1:_s.x+_driftEnd, y1:_s.y-_driftEnd*0.5, s1:_wideScale});
+          shots.push({kind:'star', x0:_s.x, y0:_s.y, s0:_closeScale, x1:_s.x+_driftEnd, y1:_s.y-_driftEnd*0.5, s1:_wideScale});
         }
       }
     }
   }
   // ── Dense cluster pan: medium-zoomed-out sweep across the most
-  // densely-starred 9000×6000-ish region of the galaxy. Found by
-  // sampling random anchor points and scoring by "stars within 8000 SU".
+  // densely-starred region. The shot anchors on an ACTUAL STAR with
+  // the most neighbors inside the viewport (not a random point in
+  // empty space), and the neighbor-count radius is sized to match
+  // the viewport at the chosen zoom — so we're literally counting
+  // "stars that will be on screen" rather than "stars somewhere
+  // nearby". This eliminates the failure mode where the pan was
+  // centered on a void with technically-close-but-just-off-screen
+  // neighbors.
   {
-    let _bestAnchor=null, _bestCount=-1;
-    for(let _t=0; _t<70; _t++){
-      const _ax=rand(-WORLD_W*0.7, WORLD_W*0.7);
-      const _ay=rand(-WORLD_H*0.7, WORLD_H*0.7);
+    // Mid-zoom where ~5-10 stars + their orbits fit comfortably.
+    const _denseScale=_maxSc*0.18;
+    // Half-viewport extents at this zoom — anything farther than this
+    // along the pan axis will be off-screen at some point during the
+    // shot. Use the smaller dimension as the "in-frame" radius so we
+    // count stars that stay visible across the full pan.
+    const _vpHwW=(W/2)/_denseScale;
+    const _vpHhW=(H/2)/_denseScale;
+    const _inFrameR=Math.min(_vpHwW,_vpHhW)*0.85;
+    const _inFrameR2=_inFrameR*_inFrameR;
+    let _bestStar=null, _bestCount=-1;
+    // Score every star by how many neighbors fall inside the in-frame
+    // radius. Quadratic in star count but the galaxy only has a few
+    // hundred stars, and this runs once when the shot list is built.
+    for(const _s of galaxy.stars){
       let _cnt=0;
-      for(const _s of galaxy.stars){
-        const _dx=_ax-_s.x, _dy=_ay-_s.y;
-        if(_dx*_dx+_dy*_dy < 8000*8000) _cnt++;
+      for(const _t of galaxy.stars){
+        const _dx=_s.x-_t.x, _dy=_s.y-_t.y;
+        if(_dx*_dx+_dy*_dy < _inFrameR2) _cnt++;
       }
-      if(_cnt>_bestCount){ _bestCount=_cnt; _bestAnchor={x:_ax, y:_ay}; }
+      if(_cnt>_bestCount){ _bestCount=_cnt; _bestStar=_s; }
     }
-    if(_bestAnchor){
-      // Mid-zoom where ~5-10 stars + their orbits fit comfortably.
-      const _denseScale=_maxSc*0.18;
-      const _pan=(W/2)/_denseScale * 0.55;
-      shots.push({x0:_bestAnchor.x-_pan, y0:_bestAnchor.y-_pan*0.5, s0:_denseScale, x1:_bestAnchor.x+_pan, y1:_bestAnchor.y+_pan*0.5, s1:_denseScale});
+    // _bestStar is guaranteed to exist (galaxy always has stars) and
+    // sits at the centre of the densest in-frame cluster. The pan
+    // arcs across this cluster.
+    if(_bestStar){
+      const _pan=_vpHwW*0.35; // pan ~1/3 viewport so stars stay framed throughout
+      shots.push({kind:'star', x0:_bestStar.x-_pan, y0:_bestStar.y-_pan*0.4, s0:_denseScale, x1:_bestStar.x+_pan, y1:_bestStar.y+_pan*0.4, s1:_denseScale});
     }
   }
   // ── Nebula zoom-out ──────────────────────────────────────────────
@@ -2718,23 +2915,67 @@ function _buildIntroShots(){
     const _n=galaxy.nebulas[0];
     const _midScale=Math.min(_maxSc*0.3, (Math.min(W,GH)*0.6) / Math.max(_n.rx,_n.ry));
     const _outScale=Math.max(_minSc*2, _midScale*0.35);
-    shots.push({x0:_n.x, y0:_n.y, s0:_midScale, x1:_n.x, y1:_n.y, s1:_outScale});
+    shots.push({kind:'nebula', x0:_n.x, y0:_n.y, s0:_midScale, x1:_n.x, y1:_n.y, s1:_outScale});
   }
   // ── Black hole zoom-in ───────────────────────────────────────────
   if(galaxy.blackHoles && galaxy.blackHoles.length){
     const _bh=galaxy.blackHoles[0];
     const _farScale=_minSc*3;
     const _closeScale=Math.min(_maxSc*0.7, 220 / Math.max(20,_bh.radius));
-    shots.push({x0:_bh.x, y0:_bh.y, s0:_farScale, x1:_bh.x, y1:_bh.y, s1:_closeScale});
+    shots.push({kind:'blackHole', x0:_bh.x, y0:_bh.y, s0:_farScale, x1:_bh.x, y1:_bh.y, s1:_closeScale});
   }
-  // ── Fisher–Yates shuffle so each playthrough orders the shots
-  // differently. The cutscene loops, so a player who reads slowly still
-  // sees every shot at least once before the order repeats.
-  for(let _i=shots.length-1; _i>0; _i--){
-    const _j=Math.floor(Math.random()*(_i+1));
-    const _tmp=shots[_i]; shots[_i]=shots[_j]; shots[_j]=_tmp;
+  // ── Constraint-aware shuffle of the random pool. Per user spec:
+  //   (a) the RESORT shot must not be the first shot in the pool
+  //       (because pool[0] plays immediately after the Orijen opener,
+  //       and going Orijen → resort would back-to-back two planet
+  //       portraits — the user wants something more visually
+  //       different to break up the home-world reveal).
+  //   (b) no two STAR shots may sit back-to-back anywhere in the
+  //       sequence. "Star shots" = the Dyson-sphere static pan, the
+  //       star solar-system zoom-out, and the dense-cluster pan
+  //       (all of which feature a star as the dominant subject).
+  // Strategy: random Fisher–Yates shuffle, then validate. Retry up
+  // to N times. With only ~9 items in the pool and gentle
+  // constraints, retry converges in 1–3 attempts. Fallback: walk
+  // the array left-to-right swapping any violating index with the
+  // first non-violating successor.
+  const _validate=(_arr)=>{
+    if(_arr.length>0 && _arr[0].kind==='resort') return false;
+    for(let _i=1; _i<_arr.length; _i++){
+      if(_arr[_i].kind==='star' && _arr[_i-1].kind==='star') return false;
+    }
+    return true;
+  };
+  const _shuffle=(_arr)=>{
+    for(let _i=_arr.length-1; _i>0; _i--){
+      const _j=Math.floor(Math.random()*(_i+1));
+      const _t=_arr[_i]; _arr[_i]=_arr[_j]; _arr[_j]=_t;
+    }
+  };
+  let _attempts=0;
+  do { _shuffle(shots); _attempts++; } while(!_validate(shots) && _attempts<100);
+  // Deterministic fallback if 100 random attempts failed (essentially
+  // never happens for these sizes — included for safety).
+  if(!_validate(shots)){
+    for(let _i=0; _i<shots.length; _i++){
+      const _bad=(_i===0 && shots[_i].kind==='resort') ||
+                 (_i>0 && shots[_i].kind==='star' && shots[_i-1].kind==='star');
+      if(!_bad) continue;
+      // Find the first later shot we can swap in without creating a
+      // fresh violation.
+      for(let _j=_i+1; _j<shots.length; _j++){
+        const _cand=shots[_j];
+        const _newOk=
+          (_i===0 ? _cand.kind!=='resort' : !(_cand.kind==='star' && shots[_i-1].kind==='star')) &&
+          (_i+1>=shots.length || !(shots[_i+1].kind==='star' && _cand.kind==='star'));
+        if(_newOk){
+          const _t=shots[_i]; shots[_i]=_cand; shots[_j]=_t;
+          break;
+        }
+      }
+    }
   }
-  return shots;
+  return _openingShots.concat(shots);
 }
 
 // Smooth ease (smoothstep) for camera lerp — eases in/out so the start and
@@ -2760,31 +3001,70 @@ function drawHowToPlay(ts){
   }
   // ── Step the cinematic camera ──────────────────────────────────
   if(_introShots.length){
+    const _shot0=_introShots[_introShotIdx];
+    const _shotDur=(_shot0&&_shot0.durMs)||_INTRO_SHOT_MS;
     const _shotElapsed=ts-_introShotStartTs;
-    if(_shotElapsed>=_INTRO_SHOT_MS){
+    if(_shotElapsed>=_shotDur){
       _introShotIdx=(_introShotIdx+1)%_introShots.length;
       _introShotStartTs=ts;
     }
     const _shot=_introShots[_introShotIdx];
-    const _t=_introEase(Math.min(1, (ts-_introShotStartTs)/_INTRO_SHOT_MS));
-    // Planet shots store (ox0,oy0)→(ox1,oy1) as cam OFFSETS from the
-    // planet's live position; re-anchor on the planet every frame so
-    // the planet stays locked in the cinematic frame even as its
-    // orbital motion drifts it through world space. Non-planet shots
-    // (stars, nebulas, black holes, empty starfield, dense cluster)
-    // use absolute world coords.
-    if(_shot.pid!=null){
+    const _dur=(_shot&&_shot.durMs)||_INTRO_SHOT_MS;
+    // CONSTANT-SPEED PANS: linear `_t` (no smoothstep ease). Per user
+    // spec, the camera should glide at a uniform pace relative to its
+    // subject — no slow-down at shot end. The previous smoothstep
+    // ease(`_introEase`) decelerated to a halt over the last ~30% of
+    // each shot, which read as "camera stops on the planet, then
+    // cuts" rather than "camera tracks past the planet, then cuts".
+    const _t=Math.min(1, (ts-_introShotStartTs)/_dur);
+    // Shot mode dispatch:
+    //  • 'planetStatic'  — camera locked in world space (captured from
+    //    planet's position on first frame); planet drifts visibly
+    //    across the static frame via its orbital motion.
+    //  • 'orijenZoomOut' — opening shot. Camera stays CENTERED on
+    //    Orijen the whole shot; only cam.scale changes. The planet
+    //    drifts on its orbit but the cam re-anchors on its live
+    //    position every frame, so Orijen sits dead-center throughout.
+    //  • pid != null     — planet portrait: cam stays anchored on the
+    //    planet's live position with a small (ox,oy) offset that
+    //    interpolates over the shot for a slow drift past the planet.
+    //  • otherwise       — absolute world coords (stars, nebulas, etc).
+    if(_shot.mode==='planetStatic'){
+      const _ap=galaxy.planets[_shot.pid];
+      if(_ap){
+        // Cache the planet's current position the first frame this
+        // shot becomes active in the current loop. We tag the capture
+        // with _introShotStartTs so when the cutscene loops and the
+        // shot plays again, we re-capture the planet's NEW position
+        // (it has drifted around its orbit by then).
+        if(_shot.capturedTs!==_introShotStartTs){
+          _shot.capturedX=_ap.x; _shot.capturedY=_ap.y;
+          _shot.capturedTs=_introShotStartTs;
+        }
+        cam.x=_shot.capturedX; cam.y=_shot.capturedY;
+      }
+      cam.scale=_shot.scale;
+    } else if(_shot.mode==='orijenZoomOut'){
+      // Keep Orijen DEAD CENTER as the cam zooms out — earlier this
+      // lerped cam from Orijen toward (0,0), which caused Orijen to
+      // drift off-center as the shot progressed. The user wants the
+      // home world to stay framed throughout the 10-second reveal.
+      const _ap=galaxy.planets[_shot.pid];
+      if(_ap){ cam.x=_ap.x; cam.y=_ap.y; }
+      cam.scale=_shot.s0*Math.pow(_shot.s1/_shot.s0, _t);
+    } else if(_shot.pid!=null){
       const _ap=galaxy.planets[_shot.pid];
       if(_ap){
         const _ox=_shot.ox0+(_shot.ox1-_shot.ox0)*_t;
         const _oy=_shot.oy0+(_shot.oy1-_shot.oy0)*_t;
         cam.x=_ap.x+_ox; cam.y=_ap.y+_oy;
       }
+      cam.scale=_shot.s0*Math.pow(_shot.s1/_shot.s0, _t);
     } else {
       cam.x=_shot.x0+(_shot.x1-_shot.x0)*_t;
       cam.y=_shot.y0+(_shot.y1-_shot.y0)*_t;
+      cam.scale=_shot.s0*Math.pow(_shot.s1/_shot.s0, _t);
     }
-    cam.scale=_shot.s0*Math.pow(_shot.s1/_shot.s0, _t);
     // NO clampCamera() here. The galaxy-view clamp is designed for the
     // playable galaxy view (it includes a panel-width inset, and prevents
     // panning past WORLD_W/H + half-viewport). For cinematic shots, that
@@ -2841,7 +3121,10 @@ function _introRenderText(ts){
   if(_introParaIdx>=_INTRO_TEXT.length) return;
   const _full=_INTRO_TEXT[_introParaIdx];
   const _elapsed=ts-_introParaStartTs;
-  const _charsShown=Math.min(_full.length, Math.floor(_elapsed/_INTRO_CHAR_MS)+1);
+  // Per-char timing table so we can hold beats inside a paragraph
+  // ("STARDATE 829." pause, "demise..." slow dots) without rewriting the
+  // typing engine.
+  const _charsShown=Math.min(_full.length, _introCharsShownAt(_introParaIdx, _elapsed));
   const _txt=_full.slice(0, _charsShown);
   // Layout: centered block, ~640 px wide.
   const _maxW=640;
@@ -2875,15 +3158,52 @@ function _introRenderText(ts){
   const _totalH=Math.max(_lh, _lines.length*_lh);
   let _y=Math.round((H-_totalH)/2)+15;
   // Track where the last non-empty line is rendered (for caret placement).
-  let _lastY=_y, _lastLine='';
-  for(const _ln of _lines){
-    if(_ln){ ctx.fillText(_ln, _lx, _y); _lastY=_y; _lastLine=_ln; }
+  let _lastY=_y, _lastLine='', _lastBoldEndX=null;
+  // Screen 2 closes with the line "The race has begun. The stars await." —
+  // per spec it renders FULL bold (parallels the bolded "STARDATE 829."
+  // header on screen 0). Detect it by exact-prefix match against the
+  // typed substring so partial chars during typing also draw bold.
+  const _CLOSING_BOLD='The race has begun. The stars await.';
+  for(let _li=0; _li<_lines.length; _li++){
+    const _ln=_lines[_li];
+    if(_ln){
+      // Screen 0, first non-empty line: the bolded "STARDATE 829." header.
+      // Render the first 13 chars (or fewer if mid-typing) in bold + rest
+      // in regular weight. The header sits on its own line (it's followed
+      // by "\n\n" in source), so we never have to handle mid-line wraps
+      // straddling the bold range.
+      if(_introParaIdx===0 && _li===0){
+        const _boldLen=Math.min(_ln.length, 13);
+        const _boldPart=_ln.slice(0,_boldLen);
+        const _restPart=_ln.slice(_boldLen);
+        ctx.font='bold 15px "Exo 2",sans-serif';
+        ctx.fillText(_boldPart, _lx, _y);
+        const _bw=_boldPart?ctx.measureText(_boldPart).width:0;
+        ctx.font='15px "Exo 2",sans-serif';
+        if(_restPart) ctx.fillText(_restPart, _lx+_bw, _y);
+        _lastY=_y; _lastLine=_ln;
+        // Save bold-aware end-x for caret placement (regular-weight
+        // measureText would mis-place the caret a few pixels left).
+        _lastBoldEndX=_lx+_bw+ctx.measureText(_restPart).width;
+      } else if(_introParaIdx===2 && _CLOSING_BOLD.startsWith(_ln) && _ln.startsWith('The race')){
+        // Screen 2 closing line — fully bold. The startsWith check lets
+        // mid-typing partials ("The r…" / "The race h…") render bold too.
+        ctx.font='bold 15px "Exo 2",sans-serif';
+        ctx.fillText(_ln, _lx, _y);
+        const _bw=ctx.measureText(_ln).width;
+        ctx.font='15px "Exo 2",sans-serif';
+        _lastY=_y; _lastLine=_ln; _lastBoldEndX=_lx+_bw;
+      } else {
+        ctx.fillText(_ln, _lx, _y);
+        _lastY=_y; _lastLine=_ln; _lastBoldEndX=null;
+      }
+    }
     _y+=_lh;
   }
   // Blinking caret while typing (cosmetic) — hides once paragraph done.
   const _typingDone=_charsShown>=_full.length;
   if(!_typingDone){
-    const _caretX=_lx+ctx.measureText(_lastLine).width+3;
+    const _caretX=(_lastBoldEndX!=null)?(_lastBoldEndX+3):(_lx+ctx.measureText(_lastLine).width+3);
     ctx.fillStyle=`rgba(180,220,255,${0.4+0.5*Math.sin(ts*0.012)})`;
     ctx.fillRect(_caretX, _lastY-14, 2, 16);
   } else {
@@ -2929,15 +3249,16 @@ function _introAdvance(ts){
   if(_introParaIdx>=_INTRO_TEXT.length){ _introToCorpSetup(); return; }
   const _full=_INTRO_TEXT[_introParaIdx];
   const _elapsed=ts-_introParaStartTs;
-  const _charsShown=Math.min(_full.length, Math.floor(_elapsed/_INTRO_CHAR_MS)+1);
+  const _totalMs=_introTypeTotalMs(_introParaIdx);
+  const _charsShown=Math.min(_full.length, _introCharsShownAt(_introParaIdx, _elapsed));
   const _typingDone=_charsShown>=_full.length;
   if(!_typingDone){
     // Snap-finish the typing animation by backdating the screen start.
-    _introParaStartTs=ts - _full.length*_INTRO_CHAR_MS;
+    _introParaStartTs=ts - _totalMs;
     return;
   }
   // Linger guard so a flash-screen isn't dismissed before the player can read.
-  if(_elapsed<_INTRO_PARA_MIN_LINGER_MS+_full.length*_INTRO_CHAR_MS) return;
+  if(_elapsed<_INTRO_PARA_MIN_LINGER_MS+_totalMs) return;
   _introParaIdx++;
   _introParaStartTs=ts;
   if(_introParaIdx>=_INTRO_TEXT.length){ _introToCorpSetup(); }
@@ -2950,6 +3271,12 @@ function _introAdvance(ts){
 // route lines, info bar, top bar, hint bar, speed indicator, panel
 // tabs, etc. The result is a clean cinematic frame with no UI bleed.
 function _drawCutsceneBg(ts){
+  // Stamp the shared draw timestamp so time-driven sub-renderers — most
+  // importantly drawDysonSphere, whose panel rotation reads `_drawTs` —
+  // animate during the cutscene. Without this stamp the Dyson sphere
+  // would render as a still image (drawGalaxy is the only other code
+  // path that updates `_drawTs`, and it's not running while gs='howtoplay').
+  _drawTs=ts;
   // Background gradient (mirrors drawGalaxy's bg fill).
   ctx.fillStyle='#060810';
   ctx.fillRect(0,0,W,H);
@@ -3027,6 +3354,33 @@ function _drawCutsceneBg(ts){
     else if(p.type.id==='ancient'&&sr>2) drawAncientRuins(sx,sy,sr);
     if(p.clouds&&sr>8) drawPlanetClouds(sx,sy,sr,p);
     if(_bras) drawPlanetRing(sx,sy,sr,p.ring,true);
+    // Cutscene station: mirrors the galaxy-view drawPlanetStation call
+    // so any planet flagged `hasStation` (including the cutscene
+    // override applied to the resort-with-moons portrait) shows its
+    // commercial ring + structures. SIZE_R / ORBIT_TIERS are already
+    // available as module-level constants. Suppressed below the
+    // cityscape/clouds size threshold for the same reason the main
+    // galaxy view does — sub-pixel station structures read as noise.
+    if(p.hasStation && sr>2){
+      drawPlanetStation(
+        sx, sy, sr, p.stationAngle||0, SIZE_R['M']*cam.scale,
+        p.isAlienRelic,
+        p.hasLargeStation||false,
+        (p.hasLargeStation||p.hasTerminal)?ORBIT_TIERS[p.size]['MED']*cam.scale:null,
+        p.hasTerminal||false,
+        p.hasTerminal?ORBIT_TIERS[p.size]['HIGH']*cam.scale:null,
+        (p.hasLargeStation||p.hasTerminal)?ORBIT_TIERS[p.size]['LOW']*cam.scale:null
+      );
+    }
+    // Cutscene-only factory building: planted just outside the planet
+    // edge on the urban-planet portrait. The flag is removed when
+    // _restoreIntroOverrides runs at corpsetup transition. Position is
+    // deterministic (135° from the station angle, or 135° from 0 if no
+    // station) so framing is stable across replays.
+    if(p._introHasFactory && sr>4){
+      const _fAng=(p.stationAngle||0)+Math.PI*0.75;
+      drawFoundryBuilding(sx, sy, sr*1.05, _fAng, sr*2.2, true, 'factory');
+    }
     // Front-half moons (drawn after planet so they sit in front).
     if(p.moons&&p.moons.length){
       ctx.save();
@@ -3058,6 +3412,10 @@ function _drawCutsceneBg(ts){
 
 function _introToCorpSetup(){
   gs='corpsetup';
+  // Roll back every cutscene-only override (Dyson Sphere on the panned
+  // star, Large Station on the resort planet, Factory mark on the urban
+  // planet) so the gameplay galaxy starts in its real generated state.
+  _restoreIntroOverrides();
   corpName=_genRandomCorpName(); _csCeoOptions=_genStartingCeos(); _csSelectedCeo=0; _csAutoEdit=true; _aiSelectSeen=false;
   // Reset cutscene state so a future replay (LOAD GAME → fresh intro) starts clean.
   _introShots=null; _introParaIdx=0; _introShotIdx=0;
