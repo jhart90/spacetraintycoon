@@ -5233,13 +5233,18 @@ function generateGalaxy(){
       p.catchphrase=isStarter?'The first world on every map.':generateCatchphrase(p);
       p.population=isStarter?Math.round(1e6+Math.random()*9e6):generatePopulation(p);
       p.clouds=generatePlanetClouds(p); p.cloudAngle=Math.random()*Math.PI*2;
-      // Gold deposit: 1/10 chance on rocky/desert/resort/jungle/ocean non-starter planets
+      // Gold deposit: 1/10 chance on rocky/desert/resort/jungle/ocean planets,
+      // EXCEPT no planet in the player's home star (Gigi Prime) is ever
+      // allowed to roll gold or diamond — keeps the tutorial system "clean"
+      // and makes deposits something the player has to leave home for.
+      // The AI's home system gets the same treatment in `_initAICorp` so
+      // both starting clusters are symmetric.
       const _goldBiomes=['rocky','desert','resort','jungle','ocean'];
-      p.hasGold=(!isStarter&&_goldBiomes.includes(p.type.id)&&Math.random()<0.1);
+      p.hasGold=(!isHome&&_goldBiomes.includes(p.type.id)&&Math.random()<0.1);
       p.goldRevealed=false;
       p.goldPatch=p.hasGold?{angle:rand(0,Math.PI*2),arcSize:Math.PI*0.25}:null;
-      // Diamond deposit: 1/50 chance on same biomes as gold, non-starter only
-      p.hasDiamond=(!isStarter&&_goldBiomes.includes(p.type.id)&&Math.random()<0.02);
+      // Diamond deposit: 1/50 chance on same biomes as gold, home system also blocked.
+      p.hasDiamond=(!isHome&&_goldBiomes.includes(p.type.id)&&Math.random()<0.02);
       p.diamondRevealed=false;
       p.diamondPatch=p.hasDiamond?{angle:rand(0,Math.PI*2),arcSize:Math.PI*0.22}:null;
       p.devLevelBase=isStarter?3:(isHome?randInt(1,2):randInt(0,3));
@@ -5754,6 +5759,13 @@ function _initAICorp(){
     _p.hasStation=false; _p.playerBuiltStation=false; _p.aiHasStation=false;
     _p.hasLargeStation=false; _p.hasTerminal=false;
     _p.playerBuiltUpgrades=[];
+    // Strip any gold/diamond deposit rolled at galaxy generation. The AI
+    // home system gets the same "no gold/diamond" treatment as the player
+    // home system (see _goldBiomes check in generateGalaxy) so neither
+    // starting cluster has the bonus resources — keeps the two clusters
+    // symmetric and forces both sides to explore outward for deposits.
+    _p.hasGold=false; _p.goldRevealed=false; _p.goldPatch=null;
+    _p.hasDiamond=false; _p.diamondRevealed=false; _p.diamondPatch=null;
   }
   // If the host star started with fewer than 6 planets, append new ones to
   // fill the canonical sequence at outer orbits.
@@ -5803,13 +5815,16 @@ function _initAICorp(){
       _np.population=generatePopulation(_np);
       _np.populationBase=_np.population;
       _np.clouds=generatePlanetClouds(_np); _np.cloudAngle=Math.random()*Math.PI*2;
-      const _goldBiomes=['rocky','desert','resort','jungle','ocean'];
-      _np.hasGold=(_goldBiomes.includes(_np.type.id)&&Math.random()<0.1);
+      // Planets generated to fill out the AI's home system are forced
+      // gold/diamond-free for the same reason the existing-planet mutate
+      // path above strips deposits — the AI start system mirrors the
+      // player home system's "no deposits" rule.
+      _np.hasGold=false;
       _np.goldRevealed=false;
-      _np.goldPatch=_np.hasGold?{angle:rand(0,Math.PI*2),arcSize:Math.PI*0.25}:null;
-      _np.hasDiamond=(_goldBiomes.includes(_np.type.id)&&Math.random()<0.02);
+      _np.goldPatch=null;
+      _np.hasDiamond=false;
       _np.diamondRevealed=false;
-      _np.diamondPatch=_np.hasDiamond?{angle:rand(0,Math.PI*2),arcSize:Math.PI*0.22}:null;
+      _np.diamondPatch=null;
       _np.devLevelBase=(i===1)?3:randInt(0,2);
       _np.devLevel=_np.devLevelBase;
       _np.devLog=[]; _np.passengerDeliveries=[];
@@ -7527,6 +7542,11 @@ function _aiPickUpgradeTarget(){
       if(!p||!p.aiHasStation) continue;
       if(!(upDef.eligibleBiomes||[]).includes(p.type.id)) continue;
       if((p.upgrades||[]).includes(upDef.id)) continue;
+      // FACTORY requires a LARGE STATION (or TERMINAL) on the planet —
+      // same gate the player has. Without it the picker would propose
+      // factories at planets whose station can't supply enough throughput
+      // for the upgrade's iron+oil intake.
+      if(upDef.id==='factory'&&!(p.hasLargeStation||p.hasTerminal)) continue;
       // ── Input sourcing (in-range preferred, out-of-range allowed) ──
       // For each required input cargo, first search visited planets WITHIN
       // engine range; if none, widen to ANY visited planet with positive
@@ -18145,7 +18165,13 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
   // tooltips collected at the bottom. Sort is stable within each tier so the
   // original UPGRADES order is preserved for visually adjacent entries.
   const _isUpgradeGateLocked=(uId)=>{
-    if(uId==='blast_furnace'||uId==='factory') return !_ironCarUnlocked;
+    if(uId==='blast_furnace') return !_ironCarUnlocked;
+    // FACTORY: requires both the first-iron-produced flag AND a LARGE
+    // STATION (or TERMINAL, which is a superset) on this urban planet.
+    // Rationale: a regular STATION's capacity isn't enough to throughput
+    // a factory's iron+oil inputs and machinery output, so we gate the
+    // upgrade on first having scaled the station here.
+    if(uId==='factory') return !_ironCarUnlocked || !(p.hasLargeStation||p.hasTerminal);
     if(uId==='bakery')  return !_grainCarUnlocked;
     if(uId==='juicery') return !_fruitCarUnlocked;
     if(uId==='glassworks'){
@@ -18219,7 +18245,10 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
   // Large-Station-style ✓ / ✗ requirements list.
   const _upLockReqs=(uId)=>{
     if(uId==='blast_furnace') return [{ok:!!_ironCarUnlocked,txt:'First iron produced'}];
-    if(uId==='factory')       return [{ok:!!_ironCarUnlocked,txt:'First iron produced'}];
+    if(uId==='factory')       return [
+      {ok:!!_ironCarUnlocked,                    txt:'First iron produced'},
+      {ok:!!(p.hasLargeStation||p.hasTerminal),  txt:'Large Station built here'},
+    ];
     if(uId==='bakery')        return [{ok:!!_grainCarUnlocked,txt:'Grain discovered'}];
     if(uId==='juicery')       return [{ok:!!_fruitCarUnlocked,txt:'Fruit discovered'}];
     if(uId==='glassworks'){
@@ -25186,8 +25215,12 @@ canvas.addEventListener('mouseup',e=>{
             }
             // Factory is gated on the player having produced their first iron
             // (same gate as Blast Furnace — `_ironCarUnlocked` is set the first
-            // time any foundry on the player's roster outputs a unit of iron).
+            // time any foundry on the player's roster outputs a unit of iron),
+            // AND on this planet having a LARGE STATION (or TERMINAL — the
+            // tier above). A regular STATION's throughput isn't sufficient
+            // for factory iron+oil intake + machinery output.
             if(u&&u.id==='factory'&&!_ironCarUnlocked){ return; }
+            if(u&&u.id==='factory'&&p&&!(p.hasLargeStation||p.hasTerminal)){ return; }
             // Bakery / Juicery are gated on grain / fruit having been
             // discovered (the same flag the train builder uses to unlock the
             // matching cargo car).
