@@ -5265,14 +5265,15 @@ function generateGalaxy(){
       p.catchphrase=isStarter?'The first world on every map.':generateCatchphrase(p);
       p.population=isStarter?Math.round(1e6+Math.random()*9e6):generatePopulation(p);
       p.clouds=generatePlanetClouds(p); p.cloudAngle=Math.random()*Math.PI*2;
-      // Gold deposit: 1/10 chance on rocky/desert/resort/jungle/ocean planets,
+      // Gold deposit: 1/20 chance on rocky/desert/resort/jungle/ocean planets,
       // EXCEPT no planet in the player's home star (Gigi Prime) is ever
       // allowed to roll gold or diamond — keeps the tutorial system "clean"
       // and makes deposits something the player has to leave home for.
       // The AI's home system gets the same treatment in `_initAICorp` so
-      // both starting clusters are symmetric.
+      // both starting clusters are symmetric. Rate was lowered from 1/10
+      // to 1/20 to make gold rarer and more meaningful when discovered.
       const _goldBiomes=['rocky','desert','resort','jungle','ocean'];
-      p.hasGold=(!isHome&&_goldBiomes.includes(p.type.id)&&Math.random()<0.1);
+      p.hasGold=(!isHome&&_goldBiomes.includes(p.type.id)&&Math.random()<0.05);
       p.goldRevealed=false;
       p.goldPatch=p.hasGold?{angle:rand(0,Math.PI*2),arcSize:Math.PI*0.25}:null;
       // Diamond deposit: 1/50 chance on same biomes as gold, home system also blocked.
@@ -17594,15 +17595,39 @@ function drawCarDetailPopup(){
   ctx.fillStyle='rgba(8,12,28,0.70)';
   ctx.fillRect(imgX,imgY,imgS,imgS);
   ctx.strokeStyle='rgba(80,140,220,0.40)'; ctx.lineWidth=1; ctx.strokeRect(imgX,imgY,imgS,imgS);
-  // Draw the full-size car sprite
+  // Draw the car sprite at its NATURAL aspect ratio. The bundled image is
+  // a square (transparent padding around the car content); drawing it
+  // directly at imgS×imgS visibly stretches wide sprites — Class R engines
+  // (srcAR 2.92), oil tankers (srcAR ~2.08), ore cars (srcAR 2.10) and the
+  // passenger / mail / cargo cars all read as squished into a near-square.
+  // Crop to the content bbox via SPRITE_CONTENT (built into index.html at
+  // build time — see _content_info in build_game.py) and render at srcAR,
+  // fitting the cropped content inside the 82×82 frame letterbox-style.
+  // Same pattern already used by drawCarUnlockPopup.
   const _cSprite=getCarSprite(carType, t.carFull?.[ci]??false);
   const _cImg=imgs[_cSprite];
   if(_cImg){
-    const _sbp=SPRITE_BOT[carType]||0;
-    const _cdh=imgS*(1-_sbp)*1.1; // slightly larger than raw, centered
-    const _cdy=imgY+imgS-Math.round(imgS*_sbp)-Math.round(_cdh);
-    ctx.save(); ctx.beginPath(); ctx.rect(imgX+2,imgY+2,imgS-4,imgS-4); ctx.clip();
-    ctx.drawImage(_sprForSize(_cSprite,imgS,imgS),imgX,_cdy,imgS,imgS);
+    const _frX=imgX+2, _frY=imgY+2, _frW=imgS-4, _frH=imgS-4;
+    const _sc=typeof SPRITE_CONTENT!=='undefined'?SPRITE_CONTENT[_cSprite]:null;
+    let _sx=0,_sy=0,_sw=_cImg.naturalWidth||160,_sh=_cImg.naturalHeight||160;
+    let _srcAR;
+    if(_sc){
+      _sx=_sc[0]; _sy=_sc[1]; _sw=_sc[2]; _sh=_sc[3];
+      _srcAR=_sc[4]||(_sw/_sh);
+    } else {
+      const _sn=typeof SPRITE_NATURAL!=='undefined'?SPRITE_NATURAL[_cSprite]:null;
+      _srcAR=_sn?(_sn[0]/_sn[1]):(_sw/_sh);
+    }
+    // Letterbox: scale srcAR to fit inside the frame (with a small inset for
+    // visual breathing room around the sprite), preserving aspect.
+    const _frAR=_frW/_frH;
+    let _dW,_dH;
+    if(_srcAR>=_frAR){ _dW=_frW*0.92; _dH=_dW/_srcAR; }
+    else             { _dH=_frH*0.92; _dW=_dH*_srcAR; }
+    const _dx=_frX+(_frW-_dW)/2;
+    const _dy=_frY+(_frH-_dH)/2;
+    ctx.save(); ctx.beginPath(); ctx.rect(_frX,_frY,_frW,_frH); ctx.clip();
+    ctx.drawImage(_cImg,_sx,_sy,_sw,_sh,_dx,_dy,_dW,_dH);
     ctx.restore();
   }
   // Middle info column — width is FIXED (174 px) so subtitle truncation is
@@ -21761,7 +21786,12 @@ function drawGalaxy(ts,dt){
     else if(p.type.id==='ancient'&&sr>2) drawAncientRuins(sx,sy,sr);
     if(p.hasGold&&p.goldRevealed&&sr>3) _drawGoldPatch(sx,sy,sr,p.goldPatch,ORBIT_TIERS[p.size]['LOW']*cam.scale*0.88);
     if(p.hasDiamond&&p.diamondRevealed&&sr>3) _drawDiamondPatch(sx,sy,sr,p.diamondPatch,ORBIT_TIERS[p.size]['LOW']*cam.scale*0.88);
-    if(p.clouds&&sr>4) drawPlanetClouds(sx,sy,sr,p);
+    // Cloud-skip threshold raised from sr>4 to sr>8: at sub-8-px screen
+    // radius, cloud bands are at most a couple pixels wide and read as
+    // visual noise rather than weather. Drops drawPlanetClouds's call
+    // count substantially during the medium-low zoom band (cam.scale
+    // 0.05-0.15) where dozens of planets are visible but each is small.
+    if(p.clouds&&sr>8) drawPlanetClouds(sx,sy,sr,p);
     if(p.hasStation) drawPlanetStation(
       sx,sy,sr,p.stationAngle||0,SIZE_R['M']*cam.scale,
       p.isAlienRelic,
@@ -27944,6 +27974,14 @@ function init(){
   // Bake the per-scheme nebula sheet tiles once at init — the cloud
   // pattern is shared across all four schemes so blending stays seamless.
   _buildNebulaTiles();
+  // Pre-warm the urban-cityscape + ancient-ruins offscreen caches at load
+  // time. Each cache is a ~720×720 pre-baked sprite of hundreds of
+  // procedurally-placed building / ruin shapes — building it on first
+  // draw spikes a single frame by ~250 ms when the first urban planet
+  // enters the viewport during zoom-out. Baking here amortises the cost
+  // into the (already-spent) load step where the player can't tell.
+  _buildUrbanSkylineCache();
+  _buildAncientRuinsCache();
   requestAnimationFrame(loop);
 }
 let lastT=0;
