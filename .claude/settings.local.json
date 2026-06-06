@@ -135,7 +135,15 @@
       "Bash(awk -F: '$1>=21780 && $1<=22500')",
       "Bash(cd \"C:/Users/jackh/Desktop/Claude/Train Game\" && rm -f _marg_*.png)",
       "Bash(awk 'NR==26442,NR==26500' build_game.py)",
-      "Bash(awk 'NR>25130 && NR<25180' build_game.py)"
+      "Bash(awk 'NR>25130 && NR<25180' build_game.py)",
+      "Bash(awk '/^function drawTitleScreen/,/^}$/{if\\(/^}$/ && NR>2520\\) {print NR\": \"$0; exit}}' build_game.py)",
+      "mcp__Claude_in_Chrome__list_connected_browsers",
+      "mcp__Claude_in_Chrome__select_browser",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8765/index.html)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8766/index.html)",
+      "Bash(find \"/c/Users/jackh/\" -name \"*.stt\" 2>/dev/null | head -10 *)",
+      "mcp__Claude_in_Chrome__find",
+      "mcp__Claude_in_Chrome__read_console_messages"
     ]
   },
   "hooks": {
