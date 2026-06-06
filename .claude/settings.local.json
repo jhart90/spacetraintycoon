@@ -133,7 +133,9 @@
       "Bash(awk 'NR>=19840 && NR<=19850' build_game.py)",
       "Bash(awk '/sel\\\\.type===.planet./' build_game.py)",
       "Bash(awk -F: '$1>=21780 && $1<=22500')",
-      "Bash(cd \"C:/Users/jackh/Desktop/Claude/Train Game\" && rm -f _marg_*.png)"
+      "Bash(cd \"C:/Users/jackh/Desktop/Claude/Train Game\" && rm -f _marg_*.png)",
+      "Bash(awk 'NR==26442,NR==26500' build_game.py)",
+      "Bash(awk 'NR>25130 && NR<25180' build_game.py)"
     ]
   },
   "hooks": {

@@ -1358,13 +1358,23 @@ let _introShotIdx=0;           // which shot the camera is currently on (also ru
 let _introShotStartTs=0;       // when the current shot started
 let _introSkipBtnBounds=null;  // skip → corp setup
 let _introSkipBtnHover=false;
+// "Near" = cursor inside an inflated bounding rect around the SKIP button.
+// Used to drive the button's proximity-fade alpha (25% baseline → 100%
+// when the cursor is close). Updated by the canvas mousemove handler.
+let _introSkipBtnNear=false;
+// Smoothly interpolated visibility alpha for the SKIP button — 0.25 at
+// rest, ramps up toward 1.0 while the cursor is "near" the button, then
+// decays back to 0.25 when the cursor leaves. Re-driven on every frame
+// of _introRenderSkipBtn via a small linear step so it stays frame-rate
+// independent enough at the cutscene's 60 fps target.
+let _introSkipBtnAlpha=0.25;
 // Three combined "screens" of intro narration. Each screen contains two
 // logical paragraphs separated by a blank line (\n\n) and gets typed out
 // together — the user only needs to click/key once between screens, not
 // six times. Triple-spaces and "the the" are preserved verbatim per the
 // source script the user provided.
 const _INTRO_TEXT=[
-  "STARDATE 829.\n\nThirty Stardates have passed since the catastrophic implosion of the Dutch East Earth Interstellar Trading Company (DEEITC), the once-dominant commercial power whose vast network of trade routes, orbital infrastructure, and wormhole technology bound 1,000s of planets together into a single galactic economy.\n\nIn the aftermath, entire star systems were cut off from one another, industries collapsed, and countless worlds have endured decades of economic isolation.",
+  "STARDATE 829.\n\nThirty Stardates have passed since the sudden implosion of the Dutch East Earth Interstellar Trading Company (DEEITC), the once-dominant commercial power whose vast network of trade routes, orbital infrastructure, and wormhole technology bound 1,000s of planets together into a single galactic economy.\n\nIn the aftermath, entire star systems were cut off from one another, industries collapsed, and countless worlds have endured decades of economic isolation.",
   "Now, a new age of opportunity has begun.\n\nAcross the galaxy, ambitious CORPORATIONs are racing to fill the void left behind. As the newly appointed CEO of one such enterprise, your mission is to reconnect the stars through a new network of SPACE TRAINs...\n\nEstablish profitable trade ROUTEs.\n\nTransport CARGO from worlds of abundance to worlds in need.\n\nRe-BUILD the foundations of interstellar civilization, one star system at a time.",
   "But commerce alone is not enough. Hidden among the ruins of DEEITC's fallen empire lie the components and knowledge required to reconstruct the legendary WORMHOLE APPARATUS — a colossal device capable of bending space itself.\n\nThe Corporation that is able to re-build this ancient technology first will unlock access to\nTHE MULTI-VERSE...\n\n...and the secrets within that powered both DEEITC's inter-galactic domination, as well as its catastrophic demise!\n\nThe race has begun. The stars await.",
 ];
@@ -2039,6 +2049,13 @@ let _livestockCarUnlocked=false; // true once player first visits a farm agri pl
 let _fruitCarUnlocked=false;   // true once player first visits an orchard agri planet
 let _sensorUpgradeActive=false; // true once galaxy_census mission completed
 let _stationCostDiscount=0;     // fraction (0.10=10%) permanent discount from corporate_expansion mission
+// Counts player-train deliveries that produced NON-ZERO revenue. One
+// increment per chat-log "Train arrived at Planet: +N credits" message.
+// Used as a delay gate on the corporate_expansion mission intro so the
+// mission doesn't fire too early — the player needs to have actually
+// established a successful trade rhythm before the game offers them
+// the corporate-scaling reward.
+let _playerDeliveryCount=0;
 let _galaxyCensusTimerMs=0;     // real-time ms when 15th planet was visited (0=not yet)
 let _sandstormCheckSd=0;        // last SD at which sandstorm_relief trigger was checked
 let _bhResearchCheckSd=0;       // last SD at which bh_research trigger was checked
@@ -2684,13 +2701,19 @@ function _buildIntroShots(){
     const _orijen=galaxy.planets[galaxy.origenId];
     if(_orijen){
       const _startSc=Math.min(_maxSc, 130/Math.max(1,_orijen.radius));
-      const _endSc=_minSc; // full galaxy width fits at MIN_SC
+      // End zoom pushed PAST the MIN_SC "whole galaxy" framing so the
+      // shot keeps pulling back into the surrounding empty space —
+      // making the scale of the universe more apparent than just
+      // showing the entire mapped galaxy at the cap. Combined with the
+      // 15-second runtime, this gives the camera a noticeably longer
+      // continuous pull-back than the previous 10 s × MIN_SC framing.
+      const _endSc=_minSc*0.45;
       _openingShots.push({
         mode:'orijenZoomOut',
         kind:'orijen',
         pid:_orijen.id,
         s0:_startSc, s1:_endSc,
-        durMs:10000,
+        durMs:15000,
       });
     }
   }
@@ -2769,9 +2792,18 @@ function _buildIntroShots(){
   };
   // Skip Orijen — it stars in the opening 10-second shot already.
   if(galaxy.origenId!=null) _usedPlanetIds.add(galaxy.origenId);
-  const _ringP =_pickPlanet(p=>!!p.ring);
-  const _urbanP=_pickPlanet(p=>p.type&&p.type.id==='urban');
-  const _stormP =_pickPlanet(p=>p.type&&p.type.id==='storm');
+  // Every planet portrait shot must be sized M or larger. The planet
+  // shot zoom math (`_targetScale = 130 / p.radius`) clamps to MAX_SC
+  // for very small worlds (XS=24, S=48 SU radius), so picking those
+  // sizes produces a frame where the planet body fills only a few px
+  // of the viewport — defeats the purpose of the portrait shot. M and
+  // above (M=96, L=192, XL=288, XXL=432) give a planet body that
+  // genuinely dominates the frame.
+  const _BIG_SIZES=new Set(['M','L','XL','XXL']);
+  const _isBig=(_p)=>_p && _BIG_SIZES.has(_p.size);
+  const _ringP =_pickPlanet(p=>!!p.ring && _isBig(p));
+  const _urbanP=_pickPlanet(p=>p.type&&p.type.id==='urban' && _isBig(p));
+  const _stormP =_pickPlanet(p=>p.type&&p.type.id==='storm' && _isBig(p));
   // ── Cutscene-only mark: the urban planet shown in its portrait shot
   // appears with a FACTORY already constructed on it. This is a purely
   // visual override (drawn by _drawCutsceneBg) — the gameplay galaxy
@@ -2789,11 +2821,15 @@ function _buildIntroShots(){
   // drawPlanetStation). All overrides are restored at the end of the
   // cutscene so the gameplay galaxy starts in its real generated state.
   {
-    let _ancientP=_pickPlanet(p=>p.type&&p.type.id==='ancient');
-    // Fallback chain so the shot never silently drops if the galaxy
-    // happened not to roll an ancient world: try urban (the other
-    // ruin-style biome), then any planet.
-    if(!_ancientP) _ancientP=_pickPlanet(p=>p.type&&p.type.id==='urban');
+    // Prefer an M+ ancient planet. The overrides below force size L
+    // anyway, but starting from a planet that's already M+ keeps the
+    // moon orbit radii (computed from p.radius) sane through the
+    // _setIntroOverride pipeline. Fallback chain widens to other
+    // biomes and finally any M+ planet.
+    let _ancientP=_pickPlanet(p=>p.type&&p.type.id==='ancient' && _isBig(p));
+    if(!_ancientP) _ancientP=_pickPlanet(p=>p.type&&p.type.id==='ancient');
+    if(!_ancientP) _ancientP=_pickPlanet(p=>p.type&&p.type.id==='urban' && _isBig(p));
+    if(!_ancientP) _ancientP=_pickPlanet(p=>_isBig(p));
     if(!_ancientP) _ancientP=_pickPlanet(p=>true);
     if(_ancientP){
       // Force size L (planet radius 192 SU). The cutscene framing math
@@ -2998,11 +3034,54 @@ function _buildIntroShots(){
     }
   }
   // ── Nebula zoom-out ──────────────────────────────────────────────
+  // Pick the LARGEST nebula closest to galactic centre (not
+  // galaxy.nebulas[0], which used to land us on whatever the generator
+  // produced first — often a small edge-of-world wisp). Picking by a
+  // weighted score that rewards both size AND centrality gives us a
+  // dramatic, full-frame nebula nearly every game.
   if(galaxy.nebulas && galaxy.nebulas.length){
-    const _n=galaxy.nebulas[0];
+    // Edge buffer: how far from the world boundary a nebula's CENTER
+    // must sit to be considered "interior" rather than "abutting the
+    // edge". Sized at ~25% of the world's half-extent.
+    const _edgeBufX=WORLD_W*0.25;
+    const _edgeBufY=WORLD_H*0.25;
+    // Score every nebula: prefer (large bounds) × (closer to centre).
+    // Normalisation makes the two terms comparable.
+    const _scoreNeb=(_n)=>{
+      const _sz=(_n.rx+_n.ry)/2;            // average half-extent
+      const _dC=Math.hypot(_n.x,_n.y);      // distance from origin
+      const _maxD=Math.hypot(WORLD_W,WORLD_H);
+      return _sz * (1 - 0.7*(_dC/_maxD));   // bigger = better, closer = better
+    };
+    // First, try to pick from neutralnebulas that DON'T abut the world edge.
+    let _interior=galaxy.nebulas.filter(_n=>
+      Math.abs(_n.x)+_n.rx <= WORLD_W-_edgeBufX*0.4 &&
+      Math.abs(_n.y)+_n.ry <= WORLD_H-_edgeBufY*0.4
+    );
+    if(!_interior.length) _interior=galaxy.nebulas.slice(); // fallback: all
+    _interior.sort((a,b)=>_scoreNeb(b)-_scoreNeb(a));
+    const _n=_interior[0];
+    // Choose where to centre the camera. If the nebula sits comfortably
+    // inside the world, use its true centre. If it ABUTS the edge (a
+    // last-resort fallback), shift the cam toward the edge of the
+    // nebula closest to the world centre so we don't aim the camera at
+    // empty space outside the world boundary.
+    const _abutsEdge=
+      (Math.abs(_n.x)+_n.rx > WORLD_W-_edgeBufX*0.4) ||
+      (Math.abs(_n.y)+_n.ry > WORLD_H-_edgeBufY*0.4);
+    let _nbCx=_n.x, _nbCy=_n.y;
+    if(_abutsEdge){
+      // Pull the cam centre TOWARD the origin by the nebula's half-extent
+      // on whichever axis is overrunning the world boundary. This frames
+      // the nebula's interior-facing rim instead of the world edge.
+      const _ovX=Math.max(0, Math.abs(_n.x)+_n.rx - (WORLD_W-_edgeBufX*0.4));
+      const _ovY=Math.max(0, Math.abs(_n.y)+_n.ry - (WORLD_H-_edgeBufY*0.4));
+      if(_ovX>0) _nbCx=_n.x - Math.sign(_n.x)*Math.min(_n.rx*0.8, _ovX+_n.rx*0.3);
+      if(_ovY>0) _nbCy=_n.y - Math.sign(_n.y)*Math.min(_n.ry*0.8, _ovY+_n.ry*0.3);
+    }
     const _midScale=Math.min(_maxSc*0.3, (Math.min(W,GH)*0.6) / Math.max(_n.rx,_n.ry));
     const _outScale=Math.max(_minSc*2, _midScale*0.35);
-    shots.push({kind:'nebula', x0:_n.x, y0:_n.y, s0:_midScale, x1:_n.x, y1:_n.y, s1:_outScale});
+    shots.push({kind:'nebula', x0:_nbCx, y0:_nbCy, s0:_midScale, x1:_nbCx, y1:_nbCy, s1:_outScale});
   }
   // ── Black hole zoom-in ───────────────────────────────────────────
   if(galaxy.blackHoles && galaxy.blackHoles.length){
@@ -3350,7 +3429,7 @@ function _introRenderText(ts){
     return _out;
   };
   // Italic targets — screen 2 only.
-  const _ITAL_TARGETS=(_introParaIdx===2)?['domination','catastrophic demise!']:[];
+  const _ITAL_TARGETS=(_introParaIdx===2)?['inter-galactic domination','catastrophic demise!']:[];
   for(let _li=0; _li<_fullLines.length; _li++){
     const _fl=_fullLines[_li];
     const _y=_yStart+_li*_lh;
@@ -3447,7 +3526,19 @@ function _introRenderText(ts){
 function _introRenderSkipBtn(ts){
   const _bw=110, _bh=28, _bx=W-_bw-22, _by=H-_bh-18;
   _introSkipBtnBounds={x:_bx, y:_by, w:_bw, h:_bh};
+  // Proximity-driven fade: 0.25 baseline opacity (so the button is
+  // visibly dimmed, per user spec "75% less opaque"), ramps to 1.0 when
+  // the cursor enters the 60-px buffer around the button. The lerp
+  // factor 0.15 hits ~95% of the target inside ~12 frames (~200 ms at
+  // 60 fps) — fast enough that the button feels responsive without
+  // jarring snap-on/snap-off behaviour.
+  const _target=_introSkipBtnNear?1.0:0.25;
+  _introSkipBtnAlpha+=(_target-_introSkipBtnAlpha)*0.15;
   ctx.save();
+  // Multiply the button's per-element alpha by the fade alpha so every
+  // layer (fill, stroke, text, shadow) dims together — keeps the
+  // proportions of the existing palette intact.
+  ctx.globalAlpha=_introSkipBtnAlpha;
   ctx.fillStyle=_introSkipBtnHover?'rgba(30,50,90,0.95)':'rgba(15,25,55,0.85)';
   ctx.beginPath(); ctx.roundRect(_bx, _by, _bw, _bh, 4); ctx.fill();
   ctx.strokeStyle=_introSkipBtnHover?'rgba(160,200,255,0.95)':'rgba(80,130,200,0.55)';
@@ -3640,6 +3731,40 @@ function _introToCorpSetup(){
   // star, Large Station on the resort planet, Factory mark on the urban
   // planet) so the gameplay galaxy starts in its real generated state.
   _restoreIntroOverrides();
+  // Reset Orijen + the tutorial lava planet back to their AT-GENERATION
+  // orbit positions. updatePlanetOrbits has been running every cutscene
+  // frame so these two planets can drift far apart if the player lingers
+  // on the narration — undoing that drift keeps the tutorial framing
+  // consistent (the two worlds always start visibly close to each other).
+  if(galaxy){
+    const _resetPlanet=(_p)=>{
+      if(!_p || typeof _p._initialOrbitAngle !== 'number') return;
+      _p.orbitAngle=_p._initialOrbitAngle;
+      const _s=galaxy.stars[_p.starId];
+      if(_s){
+        _p.x=_s.x+_p.orbitRadius*Math.cos(_p.orbitAngle);
+        _p.y=_s.y+_p.orbitRadius*Math.sin(_p.orbitAngle);
+      }
+    };
+    _resetPlanet(galaxy.planets[galaxy.origenId]);
+    if(_tutorialLavaPlanetId>=0) _resetPlanet(galaxy.planets[_tutorialLavaPlanetId]);
+  }
+  // Re-center the camera fully zoomed in on the player's train. The
+  // cutscene's last shot can leave cam at any scale (often MIN_SC at the
+  // tail of the Orijen zoom-out), and the corpsetup + aiselect screens
+  // don't touch cam — so without this, the fadein → galaxy transition
+  // would show the galaxy at whatever scale the cutscene happened to
+  // end on. Tracking is re-armed so the per-frame follow logic keeps
+  // the train centred even as it crosses orbits.
+  if(trains && trains[0]){
+    const _engPos=getTrainCarPos(trains[0],0);
+    const _panNudge=PANEL_W/(2*MAX_SC);
+    cam.scale=MAX_SC;
+    cam.x=_engPos[0]+_panNudge;
+    cam.y=_engPos[1];
+    tracking=true; trackingOffset={x:PANEL_W/(2*MAX_SC), y:0};
+    if(typeof clampCamera==='function') clampCamera();
+  }
   corpName=_genRandomCorpName(); _csCeoOptions=_genStartingCeos(); _csSelectedCeo=0; _csAutoEdit=true; _aiSelectSeen=false;
   // Reset cutscene state so a future replay (LOAD GAME → fresh intro) starts clean.
   _introShots=null; _introParaIdx=0; _introShotIdx=0;
@@ -5690,6 +5815,12 @@ function _processCargoQueue(t, p){
         if(t.isPlayer&&(t._unloadCount||0)>=1){
           _chatMsgSegs([{text:(t.name||'Train')+' arrived at '+(p.name||'planet')+': ',color:'rgba(140,210,255,0.85)'},{text:'+'+_fmtCr(t._unloadRevenue||0)+' credits',color:'rgba(100,225,145,0.92)'}]);
           _ga('train_revenue_logged',{train_name:t.name||'Train', planet:p.name||'planet', revenue:Math.round(t._unloadRevenue||0), unload_count:t._unloadCount||0, sd:Math.floor(stardate)});
+          // Bump the successful-delivery counter (one per chat message,
+          // gated on positive revenue). The corporate_expansion mission
+          // intro reads this — it won't fire until the player has logged
+          // 30 such deliveries, so the mission lands well after the
+          // player has settled into a real trade rhythm.
+          if((t._unloadRevenue||0)>0) _playerDeliveryCount++;
         }
         t._unloadRevenue=0; t._unloadCount=0;
         _startLoadPhase(t,p);
@@ -6332,6 +6463,16 @@ function generateGalaxy(){
       const p={
         id:pid++, starId:star.id,
         orbitRadius:orbitR, orbitAngle:angle, orbitSpeed:spd,
+        // Snapshot the angle at generation time so the intro cutscene
+        // can restore Orijen + the home-system lava planet back to
+        // their starting positions before gameplay begins. (The cutscene
+        // ticks updatePlanetOrbits every frame to keep moons + station
+        // structures animated, which means a player who lingers on the
+        // STARDATE 829 text for ~30 s can find Orijen and the lava
+        // planet drifted well away from each other by the time the
+        // tutorial wants to point at them. Only the home-system planets
+        // need this reset.)
+        _initialOrbitAngle:angle,
         x:star.x+orbitR*Math.cos(angle), y:star.y+orbitR*Math.sin(angle),
         size:sz, radius:pr,
         type:_typeForSlot,
@@ -6356,6 +6497,15 @@ function generateGalaxy(){
       }:null;
       p.catchphrase=isStarter?'The first world on every map.':generateCatchphrase(p);
       p.population=isStarter?Math.round(1e6+Math.random()*9e6):generatePopulation(p);
+      // Force the home-system DESERT planet (HOME_BIOMES index 2) to be
+      // inhabited. generatePopulation has a 33 % chance of returning 0 for
+      // desert worlds; the user wants Gigi Prime's desert (and the AI
+      // mirror system's desert — handled in _initAICorp) to always start
+      // with a population so the early game has a guaranteed nearby
+      // populated trade target beyond the resort/agri pair.
+      if(isHome && i===2 && p.type.id==='desert' && (p.population||0)===0){
+        p.population=Math.round(5e4+Math.random()*2e6);
+      }
       p.clouds=generatePlanetClouds(p); p.cloudAngle=Math.random()*Math.PI*2;
       // Gold deposit: 1/20 chance on rocky/desert/resort/jungle/ocean planets,
       // EXCEPT no planet in the player's home star (Gigi Prime) is ever
@@ -6860,6 +7010,13 @@ function _initAICorp(){
     _p.devLevelBase=(i===1)?3:randInt(0,2);
     _p.devLevel=_p.devLevelBase;
     _p.population=generatePopulation(_p);
+    // Mirror the player-home-system DESERT-is-always-inhabited rule
+    // (see generateGalaxy near line 6486). Index 2 of _AI_HOME_BIOMES is
+    // desert; force a non-zero population so the AI starting cluster
+    // has the same trade-target profile as the player's.
+    if(i===2 && _p.type.id==='desert' && (_p.population||0)===0){
+      _p.population=Math.round(5e4+Math.random()*2e6);
+    }
     _p.populationBase=_p.population;
     // Agri planets re-roll their pre-built upgrade; everything else gets the
     // standard preBuiltBiomes set (e.g. pumping_station on ocean — though
@@ -6938,6 +7095,14 @@ function _initAICorp(){
       }:null;
       _np.catchphrase=generateCatchphrase(_np);
       _np.population=generatePopulation(_np);
+      // Same desert-inhabited rule as the mutate path above — when the
+      // AI star's existing planet count was short of _AI_HOME_BIOMES and
+      // we're synthesising a fresh desert at slot 2, give it a starting
+      // population so neither home cluster ever rolls an uninhabited
+      // desert.
+      if(i===2 && _np.type.id==='desert' && (_np.population||0)===0){
+        _np.population=Math.round(5e4+Math.random()*2e6);
+      }
       _np.populationBase=_np.population;
       _np.clouds=generatePlanetClouds(_np); _np.cloudAngle=Math.random()*Math.PI*2;
       // Planets generated to fill out the AI's home system are forced
@@ -15992,6 +16157,12 @@ function _drawBuyTrainHintCallout(){
   if(_bx+_bW>W-6) _bx=W-6-_bW;
   const _by=_tipY-_tailH-_bH;
   const _tailX=Math.max(_bx+_bR+8,Math.min(_tipX,_bx+_bW-_bR-8));
+  // Wipe HD-overlay text underneath the bubble + tail. The chat log
+  // and hint bar both write to that overlay earlier in the frame, and
+  // because the overlay is composited LAST any text already there
+  // bleeds through this bubble's yellow background. The clear spans
+  // the bubble rect plus the tail's vertical reach down to _tipY.
+  _clearTextOverlayRect(_bx-2, _by-2, _bW+4, (_tipY-_by)+6);
   ctx.save();
   ctx.globalAlpha=_a;
   ctx.shadowColor='rgba(180,140,0,0.55)'; ctx.shadowBlur=8;
@@ -16517,15 +16688,15 @@ function _drawTutorialChain(stage){
           }
           if(_oreRow){
             // Anchor at the BOTTOM-CENTER of the molten ore sprite so the
-            // tail naturally points UP into the sprite from below — and
-            // cache the supply/demand panel bottom Y so we can position
-            // the bubble OUTSIDE the panel entirely (clear of every car
-            // sprite in the supply + demand columns).
-            const _panel=popupState.supplyDemandPanelBounds;
+            // tail points UP into the sprite from below. The bubble body
+            // sits IMMEDIATELY below the sprite (just enough gap for the
+            // tail + a small visual breather) — earlier this was pushed
+            // all the way below the whole supply/demand panel, which
+            // felt detached from the resource it was pointing at.
             _blueHoverAnchorFrozen={
               x:_oreRow.x+9,
-              y:_oreRow.y+_oreRow.h-1, // bottom edge of the sprite
-              belowY:(_panel?_panel.y+_panel.h+10:_oreRow.y+_oreRow.h+50),
+              y:_oreRow.y+_oreRow.h-1,         // bottom edge of the sprite
+              belowY:_oreRow.y+_oreRow.h+6,    // bubble top sits 6 px under sprite
             };
           }
         }
@@ -17245,12 +17416,17 @@ function updateMissions(dtSd){
     if(_gdPlayerTrains>=4) pendingMissionIntros.push({defId:'galactic_distance',readySd:stardate});
   }
   // corporate_expansion intro: PLAYER must own 4+ stations (counting Orijen
-  // starter station + every player-built station). The mission rewards
-  // continued network growth, so it lands after the player demonstrates
-  // they're scaling.
+  // starter station + every player-built station) AND have logged at
+  // least 30 successful deliveries with non-zero revenue (one chat-log
+  // message per delivery). The station check alone fired too early for
+  // players who built stations aggressively before establishing real
+  // trade flow; the delivery count makes the mission land after the
+  // player has settled into a consistent revenue rhythm.
   if(!_missionPending('corporate_expansion')&&!missions.some(mx=>mx.id==='corporate_expansion')){
     const _cePlayerStations=galaxy.planets.filter(p=>p&&(p.playerBuiltStation||p.isStarter)).length;
-    if(_cePlayerStations>=4) pendingMissionIntros.push({defId:'corporate_expansion',readySd:stardate});
+    if(_cePlayerStations>=4 && _playerDeliveryCount>=30){
+      pendingMissionIntros.push({defId:'corporate_expansion',readySd:stardate});
+    }
   }
   // galaxy_census: arm real-time timer once 15 planets visited; trigger 10s after
   if(_galaxyCensusTimerMs===0&&visitedPlanetIds.size>=15&&!_missionPending('galaxy_census')) _galaxyCensusTimerMs=Date.now();
@@ -19058,6 +19234,11 @@ function drawColorPickerPopup(){
   const cpw=240, cph=240;
   const cpx=(W-cpw)/2, cpy=(H-cph)/2-30;
   ctx.save();
+  // Wipe HD-overlay text underneath the picker so earlier-frame text
+  // (chat log, hint bar, mission tracker, etc.) doesn't composite on
+  // top of the popup. Mirrors what drawPopupBase does for every other
+  // popup that's built on top of it.
+  _clearTextOverlayRect(cpx, cpy, cpw, cph);
   ctx.fillStyle='rgba(5,10,28,0.98)'; ctx.fillRect(cpx,cpy,cpw,cph);
   ctx.strokeStyle='rgba(255,160,80,0.6)'; ctx.lineWidth=2; ctx.strokeRect(cpx,cpy,cpw,cph);
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.fillStyle='rgba(200,140,60,0.85)';
@@ -19115,10 +19296,9 @@ function drawColorPickerPopup(){
   ctx.font='12px "Courier New",monospace'; ctx.textAlign='center';
   ctx.fillStyle=_hexHov?'rgba(255,235,200,1)':'rgba(220,200,160,0.92)';
   ctx.fillText(_curHex.toUpperCase(),hexX+hexW/2,pvY+15);
-  // Subtle hint: "(click to type)" under the hex field
-  ctx.font='7px "Exo 2",sans-serif'; ctx.textAlign='left';
-  ctx.fillStyle='rgba(150,110,60,0.6)';
-  ctx.fillText('click to type a hex code',cpx+50,pvY+30);
+  // (The "click to type a hex code" hint that used to sit below the
+  // hex field was removed per user request — the cursor turning to a
+  // text-caret on hover is already a strong enough affordance.)
   // ── Preset palette at the bottom (smaller) ──
   const psY=cpy+170;
   ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='left'; ctx.fillStyle='rgba(200,140,60,0.7)';
@@ -19348,7 +19528,13 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
   // tooltips collected at the bottom. Sort is stable within each tier so the
   // original UPGRADES order is preserved for visually adjacent entries.
   const _isUpgradeGateLocked=(uId)=>{
-    if(uId==='blast_furnace') return !_ironCarUnlocked;
+    // BLAST FURNACE: same Large-Station gate as FACTORY below. The
+    // furnace's iron+chemical → steel throughput needs more bay capacity
+    // than a regular STATION can offer, so until the player upgrades to
+    // a LARGE STATION (or a TERMINAL, which is a superset) the PURCHASE
+    // button stays greyed-out and a hover tooltip lists the requirements
+    // — matches the existing Large-Station/Factory pattern.
+    if(uId==='blast_furnace') return !_ironCarUnlocked || !(p.hasLargeStation||p.hasTerminal);
     // FACTORY: requires both the first-iron-produced flag AND a LARGE
     // STATION (or TERMINAL, which is a superset) on this urban planet.
     // Rationale: a regular STATION's capacity isn't enough to throughput
@@ -19427,7 +19613,10 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
   // Used by the locked-button hover tooltip below to render the same
   // Large-Station-style ✓ / ✗ requirements list.
   const _upLockReqs=(uId)=>{
-    if(uId==='blast_furnace') return [{ok:!!_ironCarUnlocked,txt:'First iron produced'}];
+    if(uId==='blast_furnace') return [
+      {ok:!!_ironCarUnlocked,                    txt:'First iron produced'},
+      {ok:!!(p.hasLargeStation||p.hasTerminal),  txt:'Large Station built here'},
+    ];
     if(uId==='factory')       return [
       {ok:!!_ironCarUnlocked,                    txt:'First iron produced'},
       {ok:!!(p.hasLargeStation||p.hasTerminal),  txt:'Large Station built here'},
@@ -21155,6 +21344,15 @@ function drawTrainBuilderPopup(){
   const py=Math.round((H-ph)/2);
   // Draw engine panel FIRST so the popup appears on top (panel slides from behind left edge)
   _drawEngineDetailsPanel(px,py,s.engine);
+  // Wipe the HD text overlay underneath the popup body. The chat log and
+  // hint bar both write to that overlay EARLIER in the frame, and unless
+  // we clear their pixels here they composite ON TOP of this popup at
+  // the end of the frame — visibly bleeding "0.9 Stardates until a Rival
+  // Corporation is established." and the `[P] planets · [Y] stars …`
+  // hint bar across the popup. drawPopupBase does this for every popup
+  // built on top of it; trainbuilder paints its own background so the
+  // same call has to live here.
+  _clearTextOverlayRect(px, py, pw, ph);
   // Draw popup background + border on top of panel
   ctx.fillStyle='rgba(3,6,20,0.97)';
   ctx.fillRect(px,py,pw,ph);
@@ -24034,7 +24232,14 @@ function drawGalaxy(ts,dt){
 
   // ── Chat Log (above hint bar) ────────────────────────────────
   {
-    const _clX=4, _clW=262, _clLH=13, _clMaxRows=6, _clPad=4;
+    // Width sized so the longest expected single-line message — "0.9
+    // Stardates until a Rival Corporation is established." (≈239 px
+    // in 8 px bold Orbitron) plus a small visible gap plus the
+    // right-aligned "S.D. 829.1" timestamp (≈25 px in 6 px Exo 2) —
+    // just barely fits. The previous 340 px left a wide ugly gap;
+    // 295 px tightens it to a single narrow column-separator's worth
+    // of space.
+    const _clX=4, _clW=295, _clLH=13, _clMaxRows=6, _clPad=4;
     const _clH=_clMaxRows*_clLH+_clPad*2;
     const _clY=GH-22-_clH;
     _chatLogBounds={x:_clX,y:_clY,w:_clW,h:_clH};
@@ -24045,11 +24250,36 @@ function drawGalaxy(ts,dt){
      else              _chatLogHoverA=Math.max(0,_chatLogHoverA-_clf/440);}
     const _clTxtW=_clW-10; // usable text width
     ctx.font='bold 8px Orbitron,sans-serif'; // set before measuring
-    // Build visual lines for a message (word-wrap; segment messages split at boundaries)
+    // SD-timestamp width helper: returns the width in px the "S.D. 829.X"
+    // right-edge label will occupy for THIS message (or 0 if no SD), plus
+    // a small gap. Switches font twice — back to the bold Orbitron used
+    // for everything else so subsequent measurements stay accurate.
+    const _sdLabel=(msg)=>'S.D. '+(Math.round(msg.sd*10)/10).toFixed(1);
+    const _sdReserveFor=(msg)=>{
+      if(!(msg && msg.sd>0)) return 0;
+      const _f=ctx.font;
+      ctx.font='6px "Exo 2",sans-serif';
+      const _w=ctx.measureText(_sdLabel(msg)).width + 6; // +6 px gap
+      ctx.font=_f;
+      return _w;
+    };
+    // Build visual lines for a message (word-wrap; segment messages split at boundaries).
+    // Per user spec: the SD timestamp is rendered on the LAST line of the
+    // message, and that line's width must be reserved so the message text
+    // never overlaps the timestamp. Earlier lines use the full text width.
     const _clMkLines=(msg)=>{
+      const _resv=_sdReserveFor(msg);
+      const _lastW=_clTxtW-_resv; // available width on the line carrying the SD
+      const _markLast=(arr)=>{
+        for(const e of arr) e.isLast=false;
+        if(arr.length) arr[arr.length-1].isLast=true;
+        return arr;
+      };
       if(msg.segments){
+        // Cheap fast-path: every segment combined fits a SINGLE line that
+        // is ALSO the last line, so it has to reserve SD space.
         let tw=0; for(const s of msg.segments) tw+=ctx.measureText(s.text).width;
-        if(tw<=_clTxtW) return [{type:'segs',segs:msg.segments,isFirst:true}];
+        if(tw<=_lastW) return _markLast([{type:'segs',segs:msg.segments,isFirst:true}]);
         const res=[]; let isF=true;
         for(const s of msg.segments){
           if(ctx.measureText(s.text).width<=_clTxtW){
@@ -24061,12 +24291,39 @@ function drawGalaxy(ts,dt){
             for(const l of sln){res.push({type:'segs',segs:[{...s,text:l}],isFirst:isF});isF=false;}
           }
         }
-        return res;
+        // If the final segment row is too wide for SD reserve, peel the
+        // last word off into a new row. Segments are single-segment rows
+        // at this point (we already split per-segment above) so width is
+        // just measureText of seg.text.
+        while(_resv>0 && res.length>0){
+          const _lr=res[res.length-1];
+          if(_lr.type!=='segs' || _lr.segs.length!==1) break;
+          const _lt=_lr.segs[0].text;
+          if(ctx.measureText(_lt).width<=_lastW) break;
+          const _ls=_lt.lastIndexOf(' ');
+          if(_ls<0) break; // single word — accept overlap rather than orphan
+          const _before=_lt.slice(0,_ls), _after=_lt.slice(_ls+1);
+          _lr.segs[0]={..._lr.segs[0],text:_before};
+          res.push({type:'segs',segs:[{..._lr.segs[0],text:_after}],isFirst:false});
+        }
+        return _markLast(res);
       }
       const wds=msg.text.split(' '); const lns=[]; let cur='';
       for(const w of wds){const t=cur?cur+' '+w:w;if(ctx.measureText(t).width<=_clTxtW)cur=t;else{if(cur)lns.push(cur);cur=w;}}
       if(cur)lns.push(cur); if(!lns.length)lns.push(msg.text);
-      return lns.map((l,i)=>({type:'text',text:l,isFirst:i===0}));
+      // Now ensure the LAST line fits alongside the SD timestamp. Peel
+      // trailing words off until it does, or until the last line is a
+      // single word (which we then accept as-is — splitting a word would
+      // look worse than the rare overlap on a single-token message).
+      while(_resv>0 && lns.length>0){
+        const _last=lns[lns.length-1];
+        if(ctx.measureText(_last).width<=_lastW) break;
+        const _ls=_last.lastIndexOf(' ');
+        if(_ls<0) break;
+        lns[lns.length-1]=_last.slice(0,_ls);
+        lns.push(_last.slice(_ls+1));
+      }
+      return _markLast(lns.map((l,i)=>({type:'text',text:l,isFirst:i===0})));
     };
     // Build visible message set (newest first) until we have enough lines
     const _visMsgs=[];
@@ -24117,7 +24374,11 @@ function drawGalaxy(ts,dt){
         ctx.fillStyle=msg.color; ctx.shadowColor=msg.color;
         ctx.fillText(vl.text,_clX+5,ty);
       }
-      if(vl.isFirst&&msg.sd>0){
+      // Render the SD timestamp aligned with the LAST line of each
+      // message (not the first). For multi-line messages the line wrap
+      // above has already reserved enough width on the last line so the
+      // text and the timestamp can't overlap.
+      if(vl.isLast&&msg.sd>0){
         const _sdTxt='S.D. '+(Math.round(msg.sd*10)/10).toFixed(1);
         ctx.font='6px "Exo 2",sans-serif'; ctx.fillStyle='rgba(120,130,150,0.65)';
         ctx.shadowBlur=0; ctx.shadowColor='transparent'; ctx.textAlign='right';
@@ -25012,6 +25273,31 @@ canvas.addEventListener('mousedown',e=>{
       tracking=false;
     }
   }
+  // Color picker — arm drag on mousedown over the SV picker or the hue
+  // strip so the indicator follows the cursor while the button is held.
+  // (The actual click handling in the mouseup branch also pick-and-apply,
+  // but mousedown is what we need to lock the drag state.) Both branches
+  // immediately apply the picked colour so a single click without drag
+  // still works.
+  if(colorPickerState){
+    if(colorPickerState.svBounds){
+      const b=colorPickerState.svBounds;
+      if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+        colorPickerState.dragging='sv';
+        colorPickerState.s=Math.max(0,Math.min(1,(cp.x-b.x)/b.w));
+        colorPickerState.v=Math.max(0,Math.min(1,1-(cp.y-b.y)/b.h));
+        _cpApplyHsv();
+      }
+    }
+    if(colorPickerState.hueBounds && !colorPickerState.dragging){
+      const b=colorPickerState.hueBounds;
+      if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+        colorPickerState.dragging='hue';
+        colorPickerState.h=Math.max(0,Math.min(1,(cp.y-b.y)/b.h));
+        _cpApplyHsv();
+      }
+    }
+  }
 });
 canvas.addEventListener('mousemove',e=>{
   const cp=getCP(e);
@@ -25351,12 +25637,29 @@ canvas.addEventListener('mousemove',e=>{
     const _hb=colorPickerState.hexEditBounds;
     colorPickerState.hexHover=!!(_hb && cp.x>=_hb.x && cp.x<=_hb.x+_hb.w && cp.y>=_hb.y && cp.y<=_hb.y+_hb.h);
     if(colorPickerState.hexHover) canvas.style.cursor='text';
-    // SV picker / hue strip cursor feedback
-    const _svb=colorPickerState.svBounds;
-    const _hub=colorPickerState.hueBounds;
-    if((_svb && cp.x>=_svb.x && cp.x<=_svb.x+_svb.w && cp.y>=_svb.y && cp.y<=_svb.y+_svb.h) ||
-       (_hub && cp.x>=_hub.x && cp.x<=_hub.x+_hub.w && cp.y>=_hub.y && cp.y<=_hub.y+_hub.h)){
+    // Active drag from a prior mousedown on the SV picker or hue strip:
+    // keep updating the selected colour while the button is held, even
+    // when the cursor strays outside the picker bounds (cp coords are
+    // clamped to the bounds below so the indicator never leaves the rect).
+    if(colorPickerState.dragging==='sv' && colorPickerState.svBounds){
+      const b=colorPickerState.svBounds;
+      colorPickerState.s=Math.max(0,Math.min(1,(cp.x-b.x)/b.w));
+      colorPickerState.v=Math.max(0,Math.min(1,1-(cp.y-b.y)/b.h));
+      _cpApplyHsv();
       canvas.style.cursor='crosshair';
+    } else if(colorPickerState.dragging==='hue' && colorPickerState.hueBounds){
+      const b=colorPickerState.hueBounds;
+      colorPickerState.h=Math.max(0,Math.min(1,(cp.y-b.y)/b.h));
+      _cpApplyHsv();
+      canvas.style.cursor='crosshair';
+    } else {
+      // SV picker / hue strip cursor feedback when NOT dragging.
+      const _svb=colorPickerState.svBounds;
+      const _hub=colorPickerState.hueBounds;
+      if((_svb && cp.x>=_svb.x && cp.x<=_svb.x+_svb.w && cp.y>=_svb.y && cp.y<=_svb.y+_svb.h) ||
+         (_hub && cp.x>=_hub.x && cp.x<=_hub.x+_hub.w && cp.y>=_hub.y && cp.y<=_hub.y+_hub.h)){
+        canvas.style.cursor='crosshair';
+      }
     }
   }
   // Hover tracking for title screen + how-to screen
@@ -25370,9 +25673,19 @@ canvas.addEventListener('mousemove',e=>{
     // Legacy htp/dot hovers are kept at default values so other code
     // paths that read them don't see undefined.
     _introSkipBtnHover=!!(_introSkipBtnBounds&&cp.x>=_introSkipBtnBounds.x&&cp.x<=_introSkipBtnBounds.x+_introSkipBtnBounds.w&&cp.y>=_introSkipBtnBounds.y&&cp.y<=_introSkipBtnBounds.y+_introSkipBtnBounds.h);
+    // "Near" check: an inflated bounding box around the SKIP button —
+    // ~60 px buffer on every side — that drives the fade-up from the
+    // dimmed 25% baseline to fully visible. The buffer is wide enough
+    // that the button starts becoming readable before the cursor
+    // actually hits it.
+    {
+      const _SKIP_BUF=60;
+      const _b=_introSkipBtnBounds;
+      _introSkipBtnNear=!!(_b && cp.x>=_b.x-_SKIP_BUF && cp.x<=_b.x+_b.w+_SKIP_BUF && cp.y>=_b.y-_SKIP_BUF && cp.y<=_b.y+_b.h+_SKIP_BUF);
+    }
     _htpBtnHover=false; _htpSkipHover=false; _htpDotHover=-1;
     canvas.style.cursor=_introSkipBtnHover?'pointer':'default';
-  } else { _htpBtnHover=false; _htpSkipHover=false; _htpDotHover=-1; _introSkipBtnHover=false; }
+  } else { _htpBtnHover=false; _htpSkipHover=false; _htpDotHover=-1; _introSkipBtnHover=false; _introSkipBtnNear=false; }
   // Hover tracking for corpsetup screen
   if(gs==='corpsetup'){
     _csNameHover=!!(_csNameBounds&&cp.x>=_csNameBounds.x&&cp.x<=_csNameBounds.x+_csNameBounds.w&&cp.y>=_csNameBounds.y&&cp.y<=_csNameBounds.y+_csNameBounds.h);
@@ -25506,6 +25819,15 @@ canvas.addEventListener('mouseup',e=>{
   // so the underlying popup doesn't see a phantom click on whatever was
   // beneath the cursor when the user released.
   if(_sbDrag){ _sbDrag=null; drag=false; return; }
+  // End any active color-picker drag (SV picker or hue strip). The drag
+  // itself was applied during mousemove; here we just disarm it so a
+  // subsequent move-without-press doesn't keep updating the colour.
+  if(colorPickerState && colorPickerState.dragging){
+    colorPickerState.dragging=null;
+    // Don't `return` — the mouseup over the picker isn't meant to
+    // dismiss anything, but we want the rest of the click cascade to
+    // still see this release for things like the click sound.
+  }
   const wasDrag=drag&&dragDist>5; drag=false;
   if(wasDrag&&relockAfterDrag){ relockAfterDrag=false; if(sel&&sel.type==='car'){ const pos=getSelWorldPos(); if(pos){ tracking=true; trackingOffset={x:cam.x-pos[0],y:cam.y-pos[1]}; } } }
   const cp=getCP(e);
@@ -26187,20 +26509,26 @@ canvas.addEventListener('mouseup',e=>{
       }
       // Color picker click handling — SV picker, hue strip, hex input, preset swatches
       if(colorPickerState){
-        // SV picker click → pick saturation+value at click position
+        // SV picker mousedown → pick + begin drag. Subsequent mousemove
+        // events (handled in the mousemove listener) keep updating s/v
+        // until the user releases the mouse button. The cp coords are
+        // clamped to the bounds INSIDE the move handler so the cursor
+        // can travel outside the picker rect without losing the drag.
         if(colorPickerState.svBounds){
           const b=colorPickerState.svBounds;
           if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+            colorPickerState.dragging='sv';
             colorPickerState.s=Math.max(0,Math.min(1,(cp.x-b.x)/b.w));
             colorPickerState.v=Math.max(0,Math.min(1,1-(cp.y-b.y)/b.h));
             _cpApplyHsv();
             return;
           }
         }
-        // Hue strip click → pick hue
+        // Hue strip mousedown → pick + begin drag (same pattern as SV).
         if(colorPickerState.hueBounds){
           const b=colorPickerState.hueBounds;
           if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+            colorPickerState.dragging='hue';
             colorPickerState.h=Math.max(0,Math.min(1,(cp.y-b.y)/b.h));
             _cpApplyHsv();
             return;
@@ -27528,7 +27856,7 @@ function _buildSaveObject(){
     _grainCarUnlocked, _livestockCarUnlocked, _fruitCarUnlocked,
     _classJEngineUnlocked, _classREngineUnlocked, _N700EngineUnlocked,
     _steelProdLog,
-    _sensorUpgradeActive, _stationCostDiscount, _sandstormCheckSd, _bhResearchCheckSd,
+    _sensorUpgradeActive, _stationCostDiscount, _sandstormCheckSd, _bhResearchCheckSd, _playerDeliveryCount,
     _totalPassengersDelivered, _totalHazmatIncinerated, _anyCargoProduced,
     trainyard, financeLedger:_trimmedFinance, _ledgerSummary:_builtLedgerSummary, purchaseLedger, corpValueHistory, corpStatsHistory, aiCorpStatsHistory, _corp, _ceoHireCandidates,
     creditSnapshots, lastCreditSnapshotSd,
@@ -27657,6 +27985,7 @@ function _restoreFromSave(save){
   _steelProdLog=Array.isArray(save._steelProdLog)?save._steelProdLog:[];
   _steelMissionTimerMs=0; // re-armed by updateMissions() if the design_better_train intro hasn't fired yet
   _sensorUpgradeActive=!!save._sensorUpgradeActive; _stationCostDiscount=save._stationCostDiscount||0;
+  _playerDeliveryCount=typeof save._playerDeliveryCount==='number'?save._playerDeliveryCount:0;
   _galaxyCensusTimerMs=0; // timer resets on load; updateMissions() will re-arm if needed
   _hasZoomed=true; // loaded games have played before — suppress the zoom callout hint
   _buyTrainTipStartMs=0; _buyTrainTipShown=true; // suppress buy-train callout on loaded games
@@ -28278,6 +28607,7 @@ function startGame(){
   _classJEngineUnlocked=false; _classREngineUnlocked=false; _N700EngineUnlocked=false;
   _steelProdLog=[]; _steelMissionTimerMs=0;
   _sensorUpgradeActive=false; _stationCostDiscount=0; _galaxyCensusTimerMs=0; _sandstormCheckSd=0; _bhResearchCheckSd=0;
+  _playerDeliveryCount=0; // new game starts with zero successful deliveries logged
   missions=[]; _recomputeMissionTargets();
   _gameStartSd=stardate;
   pendingMissionIntros=MISSION_DEFS.filter(def=>!def.prerequisite&&def.id!=='visit_planet'&&def.id!=='build_foundry'&&def.id!=='dispose_hazmat'&&def.id!=='lost_colony'&&def.id!=='seeking_home'&&def.id!=='create_route'&&def.id!=='research_royal_car'&&def.id!=='colony_train'&&def.id!=='spread_the_seed'&&def.id!=='famine'&&def.id!=='outbreak'&&def.id!=='stellar_cartography'&&def.id!=='galaxy_census'&&def.id!=='sandstorm_relief'&&def.id!=='bh_research'&&def.id!=='design_better_train'&&def.id!=='buy_second_train'&&def.id!=='galactic_distance'&&def.id!=='corporate_expansion').map(def=>({defId:def.id,readySd:_gameStartSd+(def.startsAfter||0)}));
