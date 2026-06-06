@@ -339,6 +339,21 @@ function playSound(id){
   const a=_sfx[id]; if(!a) return;
   a.currentTime=0; a.play().catch(()=>{});
 }
+// ── soundtrack ───────────────────────────────────────────────
+const _soundtrack=new Audio('https://raw.githubusercontent.com/jhart90/spacetraintycoon/localstorage-saves/assets/last_train_loop.mp3');
+_soundtrack.loop=true; _soundtrack.volume=0.35;
+let _musicMuted=false;
+function _tryPlaySoundtrack(){
+  if(_musicMuted) return;
+  _soundtrack.play().catch(()=>{});
+}
+function _toggleMusicMute(){
+  _musicMuted=!_musicMuted;
+  if(_musicMuted){ _soundtrack.pause(); }
+  else { _soundtrack.play().catch(()=>{}); }
+}
+let _muteBtnBounds=null, _muteBtnHover=false;
+let _optsMuteBtnBounds=null, _optsMuteBtnHover=false;
 
 // ── name edit overlay ────────────────────────────────────────
 const nameEditEl=document.getElementById('name-edit');
@@ -2612,6 +2627,20 @@ function drawTitleScreen(ts,dt){
   ctx.shadowBlur=_loadBtnHover?12:6; ctx.font='bold 14px Orbitron,sans-serif';
   ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillStyle=_loadBtnHover?'rgba(255,225,120,1.0)':'rgba(210,170,80,0.95)';
   ctx.fillText('LOAD GAME',W/2,lby+lbh/2);
+  ctx.restore();
+  // Mute button — bottom-right corner of title screen
+  const _mbSz=32, _mbX=W-_mbSz-14, _mbY=H-_mbSz-14;
+  _muteBtnBounds={x:_mbX,y:_mbY,w:_mbSz,h:_mbSz};
+  ctx.save();
+  ctx.globalAlpha=_muteBtnHover?0.92:0.60;
+  ctx.fillStyle=_musicMuted?'rgba(90,30,30,0.92)':'rgba(20,40,80,0.85)';
+  ctx.strokeStyle=_musicMuted?'rgba(255,100,100,0.8)':(_muteBtnHover?'rgba(120,200,255,0.9)':'rgba(60,120,200,0.55)');
+  ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.roundRect(_mbX,_mbY,_mbSz,_mbSz,5); ctx.fill(); ctx.stroke();
+  ctx.globalAlpha=_muteBtnHover?1.0:0.75;
+  ctx.fillStyle=_musicMuted?'#f88':'#8cf';
+  ctx.font='bold 17px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(_musicMuted?'\\uD83D\\uDD07':'\\uD83D\\uDD0A',_mbX+_mbSz/2,_mbY+_mbSz/2+1);
   ctx.restore();
 }
 
@@ -18088,7 +18117,7 @@ function drawOptionsPopup(){
   // (Add Credits, Flower Planet, Colony Planet, Rival) AND the Fog of War
   // toggle all live in the hidden Cheats popup accessed by pressing 'C' while
   // Options is open.
-  const pw=300, ph=280;
+  const pw=300, ph=316;
   const [px,py]=drawPopupBase(pw,ph,'rgba(80,160,255,0.7)');
   ctx.save();
   ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
@@ -18173,6 +18202,24 @@ function drawOptionsPopup(){
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
   ctx.fillStyle='#fff'; ctx.fillText(missionTrackerEnabled?'ON':'OFF',mtTX+mtTW/2,mtTT+mtTH/2+4);
   popupState.missionTrackerToggleBounds={x:mtTX,y:mtTT,w:mtTW,h:mtTH};
+  // Divider before Music row
+  ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(px,py+227); ctx.lineTo(px+pw,py+227); ctx.stroke();
+  // Music row
+  const ry8=py+257;
+  ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
+  ctx.fillStyle='rgba(160,200,255,0.9)'; ctx.fillText('Music',px+18,ry8);
+  ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,130,180,0.5)';
+  ctx.fillText('Background soundtrack',px+18,ry8+16);
+  const _omTW=48,_omTH=22,_omTX=px+pw-18-_omTW,_omTT=ry8-16;
+  const _omHov=!!_optsMuteBtnHover;
+  ctx.fillStyle=!_musicMuted?(_omHov?'rgba(45,200,90,0.97)':'rgba(30,160,70,0.85)'):(_omHov?'rgba(70,70,105,0.90)':'rgba(50,50,75,0.75)');
+  ctx.fillRect(_omTX,_omTT,_omTW,_omTH);
+  ctx.strokeStyle=!_musicMuted?(_omHov?'rgba(80,240,110,0.85)':'rgba(50,220,90,0.7)'):(_omHov?'rgba(100,100,145,0.70)':'rgba(70,70,100,0.5)'); ctx.lineWidth=1;
+  ctx.strokeRect(_omTX,_omTT,_omTW,_omTH);
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='#fff'; ctx.fillText(!_musicMuted?'ON':'OFF',_omTX+_omTW/2,_omTT+_omTH/2+4);
+  _optsMuteBtnBounds={x:_omTX,y:_omTT,w:_omTW,h:_omTH};
   // Clear cheat-button bounds — they belong to the (separate) cheats popup now.
   popupState.addCreditsBtnBounds=null;
   popupState.flowerPlanetBtnBounds=null;
@@ -25600,6 +25647,7 @@ canvas.addEventListener('mousemove',e=>{
     popupState.autosaveToggleHover=!!(_astb&&cp.x>=_astb.x&&cp.x<=_astb.x+_astb.w&&cp.y>=_astb.y&&cp.y<=_astb.y+_astb.h);
     const _mttb=popupState.missionTrackerToggleBounds;
     popupState.missionTrackerToggleHover=!!(_mttb&&cp.x>=_mttb.x&&cp.x<=_mttb.x+_mttb.w&&cp.y>=_mttb.y&&cp.y<=_mttb.y+_mttb.h);
+    _optsMuteBtnHover=!!(_optsMuteBtnBounds&&cp.x>=_optsMuteBtnBounds.x&&cp.x<=_optsMuteBtnBounds.x+_optsMuteBtnBounds.w&&cp.y>=_optsMuteBtnBounds.y&&cp.y<=_optsMuteBtnBounds.y+_optsMuteBtnBounds.h);
     const _ctlbb=popupState.controlsBtnBounds;
     popupState.controlsBtnHover=!!(_ctlbb&&cp.x>=_ctlbb.x&&cp.x<=_ctlbb.x+_ctlbb.w&&cp.y>=_ctlbb.y&&cp.y<=_ctlbb.y+_ctlbb.h);
     const _osbb=popupState.optionsSaveBtnBounds;
@@ -25656,7 +25704,8 @@ canvas.addEventListener('mousemove',e=>{
   if(gs==='title'){
     _startBtnHover=!!(startBtnBounds&&cp.x>=startBtnBounds.x&&cp.x<=startBtnBounds.x+startBtnBounds.w&&cp.y>=startBtnBounds.y&&cp.y<=startBtnBounds.y+startBtnBounds.h);
     _loadBtnHover=!!(loadBtnBounds&&cp.x>=loadBtnBounds.x&&cp.x<=loadBtnBounds.x+loadBtnBounds.w&&cp.y>=loadBtnBounds.y&&cp.y<=loadBtnBounds.y+loadBtnBounds.h);
-    canvas.style.cursor=(_startBtnHover||_loadBtnHover)?'pointer':'default';
+    _muteBtnHover=!!(_muteBtnBounds&&cp.x>=_muteBtnBounds.x&&cp.x<=_muteBtnBounds.x+_muteBtnBounds.w&&cp.y>=_muteBtnBounds.y&&cp.y<=_muteBtnBounds.y+_muteBtnBounds.h);
+    canvas.style.cursor=(_startBtnHover||_loadBtnHover||_muteBtnHover)?'pointer':'default';
   } else { _startBtnHover=false; _loadBtnHover=false; }
   if(gs==='howtoplay'){
     // Intro cutscene hover: only the new SKIP button has a hover state.
@@ -25839,7 +25888,9 @@ canvas.addEventListener('mouseup',e=>{
     // its handler first; only fall back to PLAY/LOAD GAME buttons if the
     // click missed the popup entirely (in which case the handler already
     // closed it as click-outside-popup).
+    _tryPlaySoundtrack();
     if(_smHandleClick(cp)) return;
+    if(_muteBtnBounds){const mb=_muteBtnBounds;if(cp.x>=mb.x&&cp.x<=mb.x+mb.w&&cp.y>=mb.y&&cp.y<=mb.y+mb.h){_toggleMusicMute();return;}}
     const b=startBtnBounds;
     if(b&&cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h) startGame();
     const lb=loadBtnBounds;
@@ -26494,6 +26545,14 @@ canvas.addEventListener('mouseup',e=>{
         const b=popupState.missionTrackerToggleBounds;
         if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
           missionTrackerEnabled=!missionTrackerEnabled;
+          return;
+        }
+      }
+      // Options: Music toggle — mutes/unmutes the soundtrack.
+      if(activePopup==='options'&&_optsMuteBtnBounds){
+        const b=_optsMuteBtnBounds;
+        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+          _toggleMusicMute();
           return;
         }
       }
