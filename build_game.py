@@ -1382,7 +1382,12 @@ const _INTRO_TEXT=[
 // switch from word-by-word to char-by-char. Previous timing was 200 ms/
 // word × ~5.5 chars per word ≈ 36 ms/char; 2/3 of that is ~24 ms/char.
 const _INTRO_CHAR_MS=24;
-const _INTRO_SHOT_MS=5000;
+// Default per-shot runtime in ms. Each entry in the shot pool that
+// doesn't override `durMs` uses this — currently every shot EXCEPT
+// the Orijen zoom-out opener (which sets its own `durMs: 20000`).
+// Bumped 5000 → 6000 per user request for a slightly more
+// contemplative pacing across the random shots.
+const _INTRO_SHOT_MS=6000;
 const _INTRO_PARA_MIN_LINGER_MS=600; // ensure short paragraphs don't vanish before the eye can grab them
 // Per-screen, per-char cumulative typing timings (ms from screen start).
 // Lets us insert dramatic pauses without rewriting the typing engine:
@@ -1416,8 +1421,8 @@ const _INTRO_CHAR_TIMINGS=(function(){
     // header before the body text begins arriving.
     const _stardatePauseChar=(_idx===0?13:-1); // index of the '\n' right after "STARDATE 829."
     // Paragraph-break pause set: every char that sits IMMEDIATELY AFTER
-    // a "\n\n" pair in the source string gets an extra 500 ms before it
-    // appears. This pauses the typewriter for half a second at every
+    // a "\n\n" pair in the source string gets an extra 1000 ms before
+    // it appears. This pauses the typewriter for a full second at every
     // explicit blank line so each paragraph lands as its own beat —
     // mid-sentence word-wrap (which happens at render time, not in the
     // source string) is unaffected. The pause STACKS with the STARDATE
@@ -1432,7 +1437,7 @@ const _INTRO_CHAR_TIMINGS=(function(){
     for(let _i=0; _i<_t.length; _i++){
       let _dt=_INTRO_CHAR_MS;
       if(_i===_stardatePauseChar) _dt+=1000;
-      if(_paraBreakChars.has(_i)) _dt+=500;
+      if(_paraBreakChars.has(_i)) _dt+=1000;
       if(_slowDots&&_slowDots.has(_i)) _dt=500;
       _acc+=_dt;
       _timings.push(_acc);
@@ -2700,20 +2705,29 @@ function _buildIntroShots(){
   {
     const _orijen=galaxy.planets[galaxy.origenId];
     if(_orijen){
-      const _startSc=Math.min(_maxSc, 130/Math.max(1,_orijen.radius));
-      // End zoom pushed PAST the MIN_SC "whole galaxy" framing so the
-      // shot keeps pulling back into the surrounding empty space —
-      // making the scale of the universe more apparent than just
-      // showing the entire mapped galaxy at the cap. Combined with the
-      // 15-second runtime, this gives the camera a noticeably longer
-      // continuous pull-back than the previous 10 s × MIN_SC framing.
-      const _endSc=_minSc*0.45;
+      // Start at MAX_SC (fully zoomed in — the deepest zoom level the
+      // gameplay galaxy ever supports), regardless of Orijen's body
+      // size. Earlier this used `130/orijen.radius` so the planet body
+      // would frame to a consistent ~130 px screen radius, but the
+      // user wants the cutscene to BEGIN in the same "fully zoomed
+      // in" state the player will inherit when gameplay starts, so
+      // MAX_SC it is.
+      const _startSc=_maxSc;
+      // End zoom pushed even further past the MIN_SC "whole galaxy"
+      // framing so the shot continues to pull back into the surrounding
+      // empty void after the entire mapped galaxy has already shrunk
+      // to a tiny patch in the centre of the frame — making the scale
+      // of the universe more apparent. Combined with the 22-second
+      // runtime, this gives the camera a long, slow, continuous
+      // pull-back from the home world out to deep space well beyond
+      // the world's outer edge.
+      const _endSc=_minSc*0.30;
       _openingShots.push({
         mode:'orijenZoomOut',
         kind:'orijen',
         pid:_orijen.id,
         s0:_startSc, s1:_endSc,
-        durMs:15000,
+        durMs:22000,
       });
     }
   }
@@ -2934,31 +2948,39 @@ function _buildIntroShots(){
         }
         return _mx;
       };
-      // Shot 1: pan past the DYSON-SPHERED smaller star — framed so the
-      // entire star + Dyson sphere envelope sits inside the viewport
-      // throughout, with subtle drift for cinematic motion. Per the
-      // intro spec this star is dressed with a Dyson Sphere (a
-      // megastructure of hexagonal solar panels) revealing an
-      // evidently advanced civilization. drawDysonSphere reads
-      // `_drawTs` for panel rotation — `_drawCutsceneBg` stamps it on
-      // every frame so the panels visibly rotate.
+      // Shot 1: TIGHT framing on the DYSON-SPHERED smaller star — the
+      // star fills the vertical extent of the viewport (top + bottom
+      // edges of the disc poke 10 % past the top + bottom of the
+      // screen) and the shot begins with the star centre exactly at
+      // the LEFT edge of the viewport. Over 5 seconds the camera
+      // tracks LEFT by half the star's radius so the star slowly
+      // pans RIGHT across the screen — slow enough that the dwell
+      // reads as awe rather than motion. The Dyson sphere panels
+      // rotate during the shot because `_drawCutsceneBg` stamps
+      // `_drawTs = ts` every frame.
+      //
+      // Geometry:
+      //   • star body diameter on screen = 1.2 × H (extends 10 % past
+      //     each vertical edge)
+      //   • star body radius on screen  = 0.6 × H = 300 px (with H=500)
+      //   • cam.scale = (0.6 × H) / star.radius
+      //   • Start cam.x: star.x + (W/2) / scale   → star centre at x=0
+      //   • End cam.x  : start − star.radius / 2  → star centre at
+      //                  x = (star.radius / 2) × scale = 150 px on screen,
+      //                  i.e. 1/2 the star's on-screen radius rightward.
+      //   • Constant-speed pan (linear `_t` in drawHowToPlay), so the
+      //     150 px slide plays evenly across the 5-second runtime
+      //     (~30 px/sec).
       {
         const _s=_picks[0];
         if(_s){
           _setIntroOverride(_s, 'hasDysonSphere', true);
-          // Dyson shell extends to ~1.4× the star radius (the LOW
-          // train orbit). For the whole sphere to fit in the viewport
-          // height with breathing room, we want the shell diameter at
-          // ~70% of viewport height:
-          //   2 * (radius * 1.4) * scale  ≈  H * 0.70
-          //   → scale  ≈  H * 0.25 / radius
-          const _shellSc=(H*0.25)/Math.max(1,_s.radius);
-          const _scaleAt=Math.min(_maxSc, _shellSc);
-          // Pan ~1/3 of the viewport horizontally so the camera glides
-          // past the star at constant speed without ever losing the
-          // sphere from frame.
-          const _pan=(W/2)/_scaleAt * 0.33;
-          shots.push({kind:'star', x0:_s.x-_pan, y0:_s.y-_pan*0.35, s0:_scaleAt, x1:_s.x+_pan, y1:_s.y+_pan*0.35, s1:_scaleAt});
+          const _bodyR=_s.radius;
+          const _scaleAt=(H*0.6)/Math.max(1,_bodyR);
+          const _vpHwW=(W/2)/_scaleAt; // viewport half-width in world units
+          const _x0=_s.x+_vpHwW;       // star centre lands at screen x = 0
+          const _x1=_x0-_bodyR*0.5;    // cam tracks left by ½ star radius
+          shots.push({kind:'star', x0:_x0, y0:_s.y, s0:_scaleAt, x1:_x1, y1:_s.y, s1:_scaleAt});
         }
       }
       // Shot 2: ZOOM-OUT on the larger star. Start VERY close on the
