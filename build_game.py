@@ -372,20 +372,62 @@ function playSound(id){
   a.currentTime=0; a.play().catch(()=>{});
 }
 // ── soundtrack ───────────────────────────────────────────────
-const _soundtrack=new Audio('https://raw.githubusercontent.com/jhart90/spacetraintycoon/localstorage-saves/assets/last_train_loop.mp3');
-_soundtrack.loop=true; _soundtrack.volume=0.35;
+// Fixed-order playlist of four tracks loaded from the GitHub assets folder.
+// The Options popup exposes Prev/Next/mute controls + a progress bar; the
+// 'ended' event advances to the next track and wraps to 0 at the end.
+const _MUSIC_BASE='https://raw.githubusercontent.com/jhart90/spacetraintycoon/localstorage-saves/assets/';
+const _MUSIC_TRACKS=[
+  {file:'01_last_train_home.mp3',     title:'Last Train Home'},
+  {file:'02_interstellar_segment.mp3',title:'Interstellar Segment'},
+  {file:'03_nebulosa_amistosa.mp3',   title:'Nebulosa Amistosa'},
+  {file:'04_midnight_cargo_run.mp3',  title:'Midnight Cargo Run'},
+];
+const _soundtrack=new Audio();
+_soundtrack.volume=0.35;
 let _musicMuted=false;
+let _musicIdx=0, _musicStarted=false;
+function _loadMusicTrack(i){
+  _musicIdx=((i%_MUSIC_TRACKS.length)+_MUSIC_TRACKS.length)%_MUSIC_TRACKS.length;
+  _soundtrack.src=_MUSIC_BASE+_MUSIC_TRACKS[_musicIdx].file;
+}
+function _musicEnsureStarted(){
+  if(_musicStarted) return;
+  _musicStarted=true; _loadMusicTrack(0);
+}
+_soundtrack.addEventListener('ended',()=>{
+  _loadMusicTrack(_musicIdx+1); // wraps via _loadMusicTrack's modulo
+  if(!_musicMuted) _soundtrack.play().catch(()=>{});
+});
 function _tryPlaySoundtrack(){
   if(_musicMuted) return;
+  _musicEnsureStarted();
   _soundtrack.play().catch(()=>{});
 }
 function _toggleMusicMute(){
   _musicMuted=!_musicMuted;
   if(_musicMuted){ _soundtrack.pause(); }
-  else { _soundtrack.play().catch(()=>{}); }
+  else { _musicEnsureStarted(); _soundtrack.play().catch(()=>{}); }
+}
+// Next: immediately load + play the next track in fixed order.
+function _musicNext(){
+  _musicEnsureStarted();
+  _loadMusicTrack(_musicIdx+1);
+  if(!_musicMuted) _soundtrack.play().catch(()=>{});
+}
+// Prev: restart current track if >5s elapsed, otherwise skip to previous track.
+function _musicPrev(){
+  _musicEnsureStarted();
+  if(_soundtrack.currentTime>5){
+    _soundtrack.currentTime=0;
+  } else {
+    _loadMusicTrack(_musicIdx-1);
+  }
+  if(!_musicMuted) _soundtrack.play().catch(()=>{});
 }
 let _muteBtnBounds=null, _muteBtnHover=false;
 let _optsMuteBtnBounds=null, _optsMuteBtnHover=false;
+let _optsPrevBtnBounds=null, _optsPrevBtnHover=false;
+let _optsNextBtnBounds=null, _optsNextBtnHover=false;
 
 // ── name edit overlay ────────────────────────────────────────
 const nameEditEl=document.getElementById('name-edit');
@@ -1383,6 +1425,14 @@ let _introSkipBtnNear=false;
 // of _introRenderSkipBtn via a small linear step so it stays frame-rate
 // independent enough at the cutscene's 60 fps target.
 let _introSkipBtnAlpha=0.25;
+// Lower-left intro cutscene controls: QUIT (→ title) + mute (shares
+// _musicMuted with the title-screen / options buttons). Same proximity-fade
+// treatment as SKIP: 0.25 baseline alpha, ramps to 1.0 when the cursor nears
+// the lower-left cluster. A single shared "near" + alpha drives both since
+// they sit side by side.
+let _introQuitBtnBounds=null, _introQuitBtnHover=false;
+let _introMuteBtnBounds=null, _introMuteBtnHover=false;
+let _introLLBtnNear=false, _introLLBtnAlpha=0.25;
 // Three combined "screens" of intro narration. Each screen contains two
 // logical paragraphs separated by a blank line (\n\n) and gets typed out
 // together — the user only needs to click/key once between screens, not
@@ -2672,7 +2722,7 @@ function drawTitleScreen(ts,dt){
   ctx.globalAlpha=_muteBtnHover?1.0:0.75;
   ctx.fillStyle=_musicMuted?'#f88':'#8cf';
   ctx.font='bold 17px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
-  ctx.fillText(_musicMuted?'\\uD83D\\uDD07':'\\uD83D\\uDD0A',_mbX+_mbSz/2,_mbY+_mbSz/2+1);
+  ctx.fillText(_musicMuted?'🔇':'🔊',_mbX+_mbSz/2,_mbY+_mbSz/2+1);
   ctx.restore();
 }
 
@@ -3599,6 +3649,38 @@ function _introRenderSkipBtn(ts){
   ctx.fillStyle=_introSkipBtnHover?'rgba(225,240,255,0.99)':'rgba(170,200,235,0.92)';
   ctx.fillText('SKIP  ▶▶', _bx+_bw/2, _by+18);
   ctx.restore();
+  // ── Lower-left QUIT + mute cluster ─────────────────────────────
+  // Same height/style as SKIP, same proximity-fade (shared near → alpha).
+  const _llQW=90, _llSz=_bh, _llGap=10;
+  const _llQX=22, _llY=_by;
+  const _llMX=_llQX+_llQW+_llGap;
+  _introQuitBtnBounds={x:_llQX, y:_llY, w:_llQW, h:_bh};
+  _introMuteBtnBounds={x:_llMX, y:_llY, w:_llSz, h:_llSz};
+  const _llTarget=_introLLBtnNear?1.0:0.25;
+  _introLLBtnAlpha+=(_llTarget-_introLLBtnAlpha)*0.15;
+  ctx.save();
+  ctx.globalAlpha=_introLLBtnAlpha;
+  // QUIT button
+  ctx.fillStyle=_introQuitBtnHover?'rgba(30,50,90,0.95)':'rgba(15,25,55,0.85)';
+  ctx.beginPath(); ctx.roundRect(_llQX,_llY,_llQW,_bh,4); ctx.fill();
+  ctx.strokeStyle=_introQuitBtnHover?'rgba(160,200,255,0.95)':'rgba(80,130,200,0.55)';
+  ctx.lineWidth=_introQuitBtnHover?1.4:1;
+  ctx.beginPath(); ctx.roundRect(_llQX,_llY,_llQW,_bh,4); ctx.stroke();
+  ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='alphabetic';
+  ctx.fillStyle=_introQuitBtnHover?'rgba(225,240,255,0.99)':'rgba(170,200,235,0.92)';
+  ctx.fillText('◀  QUIT', _llQX+_llQW/2, _llY+18);
+  // Mute button — square, shows speaker / muted glyph, red-tinted when muted
+  // (matches the title-screen + options mute buttons), blue otherwise.
+  ctx.fillStyle=_musicMuted?'rgba(90,30,30,0.92)':(_introMuteBtnHover?'rgba(30,50,90,0.95)':'rgba(15,25,55,0.85)');
+  ctx.beginPath(); ctx.roundRect(_llMX,_llY,_llSz,_llSz,4); ctx.fill();
+  ctx.strokeStyle=_musicMuted?'rgba(255,100,100,0.8)':(_introMuteBtnHover?'rgba(160,200,255,0.95)':'rgba(80,130,200,0.55)');
+  ctx.lineWidth=_introMuteBtnHover?1.4:1;
+  ctx.beginPath(); ctx.roundRect(_llMX,_llY,_llSz,_llSz,4); ctx.stroke();
+  ctx.fillStyle=_musicMuted?'#f88':'#8cf';
+  ctx.font='bold 15px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(_musicMuted?'🔇':'🔊', _llMX+_llSz/2, _llY+_llSz/2+1);
+  ctx.textBaseline='alphabetic';
+  ctx.restore();
   // Legacy globals kept null so the old click handlers no-op cleanly.
   _htpBtnBounds=null; _htpSkipBounds=null; _htpDotBounds=[];
 }
@@ -4090,7 +4172,7 @@ function _htpPanel1(ts,elapsed){
     ctx.strokeStyle='rgba(80,160,255,0.9)'; ctx.lineWidth=1.5;
     ctx.beginPath(); ctx.roundRect(abx,aby,abw,abh,4); ctx.stroke();
     ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
-    ctx.fillStyle='#aadcff'; ctx.fillText('[ ASSIGN TO TRAIN ]',abx+abw/2,aby+abh/2+4);
+    ctx.fillStyle='#aadcff'; ctx.fillText('ASSIGN TO TRAIN',abx+abw/2,aby+abh/2+4);
     ctx.restore();
 
     if(subStep===0){
@@ -17050,7 +17132,10 @@ function _drawTutorialChain(stage){
     if(_op){
       const [_sx,_sy]=w2s(_op.x,_op.y);
       const _sr=Math.max(8,_op.radius*cam.scale);
-      _drawBubble(['CLICK on a planet where you\'d like to START A ROUTE'], {x:_sx,y:_sy-_sr-20}, r.alpha);
+      // Anchor just inside the planet's top edge (_sy-_sr): above-placement
+      // renders the tail tip at anchor.y-4, so +6 lands the tip ~2px into the
+      // planet so the bubble visibly touches it instead of floating above.
+      _drawBubble(['CLICK on a planet where you\'d like to START A ROUTE'], {x:_sx,y:_sy-_sr+6}, r.alpha);
     }
     return;
   }
@@ -17126,7 +17211,10 @@ function _drawTutorialChain(stage){
     if(r.advanced){ _advanceTo('cr_click_train'); return; }
     if(assignBtnBounds){
       const _b=assignBtnBounds;
-      _drawBubble(['CLICK HERE to assign this ROUTE'], {x:_b.x+_b.w/2,y:_b.y}, r.alpha);
+      // assignBtnBounds spans the whole bar; the visible blue button is inset
+      // by 14px from the top (iby=by+14 in the render). Anchor at +20 so the
+      // tail tip (anchor.y-4) lands ~2px inside the button top and touches it.
+      _drawBubble(['CLICK HERE to assign this ROUTE'], {x:_b.x+_b.w/2,y:_b.y+20}, r.alpha);
     }
     return;
   }
@@ -17165,7 +17253,10 @@ function _drawTutorialChain(stage){
     if(panelTab==='trains'){
       const _ROW_H=82;
       const _rx=W-PANEL_W+2, _ry=TOP_H+1-panelScroll, _rw=PANEL_W-4, _rh=_ROW_H-2;
-      _drawBubble(['CLICK on a TRAIN to assign the ROUTE'], {x:_rx+_rw/2,y:_ry+_rh}, r.alpha, {below:true});
+      // Anchor at _ry + 53 (matches vp_click_train): the top row's status text
+      // ("IN ORBIT / PARKED") draws at baseline ry + 54; below-placement puts
+      // the tail tip at anchor.y + 4 = _ry + 57, just touching the status text.
+      _drawBubble(['CLICK on a TRAIN to assign the ROUTE'], {x:_rx+_rw/2,y:_ry+53}, r.alpha, {below:true});
     }
     return;
   }
@@ -18149,7 +18240,7 @@ function drawOptionsPopup(){
   // (Add Credits, Flower Planet, Colony Planet, Rival) AND the Fog of War
   // toggle all live in the hidden Cheats popup accessed by pressing 'C' while
   // Options is open.
-  const pw=300, ph=316;
+  const pw=300, ph=320;
   const [px,py]=drawPopupBase(pw,ph,'rgba(80,160,255,0.7)');
   ctx.save();
   ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
@@ -18234,24 +18325,168 @@ function drawOptionsPopup(){
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
   ctx.fillStyle='#fff'; ctx.fillText(missionTrackerEnabled?'ON':'OFF',mtTX+mtTW/2,mtTT+mtTH/2+4);
   popupState.missionTrackerToggleBounds={x:mtTX,y:mtTT,w:mtTW,h:mtTH};
-  // Divider before Music row
-  ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.moveTo(px,py+227); ctx.lineTo(px+pw,py+227); ctx.stroke();
-  // Music row
-  const ry8=py+257;
-  ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
-  ctx.fillStyle='rgba(160,200,255,0.9)'; ctx.fillText('Music',px+18,ry8);
-  ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,130,180,0.5)';
-  ctx.fillText('Background soundtrack',px+18,ry8+16);
-  const _omTW=48,_omTH=22,_omTX=px+pw-18-_omTW,_omTT=ry8-16;
-  const _omHov=!!_optsMuteBtnHover;
-  ctx.fillStyle=!_musicMuted?(_omHov?'rgba(45,200,90,0.97)':'rgba(30,160,70,0.85)'):(_omHov?'rgba(70,70,105,0.90)':'rgba(50,50,75,0.75)');
-  ctx.fillRect(_omTX,_omTT,_omTW,_omTH);
-  ctx.strokeStyle=!_musicMuted?(_omHov?'rgba(80,240,110,0.85)':'rgba(50,220,90,0.7)'):(_omHov?'rgba(100,100,145,0.70)':'rgba(70,70,100,0.5)'); ctx.lineWidth=1;
-  ctx.strokeRect(_omTX,_omTT,_omTW,_omTH);
-  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
-  ctx.fillStyle='#fff'; ctx.fillText(!_musicMuted?'ON':'OFF',_omTX+_omTW/2,_omTT+_omTH/2+4);
-  _optsMuteBtnBounds={x:_omTX,y:_omTT,w:_omTW,h:_omTH};
+  // ── SOUND pane ──────────────────────────────────────────────
+  // Divider + label + control row (mute / prev / progress bar / next) + track title.
+  // All four music controls (mute/prev/next + bar click-seek not yet wired) live
+  // here. Mute shares state with the title-screen + intro-cutscene mute buttons.
+  {
+    ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(px,py+253); ctx.lineTo(px+pw,py+253); ctx.stroke();
+    // Section label, centered + same color as the OPTIONS header at the top.
+    ctx.textAlign='center'; ctx.font='bold 11px Orbitron,sans-serif';
+    ctx.fillStyle='#4af'; ctx.fillText('MUSIC',px+pw/2,py+270);
+    // Control row geometry: mute + prev (each 22×22) on the left, bar centered,
+    // next (22×22) on the right. Match the rounded-square style of the
+    // title-screen mute button.
+    const _spSz=22, _spY=py+280;
+    const _spMuteX=px+18;
+    const _spPrevX=_spMuteX+_spSz+10;
+    const _spNextX=px+pw-18-_spSz;
+    const _spBarX=_spPrevX+_spSz+8;
+    const _spBarW=_spNextX-8-_spBarX;
+    const _spBarH=6, _spBarY=_spY+(_spSz-_spBarH)/2;
+    // ── Mute button ──
+    _optsMuteBtnBounds={x:_spMuteX,y:_spY,w:_spSz,h:_spSz};
+    {
+      const _h=!!_optsMuteBtnHover;
+      ctx.save();
+      ctx.globalAlpha=_h?0.92:0.70;
+      ctx.fillStyle=_musicMuted?'rgba(90,30,30,0.92)':'rgba(20,40,80,0.85)';
+      ctx.strokeStyle=_musicMuted?'rgba(255,100,100,0.8)':(_h?'rgba(120,200,255,0.9)':'rgba(60,120,200,0.55)');
+      ctx.lineWidth=1.5;
+      ctx.beginPath(); ctx.roundRect(_spMuteX,_spY,_spSz,_spSz,4); ctx.fill(); ctx.stroke();
+      ctx.globalAlpha=_h?1.0:0.80;
+      ctx.fillStyle=_musicMuted?'#f88':'#8cf';
+      ctx.font='bold 13px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText(_musicMuted?'🔇':'🔊',_spMuteX+_spSz/2,_spY+_spSz/2+1);
+      ctx.restore();
+      ctx.textBaseline='alphabetic';
+    }
+    // ── Prev button (left arrow ◀) ──
+    _optsPrevBtnBounds={x:_spPrevX,y:_spY,w:_spSz,h:_spSz};
+    {
+      const _h=!!_optsPrevBtnHover;
+      ctx.save();
+      ctx.globalAlpha=_h?0.92:0.70;
+      ctx.fillStyle='rgba(20,40,80,0.85)';
+      ctx.strokeStyle=_h?'rgba(120,200,255,0.9)':'rgba(60,120,200,0.55)';
+      ctx.lineWidth=1.5;
+      ctx.beginPath(); ctx.roundRect(_spPrevX,_spY,_spSz,_spSz,4); ctx.fill(); ctx.stroke();
+      ctx.globalAlpha=_h?1.0:0.85;
+      ctx.fillStyle='#8cf';
+      ctx.font='bold 11px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText('◀',_spPrevX+_spSz/2,_spY+_spSz/2+1);
+      ctx.restore();
+      ctx.textBaseline='alphabetic';
+    }
+    // ── Next button (right arrow ▶) ──
+    _optsNextBtnBounds={x:_spNextX,y:_spY,w:_spSz,h:_spSz};
+    {
+      const _h=!!_optsNextBtnHover;
+      ctx.save();
+      ctx.globalAlpha=_h?0.92:0.70;
+      ctx.fillStyle='rgba(20,40,80,0.85)';
+      ctx.strokeStyle=_h?'rgba(120,200,255,0.9)':'rgba(60,120,200,0.55)';
+      ctx.lineWidth=1.5;
+      ctx.beginPath(); ctx.roundRect(_spNextX,_spY,_spSz,_spSz,4); ctx.fill(); ctx.stroke();
+      ctx.globalAlpha=_h?1.0:0.85;
+      ctx.fillStyle='#8cf';
+      ctx.font='bold 11px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText('▶',_spNextX+_spSz/2,_spY+_spSz/2+1);
+      ctx.restore();
+      ctx.textBaseline='alphabetic';
+    }
+    // ── Progress bar ──
+    // Black track + light-blue fill showing currentTime / duration. duration
+    // may be NaN until enough of the track has loaded; guard with isFinite.
+    ctx.save();
+    ctx.fillStyle='rgba(0,0,0,0.85)';
+    ctx.beginPath(); ctx.roundRect(_spBarX,_spBarY,_spBarW,_spBarH,2); ctx.fill();
+    const _dur=_soundtrack.duration;
+    const _frac=(isFinite(_dur)&&_dur>0)?Math.max(0,Math.min(1,_soundtrack.currentTime/_dur)):0;
+    if(_frac>0){
+      ctx.fillStyle='rgba(120,200,255,0.92)';
+      ctx.beginPath(); ctx.roundRect(_spBarX,_spBarY,_spBarW*_frac,_spBarH,2); ctx.fill();
+    }
+    ctx.strokeStyle='rgba(80,140,210,0.55)'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.roundRect(_spBarX,_spBarY,_spBarW,_spBarH,2); ctx.stroke();
+    ctx.restore();
+    // ── Timestamp m:ss — tiny, follows the right edge of the fill ──
+    // Sits ABOVE the bar so the track-title row below has room for the
+    // animated waves. Clamped to stay over the bar at the extremes.
+    {
+      const _ct=isFinite(_soundtrack.currentTime)?Math.max(0,_soundtrack.currentTime):0;
+      const _mm=Math.floor(_ct/60);
+      const _ss=Math.floor(_ct%60);
+      const _tsTxt=_mm+':'+(_ss<10?'0'+_ss:_ss);
+      const _tsX=Math.max(_spBarX+6,Math.min(_spBarX+_spBarW-6,_spBarX+_spBarW*_frac));
+      ctx.font='7px Orbitron,sans-serif'; ctx.textAlign='center';
+      ctx.fillStyle='rgba(180,210,240,0.80)';
+      ctx.fillText(_tsTxt,_tsX,_spY+7);
+    }
+    // ── Track title row — animated sound wave + centered title ──
+    // Title styled to match the OPTIONS header (#4af, small all-caps).
+    // The wave is two short animated sine segments either side of the
+    // title — drawn first so the title text sits cleanly on top with
+    // no wave pixels directly behind it.
+    const _trk=_MUSIC_TRACKS[_musicIdx];
+    const _title=(_trk&&_trk.title?_trk.title:'').toUpperCase();
+    // Centered on the progress bar (not the popup center, which is offset
+    // from the bar by the mute+prev buttons on the left). _titleY sits just
+    // below the bar (bar bottom at _spY+14, baseline at _spY+24 = ~4px gap).
+    const _titleCx=_spBarX+_spBarW/2;
+    const _titleY=_spY+24;
+    // Set the title font BEFORE measureText so the wave-gap math uses the
+    // same width the title will actually render at. Same Exo 2 family as the
+    // "Mission Objectives Tracker" row above.
+    ctx.font='9px "Exo 2",sans-serif'; ctx.textAlign='center';
+    const _titleHalfW=ctx.measureText(_title).width/2;
+    {
+      const _wavePhase=(typeof _drawTs==='number'?_drawTs:0)*0.006;
+      const _waveAmp=2.5, _waveFreq=0.22;
+      const _waveY=_titleY-3;     // mid-cap-height of the 9px title text
+      const _waveGap=6;           // clear space between title text and wave
+      const _waveMaxLen=16;       // requested cap on each segment's length
+      ctx.save();
+      ctx.strokeStyle='rgba(255,170,80,0.60)'; ctx.lineWidth=1;
+      // Left segment — bounded by the bar's left edge so it never extends
+      // past the start of the progress bar.
+      {
+        const x1=_titleCx-_titleHalfW-_waveGap;
+        const x0=Math.max(_spBarX, x1-_waveMaxLen);
+        if(x1>x0){
+          ctx.beginPath();
+          for(let i=0;i<=24;i++){
+            const x=x0+(x1-x0)*(i/24);
+            const y=_waveY+Math.sin(x*_waveFreq+_wavePhase)*_waveAmp;
+            if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+          }
+          ctx.stroke();
+        }
+      }
+      // Right segment — bounded by the bar's right edge so it never extends
+      // past the end of the progress bar.
+      {
+        const x0=_titleCx+_titleHalfW+_waveGap;
+        const x1=Math.min(_spBarX+_spBarW, x0+_waveMaxLen);
+        if(x1>x0){
+          ctx.beginPath();
+          for(let i=0;i<=24;i++){
+            const x=x0+(x1-x0)*(i/24);
+            const y=_waveY+Math.sin(x*_waveFreq+_wavePhase)*_waveAmp;
+            if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+          }
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
+    // Title text itself — Exo 2 (matches Mission Objectives Tracker font
+    // above), non-bold, orange, all-caps.
+    ctx.font='9px "Exo 2",sans-serif'; ctx.textAlign='center';
+    ctx.fillStyle='#fa4';
+    ctx.fillText(_title,_titleCx,_titleY);
+  }
   // Clear cheat-button bounds — they belong to the (separate) cheats popup now.
   popupState.addCreditsBtnBounds=null;
   popupState.flowerPlanetBtnBounds=null;
@@ -23139,13 +23374,17 @@ function drawGalaxy(ts,dt){
           if(p.isStarProxy) continue; // proxy has orbitRadius=0; skip to avoid zero-size ring
           const orR = p.orbitRadius*cam.scale;
           const isSelectedPlanet = (sel.type==='planet' && p.id===sel.data.id);
+          // Skip shadow blur when the ring dwarfs the canvas — at those radii the arc
+          // is nearly a straight line and the glow is imperceptible, but the GPU blur
+          // pass still costs ~10ms per ring regardless of on-screen area.
+          const _ringBlur = orR > W*0.5 ? 0 : (isSelectedPlanet ? 14 : 8);
           if(isSelectedPlanet){
             ctx.strokeStyle = `rgba(255,220,60,${0.4*alpha})`;
-            ctx.shadowColor = '#ffe040'; ctx.shadowBlur = 14;
+            ctx.shadowColor = '#ffe040'; ctx.shadowBlur = _ringBlur;
           } else {
             ctx.strokeStyle = `rgba(160,160,160,${0.25*alpha})`;
             ctx.shadowColor = `rgba(200,200,200,${0.6*alpha})`;
-            ctx.shadowBlur = 8;
+            ctx.shadowBlur = _ringBlur;
           }
           ctx.beginPath(); ctx.arc(stx,sty,orR,0,Math.PI*2); ctx.stroke();
         }
@@ -23487,7 +23726,21 @@ function drawGalaxy(ts,dt){
           ctx.shadowColor=`rgba(${tcr},${tcg},${tcb},0.85)`;
           ctx.shadowBlur=baseShadow;
         }
-        ctx.beginPath(); ctx.moveTo(ax,ay); ctx.lineTo(bx,by); ctx.stroke();
+        // Screen-space Liang-Barsky clip: canvas clips rendered pixels to the
+        // viewport rect but still rasterises the full off-screen path —
+        // expensive for routes that span 100k+ screen pixels at MAX zoom.
+        // Clipping here keeps the submitted segment short regardless of
+        // how far the route extends off-screen in either direction.
+        {
+          const _buf=64; // px slack for stroke/shadow bleed
+          let _dx=bx-ax,_dy=by-ay,_t0=0,_t1=1,_ok=true;
+          for(const [p,q] of [[-_dx,ax+_buf],[_dx,W+_buf-ax],[-_dy,ay+_buf],[_dy,H+_buf-ay]]){
+            if(p===0){if(q<0){_ok=false;break;}}
+            else if(p<0){_t0=Math.max(_t0,q/p);if(_t0>_t1){_ok=false;break;}}
+            else{_t1=Math.min(_t1,q/p);if(_t0>_t1){_ok=false;break;}}
+          }
+          if(_ok){ctx.beginPath();ctx.moveTo(ax+_t0*_dx,ay+_t0*_dy);ctx.lineTo(ax+_t1*_dx,ay+_t1*_dy);ctx.stroke();}
+        }
       }
       // Orbit rings at every stop — reset to train colour regardless of what the last segment did.
       // Per the user spec: rings the train is currently in (b) AND rings the
@@ -23518,6 +23771,10 @@ function drawGalaxy(ts,dt){
         // segment-side _isSel exemption above).
         const _ringDim=(_routeDimActive&&!_isCurStopRing&&!_isSel)?_ROUTE_DIM:1.0;
         ctx.strokeStyle=`rgba(${tcr},${tcg},${tcb},${baseAlpha*_ringDim})`;
+        // Same guard as the selected-system rings: drop shadow when the ring
+        // dwarfs the canvas — the blur is imperceptible on a near-straight arc
+        // and the GPU blur pass costs the same regardless of on-screen area.
+        ctx.shadowBlur=orR>W*0.5?0:baseShadow;
         ctx.beginPath(); ctx.arc(sx,sy,orR,0,Math.PI*2); ctx.stroke();
       }
       ctx.restore();
@@ -23551,11 +23808,15 @@ function drawGalaxy(ts,dt){
     if(showOrbitDash){
       const tp=_gp(train.planetId);
       if(tp){
-        const [ox,oy]=w2s(tp.x,tp.y);
-        ctx.strokeStyle=train.isPlayer?'rgba(80,160,255,0.15)':'rgba(255,160,60,0.15)';
-        ctx.lineWidth=1; ctx.setLineDash([4,7]);
-        ctx.beginPath(); ctx.arc(ox,oy,train.orbitR*cam.scale,0,Math.PI*2); ctx.stroke();
-        ctx.setLineDash([]);
+        const _orW=train.orbitR;
+        // Skip if the orbit ring's world-space bounding box is entirely off-screen.
+        if(!(tp.x+_orW<_vMinX||tp.x-_orW>_vMaxX||tp.y+_orW<_vMinY||tp.y-_orW>_vMaxY)){
+          const [ox,oy]=w2s(tp.x,tp.y);
+          ctx.strokeStyle=train.isPlayer?'rgba(80,160,255,0.15)':'rgba(255,160,60,0.15)';
+          ctx.lineWidth=1; ctx.setLineDash([4,7]);
+          ctx.beginPath(); ctx.arc(ox,oy,_orW*cam.scale,0,Math.PI*2); ctx.stroke();
+          ctx.setLineDash([]);
+        }
       }
     }
     // Show arrival-planet orbit dash during transit (leading cars may be on it)
@@ -23563,11 +23824,14 @@ function drawGalaxy(ts,dt){
       const r=train.route;
       const toP=_gp(r.stops[r.toIdx]);
       if(toP){
-        const [ox,oy]=w2s(toP.x,toP.y);
-        ctx.strokeStyle=train.isPlayer?'rgba(80,160,255,0.10)':'rgba(255,160,60,0.10)';
-        ctx.lineWidth=1; ctx.setLineDash([4,7]);
-        ctx.beginPath(); ctx.arc(ox,oy,r.arrivalOrbitR*cam.scale,0,Math.PI*2); ctx.stroke();
-        ctx.setLineDash([]);
+        const _orW=r.arrivalOrbitR;
+        if(!(toP.x+_orW<_vMinX||toP.x-_orW>_vMaxX||toP.y+_orW<_vMinY||toP.y-_orW>_vMaxY)){
+          const [ox,oy]=w2s(toP.x,toP.y);
+          ctx.strokeStyle=train.isPlayer?'rgba(80,160,255,0.10)':'rgba(255,160,60,0.10)';
+          ctx.lineWidth=1; ctx.setLineDash([4,7]);
+          ctx.beginPath(); ctx.arc(ox,oy,_orW*cam.scale,0,Math.PI*2); ctx.stroke();
+          ctx.setLineDash([]);
+        }
       }
     }
     for(let i=0;i<train.cars.length;i++){
@@ -23835,7 +24099,7 @@ function drawGalaxy(ts,dt){
       ctx.beginPath(); ctx.roundRect(ibx,iby,ibw,ibh,4); ctx.stroke();
       ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
       ctx.fillStyle=_selPending?'#fff':_assignBtnHover?'#d0eeff':'#adf';
-      ctx.fillText(_selPending?'[ SELECT A TRAIN... ]':'[ ASSIGN TO TRAIN ]',ibx+ibw/2,iby+ibh/2+4);
+      ctx.fillText(_selPending?'SELECT A TRAIN...':'ASSIGN TO TRAIN',ibx+ibw/2,iby+ibh/2+4);
       ctx.restore();
     } else {
       assignBtnBounds=null;
@@ -25680,6 +25944,8 @@ canvas.addEventListener('mousemove',e=>{
     const _mttb=popupState.missionTrackerToggleBounds;
     popupState.missionTrackerToggleHover=!!(_mttb&&cp.x>=_mttb.x&&cp.x<=_mttb.x+_mttb.w&&cp.y>=_mttb.y&&cp.y<=_mttb.y+_mttb.h);
     _optsMuteBtnHover=!!(_optsMuteBtnBounds&&cp.x>=_optsMuteBtnBounds.x&&cp.x<=_optsMuteBtnBounds.x+_optsMuteBtnBounds.w&&cp.y>=_optsMuteBtnBounds.y&&cp.y<=_optsMuteBtnBounds.y+_optsMuteBtnBounds.h);
+    _optsPrevBtnHover=!!(_optsPrevBtnBounds&&cp.x>=_optsPrevBtnBounds.x&&cp.x<=_optsPrevBtnBounds.x+_optsPrevBtnBounds.w&&cp.y>=_optsPrevBtnBounds.y&&cp.y<=_optsPrevBtnBounds.y+_optsPrevBtnBounds.h);
+    _optsNextBtnHover=!!(_optsNextBtnBounds&&cp.x>=_optsNextBtnBounds.x&&cp.x<=_optsNextBtnBounds.x+_optsNextBtnBounds.w&&cp.y>=_optsNextBtnBounds.y&&cp.y<=_optsNextBtnBounds.y+_optsNextBtnBounds.h);
     const _ctlbb=popupState.controlsBtnBounds;
     popupState.controlsBtnHover=!!(_ctlbb&&cp.x>=_ctlbb.x&&cp.x<=_ctlbb.x+_ctlbb.w&&cp.y>=_ctlbb.y&&cp.y<=_ctlbb.y+_ctlbb.h);
     const _osbb=popupState.optionsSaveBtnBounds;
@@ -25754,9 +26020,21 @@ canvas.addEventListener('mousemove',e=>{
       const _b=_introSkipBtnBounds;
       _introSkipBtnNear=!!(_b && cp.x>=_b.x-_SKIP_BUF && cp.x<=_b.x+_b.w+_SKIP_BUF && cp.y>=_b.y-_SKIP_BUF && cp.y<=_b.y+_b.h+_SKIP_BUF);
     }
+    // Lower-left QUIT + mute cluster: per-button hover + a shared "near" that
+    // spans both bounds (plus the 60-px buffer) so the cluster fades up
+    // together as the cursor approaches either button.
+    _introQuitBtnHover=!!(_introQuitBtnBounds&&cp.x>=_introQuitBtnBounds.x&&cp.x<=_introQuitBtnBounds.x+_introQuitBtnBounds.w&&cp.y>=_introQuitBtnBounds.y&&cp.y<=_introQuitBtnBounds.y+_introQuitBtnBounds.h);
+    _introMuteBtnHover=!!(_introMuteBtnBounds&&cp.x>=_introMuteBtnBounds.x&&cp.x<=_introMuteBtnBounds.x+_introMuteBtnBounds.w&&cp.y>=_introMuteBtnBounds.y&&cp.y<=_introMuteBtnBounds.y+_introMuteBtnBounds.h);
+    {
+      const _LL_BUF=60;
+      const _q=_introQuitBtnBounds, _m=_introMuteBtnBounds;
+      const _x0=_q?_q.x:Infinity, _x1=_m?_m.x+_m.w:-Infinity;
+      const _y0=_q?_q.y:Infinity, _y1=_q?_q.y+_q.h:-Infinity;
+      _introLLBtnNear=!!(_q && cp.x>=_x0-_LL_BUF && cp.x<=_x1+_LL_BUF && cp.y>=_y0-_LL_BUF && cp.y<=_y1+_LL_BUF);
+    }
     _htpBtnHover=false; _htpSkipHover=false; _htpDotHover=-1;
-    canvas.style.cursor=_introSkipBtnHover?'pointer':'default';
-  } else { _htpBtnHover=false; _htpSkipHover=false; _htpDotHover=-1; _introSkipBtnHover=false; _introSkipBtnNear=false; }
+    canvas.style.cursor=(_introSkipBtnHover||_introQuitBtnHover||_introMuteBtnHover)?'pointer':'default';
+  } else { _htpBtnHover=false; _htpSkipHover=false; _htpDotHover=-1; _introSkipBtnHover=false; _introSkipBtnNear=false; _introQuitBtnHover=false; _introMuteBtnHover=false; _introLLBtnNear=false; }
   // Hover tracking for corpsetup screen
   if(gs==='corpsetup'){
     _csNameHover=!!(_csNameBounds&&cp.x>=_csNameBounds.x&&cp.x<=_csNameBounds.x+_csNameBounds.w&&cp.y>=_csNameBounds.y&&cp.y<=_csNameBounds.y+_csNameBounds.h);
@@ -25937,6 +26215,18 @@ canvas.addEventListener('mouseup',e=>{
     const sb=_introSkipBtnBounds;
     if(sb&&cp.x>=sb.x&&cp.x<=sb.x+sb.w&&cp.y>=sb.y&&cp.y<=sb.y+sb.h){
       _introToCorpSetup();
+      return;
+    }
+    // Lower-left QUIT → back to title screen (mirrors the quit-confirm Yes path).
+    const qb=_introQuitBtnBounds;
+    if(qb&&cp.x>=qb.x&&cp.x<=qb.x+qb.w&&cp.y>=qb.y&&cp.y<=qb.y+qb.h){
+      gs='title'; document.getElementById('refresh-btn').classList.remove('hidden');
+      return;
+    }
+    // Lower-left mute → toggle soundtrack (shared with title/options buttons).
+    const mb=_introMuteBtnBounds;
+    if(mb&&cp.x>=mb.x&&cp.x<=mb.x+mb.w&&cp.y>=mb.y&&cp.y<=mb.y+mb.h){
+      _toggleMusicMute();
       return;
     }
     _introAdvance(performance.now());
@@ -26580,12 +26870,19 @@ canvas.addEventListener('mouseup',e=>{
           return;
         }
       }
-      // Options: Music toggle — mutes/unmutes the soundtrack.
-      if(activePopup==='options'&&_optsMuteBtnBounds){
-        const b=_optsMuteBtnBounds;
-        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
-          _toggleMusicMute();
-          return;
+      // Options: SOUND pane controls — mute / prev track / next track.
+      if(activePopup==='options'){
+        if(_optsMuteBtnBounds){
+          const b=_optsMuteBtnBounds;
+          if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ _toggleMusicMute(); return; }
+        }
+        if(_optsPrevBtnBounds){
+          const b=_optsPrevBtnBounds;
+          if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ _musicPrev(); return; }
+        }
+        if(_optsNextBtnBounds){
+          const b=_optsNextBtnBounds;
+          if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ _musicNext(); return; }
         }
       }
       // Color picker click handling — SV picker, hue strip, hex input, preset swatches

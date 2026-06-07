@@ -143,7 +143,15 @@
       "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8766/index.html)",
       "Bash(find \"/c/Users/jackh/\" -name \"*.stt\" 2>/dev/null | head -10 *)",
       "mcp__Claude_in_Chrome__find",
-      "mcp__Claude_in_Chrome__read_console_messages"
+      "mcp__Claude_in_Chrome__read_console_messages",
+      "Bash(node --check \"/c/Users/jackh/Desktop/Claude/Train Game/index.html\")",
+      "Bash(curl -sI \"https://raw.githubusercontent.com/jhart90/spacetraintycoon/localstorage-saves/assets/last_train_loop.mp3\")",
+      "Bash(curl -sI \"https://raw.githubusercontent.com/jhart90/spacetraintycoon/74bbdd4/assets/last_train_loop.mp3\")",
+      "Bash(curl -s \"https://api.github.com/repos/jhart90/spacetraintycoon/contents/assets?ref=localstorage-saves\")",
+      "Bash(curl -s \"https://api.github.com/repos/jhart90/spacetraintycoon/git/trees/localstorage-saves?recursive=1\")",
+      "Bash(curl -v \"https://api.github.com/repos/jhart90/spacetraintycoon/contents/?ref=localstorage-saves\")",
+      "Bash(cd \"/c/Users/jackh/Desktop/Claude/Train Game\" && ls -lh assets/*.mp3)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8765/screensaver.html)"
     ]
   },
   "hooks": {
