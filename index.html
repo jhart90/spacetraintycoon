@@ -861,15 +861,12 @@ const MISSION_DEFS=[
    name:'Build a Foundry',
    imageType:'foundry', imageKey:null,
    objectives:[
-     {id:'visit_foundry_planet', text:'Visit a Desert planet that can support a FOUNDRY'},
      {id:'station_foundry_planet',text:'Construct a STATION on a Desert planet'},
      {id:'construct_foundry',    text:'Construct a FOUNDRY'},
    ],
    details:'Establish a foundry to smelt molten ore into refined iron.',
    reward:10000, timeLimit:null,
    checkObj:(oid,m)=>{
-     if(oid==='visit_foundry_planet')
-       return !!(galaxy&&galaxy.planets.some(p=>visitedPlanetIds.has(p.id)&&!m.visitedSnapshot?.has(p.id)&&p.type.id==='desert'));
      if(oid==='station_foundry_planet')
        return !!(galaxy&&galaxy.planets.some(p=>p.type.id==='desert'&&p.playerBuiltStation));
      if(oid==='construct_foundry')
@@ -17187,10 +17184,10 @@ function _drawTutorialChain(stage){
       return;
     }
     if(missions.some(m=>m.id==='build_foundry'&&m.status==='active')){
-      // Enter at bf_visit_desert; if the player's train has already visited
-      // a desert planet (likely — the create_route loop includes one), that
-      // phase auto-advances in one frame.
-      _advanceTo('bf_visit_desert');
+      // Enter at bf_click_desert directly. The home-system desert is marked
+      // playerPreview=true at game start, so the player can open its details
+      // popup and build a station without ever visiting it first.
+      _advanceTo('bf_click_desert');
     }
     return;
   }
@@ -17403,43 +17400,27 @@ function _drawTutorialChain(stage){
     return -1;
   })();
   const _bfDesert=_bfDesertId>=0?galaxy.planets[_bfDesertId]:null;
-  // Has the player visited any desert planet this mission counts? The mission
-  // gives build_foundry an empty visitedSnapshot, so any previously-visited
-  // desert satisfies obj 1 immediately.
+  // Mission state + objective progress flags for the bf_* chain.
   const _bfMission=missions.find(mx=>mx.id==='build_foundry');
-  const _bfVisitedDesert=!!(galaxy && galaxy.planets.some(p=>visitedPlanetIds.has(p.id)&&p.type.id==='desert'));
   const _bfStationedDesert=!!(galaxy && galaxy.planets.some(p=>p.type.id==='desert'&&p.playerBuiltStation));
   const _bfBuiltFoundry  =!!(galaxy && galaxy.planets.some(p=>(p.playerBuiltUpgrades||[]).includes('iron_foundry')));
   // Chain-done short-circuit: bf mission completed or terminal mission state.
   if(_bfMission && _bfMission.status==='completed' &&
-     (_tutorialPhase==='bf_visit_desert'||_tutorialPhase==='bf_click_desert'||
+     (_tutorialPhase==='bf_click_desert'||
       _tutorialPhase==='bf_click_build_station'||_tutorialPhase==='bf_click_foundry_upgrade')){
     _tutorialPhase='bf_all_done';
     return;
   }
-  // ── Phase: bf_visit_desert ────────────────────────────────
-  // Yellow bubble pointing at the home-system desert planet, prompting the
-  // player to wait for their TRAIN to VISIT it. Auto-advances the moment any
-  // desert planet has been visited (likely already true when the mission
-  // appears, since the create_route loop included desert).
-  if(_tutorialPhase==='bf_visit_desert'){
-    if(_tutorialFadeOutStartMs===0 && _bfVisitedDesert) _tutorialFadeOutStartMs=_now;
-    const r=_resolveAlpha();
-    if(r.advanced){ _advanceTo('bf_click_desert'); return; }
-    if(_bfDesert){
-      const [_sx,_sy]=w2s(_bfDesert.x,_bfDesert.y);
-      const _sr=Math.max(8,_bfDesert.radius*cam.scale);
-      _drawBubble(['Wait for your TRAIN to VISIT the DESERT PLANET'], {x:_sx,y:_sy-_sr+6}, r.alpha);
-    }
-    return;
-  }
+  // Backward-compat: legacy saves on the now-removed bf_visit_desert phase
+  // are remapped to bf_click_desert so the chain doesn't stall.
+  if(_tutorialPhase==='bf_visit_desert') _tutorialPhase='bf_click_desert';
   // ── Phase: bf_click_desert ────────────────────────────────
   // Yellow bubble pointing at the desert planet, prompting the player to
-  // DOUBLE-CLICK it to open PLANET DETAILS. Rolls back to bf_visit_desert if
-  // somehow no desert has been visited; advances when the planet detail
+  // DOUBLE-CLICK it to open PLANET DETAILS. (The home-system desert is
+  // playerPreview=true at game start, so the player can open + station it
+  // without ever having visited it first.) Advances when the planet detail
   // popup opens for a desert planet.
   if(_tutorialPhase==='bf_click_desert'){
-    if(!_bfVisitedDesert){ _advanceTo('bf_visit_desert'); return; }
     const _bfPopupOpen=activePopup==='planet'&&popupState.planet&&popupState.planet.type&&popupState.planet.type.id==='desert';
     if(_tutorialFadeOutStartMs===0 && _bfPopupOpen) _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
@@ -29413,18 +29394,22 @@ function startGame(){
    for(const _hpid of _hst.planetIds){
      discoveredPlanetIds.add(_hpid);
      revealedOrbitedPlanetIds.add(_hpid);
-     // Pre-mark the lava planet in Orijen's system as PREVIEWABLE so the
-     // tutorial can point the player at it from the very first frame (its
-     // supply/demand readouts render properly, "??? UNKNOWN ???" doesn't
-     // show, etc.). The planet is NOT added to visitedPlanetIds — it acts
-     // exactly like an AI-stationed view-through: the planet detail popup
-     // renders full content, but trackVisit still fires the first-visit
-     // chat message + biome car unlock when the player's train actually
-     // enters orbit for the first time.
+     // Pre-mark the lava AND desert planets in Orijen's system as PREVIEWABLE
+     // so the tutorial can point the player at them from the very first frame
+     // (their supply/demand readouts render properly, "??? UNKNOWN ???"
+     // doesn't show, etc.). The planets are NOT added to visitedPlanetIds —
+     // they act exactly like AI-stationed view-throughs: the planet detail
+     // popup renders full content (so the player can also BUILD a STATION
+     // before visiting), but trackVisit still fires the first-visit chat
+     // message + biome car unlock (sand car, etc.) when the player's train
+     // actually enters orbit for the first time.
      const _hp=galaxy.planets[_hpid];
      if(_hp&&_hp.type.id==='lava'&&_tutorialLavaPlanetId===-1){
        _hp.playerPreview=true;
        _tutorialLavaPlanetId=_hpid;
+     }
+     if(_hp&&_hp.type.id==='desert'){
+       _hp.playerPreview=true;
      }
    }
    // Orijen itself is visited from the start (the player's train is already there)
