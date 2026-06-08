@@ -681,6 +681,76 @@ const CARGO_BASE_RATE = {
 const CARGO_CAR_SPRITE = {passengers:'car_passenger', livestock:'car_livestock', mail:'car_mail', water:'car_water_tank', ice:'car_ice', sand:'car_sand', molten_ore:'car_ore', iron:'car_iron', gold:'car_gold', diamond:'car_diamond', hazmat:'car_hazmat', oil:'car_oil', battery:'car_battery', chemical:'car_chemical', flowers:'car_flowers', medical:'car_medical', grain:'car_grain', fruit:'car_fruit', steel:'car_steel', glass:'car_glass', machinery:'car_machinery', cargo:'car_cargo'};
 const CARGO_LABEL      = {passengers:'PASSENGERS', livestock:'LIVESTOCK', mail:'MAIL', water:'WATER', ice:'ICE', sand:'SAND', molten_ore:'MOLTEN ORE', iron:'IRON', gold:'GOLD', diamond:'DIAMOND', hazmat:'HAZMAT', oil:'OIL', battery:'BATTERY', chemical:'CHEMICAL', flowers:'FLOWERS', medical:'MEDICAL', grain:'GRAIN', fruit:'FRUIT', steel:'STEEL', glass:'GLASS', machinery:'MACHINERY', cargo:'CARGO', ceo_salary:'CEO SALARY', maintenance:'MAINTENANCE'};
 const CARGO_SHORT      = {passengers:'PSNGR', livestock:'LVSTK', mail:'MAIL', water:'WATER', ice:'ICE', sand:'SAND', molten_ore:'ORE', iron:'IRON', gold:'GOLD', diamond:'DMND', hazmat:'HAZMT', oil:'OIL', battery:'BATT', chemical:'CHEM', flowers:'FLWRS', medical:'MEDCL', grain:'GRAIN', fruit:'FRUIT', steel:'STEEL', glass:'GLASS', machinery:'MACH', cargo:'CARGO'};
+// Text-color map for resource / cargo names rendered inline in objective
+// text. Looked up case-insensitively keyed on the displayed name (handles both
+// "iron" and "Molten Ore"). Choose the dominant hue of each cargo's sprite.
+const CARGO_TEXT_COLORS = {
+  passengers:'#e8c8a4', livestock:'#b6815c', mail:'#f4b450', water:'#42a8ff',
+  ice:'#a4dcff', sand:'#dcc080', 'molten ore':'#ff5a28', iron:'#d2d2d2',
+  gold:'#ffd148', diamond:'#a4f0ff', hazmat:'#dcff48', oil:'#9aa83a',
+  battery:'#ffd744', chemical:'#80e860', flowers:'#ff7acc', medical:'#ff5a78',
+  grain:'#d4a76a', fruit:'#ff7a48', steel:'#94a8bc', glass:'#b0e8f0',
+  machinery:'#a4acb4', cargo:'#b08858',
+};
+function _cargoTextColor(name){
+  if(!name) return null;
+  return CARGO_TEXT_COLORS[String(name).toLowerCase().trim()] || null;
+}
+// Tokenize objective text for colored rendering. `[Name]` segments stay
+// whole (including the literal brackets) and pick up the resource's
+// CARGO_TEXT_COLORS color + bold weight at render time. Everything else
+// is split by whitespace into ordinary tokens.
+function _objTokenize(text){
+  const out=[]; let i=0, cur='';
+  const flush=()=>{ if(cur){ for(const w of cur.split(/\s+/)) if(w) out.push({text:w,color:null}); cur=''; } };
+  while(i<text.length){
+    const ch=text[i];
+    if(ch==='['){
+      const rb=text.indexOf(']',i);
+      if(rb<0){ cur+=text.slice(i); break; }
+      flush();
+      const inner=text.slice(i+1,rb);
+      out.push({text:text.slice(i,rb+1), color:_cargoTextColor(inner)});
+      i=rb+1; continue;
+    }
+    cur+=ch; i++;
+  }
+  flush();
+  return out;
+}
+// Word-wrap tokens into an array of lines (each line is an array of tokens).
+// Bracketed tokens are measured with bold for accurate width.
+function _objWrapTokens(tokens,maxW,fontStr){
+  const lines=[]; let cur=[], curW=0;
+  ctx.font=fontStr; const spaceW=ctx.measureText(' ').width;
+  for(const tok of tokens){
+    ctx.font = tok.color ? ('bold '+fontStr) : fontStr;
+    const tw=ctx.measureText(tok.text).width;
+    const need = cur.length ? curW + spaceW + tw : tw;
+    if(need<=maxW || !cur.length){
+      cur.push(tok); curW=need;
+    } else {
+      lines.push(cur); cur=[tok]; curW=tw;
+    }
+  }
+  if(cur.length) lines.push(cur);
+  return lines;
+}
+// Render one wrapped line at (x,y). Token color/weight defaults to baseColor /
+// regular when the token isn't tagged. Returns the width consumed.
+function _objDrawLine(line,x,y,fontStr,baseColor){
+  let cx=x;
+  ctx.font=fontStr; const spaceW=ctx.measureText(' ').width;
+  for(let i=0;i<line.length;i++){
+    const tok=line[i];
+    if(i>0) cx+=spaceW;
+    ctx.font = tok.color ? ('bold '+fontStr) : fontStr;
+    ctx.fillStyle = tok.color || baseColor;
+    ctx.fillText(tok.text,cx,y);
+    cx+=ctx.measureText(tok.text).width;
+  }
+  return cx-x;
+}
 const CARGO_MAX_SUPPLY = 20;
 const CARGO_MAX_DEMAND = 30;
 const CARGO_OP_TIME    = 180; // dtG frame-units per car (~3 s at 1× speed)
@@ -827,8 +897,8 @@ const MISSION_DEFS=[
    objectives:[
      {id:'open_trains',          text:'Press "T" to open the "Trains" window'},
      {id:'open_builder',         text:'Press the "+" sign to open the Train Builder'},
-     {id:'purchase_train',       text:'Purchase a new train'},
-     {id:'deliver_iron_orijen',  text:'Using your new TRAIN, load IRON from the DESERT PLANET and deliver it to ORIJEN'},
+     {id:'purchase_train',       text:'Purchase a new train with 2+ [Iron] cars'},
+     {id:'deliver_iron_orijen',  text:'Using your new TRAIN, load [Iron] from the DESERT PLANET and deliver it to ORIJEN'},
    ],
    details:"A rail empire can't grow with a single engine! Buy a second train and set up a second route to diversify your revenue.",
    reward:15000, timeLimit:null,
@@ -839,7 +909,17 @@ const MISSION_DEFS=[
      // NOT auto-passed on purchase; the player still has to actually deliver.
      if(oid==='open_trains')         return _bought||activePopup==='trains'||activePopup==='trainbuilder';
      if(oid==='open_builder')        return _bought||activePopup==='trainbuilder';
-     if(oid==='purchase_train')      return _bought;
+     if(oid==='purchase_train'){
+       // Stricter than _bought: at least one player train PAST the original
+       // Iron Express must have 2+ iron cars on it.
+       if(!_bought) return false;
+       for(let _ti=1;_ti<trains.length;_ti++){
+         const _t=trains[_ti];
+         if(!_t||!_t.isPlayer||!_t.cars) continue;
+         if(_t.cars.filter(c=>c==='car_iron').length>=2) return true;
+       }
+       return false;
+     }
      if(oid==='deliver_iron_orijen') return (m._ironFromDesertToOrijen||0)>=1;
      return false;
    }},
@@ -848,7 +928,7 @@ const MISSION_DEFS=[
    imageType:'car', imageKey:'car_iron',
    prerequisite:'build_foundry',
    objectives:[
-     {id:'produce_iron_obj', text:'Produce Iron by delivering both Molten Ore and Water to a Foundry'},
+     {id:'produce_iron_obj', text:'Produce [Iron] by delivering both [Molten Ore] and [Water] to a FOUNDRY'},
    ],
    details:'Put your new foundry to work smelting raw ore into refined iron.',
    reward:10000, timeLimit:null,
@@ -861,7 +941,7 @@ const MISSION_DEFS=[
    imageType:'station_large', imageKey:null,
    prerequisite:'produce_iron',
    objectives:[
-     {id:'deliver_4_iron_for_upgrade', text:'Deliver 4 Iron to a planet with a station you’d like to upgrade'},
+     {id:'deliver_4_iron_for_upgrade', text:'Deliver 4 [Iron] to a planet with a station you’d like to upgrade'},
      {id:'upgrade_to_large_station',   text:'Upgrade a Station to a Large Station'},
    ],
    details:'Stations only allow one train (in low orbit) to load or unload at a time, while a Large Station can accommodate trains in two orbits.',
@@ -877,9 +957,9 @@ const MISSION_DEFS=[
    name:'Designing a better space train',
    imageType:'car', imageKey:'engine_classJ',
    objectives:[
-     {id:'deliver_10_steel_home',   text:'Deliver 20 steel to {TARGET}'},
-     {id:'deliver_10_battery_home', text:'Deliver 20 batteries to {TARGET}'},
-     {id:'deliver_10_oil_home',     text:'Deliver 20 Oil to {TARGET}'},
+     {id:'deliver_10_steel_home',   text:'Deliver 20 [Steel] to {TARGET}'},
+     {id:'deliver_10_battery_home', text:'Deliver 20 [Battery] to {TARGET}'},
+     {id:'deliver_10_oil_home',     text:'Deliver 20 [Oil] to {TARGET}'},
    ],
    details:'Scientists on {TARGET} are prototyping a new space train engine, and they need materials from nearby planets',
    reward:null, rewardText:'A new engine type', timeLimit:null,
@@ -909,7 +989,7 @@ const MISSION_DEFS=[
    name:'Dispose of Hazmat',
    imageType:'car', imageKey:'car_hazmat',
    objectives:[
-     {id:'incinerate_hazmat', text:'Incinerate 2.0 units of Hazmat'},
+     {id:'incinerate_hazmat', text:'Incinerate 2.0 units of [Hazmat]'},
    ],
    details:'Industrial activity produces Hazmat as a by-product. As Hazmat accumulates on a planet, it drags down the planet\'s productivity & its people\'s happiness. Pick up Hazmat from a planet with Hazmat cars & transport it to the nearest star for incineration.',
    reward:8000, timeLimit:null,
@@ -935,7 +1015,7 @@ const MISSION_DEFS=[
    name:'Seeking a Way Home',
    imageType:'planet_target', imageKey:null,
    objectives:[
-     {id:'rocky_home', text:'Help Rocky back to his home planet, by transporting 1 unit of passengers from {SOURCE} to {TARGET}'},
+     {id:'rocky_home', text:'Help Rocky back to his home planet, by transporting 1 unit of [Passengers] from {SOURCE} to {TARGET}'},
    ],
    details:"The radio crackles and you hear a voice from the planet's surface. They identify themselves as 'Rocky' and explain that they seem to have gotten lost, a long way from home.",
    reward:100000, timeLimit:null,
@@ -947,7 +1027,7 @@ const MISSION_DEFS=[
    name:'Spread the Seed',
    imageType:'car', imageKey:'car_flowers',
    objectives:[
-     {id:'deliver_flowers_10', text:'Deliver Flowers to 10+ planets capable of growing them (Jungle, Desert, or Resort)'},
+     {id:'deliver_flowers_10', text:'Deliver [Flowers] to 10+ planets capable of growing them (Jungle, Desert, or Resort)'},
    ],
    details:"The flowers of this world are ready to spread across the galaxy. Deliver flowers cargo to any Jungle, Desert, or Resort planet — a single delivery unlocks flower cultivation there forever.",
    reward:88888, timeLimit:null,
@@ -972,7 +1052,7 @@ const MISSION_DEFS=[
    name:'Famine',
    imageType:'car', imageKey:'car_livestock',
    objectives:[
-     {id:'deliver_20_livestock', text:'Deliver 10 units of food (livestock) to {TARGET} within 2.0 stardates'},
+     {id:'deliver_20_livestock', text:'Deliver 10 units of food ([Livestock]) to {TARGET} within 2.0 stardates'},
    ],
    details:"A crop failure has left this planet\'s population on the brink of starvation. They desperately need food shipments — fast!",
    reward:200000, timeLimit:2.0,
@@ -1000,7 +1080,7 @@ const MISSION_DEFS=[
    name:'Outbreak',
    imageType:'car', imageKey:'car_medical',
    objectives:[
-     {id:'deliver_4_medical', text:'Deliver 4 units of Medical Supplies to {TARGET} within 1.0 stardate'},
+     {id:'deliver_4_medical', text:'Deliver 4 units of [Medical] supplies to {TARGET} within 1.0 stardate'},
    ],
    details:"A pathogen has swept through this planet\'s population — doctors are overwhelmed and medical supplies are critically low. Rush Medical Supplies here before it\'s too late!",
    reward:500, timeLimit:1.0,
@@ -1028,7 +1108,7 @@ const MISSION_DEFS=[
    name:'Sand Storm Relief',
    imageType:'planet_type', imageKey:'desert',
    objectives:[
-     {id:'deliver_10_sand', text:'Load and remove 10 units of sand from {SOURCE} by delivering it anywhere'},
+     {id:'deliver_10_sand', text:'Load and remove 10 units of [Sand] from {SOURCE} by delivering it anywhere'},
    ],
    details:"A catastrophic sandstorm has buried critical infrastructure on this desert world. Help clear the excess sand by loading it onto your trains and transporting it elsewhere — any destination will do.",
    reward:20000, timeLimit:null,
@@ -1096,7 +1176,7 @@ const MISSION_DEFS=[
    name:'Black Hole Research',
    imageType:'planet_type', imageKey:'rocky',
    objectives:[
-     {id:'deliver_5_chemical', text:'Deliver 5 units of Chemical cargo to the research station at {TARGET}'},
+     {id:'deliver_5_chemical', text:'Deliver 5 units of [Chemical] cargo to the research station at {TARGET}'},
    ],
    details:"Scientists stationed near the black hole are conducting dangerous research into its gravitational properties. They urgently need Chemical cargo to run their experiments. Deliver 5 units to their remote outpost.",
    reward:150000, timeLimit:null,
@@ -14557,27 +14637,20 @@ function drawNewMissionPopup(){
     // Resolve dynamic placeholders with actual planet names
     if(_ot.includes('{SOURCE}')&&popupState.sourcePlanetId!=null){const _sp2=_gp(popupState.sourcePlanetId);if(_sp2)_ot=_ot.replace('{SOURCE}',_sp2.name);}
     if(_ot.includes('{TARGET}')&&popupState.targetPlanetId!=null){const _tp2=_gp(popupState.targetPlanetId);if(_tp2)_ot=_ot.replace('{TARGET}',_tp2.name);}
-    // Word-wrap the objective text into lines
-    ctx.font='11px "Exo 2",sans-serif';
+    // Tokenize for colored [Name] segments, then word-wrap by tokens.
+    const _objFontStr='11px "Exo 2",sans-serif';
     const _objTxtW=cMaxW-_cbW;
-    const _objWords=_ot.split(' ');
-    const _objLines=[]; let _objCur='';
-    for(const _w of _objWords){
-      const _t=_objCur?_objCur+' '+_w:_w;
-      if(ctx.measureText(_t).width<=_objTxtW) _objCur=_t;
-      else{ if(_objCur) _objLines.push(_objCur); _objCur=_w; }
-    }
-    if(_objCur) _objLines.push(_objCur);
+    const _objTokens=_objTokenize(_ot);
+    const _objLines=_objWrapTokens(_objTokens,_objTxtW,_objFontStr);
     const _objRowTotalH=_objLines.length*_objLH+2;
     const _objRowStartY=_rcy-13;
     popupState.objBounds[_oi]={x:cX,y:_objRowStartY,w:cMaxW,h:_objRowTotalH};
     // Draw checkbox: ✓ (green) for pre-completed objectives, ○ for pending
     ctx.font='14px "Exo 2",sans-serif'; ctx.fillStyle=_baseCol;
     ctx.fillText(_isPreComp?'✓':'○',cX,_rcy);
-    // Draw each wrapped line of objective text
-    ctx.font='11px "Exo 2",sans-serif'; ctx.fillStyle=_baseCol;
+    // Draw each wrapped line of objective text (tokens with their own colors)
     for(let _li=0;_li<_objLines.length;_li++){
-      ctx.fillText(_objLines[_li],cX+(_li===0?_cbW:_cbW),_rcy+_li*_objLH);
+      _objDrawLine(_objLines[_li],cX+_cbW,_rcy+_li*_objLH,_objFontStr,_baseCol);
     }
     _rcy+=_objRowTotalH;
   }
@@ -18010,7 +18083,7 @@ function updateMissions(dtSd){
         // Log the FULL objective text (no slice/ellipsis). The chat-log
         // renderer already word-wraps long messages into as many rows as
         // needed, so the player sees the entire completed-objective text.
-        if(m.objectives.length>1) _chatMsg(m.name+': objective done — '+(obj.text||''),'rgba(160,230,200,1)');
+        if(m.objectives.length>1) _chatMsg(m.name+': objective done — '+((obj.text||'').replace(/\[([^\]]+)\]/g,'$1')),'rgba(160,230,200,1)');
       }
       if(!obj.done) allDone=false;
     }
@@ -18322,16 +18395,10 @@ function drawMissionsPopup(){
       else if(isDone)    _col='rgba(82,87,98,0.70)';
       else if(obj.done)  _col='rgba(100,210,125,0.90)';
       else               _col='rgba(180,200,235,0.78)';
-      // Word-wrap objective text
-      ctx.font='11px "Exo 2",sans-serif';
-      const _objWords=obj.text.split(' ');
-      const _objLines=[]; let _objCur='';
-      for(const _w of _objWords){
-        const _t=_objCur?_objCur+' '+_w:_w;
-        if(ctx.measureText(_t).width<=(cMaxW-_mCbW)) _objCur=_t;
-        else{ if(_objCur) _objLines.push(_objCur); _objCur=_w; }
-      }
-      if(_objCur) _objLines.push(_objCur);
+      // Tokenize for colored [Name] segments, then word-wrap by tokens.
+      const _objFontStrM='11px "Exo 2",sans-serif';
+      const _objTokensM=_objTokenize(obj.text);
+      const _objLines=_objWrapTokens(_objTokensM,cMaxW-_mCbW,_objFontStrM);
       const _objTotalH=_objLines.length*_mObjLH;
       const _prog=_mObjProgress(m,obj.id);
       // Store bounds for hover detection (screen coords)
@@ -18339,10 +18406,9 @@ function drawMissionsPopup(){
       // Draw checkbox (done=✓ 14px, undone=○ 14px)
       ctx.font='14px "Exo 2",sans-serif'; ctx.fillStyle=_col; ctx.textAlign='left';
       ctx.fillText(obj.done?'✓':'○',cX,_mRowY);
-      // Draw wrapped lines
-      ctx.font='11px "Exo 2",sans-serif'; ctx.fillStyle=_col;
+      // Draw wrapped lines (tokens with their own colors)
       for(let _li=0;_li<_objLines.length;_li++){
-        ctx.fillText(_objLines[_li],cX+_mCbW,_mRowY+_li*_mObjLH);
+        _objDrawLine(_objLines[_li],cX+_mCbW,_mRowY+_li*_mObjLH,_objFontStrM,_col);
       }
       // Progress bar for quantified objectives. For COMPLETED missions
       // (isDone=true) every visible piece — label, bar background, fill and
@@ -24948,12 +25014,22 @@ function drawGalaxy(ts,dt){
         const _obj=(m.objectives||[]).find(o=>!o.done);
         if(_obj){
           ctx.font='8px "Exo 2",sans-serif';
-          ctx.fillStyle=_hov?'rgba(255,235,170,0.95)':'rgba(225,200,125,0.75)';
-          const _objLines=_wrap('• '+(_obj.text||''),_mtW,3);
-          for(let li=0;li<_objLines.length;li++){
-            ctx.fillText(_objLines[li],_mtX+(li===0?0:6),_rowBottom+8+li*_mtLH);
+          const _trkCol=_hov?'rgba(255,235,170,0.95)':'rgba(225,200,125,0.75)';
+          ctx.fillStyle=_trkCol;
+          // Substitute spaces inside [bracketed] tokens with U+0001 (a non-
+          // whitespace control character) so the existing /\s+/-based wrap
+          // treats them as atomic, then restore and tokenize each wrapped
+          // line for colored rendering. (NBSP U+00A0 also matches \s+ in
+          // JS so it can't be used as the placeholder.)
+          const _safe=(_obj.text||'').replace(/\[([^\]]+)\]/g,(m2,inner)=>'['+inner.replace(/ /g,'\u0001')+']');
+          const _trkLines=_wrap('• '+_safe,_mtW,3);
+          const _trkFontStr='8px "Exo 2",sans-serif';
+          for(let li=0;li<_trkLines.length;li++){
+            const _restored=_trkLines[li].replace(/\u0001/g,' ');
+            const _toks=_objTokenize(_restored);
+            _objDrawLine(_toks,_mtX+(li===0?0:6),_rowBottom+8+li*_mtLH,_trkFontStr,_trkCol);
           }
-          _rowBottom+=_objLines.length*_mtLH;
+          _rowBottom+=_trkLines.length*_mtLH;
         }
         _missionTrackerBounds.push({x:_mtX-2,y:_nameY-2,w:_mtW+4,h:(_rowBottom-_nameY)+4,missionIdx:_mi});
         _mtCursorY=_rowBottom+_mtGap;
@@ -28852,6 +28928,30 @@ function _restoreFromSave(save){
   // Restore missions (visitedSnapshot Array → Set)
   missions=(save.missions||[]).map(m=>{
     const {visitedSnapshot,...rest}=m;
+    // Refresh objective text from the latest mission def — so updates to
+    // mission text (e.g. new [Bracket] colored tokens) propagate into older
+    // save files instead of staying frozen at the text version stored when
+    // the mission was originally accepted. Done-flags + placeholders (the
+    // {SOURCE}/{TARGET} resolved by the original accept handler) are
+    // preserved by mapping by objective id.
+    const _def=MISSION_DEFS.find(d=>d.id===rest.id);
+    if(_def && Array.isArray(rest.objectives)){
+      rest.objectives=rest.objectives.map(o=>{
+        const _defObj=_def.objectives.find(x=>x.id===o.id);
+        if(!_defObj) return o;
+        let _newText=_defObj.text;
+        // Re-resolve {SOURCE}/{TARGET} placeholders using saved planet ids.
+        if(_newText.includes('{SOURCE}') && rest.sourcePlanetId!=null){
+          const _sp=galaxy&&galaxy.planets[rest.sourcePlanetId];
+          if(_sp) _newText=_newText.replace('{SOURCE}',_sp.name);
+        }
+        if(_newText.includes('{TARGET}') && rest.targetPlanetId!=null){
+          const _tp=galaxy&&galaxy.planets[rest.targetPlanetId];
+          if(_tp) _newText=_newText.replace('{TARGET}',_tp.name);
+        }
+        return {...o, text:_newText};
+      });
+    }
     return {...rest, visitedSnapshot:new Set(visitedSnapshot||[])};
   });
   _recomputeMissionTargets();
