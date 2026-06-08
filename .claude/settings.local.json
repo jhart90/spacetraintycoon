@@ -155,7 +155,8 @@
       "PowerShell(try { $r = Invoke-WebRequest -Uri \"http://localhost:57956/screensaver.html\" -TimeoutSec 5 -ErrorAction Stop; \"OK: \" + $r.StatusCode + \" size:\" + $r.Content.Length } catch { \"Error: $_\" })",
       "PowerShell($lines = Get-Content \"C:\\\\Users\\\\jackh\\\\Desktop\\\\Claude\\\\Train Game\\\\build_game.py\"; $total = $lines.Count; $start = [Math]::Max\\(0,$total-150\\); $lines[$start..$total] | Select-String -Pattern \"init\\\\b|^imgs\\\\[\" | Select-Object LineNumber, Line | Format-Table -AutoSize)",
       "Bash(xxd)",
-      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8766/index.html)"
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8766/index.html)",
+      "Bash(curl -sI \"https://raw.githubusercontent.com/jhart90/spacetraintycoon/localstorage-saves/assets/04_neon_katsu_sandwich.mp3\")"
     ]
   },
   "hooks": {

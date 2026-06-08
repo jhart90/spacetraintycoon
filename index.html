@@ -18886,7 +18886,9 @@ function drawOptionsPopup(){
         }
       }
       // Right segment — bounded by the bar's right edge so it never extends
-      // past the end of the progress bar.
+      // past the end of the progress bar. Sampled at the MIRROR of each x
+      // across the title center, so the right wave is a horizontal flip
+      // of the left wave (the animation also runs in the opposite direction).
       {
         const x0=_titleCx+_titleHalfW+_waveGap;
         const x1=Math.min(_spBarX+_spBarW, x0+_waveMaxLen);
@@ -18894,7 +18896,8 @@ function drawOptionsPopup(){
           ctx.beginPath();
           for(let i=0;i<=24;i++){
             const x=x0+(x1-x0)*(i/24);
-            const y=_waveY+Math.sin(x*_waveFreq+_wavePhase)*_waveAmp;
+            const _xMirror=2*_titleCx-x;
+            const y=_waveY+Math.sin(_xMirror*_waveFreq+_wavePhase)*_waveAmp;
             if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
           }
           ctx.stroke();
