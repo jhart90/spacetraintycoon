@@ -2203,6 +2203,7 @@ let _steelCarUnlocked=false;   // true once a blast furnace first produces steel
 let _glassCarUnlocked=false;   // true once a glassworks first produces glass
 let _machineryCarUnlocked=false; // true at the same moment glass is first produced
                                   // (industrial chain reaction unlock)
+let _cargoCarUnlocked=false;   // true once a bakery or juicery first produces "cargo"
 let _hazmatCarUnlocked=false;  // true once hazmat supply first reaches >=1 on any planet
 let _totalHazmatIncinerated=0; // cumulative hazmat units dumped into stars
 let _royalCarUnlocked=false;   // true once research_royal_car mission completed
@@ -12546,6 +12547,12 @@ function updateFoundries(dtG){
           _bk.grain=Math.max(0,(_bk.grain||0)-1);
           p.supply.cargo=Math.min(CARGO_MAX_SUPPLY,(p.supply.cargo||0)+1);
           _anyCargoProduced=true; // one-shot flag for galaxy-wide cargo demand
+          if(!_cargoCarUnlocked){
+            _cargoCarUnlocked=true;
+            pendingCarUnlocks.push({sprite:'car_cargo',displayName:'Cargo Car'});
+            _chatMsg('CARGO CAR UNLOCKED','rgba(200,170,120,1)');
+            _ga('car_unlocked',{car_type:'cargo', cargo:'cargo', sd:Math.floor(stardate)});
+          }
         }
       } else if((_bk.grain||0)>=1){
         _bk.progress=FOUNDRY_PROD_TIME;
@@ -12561,6 +12568,12 @@ function updateFoundries(dtG){
           _jc.fruit=Math.max(0,(_jc.fruit||0)-1);
           p.supply.cargo=Math.min(CARGO_MAX_SUPPLY,(p.supply.cargo||0)+1);
           _anyCargoProduced=true;
+          if(!_cargoCarUnlocked){
+            _cargoCarUnlocked=true;
+            pendingCarUnlocks.push({sprite:'car_cargo',displayName:'Cargo Car'});
+            _chatMsg('CARGO CAR UNLOCKED','rgba(200,170,120,1)');
+            _ga('car_unlocked',{car_type:'cargo', cargo:'cargo', sd:Math.floor(stardate)});
+          }
         }
       } else if((_jc.fruit||0)>=1){
         _jc.progress=FOUNDRY_PROD_TIME;
@@ -16767,18 +16780,15 @@ function _drawTutorialChain(stage){
     const _shadowCol = _blue ? 'rgba(0,80,180,0.55)'  : 'rgba(180,140,0,0.55)';
     const _fillCol   = _blue ? 'rgba(25,155,255,0.97)' : 'rgba(245,200,40,0.97)';
     const _textCol   = _blue ? '#000000'               : '#1a1308';
-    // Wipe HD text overlay under the bubble (including its tail) so any
-    // earlier text drawn to the overlay — trains-panel rows, info-bar text,
-    // planet labels, chat log — can't bleed THROUGH the opaque yellow fill
-    // and read as garbage behind the bubble's own text. Tail extends
-    // vertically beyond the bubble rect by ~_tailH, so we widen the clear
-    // rect to include it on both placements (above + below).
-    {
-      const _anchY = (anchorScreen ? anchorScreen.y : _by);
-      const _clearY0 = Math.min(_by, _anchY-4) - 2;
-      const _clearY1 = Math.max(_by+_bH, _anchY+4) + 2;
-      _clearTextOverlayRect(_bx-2, _clearY0, _bW+4, _clearY1-_clearY0);
-    }
+    // Wipe HD text overlay under the bubble's body so trains-panel rows,
+    // info-bar text, planet labels, chat log, etc. can't bleed THROUGH the
+    // opaque fill. NOTE: only clear the bubble's rounded-rect footprint —
+    // NOT the tail/anchor span. The tail is a narrow triangle, so
+    // extending the clear to cover the anchor would erase HD-overlay text
+    // in the wide rectangle between the anchor and the bubble where the
+    // tail itself only covers a narrow path, leaving visible "dark
+    // rectangle" gaps in popup text behind the bubble.
+    _clearTextOverlayRect(_bx-2, _by-2, _bW+4, _bH+4);
     ctx.globalAlpha=alpha;
     ctx.shadowColor=_shadowCol; ctx.shadowBlur=8;
     ctx.fillStyle=_fillCol;
@@ -22079,13 +22089,17 @@ function _drawCarBtn(bx,by,bw,bh,carType,isSelected,isGreyed,tyCount=0,isHov=fal
 // explaining how to unlock them on hover; the bottom "mystery" row is
 // blacked-out silhouettes with only a "???" tooltip.
 const _TT_ENGINES=['engine_constellation','engine_galaxy','engine_classJ','engine_classR','engine_N700'];
+// Non-mystery cars (full color when unlocked, greyscale when locked). Grouped
+// by row for organizational clarity — actual screen positions come from
+// _TT_POS so cars can sit at half-column offsets within their row.
 const _TT_CAR_ROWS=[
-  ['car_passenger','car_mail','car_water_tank','car_ore','car_livestock'],
-  ['car_royal','car_sand','car_chemical','car_oil','car_grain','car_fruit'],
-  ['car_ice','car_iron'],
+  ['car_passenger','car_mail','car_water_tank','car_ore','car_grain'],
+  ['car_royal','car_chemical','car_sand','car_oil','car_livestock','car_fruit'],
+  ['car_glass','car_iron','car_cargo'],
   ['car_steel','car_hazmat','car_machinery'],
 ];
-const _TT_MYSTERY_ROW=['car_glass','car_gold','car_diamond','car_battery','car_medical','car_flowers'];
+// Mystery row — blacked-out silhouettes with no tooltip clues.
+const _TT_MYSTERY_ROW=['car_ice','car_gold','car_diamond','car_battery','car_medical','car_flowers'];
 const _TT_NAMES={
   engine_constellation:'CONSTELLATION',engine_galaxy:'GALAXY',
   engine_classJ:'CLASS J',engine_classR:'CLASS R',engine_N700:'N700',
@@ -22100,6 +22114,7 @@ const _TT_NAMES={
   car_glass:'GLASS CAR',car_gold:'GOLD CAR',
   car_diamond:'DIAMOND CAR',car_battery:'BATTERY CAR',
   car_medical:'MEDICAL CAR',car_flowers:'FLOWERS CAR',
+  car_cargo:'CARGO CAR',
 };
 const _TT_HINTS={
   engine_constellation:'Available from the start of the game',
@@ -22122,6 +22137,8 @@ const _TT_HINTS={
   car_steel:'Produce STEEL by running a BLAST FURNACE',
   car_hazmat:'Produce HAZMAT as a FOUNDRY byproduct',
   car_machinery:'Produce MACHINERY by running a FACTORY',
+  car_glass:'Produce GLASS by running a GLASSWORKS',
+  car_cargo:'Produce CARGO by running a BAKERY or JUICERY',
 };
 // True for items that have an unlock hint we can show, false for the
 // bottom mystery row (blacked-out + "???" tooltip).
@@ -22155,6 +22172,7 @@ function _ttIsLocked(t){
   if(t==='car_glass')     return !_glassCarUnlocked;
   if(t==='car_machinery') return !_machineryCarUnlocked;
   if(t==='car_hazmat')    return !_hazmatCarUnlocked;
+  if(t==='car_cargo')     return !_cargoCarUnlocked;
   if(t==='car_gold')      return !_gold;
   if(t==='car_diamond')   return !_diamond;
   if(t==='car_medical')   return !_medicalCarUnlocked;
@@ -22162,56 +22180,91 @@ function _ttIsLocked(t){
   return false;
 }
 // Explicit position map for every tech-tree node — keys are sprite type
-// strings, values are screen-space centers. Tree visualization expects
-// parents above their children with edges drawn from parent.bottom to
-// child.top in an L-shape using the gap between rows.
+// strings, values are screen-space centers.
+//
+// Cars pane is the right region of the screen (x: 160→895, y: 40→475).
+// Cars are laid out on a 7-col × 6-row grid:
+//   col step = 105 px, col-1 center = 160 + 52.5 = 212.5
+//   row step = 72.5 px, row-1 center = 40 + 36.25 = 76.25
+//   cx = 160 + 105 * (col - 0.5)
+//   cy = 40 + 72.5 * (row - 0.5)
+//
+// Engines sit in their own 150-px-wide column on the left.
 const _TT_POS={
-  engine_constellation:{cx:75, cy:75},
-  engine_galaxy:       {cx:75, cy:160},
-  engine_classJ:       {cx:75, cy:245},
-  engine_classR:       {cx:75, cy:330},
-  engine_N700:         {cx:75, cy:425},
-  car_passenger:       {cx:220, cy:70},
-  car_mail:            {cx:305, cy:70},
-  car_water_tank:      {cx:435, cy:70},
-  car_ore:             {cx:580, cy:70},
-  car_livestock:       {cx:795, cy:70},
-  car_royal:           {cx:262, cy:160},
-  car_chemical:        {cx:435, cy:160},
-  car_sand:            {cx:545, cy:160},
-  car_oil:             {cx:625, cy:160},
-  car_grain:           {cx:750, cy:160},
-  car_fruit:           {cx:835, cy:160},
-  car_ice:             {cx:435, cy:250},
-  car_iron:            {cx:585, cy:250},
-  car_steel:           {cx:500, cy:340},
-  car_hazmat:          {cx:585, cy:340},
-  car_machinery:       {cx:670, cy:340},
-  car_glass:           {cx:215, cy:425},
-  car_gold:            {cx:330, cy:425},
-  car_diamond:         {cx:445, cy:425},
-  car_battery:         {cx:560, cy:425},
-  car_medical:         {cx:675, cy:425},
-  car_flowers:         {cx:790, cy:425},
+  // Engines — single left-column at car rows 1..5 (same Y values as the
+  // car grid so engines visually align horizontally with cars in each row).
+  engine_constellation:{cx:75, cy:76.25},  // row 1
+  engine_galaxy:       {cx:75, cy:148.75}, // row 2
+  engine_classJ:       {cx:75, cy:221.25}, // row 3
+  engine_classR:       {cx:75, cy:293.75}, // row 4
+  engine_N700:         {cx:75, cy:366.25}, // row 5
+  // Cars - row 1 (top)
+  car_passenger:       {cx:212.5, cy:76.25},   // (1, 1)
+  car_mail:            {cx:317.5, cy:76.25},   // (2, 1)
+  car_water_tank:      {cx:422.5, cy:76.25},   // (3, 1)
+  car_ore:             {cx:580.0, cy:76.25},   // (4.5, 1)
+  car_grain:           {cx:790.0, cy:76.25},   // (6.5, 1)
+  // Cars - row 2
+  car_royal:           {cx:265.0, cy:148.75},  // (1.5, 2)
+  car_chemical:        {cx:422.5, cy:148.75},  // (3, 2)
+  car_sand:            {cx:527.5, cy:148.75},  // (4, 2)
+  car_oil:             {cx:632.5, cy:148.75},  // (5, 2)
+  car_livestock:       {cx:737.5, cy:148.75},  // (6, 2)
+  car_fruit:           {cx:842.5, cy:148.75},  // (7, 2)
+  // Cars - row 3
+  car_glass:           {cx:370.0, cy:221.25},  // (2.5, 3)
+  car_iron:            {cx:527.5, cy:221.25},  // (4, 3)
+  car_cargo:           {cx:790.0, cy:221.25},  // (6.5, 3)
+  // Cars - row 4
+  car_steel:           {cx:422.5, cy:293.75},  // (3, 4)
+  car_hazmat:          {cx:527.5, cy:293.75},  // (4, 4)
+  car_machinery:       {cx:632.5, cy:293.75},  // (5, 4)
+  // Cars - row 6 (bottom mystery row; row 5 left empty as a visual gap)
+  car_ice:             {cx:265.0, cy:438.75},  // (1.5, 6)
+  car_gold:            {cx:370.0, cy:438.75},  // (2.5, 6)
+  car_diamond:         {cx:475.0, cy:438.75},  // (3.5, 6)
+  car_battery:         {cx:580.0, cy:438.75},  // (4.5, 6)
+  car_medical:         {cx:685.0, cy:438.75},  // (5.5, 6)
+  car_flowers:         {cx:790.0, cy:438.75},  // (6.5, 6)
 };
-const _TT_CAR_W=78, _TT_CAR_H=50;
-const _TT_ENG_W=95, _TT_ENG_H=55;
+// Max-fit bounding boxes for each sprite. The actual rendered sprite is
+// always scaled to preserve its natural aspect ratio (see _ttDrawItem),
+// so nothing gets stretched — these are just the maximum dimensions.
+// Sized to leave a ~10-15 px gap between adjacent items in both axes
+// given the car grid's 105 px column spacing and 72.5 px row spacing.
+const _TT_CAR_W=90, _TT_CAR_H=60;
+const _TT_ENG_W=110, _TT_ENG_H=62;
 // Visible prerequisite edges (parent → child). Edges involving any mystery
 // node are skipped so the bottom row + N700 engine stay spoiler-free.
 const _TT_EDGES=[
+  // Engine chain
   ['engine_constellation','engine_galaxy'],
   ['engine_galaxy','engine_classJ'],
   ['engine_classJ','engine_classR'],
+  // (1) water → chemical (straight down)
+  ['car_water_tank','car_chemical'],
+  // (2) molten ore → {sand, oil} (split)
+  ['car_ore','car_sand'],
+  ['car_ore','car_oil'],
+  // (3) grain → {livestock, fruit} (split)
+  ['car_grain','car_livestock'],
+  ['car_grain','car_fruit'],
+  // (4) grain → cargo (straight down, skipping row 2 through the col-6.5 gap)
+  ['car_grain','car_cargo'],
+  // (5) {passenger, mail} → royal (converge)
   ['car_passenger','car_royal'],
   ['car_mail','car_royal'],
-  ['car_water_tank','car_chemical'],
-  ['car_ore','car_iron'],
-  ['car_livestock','car_grain'],
-  ['car_livestock','car_fruit'],
-  ['car_chemical','car_ice'],
+  // (6) chemical → glass
+  ['car_chemical','car_glass'],
+  // (7) sand → {glass, iron} (split)
+  ['car_sand','car_glass'],
+  ['car_sand','car_iron'],
+  // (8) iron → {steel, hazmat, machinery} (3-way split)
   ['car_iron','car_steel'],
   ['car_iron','car_hazmat'],
   ['car_iron','car_machinery'],
+  // (9) oil → machinery (straight down, skipping row 3 through the col-5 gap)
+  ['car_oil','car_machinery'],
 ];
 function _ttIsMystery(t){
   return t==='engine_N700' || _TT_MYSTERY_ROW.indexOf(t)>=0;
@@ -22457,6 +22510,7 @@ function drawTrainBuilderPopup(){
     if(t==='car_medical')  return !_medicalCarUnlocked;
     if(t==='car_grain')    return !_grainCarUnlocked;
     if(t==='car_fruit')    return !_fruitCarUnlocked;
+    if(t==='car_cargo')    return !_cargoCarUnlocked;
     return false;
   };
   // Stable sort: unlocked cars first, locked cars at end, preserving original order within each group
@@ -28994,7 +29048,7 @@ function _buildSaveObject(){
     fogEnabled, panelTab, panelScroll, stationPanelScroll,
     pokedexSortIdx, pokedexDiscoveredOnly, starRegistrySortIdx, starRegistryVisitedOnly, autosaveEnabled, missionTrackerEnabled,
     _gameStartSd, _ironCarUnlocked, _steelCarUnlocked, _glassCarUnlocked, _machineryCarUnlocked, _hazmatCarUnlocked, _royalCarUnlocked, _flowersCarUnlocked, _medicalCarUnlocked,
-    _grainCarUnlocked, _livestockCarUnlocked, _fruitCarUnlocked,
+    _grainCarUnlocked, _livestockCarUnlocked, _fruitCarUnlocked, _cargoCarUnlocked,
     _classJEngineUnlocked, _classREngineUnlocked, _N700EngineUnlocked,
     _steelProdLog,
     _sensorUpgradeActive, _stationCostDiscount, _sandstormCheckSd, _bhResearchCheckSd, _playerDeliveryCount,
@@ -29121,7 +29175,7 @@ function _restoreFromSave(save){
   missionTrackerEnabled=save.missionTrackerEnabled!==undefined?save.missionTrackerEnabled:true;
   _gameStartSd=save._gameStartSd||save.stardate;
   _ironCarUnlocked=!!save._ironCarUnlocked; _steelCarUnlocked=!!save._steelCarUnlocked; _glassCarUnlocked=!!save._glassCarUnlocked; _machineryCarUnlocked=!!save._machineryCarUnlocked; _hazmatCarUnlocked=!!save._hazmatCarUnlocked; _royalCarUnlocked=!!save._royalCarUnlocked; _flowersCarUnlocked=!!save._flowersCarUnlocked; _medicalCarUnlocked=!!save._medicalCarUnlocked;
-  _grainCarUnlocked=!!save._grainCarUnlocked; _livestockCarUnlocked=!!save._livestockCarUnlocked; _fruitCarUnlocked=!!save._fruitCarUnlocked;
+  _grainCarUnlocked=!!save._grainCarUnlocked; _livestockCarUnlocked=!!save._livestockCarUnlocked; _fruitCarUnlocked=!!save._fruitCarUnlocked; _cargoCarUnlocked=!!save._cargoCarUnlocked;
   _classJEngineUnlocked=!!save._classJEngineUnlocked; _classREngineUnlocked=!!save._classREngineUnlocked; _N700EngineUnlocked=!!save._N700EngineUnlocked;
   _steelProdLog=Array.isArray(save._steelProdLog)?save._steelProdLog:[];
   _steelMissionTimerMs=0; // re-armed by updateMissions() if the design_better_train intro hasn't fired yet
@@ -29774,7 +29828,7 @@ function startGame(){
   pendingEngineUnlocks=[];
   pendingMissionIntros=[];
   pendingAncientPopups=[]; _ancientTranslatedWords=new Set();
-  _ironCarUnlocked=false; _steelCarUnlocked=false; _glassCarUnlocked=false; _machineryCarUnlocked=false; _hazmatCarUnlocked=false; _royalCarUnlocked=false; _flowersCarUnlocked=false; _medicalCarUnlocked=false; _grainCarUnlocked=false; _livestockCarUnlocked=false; _fruitCarUnlocked=false; _totalPassengersDelivered=0; _totalHazmatIncinerated=0; _anyCargoProduced=false;
+  _ironCarUnlocked=false; _steelCarUnlocked=false; _glassCarUnlocked=false; _machineryCarUnlocked=false; _hazmatCarUnlocked=false; _royalCarUnlocked=false; _flowersCarUnlocked=false; _medicalCarUnlocked=false; _grainCarUnlocked=false; _livestockCarUnlocked=false; _fruitCarUnlocked=false; _cargoCarUnlocked=false; _totalPassengersDelivered=0; _totalHazmatIncinerated=0; _anyCargoProduced=false;
   _classJEngineUnlocked=false; _classREngineUnlocked=false; _N700EngineUnlocked=false;
   _steelProdLog=[]; _steelMissionTimerMs=0;
   _sensorUpgradeActive=false; _stationCostDiscount=0; _galaxyCensusTimerMs=0; _sandstormCheckSd=0; _bhResearchCheckSd=0;
