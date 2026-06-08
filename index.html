@@ -941,7 +941,7 @@ const MISSION_DEFS=[
    name:'Build a Foundry',
    imageType:'foundry', imageKey:null,
    objectives:[
-     {id:'station_foundry_planet',text:'Construct a STATION on a Desert planet'},
+     {id:'station_foundry_planet',text:'Construct a STATION on a DESERT PLANET'},
      {id:'construct_foundry',    text:'Construct a FOUNDRY'},
    ],
    details:'Establish a foundry to smelt molten ore into refined iron.',
@@ -17618,7 +17618,7 @@ function _drawTutorialChain(stage){
     if(_bfDesert){
       const [_sx,_sy]=w2s(_bfDesert.x,_bfDesert.y);
       const _sr=Math.max(8,_bfDesert.radius*cam.scale);
-      _drawBubble(['LOAD IRON from the DESERT PLANET'], {x:_sx,y:_sy-_sr+6}, r.alpha);
+      _drawBubble(['ROUTE your new TRAIN to LOAD IRON from the DESERT PLANET'], {x:_sx,y:_sy-_sr+6}, r.alpha);
     }
     return;
   }
@@ -22073,6 +22073,286 @@ function _drawCarBtn(bx,by,bw,bh,carType,isSelected,isGreyed,tyCount=0,isHov=fal
   }
 }
 
+// ── Tech Tree screen (toggled with the 'I' key) ─────────────
+// Full-canvas screen listing every ENGINE + CAR sprite. Unlocked items
+// render in full color; locked items render greyscale with a tooltip
+// explaining how to unlock them on hover; the bottom "mystery" row is
+// blacked-out silhouettes with only a "???" tooltip.
+const _TT_ENGINES=['engine_constellation','engine_galaxy','engine_classJ','engine_classR','engine_N700'];
+const _TT_CAR_ROWS=[
+  ['car_passenger','car_mail','car_water_tank','car_ore','car_livestock'],
+  ['car_royal','car_sand','car_chemical','car_oil','car_grain','car_fruit'],
+  ['car_ice','car_iron'],
+  ['car_steel','car_hazmat','car_machinery'],
+];
+const _TT_MYSTERY_ROW=['car_glass','car_gold','car_diamond','car_battery','car_medical','car_flowers'];
+const _TT_NAMES={
+  engine_constellation:'CONSTELLATION',engine_galaxy:'GALAXY',
+  engine_classJ:'CLASS J',engine_classR:'CLASS R',engine_N700:'N700',
+  car_passenger:'PASSENGER CAR',car_mail:'MAIL CAR',
+  car_water_tank:'WATER TANK',car_ore:'MOLTEN ORE CAR',
+  car_livestock:'LIVESTOCK CAR',car_royal:'ROYAL CAR',
+  car_sand:'SAND CAR',car_chemical:'CHEMICAL CAR',
+  car_oil:'OIL CAR',car_grain:'GRAIN CAR',
+  car_fruit:'FRUIT CAR',car_ice:'ICE CAR',
+  car_iron:'IRON CAR',car_steel:'STEEL CAR',
+  car_hazmat:'HAZMAT CAR',car_machinery:'MACHINERY CAR',
+  car_glass:'GLASS CAR',car_gold:'GOLD CAR',
+  car_diamond:'DIAMOND CAR',car_battery:'BATTERY CAR',
+  car_medical:'MEDICAL CAR',car_flowers:'FLOWERS CAR',
+};
+const _TT_HINTS={
+  engine_constellation:'Available from the start of the game',
+  engine_galaxy:'Available for purchase from the start',
+  engine_classJ:'Earn $400K rolling revenue OR grow corp value to $2.4M',
+  engine_classR:'Complete the "Designing a better space TRAIN" mission',
+  car_passenger:'Available from the start',
+  car_mail:'Available from the start',
+  car_water_tank:'Available from the start',
+  car_ore:'Available from the start',
+  car_livestock:'VISIT an AGRICULTURAL PLANET with a Farm structure',
+  car_royal:'Complete the ROYAL CAR research mission',
+  car_sand:'VISIT a DESERT PLANET',
+  car_chemical:'VISIT a CHEMICAL PLANET',
+  car_oil:'VISIT an OIL PLANET',
+  car_grain:'VISIT an AGRICULTURAL PLANET with a Granary structure',
+  car_fruit:'VISIT an AGRICULTURAL PLANET with an Orchard structure',
+  car_ice:'VISIT an ICE PLANET',
+  car_iron:'Produce IRON by running a FOUNDRY',
+  car_steel:'Produce STEEL by running a BLAST FURNACE',
+  car_hazmat:'Produce HAZMAT as a FOUNDRY byproduct',
+  car_machinery:'Produce MACHINERY by running a FACTORY',
+};
+// True for items that have an unlock hint we can show, false for the
+// bottom mystery row (blacked-out + "???" tooltip).
+function _ttIsLocked(t){
+  // Engines
+  if(t==='engine_constellation') return false;
+  if(t==='engine_galaxy')        return false;
+  if(t==='engine_classJ')        return !_classJEngineUnlocked;
+  if(t==='engine_classR')        return !_classREngineUnlocked;
+  if(t==='engine_N700')          return !_N700EngineUnlocked;
+  // Cars — replicate the train builder's _carLocked logic.
+  const _gold=galaxy&&galaxy.planets.some(p=>p.hasGold&&p.goldRevealed);
+  const _diamond=galaxy&&galaxy.planets.some(p=>p.hasDiamond&&p.diamondRevealed);
+  const _oil=galaxy&&galaxy.planets.some(p=>p.type.id==='oil'&&visitedPlanetIds.has(p.id));
+  const _battery=galaxy&&galaxy.planets.some(p=>p.type.id==='storm'&&visitedPlanetIds.has(p.id));
+  const _chemical=galaxy&&galaxy.planets.some(p=>p.type.id==='chemical'&&visitedPlanetIds.has(p.id));
+  const _sand=galaxy&&galaxy.planets.some(p=>p.type.id==='desert'&&visitedPlanetIds.has(p.id));
+  const _ice=galaxy&&galaxy.planets.some(p=>p.type.id==='ice'&&visitedPlanetIds.has(p.id));
+  if(t==='car_passenger'||t==='car_mail'||t==='car_water_tank'||t==='car_ore') return false;
+  if(t==='car_livestock') return !_livestockCarUnlocked;
+  if(t==='car_grain')     return !_grainCarUnlocked;
+  if(t==='car_fruit')     return !_fruitCarUnlocked;
+  if(t==='car_royal')     return !_royalCarUnlocked;
+  if(t==='car_sand')      return !_sand;
+  if(t==='car_chemical')  return !_chemical;
+  if(t==='car_oil')       return !_oil;
+  if(t==='car_battery')   return !_battery;
+  if(t==='car_ice')       return !_ice;
+  if(t==='car_iron')      return !_ironCarUnlocked;
+  if(t==='car_steel')     return !_steelCarUnlocked;
+  if(t==='car_glass')     return !_glassCarUnlocked;
+  if(t==='car_machinery') return !_machineryCarUnlocked;
+  if(t==='car_hazmat')    return !_hazmatCarUnlocked;
+  if(t==='car_gold')      return !_gold;
+  if(t==='car_diamond')   return !_diamond;
+  if(t==='car_medical')   return !_medicalCarUnlocked;
+  if(t==='car_flowers')   return !_flowersCarUnlocked;
+  return false;
+}
+// Explicit position map for every tech-tree node — keys are sprite type
+// strings, values are screen-space centers. Tree visualization expects
+// parents above their children with edges drawn from parent.bottom to
+// child.top in an L-shape using the gap between rows.
+const _TT_POS={
+  engine_constellation:{cx:75, cy:75},
+  engine_galaxy:       {cx:75, cy:160},
+  engine_classJ:       {cx:75, cy:245},
+  engine_classR:       {cx:75, cy:330},
+  engine_N700:         {cx:75, cy:425},
+  car_passenger:       {cx:220, cy:70},
+  car_mail:            {cx:305, cy:70},
+  car_water_tank:      {cx:435, cy:70},
+  car_ore:             {cx:580, cy:70},
+  car_livestock:       {cx:795, cy:70},
+  car_royal:           {cx:262, cy:160},
+  car_chemical:        {cx:435, cy:160},
+  car_sand:            {cx:545, cy:160},
+  car_oil:             {cx:625, cy:160},
+  car_grain:           {cx:750, cy:160},
+  car_fruit:           {cx:835, cy:160},
+  car_ice:             {cx:435, cy:250},
+  car_iron:            {cx:585, cy:250},
+  car_steel:           {cx:500, cy:340},
+  car_hazmat:          {cx:585, cy:340},
+  car_machinery:       {cx:670, cy:340},
+  car_glass:           {cx:215, cy:425},
+  car_gold:            {cx:330, cy:425},
+  car_diamond:         {cx:445, cy:425},
+  car_battery:         {cx:560, cy:425},
+  car_medical:         {cx:675, cy:425},
+  car_flowers:         {cx:790, cy:425},
+};
+const _TT_CAR_W=78, _TT_CAR_H=50;
+const _TT_ENG_W=95, _TT_ENG_H=55;
+// Visible prerequisite edges (parent → child). Edges involving any mystery
+// node are skipped so the bottom row + N700 engine stay spoiler-free.
+const _TT_EDGES=[
+  ['engine_constellation','engine_galaxy'],
+  ['engine_galaxy','engine_classJ'],
+  ['engine_classJ','engine_classR'],
+  ['car_passenger','car_royal'],
+  ['car_mail','car_royal'],
+  ['car_water_tank','car_chemical'],
+  ['car_ore','car_iron'],
+  ['car_livestock','car_grain'],
+  ['car_livestock','car_fruit'],
+  ['car_chemical','car_ice'],
+  ['car_iron','car_steel'],
+  ['car_iron','car_hazmat'],
+  ['car_iron','car_machinery'],
+];
+function _ttIsMystery(t){
+  return t==='engine_N700' || _TT_MYSTERY_ROW.indexOf(t)>=0;
+}
+function _ttSize(t){
+  return t.indexOf('engine_')===0 ? {w:_TT_ENG_W,h:_TT_ENG_H} : {w:_TT_CAR_W,h:_TT_CAR_H};
+}
+// L-shaped prerequisite line from parent.bottom-center to child.top-center.
+// Dims the line color if the parent is itself still locked.
+function _ttDrawEdge(parent,child){
+  const p=_TT_POS[parent], c=_TT_POS[child];
+  if(!p||!c) return;
+  if(_ttIsMystery(parent)||_ttIsMystery(child)) return;
+  const ps=_ttSize(parent), cs=_ttSize(child);
+  const x1=p.cx, y1=p.cy+ps.h/2;
+  const x2=c.cx, y2=c.cy-cs.h/2;
+  const _parentLocked=_ttIsLocked(parent);
+  ctx.strokeStyle=_parentLocked?'rgba(85,105,145,0.32)':'rgba(140,200,235,0.55)';
+  ctx.lineWidth=1.4;
+  ctx.beginPath();
+  ctx.moveTo(x1,y1);
+  if(Math.abs(x1-x2)<2){
+    ctx.lineTo(x2,y2);
+  } else {
+    const midY=(y1+y2)/2;
+    ctx.lineTo(x1,midY);
+    ctx.lineTo(x2,midY);
+    ctx.lineTo(x2,y2);
+  }
+  ctx.stroke();
+}
+// Render one tech-tree node — bare sprite (no surrounding box, no caption).
+// Greyscale + dim if locked, mystery silhouette + "???" if mystery. A
+// subtle blue glow indicates hover. Registers a bounds rect for tooltip.
+function _ttDrawItem(type,mystery){
+  const pos=_TT_POS[type];
+  if(!pos) return;
+  const sz=_ttSize(type);
+  const bx=pos.cx-sz.w/2, by=pos.cy-sz.h/2;
+  const _locked=mystery||_ttIsLocked(type);
+  const _hov=popupState.techTreeHover===type;
+  if(mystery){
+    ctx.save();
+    ctx.fillStyle='rgba(14,16,24,0.92)';
+    ctx.beginPath(); ctx.roundRect(bx+6,by+4,sz.w-12,sz.h-8,4); ctx.fill();
+    ctx.strokeStyle=_hov?'rgba(120,135,170,0.7)':'rgba(40,46,62,0.55)'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.roundRect(bx+6,by+4,sz.w-12,sz.h-8,4); ctx.stroke();
+    ctx.font='bold 14px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillStyle=_hov?'rgba(160,180,220,0.95)':'rgba(80,92,120,0.82)';
+    ctx.fillText('???', pos.cx, pos.cy);
+    ctx.textBaseline='alphabetic';
+    ctx.restore();
+  } else if(imgs[type]){
+    const _natW=imgs[type].naturalWidth||CAR_W;
+    const _natH=imgs[type].naturalHeight||CAR_H;
+    const _aspect=_natW/_natH;
+    let _dh=sz.h, _dw=_dh*_aspect;
+    if(_dw>sz.w){ _dw=sz.w; _dh=_dw/_aspect; }
+    const _dx=pos.cx-_dw/2, _dy=pos.cy-_dh/2;
+    ctx.save();
+    if(_locked){
+      try{ ctx.filter='grayscale(1) brightness(0.55) contrast(0.85)'; }catch(e){}
+      ctx.globalAlpha=0.85;
+    }
+    if(_hov){
+      ctx.shadowColor='rgba(120,200,255,0.95)';
+      ctx.shadowBlur=14;
+    }
+    ctx.drawImage(_sprForSize(type,_dw,_dh),_dx,_dy,_dw,_dh);
+    ctx.restore();
+    ctx.filter='none';
+  }
+  popupState.techTreeItemBounds.push({x:bx,y:by,w:sz.w,h:sz.h,type,mystery});
+}
+function drawTechTreePopup(){
+  if(activePopup!=='techtree') return;
+  ctx.save();
+  // Wipe the HD text overlay across the whole canvas so chat-log text,
+  // top-bar stats, info-bar planet/train labels, panel-tab text, tutorial
+  // callout text, hint-bar text, etc. don't bleed through this screen's
+  // opaque dark backdrop.
+  _clearTextOverlayRect(0,0,W,H);
+  // Dark backdrop covering the full canvas
+  ctx.fillStyle='rgba(4,7,18,0.97)';
+  ctx.fillRect(0,0,W,H);
+  ctx.strokeStyle='rgba(70,140,220,0.55)'; ctx.lineWidth=2;
+  ctx.strokeRect(3,3,W-6,H-6);
+  popupState.techTreeItemBounds=[];
+  // Top header strip
+  const HEADER_H=26;
+  ctx.fillStyle='rgba(40,130,220,0.92)';
+  ctx.fillRect(6,6,W-12,HEADER_H);
+  ctx.font='bold 12px Orbitron,sans-serif'; ctx.textAlign='left'; ctx.textBaseline='middle';
+  ctx.fillStyle='#fff';
+  ctx.fillText('ENGINES', 18, 6+HEADER_H/2+1);
+  ctx.textAlign='center'; ctx.fillText('CARS', 540, 6+HEADER_H/2+1);
+  ctx.textAlign='right'; ctx.font='10px "Exo 2",sans-serif';
+  ctx.fillStyle='rgba(230,240,255,0.85)';
+  ctx.fillText('[ESC] close', W-14, 6+HEADER_H/2+1);
+  ctx.textBaseline='alphabetic';
+  // Subtle vertical divider between Engines column and Cars area
+  ctx.strokeStyle='rgba(40,130,220,0.45)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(150,6+HEADER_H); ctx.lineTo(150,H-6); ctx.stroke();
+  // Draw edges FIRST so the sprites paint over each endpoint cleanly.
+  for(const [a,b] of _TT_EDGES) _ttDrawEdge(a,b);
+  // Non-mystery engines + cars
+  for(const _e of _TT_ENGINES){ if(_e!=='engine_N700') _ttDrawItem(_e,false); }
+  for(const _row of _TT_CAR_ROWS){ for(const _c of _row) _ttDrawItem(_c,false); }
+  // Mystery row (blacked-out silhouettes with "???")
+  _ttDrawItem('engine_N700', true);
+  for(const _c of _TT_MYSTERY_ROW) _ttDrawItem(_c,true);
+  // Tooltip on top of everything
+  if(popupState.techTreeHover){
+    const _t=popupState.techTreeHover;
+    const _isMyst=!!popupState.techTreeHoverMystery;
+    const _name=_isMyst?'???':(_TT_NAMES[_t]||_t);
+    const _isLocked=_isMyst||_ttIsLocked(_t);
+    const _hint=_isMyst?'Unknown — keep exploring':(_isLocked?(_TT_HINTS[_t]||'Locked'):'Unlocked!');
+    ctx.font='bold 10px Orbitron,sans-serif';
+    const _nW=ctx.measureText(_name).width;
+    ctx.font='10px "Exo 2",sans-serif';
+    const _hW=ctx.measureText(_hint).width;
+    const _tW=Math.max(_nW,_hW)+20, _tH=38;
+    let _tx=popupState.techTreeHoverX-_tW/2, _ty=popupState.techTreeHoverY-_tH-8;
+    if(_tx<6) _tx=6; if(_tx+_tW>W-6) _tx=W-6-_tW;
+    if(_ty<6+HEADER_H) _ty=popupState.techTreeHoverY+8;
+    ctx.fillStyle='rgba(15,25,55,0.97)';
+    ctx.beginPath(); ctx.roundRect(_tx,_ty,_tW,_tH,5); ctx.fill();
+    ctx.strokeStyle=_isLocked?'rgba(200,160,80,0.85)':'rgba(80,200,140,0.85)'; ctx.lineWidth=1.2;
+    ctx.beginPath(); ctx.roundRect(_tx,_ty,_tW,_tH,5); ctx.stroke();
+    ctx.textAlign='center';
+    ctx.font='bold 10px Orbitron,sans-serif';
+    ctx.fillStyle=_isLocked?'rgba(230,200,140,0.97)':'rgba(180,235,200,0.97)';
+    ctx.fillText(_name, _tx+_tW/2, _ty+14);
+    ctx.font='10px "Exo 2",sans-serif';
+    ctx.fillStyle='rgba(200,215,240,0.85)';
+    ctx.fillText(_hint, _tx+_tW/2, _ty+30);
+  }
+  ctx.restore();
+}
+
 function drawTrainBuilderPopup(){
   if(activePopup!=='trainbuilder'||!trainBuilderState) return;
   const s=trainBuilderState;
@@ -25239,6 +25519,7 @@ function drawGalaxy(ts,dt){
   // ever wanted again.
   _drawBuyTrainPlusHintCallout();
   drawTrainBuilderPopup();
+  drawTechTreePopup();
   // Color picker renders on top of all popups
   if(colorPickerState&&activePopup!=='train') drawColorPickerPopup();
   drawNewMissionPopup();
@@ -26150,6 +26431,22 @@ canvas.addEventListener('mousemove',e=>{
     }
     popupState.hoveredObjIdx=_hovObj;
   }
+  // Hover tracking for tech tree screen
+  if(activePopup==='techtree'){
+    popupState.techTreeHover=null;
+    popupState.techTreeHoverMystery=false;
+    if(Array.isArray(popupState.techTreeItemBounds)){
+      for(const _ttb of popupState.techTreeItemBounds){
+        if(cp.x>=_ttb.x&&cp.x<=_ttb.x+_ttb.w&&cp.y>=_ttb.y&&cp.y<=_ttb.y+_ttb.h){
+          popupState.techTreeHover=_ttb.type;
+          popupState.techTreeHoverMystery=!!_ttb.mystery;
+          popupState.techTreeHoverX=_ttb.x+_ttb.w/2;
+          popupState.techTreeHoverY=_ttb.y;
+          break;
+        }
+      }
+    }
+  } else { popupState.techTreeHover=null; popupState.techTreeHoverMystery=false; }
   // Hover tracking for missions popup objective rows
   if(activePopup==='missions'){
     let _mHovKey=null;
@@ -28310,9 +28607,13 @@ document.addEventListener('keydown',e=>{
     //   • Escape → SKIP straight to corpsetup (no point exposing the player
     //     to the title screen mid-cutscene; the SKIP button label sets the
     //     expectation that ESC behaves the same)
-    //   • Any other key → advance paragraph (or snap-finish typing)
+    //   • Space OR a single letter (a-z / A-Z) → advance paragraph
+    //   • Anything else (digits, modifiers, function keys, arrow keys, etc.)
+    //     is ignored so a stray Shift/Ctrl tap doesn't snap-skip the cutscene.
     if(e.key==='Escape'){ _introToCorpSetup(); return; }
-    _introAdvance(typeof performance!=='undefined'?performance.now():Date.now());
+    if(e.key===' ' || (e.key.length===1 && /[a-zA-Z]/.test(e.key))){
+      _introAdvance(typeof performance!=='undefined'?performance.now():Date.now());
+    }
     return;
   }
   if(gs==='corpsetup'){
@@ -28533,6 +28834,13 @@ document.addEventListener('keydown',e=>{
     if(e.key==='m'||e.key==='M'){
       activePopup=activePopup==='missions'?null:'missions';
       if(activePopup==='missions') popupState={mScroll:0};
+      return;
+    }
+    if(e.key==='i'||e.key==='I'){
+      // Tech Tree screen — full-canvas view of every ENGINE + CAR, with
+      // greyscale locked items + a blacked-out mystery bottom row.
+      activePopup=activePopup==='techtree'?null:'techtree';
+      if(activePopup==='techtree') popupState={techTreeItemBounds:[]};
       return;
     }
     if(e.key==='Enter'&&activePopup===null){
