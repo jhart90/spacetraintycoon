@@ -22105,6 +22105,223 @@ function _drawCarBtn(bx,by,bw,bh,carType,isSelected,isGreyed,tyCount=0,isHov=fal
   }
 }
 
+// ── Tech Tree screen (toggled with the 'I' key) ─────────────
+// Full-canvas screen listing every ENGINE + CAR sprite. Unlocked items
+// render in full color; locked items render greyscale with a tooltip
+// explaining how to unlock them on hover; the bottom "mystery" row is
+// blacked-out silhouettes with only a "???" tooltip.
+const _TT_ENGINES=['engine_constellation','engine_galaxy','engine_classJ','engine_classR','engine_N700'];
+const _TT_CAR_ROWS=[
+  ['car_passenger','car_mail','car_water_tank','car_ore','car_livestock'],
+  ['car_royal','car_sand','car_chemical','car_oil','car_grain','car_fruit'],
+  ['car_ice','car_iron'],
+  ['car_steel','car_hazmat','car_machinery'],
+];
+const _TT_MYSTERY_ROW=['car_glass','car_gold','car_diamond','car_battery','car_medical','car_flowers'];
+const _TT_NAMES={
+  engine_constellation:'CONSTELLATION',engine_galaxy:'GALAXY',
+  engine_classJ:'CLASS J',engine_classR:'CLASS R',engine_N700:'N700',
+  car_passenger:'PASSENGER CAR',car_mail:'MAIL CAR',
+  car_water_tank:'WATER TANK',car_ore:'MOLTEN ORE CAR',
+  car_livestock:'LIVESTOCK CAR',car_royal:'ROYAL CAR',
+  car_sand:'SAND CAR',car_chemical:'CHEMICAL CAR',
+  car_oil:'OIL CAR',car_grain:'GRAIN CAR',
+  car_fruit:'FRUIT CAR',car_ice:'ICE CAR',
+  car_iron:'IRON CAR',car_steel:'STEEL CAR',
+  car_hazmat:'HAZMAT CAR',car_machinery:'MACHINERY CAR',
+  car_glass:'GLASS CAR',car_gold:'GOLD CAR',
+  car_diamond:'DIAMOND CAR',car_battery:'BATTERY CAR',
+  car_medical:'MEDICAL CAR',car_flowers:'FLOWERS CAR',
+};
+const _TT_HINTS={
+  engine_constellation:'Available from the start of the game',
+  engine_galaxy:'Available for purchase from the start',
+  engine_classJ:'Earn $400K rolling revenue OR grow corp value to $2.4M',
+  engine_classR:'Complete the "Designing a better space TRAIN" mission',
+  car_passenger:'Available from the start',
+  car_mail:'Available from the start',
+  car_water_tank:'Available from the start',
+  car_ore:'Available from the start',
+  car_livestock:'VISIT an AGRICULTURAL PLANET with a Farm structure',
+  car_royal:'Complete the ROYAL CAR research mission',
+  car_sand:'VISIT a DESERT PLANET',
+  car_chemical:'VISIT a CHEMICAL PLANET',
+  car_oil:'VISIT an OIL PLANET',
+  car_grain:'VISIT an AGRICULTURAL PLANET with a Granary structure',
+  car_fruit:'VISIT an AGRICULTURAL PLANET with an Orchard structure',
+  car_ice:'VISIT an ICE PLANET',
+  car_iron:'Produce IRON by running a FOUNDRY',
+  car_steel:'Produce STEEL by running a BLAST FURNACE',
+  car_hazmat:'Produce HAZMAT as a FOUNDRY byproduct',
+  car_machinery:'Produce MACHINERY by running a FACTORY',
+};
+// True for items that have an unlock hint we can show, false for the
+// bottom mystery row (blacked-out + "???" tooltip).
+function _ttIsLocked(t){
+  // Engines
+  if(t==='engine_constellation') return false;
+  if(t==='engine_galaxy')        return false;
+  if(t==='engine_classJ')        return !_classJEngineUnlocked;
+  if(t==='engine_classR')        return !_classREngineUnlocked;
+  if(t==='engine_N700')          return !_N700EngineUnlocked;
+  // Cars — replicate the train builder's _carLocked logic.
+  const _gold=galaxy&&galaxy.planets.some(p=>p.hasGold&&p.goldRevealed);
+  const _diamond=galaxy&&galaxy.planets.some(p=>p.hasDiamond&&p.diamondRevealed);
+  const _oil=galaxy&&galaxy.planets.some(p=>p.type.id==='oil'&&visitedPlanetIds.has(p.id));
+  const _battery=galaxy&&galaxy.planets.some(p=>p.type.id==='storm'&&visitedPlanetIds.has(p.id));
+  const _chemical=galaxy&&galaxy.planets.some(p=>p.type.id==='chemical'&&visitedPlanetIds.has(p.id));
+  const _sand=galaxy&&galaxy.planets.some(p=>p.type.id==='desert'&&visitedPlanetIds.has(p.id));
+  const _ice=galaxy&&galaxy.planets.some(p=>p.type.id==='ice'&&visitedPlanetIds.has(p.id));
+  if(t==='car_passenger'||t==='car_mail'||t==='car_water_tank'||t==='car_ore') return false;
+  if(t==='car_livestock') return !_livestockCarUnlocked;
+  if(t==='car_grain')     return !_grainCarUnlocked;
+  if(t==='car_fruit')     return !_fruitCarUnlocked;
+  if(t==='car_royal')     return !_royalCarUnlocked;
+  if(t==='car_sand')      return !_sand;
+  if(t==='car_chemical')  return !_chemical;
+  if(t==='car_oil')       return !_oil;
+  if(t==='car_battery')   return !_battery;
+  if(t==='car_ice')       return !_ice;
+  if(t==='car_iron')      return !_ironCarUnlocked;
+  if(t==='car_steel')     return !_steelCarUnlocked;
+  if(t==='car_glass')     return !_glassCarUnlocked;
+  if(t==='car_machinery') return !_machineryCarUnlocked;
+  if(t==='car_hazmat')    return !_hazmatCarUnlocked;
+  if(t==='car_gold')      return !_gold;
+  if(t==='car_diamond')   return !_diamond;
+  if(t==='car_medical')   return !_medicalCarUnlocked;
+  if(t==='car_flowers')   return !_flowersCarUnlocked;
+  return false;
+}
+// Render one tech-tree item: sprite (full color / greyscale / blacked-out)
+// inside a dark blue cell, with the item's name underneath. Registers the
+// cell's rect into popupState.techTreeItemBounds for hover detection.
+function _ttDrawItem(type,bx,by,bw,bh,mystery){
+  const _locked=mystery||_ttIsLocked(type);
+  const _hov=popupState.techTreeHover===type;
+  // Cell background
+  ctx.fillStyle=mystery?'rgba(2,3,8,0.95)':(_locked?'rgba(10,16,30,0.78)':(_hov?'rgba(22,52,120,0.85)':'rgba(12,32,75,0.65)'));
+  ctx.fillRect(bx,by,bw,bh);
+  ctx.strokeStyle=mystery?'rgba(40,40,60,0.55)':(_hov?'rgba(110,175,255,0.85)':'rgba(55,95,175,0.50)'); ctx.lineWidth=1;
+  ctx.strokeRect(bx,by,bw,bh);
+  // Sprite area
+  const lblH=12, sprArea=bh-lblH-4;
+  if(!mystery && imgs[type]){
+    const _natW=imgs[type].naturalWidth||CAR_W;
+    const _natH=imgs[type].naturalHeight||CAR_H;
+    const _aspect=_natW/_natH;
+    let _dh=sprArea-4, _dw=_dh*_aspect;
+    if(_dw>bw-10){ _dw=bw-10; _dh=_dw/_aspect; }
+    const _dx=bx+(bw-_dw)/2, _dy=by+(sprArea-_dh)/2+2;
+    ctx.save();
+    if(_locked){
+      // CSS-filter greyscale + dim. Browsers that don't support ctx.filter
+      // fall through to plain alpha=0.4 — still readable.
+      try{ ctx.filter='grayscale(1) brightness(0.55) contrast(0.85)'; }catch(e){}
+      ctx.globalAlpha=0.85;
+    }
+    ctx.drawImage(_sprForSize(type,_dw,_dh),_dx,_dy,_dw,_dh);
+    ctx.restore();
+    ctx.filter='none';
+  } else if(mystery){
+    // "???" silhouette
+    ctx.fillStyle='rgba(40,45,60,0.95)';
+    const _silW=bw-16, _silH=sprArea-8;
+    ctx.fillRect(bx+(bw-_silW)/2, by+(sprArea-_silH)/2+2, _silW, _silH);
+    ctx.font='bold 14px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillStyle='rgba(80,90,120,0.85)';
+    ctx.fillText('???', bx+bw/2, by+sprArea/2+2);
+    ctx.textBaseline='alphabetic';
+  }
+  // Label underneath
+  if(!mystery){
+    ctx.font='7px "Exo 2",sans-serif'; ctx.textAlign='center';
+    ctx.fillStyle=_locked?'rgba(110,125,160,0.75)':(_hov?'rgba(220,235,255,0.98)':'rgba(170,200,235,0.85)');
+    const _label=_TT_NAMES[type]||type.replace(/^(car|engine)_/,'').toUpperCase();
+    let _lt=_label; while(ctx.measureText(_lt).width>bw-4 && _lt.length>4) _lt=_lt.slice(0,-1);
+    if(_lt!==_label) _lt+='…';
+    ctx.fillText(_lt, bx+bw/2, by+bh-3);
+  }
+  popupState.techTreeItemBounds.push({x:bx,y:by,w:bw,h:bh,type,mystery});
+}
+function drawTechTreePopup(){
+  if(activePopup!=='techtree') return;
+  ctx.save();
+  // Dark backdrop covering the full canvas
+  ctx.fillStyle='rgba(4,7,18,0.97)';
+  ctx.fillRect(0,0,W,H);
+  ctx.strokeStyle='rgba(70,140,220,0.55)'; ctx.lineWidth=2;
+  ctx.strokeRect(3,3,W-6,H-6);
+  popupState.techTreeItemBounds=[];
+  // Top header strip
+  const HEADER_H=26;
+  ctx.fillStyle='rgba(40,130,220,0.92)';
+  ctx.fillRect(6,6,W-12,HEADER_H);
+  ctx.font='bold 12px Orbitron,sans-serif'; ctx.textAlign='left'; ctx.textBaseline='middle';
+  ctx.fillStyle='#fff';
+  ctx.fillText('ENGINES', 18, 6+HEADER_H/2+1);
+  ctx.textAlign='center'; ctx.fillText('CARS', 540, 6+HEADER_H/2+1);
+  ctx.textAlign='right'; ctx.font='10px "Exo 2",sans-serif';
+  ctx.fillStyle='rgba(230,240,255,0.85)';
+  ctx.fillText('[ESC] close', W-14, 6+HEADER_H/2+1);
+  ctx.textBaseline='alphabetic';
+  // Divider between Engines column and Cars area
+  const ENG_COL_W=150;
+  ctx.strokeStyle='rgba(40,130,220,0.55)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(ENG_COL_W,6+HEADER_H); ctx.lineTo(ENG_COL_W,H-8); ctx.stroke();
+  // Engine column — 5 items vertically stacked
+  const ENG_X=20, ENG_Y_START=40, ENG_W=ENG_COL_W-40, ENG_H=58, ENG_GAP=78;
+  for(let i=0;i<_TT_ENGINES.length;i++){
+    const _isMystery=(i===_TT_ENGINES.length-1); // N700 → blacked out
+    _ttDrawItem(_TT_ENGINES[i], ENG_X, ENG_Y_START+i*ENG_GAP, ENG_W, ENG_H, _isMystery);
+  }
+  // Cars area — 4 visible rows + 1 mystery row at bottom
+  const CAR_X_LEFT=ENG_COL_W+12, CAR_X_RIGHT=W-12;
+  const CAR_W_=82, CAR_H_=58, CAR_Y_GAP=78;
+  const _drawCarRow=(row, rowY, mystery)=>{
+    if(!row.length) return;
+    const _gap=10;
+    const _totalW=row.length*CAR_W_+(row.length-1)*_gap;
+    const _xStart=CAR_X_LEFT+((CAR_X_RIGHT-CAR_X_LEFT)-_totalW)/2;
+    for(let c=0;c<row.length;c++){
+      _ttDrawItem(row[c], _xStart+c*(CAR_W_+_gap), rowY, CAR_W_, CAR_H_, mystery);
+    }
+  };
+  for(let r=0;r<_TT_CAR_ROWS.length;r++){
+    _drawCarRow(_TT_CAR_ROWS[r], ENG_Y_START+r*CAR_Y_GAP, false);
+  }
+  // Mystery row at the bottom (always blacked out + "???").
+  _drawCarRow(_TT_MYSTERY_ROW, ENG_Y_START+4*CAR_Y_GAP, true);
+  // Tooltip on top of everything
+  if(popupState.techTreeHover){
+    const _t=popupState.techTreeHover;
+    const _isMyst=!!popupState.techTreeHoverMystery;
+    const _name=_isMyst?'???':(_TT_NAMES[_t]||_t);
+    const _isLocked=_isMyst||_ttIsLocked(_t);
+    const _hint=_isMyst?'Unknown — keep exploring':(_isLocked?(_TT_HINTS[_t]||'Locked'):'Unlocked!');
+    ctx.font='bold 10px Orbitron,sans-serif';
+    const _nW=ctx.measureText(_name).width;
+    ctx.font='10px "Exo 2",sans-serif';
+    const _hW=ctx.measureText(_hint).width;
+    const _tW=Math.max(_nW,_hW)+20, _tH=38;
+    let _tx=popupState.techTreeHoverX-_tW/2, _ty=popupState.techTreeHoverY-_tH-8;
+    if(_tx<6) _tx=6; if(_tx+_tW>W-6) _tx=W-6-_tW;
+    if(_ty<6+HEADER_H) _ty=popupState.techTreeHoverY+8;
+    ctx.fillStyle='rgba(15,25,55,0.97)';
+    ctx.beginPath(); ctx.roundRect(_tx,_ty,_tW,_tH,5); ctx.fill();
+    ctx.strokeStyle=_isLocked?'rgba(200,160,80,0.85)':'rgba(80,200,140,0.85)'; ctx.lineWidth=1.2;
+    ctx.beginPath(); ctx.roundRect(_tx,_ty,_tW,_tH,5); ctx.stroke();
+    ctx.textAlign='center';
+    ctx.font='bold 10px Orbitron,sans-serif';
+    ctx.fillStyle=_isLocked?'rgba(230,200,140,0.97)':'rgba(180,235,200,0.97)';
+    ctx.fillText(_name, _tx+_tW/2, _ty+14);
+    ctx.font='10px "Exo 2",sans-serif';
+    ctx.fillStyle='rgba(200,215,240,0.85)';
+    ctx.fillText(_hint, _tx+_tW/2, _ty+30);
+  }
+  ctx.restore();
+}
+
 function drawTrainBuilderPopup(){
   if(activePopup!=='trainbuilder'||!trainBuilderState) return;
   const s=trainBuilderState;
