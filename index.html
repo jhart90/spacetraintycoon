@@ -714,53 +714,98 @@ const MISSION_DEFS=[
    name:'Create a repeating train route',
    imageType:'route_preview', imageKey:null,
    objectives:[
-     {id:'sel_start',    text:'CLICK on a PLANET (or a TRAIN orbiting a PLANET) where you\'d like the REPEATING ROUTE to begin'},
-     {id:'shift_click',  text:'SHIFT+CLICK additional planets in the order you\'d like them to be visited'},
-     {id:'assign_train', text:'When you\'re satisfied with your route, click "ASSIGN TO TRAIN" and then select a TRAIN to run the ROUTE'},
+     {id:'sel_lava_start', text:'CLICK on the LAVA PLANET (or a TRAIN orbiting that planet) to select a starting point for your ROUTE'},
+     {id:'shift_orijen',   text:'SHIFT+CLICK on ORIJEN (your HOME PLANET) to ADD A STOP to your route'},
+     {id:'shift_desert',   text:'SHIFT+CLICK on the DESERT PLANET to ADD ANOTHER STOP to your route'},
+     {id:'shift_loop',     text:'SHIFT+CLICK on the LAVA PLANET to complete the LOOP ROUTE'},
+     {id:'assign_route',   text:'ASSIGN this ROUTE to a TRAIN'},
    ],
    details:"A repeating route keeps your trains busy automatically — no need to redirect them after each delivery.",
    reward:2000, timeLimit:null,
    checkObj:(oid,m)=>{
-     // Auto-pass all three objectives the moment ANY player train has a
-     // real (non-temp) ≥2-stop route — whether it's already `train.route`
-     // (assigned directly when the train was at the first stop) OR sitting
-     // in `train.queuedRoute` (assigned while the train was mid-transit,
-     // so the temp connecting leg holds train.route and the real route is
-     // queued). Also honors the mission's own `_routeAssigned` flag, which
-     // assignRouteToTrain stamps synchronously at click time and which
-     // persists through the mid-mission status flip.
-     // NOTE: previously this used `t.route.isLoop` only, which never fired
-     // for the 2-stop A↔B route the tutorial creates (isLoop requires
-     // stops[0]===stops[N-1]). That gap let the tutorial chain roll back
-     // from cr_assign_btn → cr_click_orijen the moment routeStops cleared.
-     const _hasRealRoute=galaxy&&(
+     if(!galaxy) return false;
+     // Resolve the three home-system planets this mission walks through.
+     // Lava: cached at game start in `_tutorialLavaPlanetId`.
+     // Orijen: the home planet (galaxy.origenId).
+     // Desert: HOME_BIOMES index 2 — the only desert in Orijen's star system.
+     const _lavaId=_tutorialLavaPlanetId;
+     const _orijenId=galaxy.origenId;
+     const _orijenP=galaxy.planets[_orijenId];
+     let _desertId=-1;
+     if(_orijenP){
+       for(const _p of galaxy.planets){
+         if(_p.starId===_orijenP.starId && _p.type && _p.type.id==='desert'){ _desertId=_p.id; break; }
+       }
+     }
+     // Real (non-temp) ≥2-stop route assigned to any player train? → entire
+     // mission done. Mirrors the old short-circuit so the post-assign frame
+     // doesn't roll any objective back as `routeStops` clears.
+     const _hasRealRoute=(
        !!m._routeAssigned ||
        trains.some(t=>t.isPlayer && (
          (t.route       && !t.route.isTempRoute       && (t.route.stops||[]).length>=2) ||
          (t.queuedRoute && !t.queuedRoute.isTempRoute && (t.queuedRoute.stops||[]).length>=2)
        ))
      );
-     if(oid==='sel_start')    return _hasRealRoute||!!(routeStops.length>=1&&sel&&sel.type==='planet');
-     if(oid==='shift_click')  return _hasRealRoute||routeStops.length>=2;
-     if(oid==='assign_train') return _hasRealRoute;
+     if(_hasRealRoute) return true;
+     // Selection state used for the obj-1 auto-pass at mission intro.
+     const _selPlanetId=(sel&&sel.type==='planet')?sel.data.id:-1;
+     const _selTrain=(sel&&sel.type==='car')?trains[sel.data.trainIdx]:null;
+     const _firstPlayerTrain=trains.find(t=>t.isPlayer);
+     const _firstTrainOnLava=!!(_firstPlayerTrain && _firstPlayerTrain.planetId===_lavaId);
+     // routeStops membership flags — entries are full planet objects.
+     const _lavaInRouteStops  = routeStops.some(p=>p&&p.id===_lavaId);
+     const _orijenInRouteStops= routeStops.some(p=>p&&p.id===_orijenId);
+     const _desertInRouteStops= routeStops.some(p=>p&&p.id===_desertId);
+
+     if(oid==='sel_lava_start'){
+       // Auto-pass conditions per spec — any of these means objective 1 is
+       // already done the moment the mission intro evaluates it:
+       //  (a) the player's first train is currently in orbit of the lava planet
+       //  (b) the lava planet is currently the active selection
+       //  (c) the first player train is the active selection (and it's at lava)
+       //  (d) the player already added lava as the route anchor
+       if(_firstTrainOnLava) return true;
+       if(_selPlanetId===_lavaId) return true;
+       if(_selTrain===_firstPlayerTrain && _firstPlayerTrain && _firstPlayerTrain.planetId===_lavaId) return true;
+       return _lavaInRouteStops;
+     }
+     if(oid==='shift_orijen'){
+       return _lavaInRouteStops && _orijenInRouteStops;
+     }
+     if(oid==='shift_desert'){
+       return _lavaInRouteStops && _orijenInRouteStops && _desertInRouteStops;
+     }
+     if(oid==='shift_loop'){
+       // routeStops must be ≥4 long, all three planets present, AND the
+       // most recent stop is lava again (player closed the loop).
+       return routeStops.length>=4 &&
+              routeStops[routeStops.length-1] && routeStops[routeStops.length-1].id===_lavaId &&
+              _orijenInRouteStops && _desertInRouteStops;
+     }
+     if(oid==='assign_route') return _hasRealRoute; // covered by the short-circuit above
      return false;
    }},
   {id:'buy_second_train',
    name:'Buy a 2nd train',
    imageType:'car', imageKey:'engine_galaxy',
    objectives:[
-     {id:'open_trains',    text:'Press "T" to open the "Trains" window'},
-     {id:'open_builder',   text:'Press the "+" sign to open the Train Builder'},
-     {id:'purchase_train', text:'Purchase a new train'},
+     {id:'open_trains',          text:'Press "T" to open the "Trains" window'},
+     {id:'open_builder',         text:'Press the "+" sign to open the Train Builder'},
+     {id:'purchase_train',       text:'Purchase a new train'},
+     {id:'deliver_iron_orijen',  text:'Using your new TRAIN, load IRON from the DESERT PLANET and deliver it to ORIJEN'},
    ],
    details:"A rail empire can't grow with a single engine! Buy a second train and set up a second route to diversify your revenue.",
    reward:15000, timeLimit:null,
    checkObj:(oid,m)=>{
      const _bought=trains&&trains.filter(t=>t.isPlayer).length>=2;
-     if(_bought) return true;
-     if(oid==='open_trains')    return activePopup==='trains'||activePopup==='trainbuilder';
-     if(oid==='open_builder')   return activePopup==='trainbuilder';
-     if(oid==='purchase_train') return false;
+     // Objectives 1–3 auto-pass the moment the player owns 2+ trains (same
+     // behavior as before). The new objective 4 has its own counter — it is
+     // NOT auto-passed on purchase; the player still has to actually deliver.
+     if(oid==='open_trains')         return _bought||activePopup==='trains'||activePopup==='trainbuilder';
+     if(oid==='open_builder')        return _bought||activePopup==='trainbuilder';
+     if(oid==='purchase_train')      return _bought;
+     if(oid==='deliver_iron_orijen') return (m._ironFromDesertToOrijen||0)>=1;
      return false;
    }},
   {id:'produce_iron',
@@ -2021,7 +2066,8 @@ const _PLAYER_OPENED_POPUPS=new Set([
   'car_detail','savemanager','quitconfirm'
 ]);
 let _missionTipFired=false;  // M-tip is one-shot once the player has 3 simultaneously-active missions for the first time
-let _buyTrainCompletedMs=0;  // real-time ms when buy_second_train completed (0=not yet). Gates the build_foundry mission intro 5 s later.
+let _buyTrainCompletedMs=0;  // real-time ms when buy_second_train completed (0=not yet). Legacy — no longer gates any intro after the build_foundry / buy_second_train flow was rewired.
+let _foundryCompletedMs=0;   // real-time ms when build_foundry completed (0=not yet). Gates the buy_second_train mission intro 10 s later.
 // New-game tutorial bubble chain (zoom out → double click lava planet → build station)
 let _tutorialPhase='inactive'; // 'inactive'|'pre_zoom'|'look_around'|'look_around_pause'|'zoom_out'|'double_click'|'build_station'|'done'
 let _tutorialPhaseStartMs=0;   // real-time ms when the current phase started
@@ -5738,6 +5784,12 @@ function _processCargoQueue(t, p){
         const _cUU=CAR_CARGO_UNITS[t.cars[i]]||1.0;
         if(t.carUnitsUnloaded) t.carUnitsUnloaded[i]=(t.carUnitsUnloaded[i]||0)+_cUU;
         if(cargo==='iron')      p.ironDelivered     =(p.ironDelivered     ||0)+_cUU;
+        // buy_second_train obj 4: count IRON loaded from a DESERT planet that
+        // gets delivered to ORIJEN. Player-only; ignores AI deliveries.
+        if(cargo==='iron' && t.isPlayer && galaxy && p.id===galaxy.origenId && src && src.type && src.type.id==='desert'){
+          const _bstMx=missions.find(mx=>mx.id==='buy_second_train'&&mx.status==='active');
+          if(_bstMx) _bstMx._ironFromDesertToOrijen=(_bstMx._ironFromDesertToOrijen||0)+_cUU;
+        }
         if(cargo==='steel')     p.steelDelivered    =(p.steelDelivered    ||0)+_cUU;
         if(cargo==='glass')     p.glassDelivered    =(p.glassDelivered    ||0)+_cUU;
         if(cargo==='machinery'){
@@ -16525,7 +16577,7 @@ function _drawTutorialChain(stage){
   // 'all_done' is the final terminal state. 'done' is NOT terminal — it
   // continues polling for the player to accept the create_route mission
   // so the next callout chain can fire.
-  if(_tutorialPhase==='inactive'||_tutorialPhase==='all_done') return;
+  if(_tutorialPhase==='inactive'||_tutorialPhase==='bst_all_done') return;
   // Stage gating: this function is called TWICE per frame in drawGalaxy.
   // - 'galaxy' (before popups): renders bubbles that point at planets,
   //   trains, or panel UI items so they sit UNDER any popup the player
@@ -16542,7 +16594,7 @@ function _drawTutorialChain(stage){
   // drawPanelTabs / drawTopBar, so the yellow bubble can never be partially
   // hidden behind the Stations/Trains folder tabs that sit at the top of the
   // panel.
-  const _POPUP_PHASES=new Set(['build_station','supply_demand','select_train','train_detail_edit','builder_add_cars','builder_purchase']);
+  const _POPUP_PHASES=new Set(['build_station','supply_demand','select_train','train_detail_edit','builder_add_cars','builder_purchase','bf_click_build_station','bf_click_foundry_upgrade']);
   const _isPopupPhase=_POPUP_PHASES.has(_tutorialPhase);
   // Popup-stage calls for non-popup phases have nothing to do (no advance
   // either — that already ran in the 'galaxy' call earlier this frame).
@@ -17036,47 +17088,73 @@ function _drawTutorialChain(stage){
       return;
     }
     if(missions.some(m=>m.id==='create_route'&&m.status==='active')){
-      // No pre-snapshot needed — cr_shift_click_other re-evaluates the
-      // current selection every frame to render the right blue companion
-      // bubble. Always enter at cr_click_orijen; that phase auto-advances
-      // in one frame if a valid "anchor" is already selected so the player
-      // never sees an off-target yellow bubble.
-      _advanceTo('cr_click_orijen');
+      // Enter at cr_click_lava; if obj 1 is already satisfied (first player
+      // train in lava orbit AND either the train or lava planet is the
+      // current selection), that phase auto-advances in one frame so the
+      // player never sees an off-target yellow bubble.
+      _advanceTo('cr_click_lava');
     }
     return;
   }
-  // Anchor-selection check shared by the cr_* phases. The player has a valid
-  // route-starting anchor when EITHER:
-  //   • Orijen or the home-system lava planet is currently `sel`'d, OR
-  //   • A player train in orbit (route null OR route.phase==='orbit', NOT
-  //     transit/blocked/waiting) of one of those two planets is `sel`'d.
-  // Returns null when no anchor is selected, otherwise `{kind, planet, train}`
-  // so callers can attach a blue companion bubble to whichever object the
-  // player chose.
-  const _resolveCrAnchor=()=>{
-    if(!galaxy) return null;
-    if(sel && sel.type==='planet' && sel.data &&
-       (sel.data.id===galaxy.origenId || sel.data.id===_tutorialLavaPlanetId)){
-      return {kind:'planet', planet:sel.data};
+  // ── Phase: all_done — create_route chain finished. Poll for the player
+  // accepting (or already having completed) the build_foundry mission,
+  // then start the bf_* chain. No rendering in this phase.
+  if(_tutorialPhase==='all_done'){
+    if(missions.some(m=>m.id==='build_foundry'&&m.status==='completed')){
+      _tutorialPhase='bf_all_done';
+      return;
     }
-    if(sel && sel.type==='car' && sel.data){
-      const _t = trains[sel.data.trainIdx];
-      if(_t && _t.isPlayer &&
-         (_t.planetId===galaxy.origenId || _t.planetId===_tutorialLavaPlanetId) &&
-         (!_t.route || _t.route.phase==='orbit')){
-        return {kind:'train', train:_t};
+    if(missions.some(m=>m.id==='build_foundry'&&m.status==='active')){
+      // Enter at bf_visit_desert; if the player's train has already visited
+      // a desert planet (likely — the create_route loop includes one), that
+      // phase auto-advances in one frame.
+      _advanceTo('bf_visit_desert');
+    }
+    return;
+  }
+  // Backward-compat: legacy saves from prior tutorial chain (3-phase build)
+  // could land here with phase names that no longer exist. Remap them to the
+  // closest equivalent in the new 5-phase walk so the chain doesn't stall.
+  if(_tutorialPhase==='cr_click_orijen') _tutorialPhase='cr_click_lava';
+  else if(_tutorialPhase==='cr_shift_click_other'){
+    const _lvIn=routeStops.some(p=>p&&p.id===_tutorialLavaPlanetId);
+    _tutorialPhase=_lvIn?'cr_shift_orijen':'cr_click_lava';
+  }
+  // Resolve the desert planet in the home star system (HOME_BIOMES index 2).
+  // Shared by every cr_* phase below for both the bubble target and the
+  // routeStops membership checks.
+  let _crDesertId=-1;
+  {
+    const _op=galaxy?galaxy.planets[galaxy.origenId]:null;
+    if(_op){
+      for(const _p of galaxy.planets){
+        if(_p.starId===_op.starId && _p.type && _p.type.id==='desert'){ _crDesertId=_p.id; break; }
       }
     }
-    return null;
-  };
+  }
+  // routeStops membership (entries are full planet objects).
+  const _crLavaInRoute  =galaxy && routeStops.some(p=>p&&p.id===_tutorialLavaPlanetId);
+  const _crOrijenInRoute=galaxy && routeStops.some(p=>p&&p.id===galaxy.origenId);
+  const _crDesertInRoute=galaxy && _crDesertId>=0 && routeStops.some(p=>p&&p.id===_crDesertId);
+  const _crLoopClosed   =routeStops.length>=4 &&
+    routeStops[routeStops.length-1] && routeStops[routeStops.length-1].id===_tutorialLavaPlanetId &&
+    _crOrijenInRoute && _crDesertInRoute;
+  // Has the player already established a valid route-starting anchor? Either
+  // the lava planet itself is selected, OR the first player train is selected
+  // and orbiting lava, OR lava is already the first stop in routeStops.
+  const _crFirstTrain=galaxy?trains.find(t=>t.isPlayer):null;
+  const _crFirstOnLava=!!(_crFirstTrain && _crFirstTrain.planetId===_tutorialLavaPlanetId);
+  const _crSelLava=!!(sel && sel.type==='planet' && sel.data && sel.data.id===_tutorialLavaPlanetId);
+  const _crSelFirstAtLava=!!(sel && sel.type==='car' && sel.data && trains[sel.data.trainIdx]===_crFirstTrain && _crFirstOnLava);
+  const _crAnchorReady=_crSelLava || _crSelFirstAtLava || _crLavaInRoute;
+
   // Shared short-circuit for the cr_* phases: the moment any player train
   // has a real (non-temp) ≥2-stop route assigned — either directly on
   // train.route or sitting in train.queuedRoute behind a temp connecting
   // leg — OR the create_route mission has its _routeAssigned flag set, the
   // whole chain is done. Jump straight to all_done so the rollback checks
-  // in cr_shift_click_other / cr_assign_btn can't fire after the player
-  // has actually completed the assignment. (The mission's checkObj uses
-  // the same broadened detection so the mission itself completes here too.)
+  // in cr_shift_* / cr_assign_btn can't fire after the player has actually
+  // completed the assignment.
   const _crChainDone=galaxy && (
     missions.some(mx=>mx.id==='create_route' && (mx._routeAssigned || mx.status==='completed')) ||
     trains.some(t=>t.isPlayer && (
@@ -17084,95 +17162,95 @@ function _drawTutorialChain(stage){
       (t.queuedRoute && !t.queuedRoute.isTempRoute && (t.queuedRoute.stops||[]).length>=2)
     ))
   );
-  if(_crChainDone && (_tutorialPhase==='cr_click_orijen' || _tutorialPhase==='cr_shift_click_other' || _tutorialPhase==='cr_assign_btn')){
+  if(_crChainDone && (_tutorialPhase==='cr_click_lava' || _tutorialPhase==='cr_shift_orijen' || _tutorialPhase==='cr_shift_desert' || _tutorialPhase==='cr_shift_lava' || _tutorialPhase==='cr_assign_btn')){
     _tutorialPhase='all_done'; if(!_crTutorialDoneMs) _crTutorialDoneMs=_now;
     return;
   }
-  // ── Phase: cr_click_orijen ────────────────────────────────
-  // Yellow bubble above Orijen telling the player to pick a starting planet.
-  // Advances the moment ANY valid anchor becomes selected (Orijen, the home
-  // lava planet, or a player train in orbit of either).
-  if(_tutorialPhase==='cr_click_orijen'){
-    if(_tutorialFadeOutStartMs===0 && _resolveCrAnchor()) _tutorialFadeOutStartMs=_now;
+  // ── Phase: cr_click_lava ──────────────────────────────────
+  // Yellow bubble pointing at the lava planet. Advances the moment the
+  // player has a valid anchor (lava selected, first train selected while
+  // orbiting lava, or lava already in routeStops). Per the mission's
+  // obj-1 auto-pass: if the first player train is in lava orbit OR the
+  // lava planet is currently selected, this phase fades immediately.
+  if(_tutorialPhase==='cr_click_lava'){
+    if(_tutorialFadeOutStartMs===0 && _crAnchorReady) _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
-    if(r.advanced){ _advanceTo('cr_shift_click_other'); return; }
+    if(r.advanced){ _advanceTo('cr_shift_orijen'); return; }
+    const _lp=galaxy.planets[_tutorialLavaPlanetId];
+    if(_lp){
+      const [_sx,_sy]=w2s(_lp.x,_lp.y);
+      const _sr=Math.max(8,_lp.radius*cam.scale);
+      _drawBubble(['CLICK on the LAVA PLANET to START a ROUTE'], {x:_sx,y:_sy-_sr+6}, r.alpha);
+    }
+    return;
+  }
+  // ── Phase: cr_shift_orijen ────────────────────────────────
+  // Yellow bubble pointing at Orijen, asking the player to SHIFT+CLICK it.
+  // Advances when both lava and Orijen are in routeStops. Rolls back to
+  // cr_click_lava if the player loses the anchor (deselected with empty
+  // routeStops and train not at lava).
+  if(_tutorialPhase==='cr_shift_orijen'){
+    if(!_crAnchorReady){ _advanceTo('cr_click_lava'); return; }
+    if(_tutorialFadeOutStartMs===0 && _crLavaInRoute && _crOrijenInRoute) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _advanceTo('cr_shift_desert'); return; }
     const _op=galaxy.planets[galaxy.origenId];
     if(_op){
       const [_sx,_sy]=w2s(_op.x,_op.y);
       const _sr=Math.max(8,_op.radius*cam.scale);
-      // Anchor just inside the planet's top edge (_sy-_sr): above-placement
-      // renders the tail tip at anchor.y-4, so +6 lands the tip ~2px into the
-      // planet so the bubble visibly touches it instead of floating above.
-      _drawBubble(['CLICK on a planet where you\'d like to START A ROUTE'], {x:_sx,y:_sy-_sr+6}, r.alpha);
+      _drawBubble(['SHIFT+CLICK on ORIJEN to ADD a STOP to your ROUTE'], {x:_sx,y:_sy-_sr+6}, r.alpha);
     }
     return;
   }
-  // ── Phase: cr_shift_click_other ────────────────────────────
-  // Yellow bubble over whichever anchor planet (Orijen or LAVA) is NOT the
-  // currently-selected one, plus a blue companion bubble explaining the
-  // chosen anchor. Advances when routeStops contains both Orijen and the
-  // home-system lava planet (player completed the 1-segment route).
-  // Backs UP to cr_click_orijen if the player loses all route progress
-  // (deselects with no anchor AND no anchor-planet entries left in
-  // routeStops) — e.g. they clicked off into empty space mid-build.
-  if(_tutorialPhase==='cr_shift_click_other'){
-    const _anchor=_resolveCrAnchor();
-    const _orijenInRoute = routeStops.some(p=>p&&p.id===galaxy.origenId);
-    const _lavaInRoute   = routeStops.some(p=>p&&p.id===_tutorialLavaPlanetId);
-    // Backup: route progress is gone AND no anchor selected.
-    if(!_anchor && !_orijenInRoute && !_lavaInRoute){
-      _advanceTo('cr_click_orijen');
-      return;
-    }
-    if(_tutorialFadeOutStartMs===0 && _orijenInRoute && _lavaInRoute) _tutorialFadeOutStartMs=_now;
+  // ── Phase: cr_shift_desert ────────────────────────────────
+  // Yellow bubble pointing at the home-system desert planet, asking the
+  // player to SHIFT+CLICK it. Advances when desert joins routeStops.
+  // Rolls back if Orijen has somehow been removed from routeStops since.
+  if(_tutorialPhase==='cr_shift_desert'){
+    if(!_crLavaInRoute && !_crAnchorReady){ _advanceTo('cr_click_lava'); return; }
+    if(!_crOrijenInRoute){ _advanceTo('cr_shift_orijen'); return; }
+    if(_tutorialFadeOutStartMs===0 && _crDesertInRoute) _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
-    if(r.advanced){ _advanceTo('cr_assign_btn'); return; }
-    // Blue companion bubble — re-evaluated every frame so it tracks the
-    // player's current selection. Drawn BEFORE the yellow bubble so the
-    // yellow one renders on top wherever they overlap.
-    if(_anchor){
-      if(_anchor.kind==='train'){
-        const [_tx,_ty]=getTrainCarPos(_anchor.train,0);
-        const [_bsx,_bsy]=w2s(_tx,_ty);
-        _drawBubble(['Since you already have a TRAIN IN ORBIT selected...'], {x:_bsx,y:_bsy-14}, r.alpha, {color:'blue'});
-      } else {
-        const _ap=_anchor.planet;
-        const [_pax,_pay]=w2s(_ap.x,_ap.y);
-        const _ar=Math.max(8,_ap.radius*cam.scale);
-        _drawBubble(['Since you already have a STARTING PLANET selected...'], {x:_pax,y:_pay-_ar-14}, r.alpha, {color:'blue'});
+    if(r.advanced){ _advanceTo('cr_shift_lava'); return; }
+    if(_crDesertId>=0){
+      const _dp=galaxy.planets[_crDesertId];
+      if(_dp){
+        const [_sx,_sy]=w2s(_dp.x,_dp.y);
+        const _sr=Math.max(8,_dp.radius*cam.scale);
+        _drawBubble(['SHIFT+CLICK on the DESERT PLANET to ADD ANOTHER STOP'], {x:_sx,y:_sy-_sr+6}, r.alpha);
       }
     }
-    // Pick the OTHER planet — the anchor side is determined by sel (preferred)
-    // or, if sel is gone but routeStops still has one of the anchors, by that.
-    let _anchorPid=null;
-    if(_anchor){
-      _anchorPid = _anchor.kind==='planet' ? _anchor.planet.id : _anchor.train.planetId;
-    } else if(_orijenInRoute){ _anchorPid=galaxy.origenId; }
-    else if(_lavaInRoute){    _anchorPid=_tutorialLavaPlanetId; }
-    const _targetPid = (_anchorPid===_tutorialLavaPlanetId) ? galaxy.origenId : _tutorialLavaPlanetId;
-    const _tp = galaxy.planets[_targetPid];
-    if(_tp){
-      const [_sx,_sy]=w2s(_tp.x,_tp.y);
-      const _sr=Math.max(8,_tp.radius*cam.scale);
-      // Anchor sits slightly INSIDE the planet's top rim so the bubble's
-      // tail tip (helper renders at anchor.y - 4) lands on the planet's
-      // edge — bubble appears to be just barely touching the surface.
-      _drawBubble(['SHIFT+CLICK on this planet to add it to the REPEATING ROUTE'], {x:_sx,y:_sy-_sr+4}, r.alpha);
+    return;
+  }
+  // ── Phase: cr_shift_lava ──────────────────────────────────
+  // Yellow bubble pointing at the lava planet again, asking the player
+  // to SHIFT+CLICK it a second time to close the LOOP. Advances once
+  // routeStops ends back at lava with all three planets present.
+  if(_tutorialPhase==='cr_shift_lava'){
+    if(!_crLavaInRoute){ _advanceTo('cr_click_lava'); return; }
+    if(!_crOrijenInRoute){ _advanceTo('cr_shift_orijen'); return; }
+    if(!_crDesertInRoute){ _advanceTo('cr_shift_desert'); return; }
+    if(_tutorialFadeOutStartMs===0 && _crLoopClosed) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _advanceTo('cr_assign_btn'); return; }
+    const _lp=galaxy.planets[_tutorialLavaPlanetId];
+    if(_lp){
+      const [_sx,_sy]=w2s(_lp.x,_lp.y);
+      const _sr=Math.max(8,_lp.radius*cam.scale);
+      _drawBubble(['SHIFT+CLICK on the LAVA PLANET to CLOSE the LOOP'], {x:_sx,y:_sy-_sr+6}, r.alpha);
     }
     return;
   }
   // ── Phase: cr_assign_btn ──────────────────────────────────
-  // Yellow bubble over the ASSIGN TO TRAIN button (lives in the right-panel
-  // area when routeStops has 2+ stops). Advances when assignPending flips
-  // true (player clicked the button). Backs UP to cr_click_orijen if the
-  // player abandoned the route (cleared routeStops by clicking empty space,
-  // pressing Esc, etc.) — covers the "built a route but never assigned" case.
+  // Yellow bubble over the ASSIGN TO TRAIN button. Advances when
+  // assignPending flips true. Rolls back to whichever earlier phase is
+  // applicable if the player undoes the loop before clicking ASSIGN.
   if(_tutorialPhase==='cr_assign_btn'){
-    const _orijenInRoute = routeStops.some(p=>p&&p.id===galaxy.origenId);
-    const _lavaInRoute   = routeStops.some(p=>p&&p.id===_tutorialLavaPlanetId);
-    if(!(_orijenInRoute && _lavaInRoute) && !assignPending){
-      _advanceTo('cr_click_orijen');
-      return;
+    if(!_crLoopClosed && !assignPending){
+      if(!_crLavaInRoute){ _advanceTo('cr_click_lava'); return; }
+      if(!_crOrijenInRoute){ _advanceTo('cr_shift_orijen'); return; }
+      if(!_crDesertInRoute){ _advanceTo('cr_shift_desert'); return; }
+      _advanceTo('cr_shift_lava'); return;
     }
     if(_tutorialFadeOutStartMs===0 && assignPending) _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
@@ -17182,7 +17260,7 @@ function _drawTutorialChain(stage){
       // assignBtnBounds spans the whole bar; the visible blue button is inset
       // by 14px from the top (iby=by+14 in the render). Anchor at +20 so the
       // tail tip (anchor.y-4) lands ~2px inside the button top and touches it.
-      _drawBubble(['CLICK HERE to assign this ROUTE'], {x:_b.x+_b.w/2,y:_b.y+20}, r.alpha);
+      _drawBubble(['CLICK HERE to ASSIGN this ROUTE'], {x:_b.x+_b.w/2,y:_b.y+20}, r.alpha);
     }
     return;
   }
@@ -17224,7 +17302,169 @@ function _drawTutorialChain(stage){
       // Anchor at _ry + 53 (matches vp_click_train): the top row's status text
       // ("IN ORBIT / PARKED") draws at baseline ry + 54; below-placement puts
       // the tail tip at anchor.y + 4 = _ry + 57, just touching the status text.
-      _drawBubble(['CLICK on a TRAIN to assign the ROUTE'], {x:_rx+_rw/2,y:_ry+53}, r.alpha, {below:true});
+      _drawBubble(['CLICK on a TRAIN to ASSIGN the ROUTE'], {x:_rx+_rw/2,y:_ry+53}, r.alpha, {below:true});
+    }
+    return;
+  }
+  // ── build_foundry tutorial chain (bf_*) ──────────────────
+  // Resolve the home-system desert planet for the chain's bubble targets.
+  // (The chain prefers the home-system desert since it sits inside Orijen's
+  // star — by the time build_foundry is introduced, the player's train has
+  // typically already visited it as part of the create_route loop.)
+  const _bfDesertId=(()=>{
+    if(!galaxy) return -1;
+    const _op=galaxy.planets[galaxy.origenId];
+    if(!_op) return -1;
+    for(const _p of galaxy.planets){
+      if(_p.starId===_op.starId && _p.type && _p.type.id==='desert') return _p.id;
+    }
+    return -1;
+  })();
+  const _bfDesert=_bfDesertId>=0?galaxy.planets[_bfDesertId]:null;
+  // Has the player visited any desert planet this mission counts? The mission
+  // gives build_foundry an empty visitedSnapshot, so any previously-visited
+  // desert satisfies obj 1 immediately.
+  const _bfMission=missions.find(mx=>mx.id==='build_foundry');
+  const _bfVisitedDesert=!!(galaxy && galaxy.planets.some(p=>visitedPlanetIds.has(p.id)&&p.type.id==='desert'));
+  const _bfStationedDesert=!!(galaxy && galaxy.planets.some(p=>p.type.id==='desert'&&p.playerBuiltStation));
+  const _bfBuiltFoundry  =!!(galaxy && galaxy.planets.some(p=>(p.playerBuiltUpgrades||[]).includes('iron_foundry')));
+  // Chain-done short-circuit: bf mission completed or terminal mission state.
+  if(_bfMission && _bfMission.status==='completed' &&
+     (_tutorialPhase==='bf_visit_desert'||_tutorialPhase==='bf_click_desert'||
+      _tutorialPhase==='bf_click_build_station'||_tutorialPhase==='bf_click_foundry_upgrade')){
+    _tutorialPhase='bf_all_done';
+    return;
+  }
+  // ── Phase: bf_visit_desert ────────────────────────────────
+  // Yellow bubble pointing at the home-system desert planet, prompting the
+  // player to wait for their TRAIN to VISIT it. Auto-advances the moment any
+  // desert planet has been visited (likely already true when the mission
+  // appears, since the create_route loop included desert).
+  if(_tutorialPhase==='bf_visit_desert'){
+    if(_tutorialFadeOutStartMs===0 && _bfVisitedDesert) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _advanceTo('bf_click_desert'); return; }
+    if(_bfDesert){
+      const [_sx,_sy]=w2s(_bfDesert.x,_bfDesert.y);
+      const _sr=Math.max(8,_bfDesert.radius*cam.scale);
+      _drawBubble(['Wait for your TRAIN to VISIT the DESERT PLANET'], {x:_sx,y:_sy-_sr+6}, r.alpha);
+    }
+    return;
+  }
+  // ── Phase: bf_click_desert ────────────────────────────────
+  // Yellow bubble pointing at the desert planet, prompting the player to
+  // DOUBLE-CLICK it to open PLANET DETAILS. Rolls back to bf_visit_desert if
+  // somehow no desert has been visited; advances when the planet detail
+  // popup opens for a desert planet.
+  if(_tutorialPhase==='bf_click_desert'){
+    if(!_bfVisitedDesert){ _advanceTo('bf_visit_desert'); return; }
+    const _bfPopupOpen=activePopup==='planet'&&popupState.planet&&popupState.planet.type&&popupState.planet.type.id==='desert';
+    if(_tutorialFadeOutStartMs===0 && _bfPopupOpen) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _advanceTo('bf_click_build_station'); return; }
+    if(_bfDesert){
+      const [_sx,_sy]=w2s(_bfDesert.x,_bfDesert.y);
+      const _sr=Math.max(8,_bfDesert.radius*cam.scale);
+      _drawBubble(['DOUBLE-CLICK the DESERT PLANET to view its details'], {x:_sx,y:_sy-_sr+6}, r.alpha);
+    }
+    return;
+  }
+  // ── Phase: bf_click_build_station ─────────────────────────
+  // Yellow bubble over the BUILD STATION (PURCHASE) button inside the
+  // desert planet's detail popup. Rolls back to bf_click_desert if the
+  // popup gets closed or switched to a non-desert planet. Advances the
+  // moment the player has built a station on any desert planet.
+  if(_tutorialPhase==='bf_click_build_station'){
+    const _bfPopupOpen=activePopup==='planet'&&popupState.planet&&popupState.planet.type&&popupState.planet.type.id==='desert';
+    if(!_bfPopupOpen && !_bfStationedDesert){ _advanceTo('bf_click_desert'); return; }
+    if(_tutorialFadeOutStartMs===0 && _bfStationedDesert) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _advanceTo('bf_click_foundry_upgrade'); return; }
+    if(_bfPopupOpen && popupState.buildStationBtnBounds){
+      const _b=popupState.buildStationBtnBounds;
+      _drawBubble(['CLICK HERE to BUILD a STATION on this PLANET'], {x:_b.x+_b.w/2,y:_b.y+_b.h}, r.alpha, {below:true});
+    }
+    return;
+  }
+  // ── Phase: bf_click_foundry_upgrade ───────────────────────
+  // Yellow bubble over the FOUNDRY purchase button inside the desert
+  // planet's upgrades panel. Rolls back if the popup is closed before the
+  // foundry purchase. Advances the moment any planet has an iron_foundry
+  // built; the chain then terminates at bf_all_done.
+  if(_tutorialPhase==='bf_click_foundry_upgrade'){
+    const _bfPopupOpen=activePopup==='planet'&&popupState.planet&&popupState.planet.type&&popupState.planet.type.id==='desert';
+    if(!_bfPopupOpen && !_bfBuiltFoundry){ _advanceTo('bf_click_desert'); return; }
+    if(!_bfStationedDesert && !_bfBuiltFoundry){ _advanceTo('bf_click_build_station'); return; }
+    if(_tutorialFadeOutStartMs===0 && _bfBuiltFoundry) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _tutorialPhase='bf_all_done'; return; }
+    if(_bfPopupOpen && Array.isArray(popupState.upgradeBuildBounds)){
+      const _fb=popupState.upgradeBuildBounds.find(b=>b&&b.upgradeId==='iron_foundry');
+      if(_fb){
+        _drawBubble(['CLICK HERE to BUILD a FOUNDRY'], {x:_fb.x+_fb.w/2,y:_fb.y+_fb.h}, r.alpha, {below:true});
+      }
+    }
+    return;
+  }
+  // ── buy_second_train tutorial chain (bst_*) ─────────────────
+  // Covers ONLY the new final objective ("Using your new TRAIN, load IRON
+  // from the DESERT PLANET and deliver it to ORIJEN"). Objectives 1–3
+  // (open Trains, click +, purchase) are still guided by the existing
+  // _buyTrainHint / _buyTrainPlusHint callouts elsewhere.
+  const _bstMission=missions.find(mx=>mx.id==='buy_second_train');
+  const _bstPlayerOwns2=trains.filter(t=>t.isPlayer).length>=2;
+  // Any player train currently carrying IRON loaded from a DESERT planet?
+  const _bstIronFromDesertLoaded=!!(galaxy && trains.some(t=>t.isPlayer && t.cars && t.cars.some((c,i)=>{
+    if(t.carCargo?.[i]!=='iron') return false;
+    const _srcPid=t.carCargoSource?.[i];
+    if(_srcPid==null) return false;
+    const _src=galaxy.planets[_srcPid];
+    return !!(_src && _src.type && _src.type.id==='desert');
+  })));
+  const _bstIronDelivered=!!(_bstMission && (_bstMission._ironFromDesertToOrijen||0)>=1);
+  // ── Phase: bf_all_done — poll for buy_second_train becoming active with
+  // the player already owning a 2nd train, then transition into bst_load_iron.
+  // Skips straight to bst_all_done if the mission is already completed.
+  if(_tutorialPhase==='bf_all_done'){
+    if(_bstMission && _bstMission.status==='completed'){ _tutorialPhase='bst_all_done'; return; }
+    if(_bstMission && _bstMission.status==='active' && _bstPlayerOwns2){
+      _advanceTo('bst_load_iron');
+    }
+    return;
+  }
+  // Chain-done short-circuit for the bst_* phases.
+  if(_bstMission && _bstMission.status==='completed' &&
+     (_tutorialPhase==='bst_load_iron'||_tutorialPhase==='bst_deliver_iron')){
+    _tutorialPhase='bst_all_done'; return;
+  }
+  // ── Phase: bst_load_iron ──────────────────────────────────
+  // Yellow bubble pointing at the home-system desert planet. Advances the
+  // moment any player train is carrying IRON sourced from a DESERT planet.
+  if(_tutorialPhase==='bst_load_iron'){
+    if(_tutorialFadeOutStartMs===0 && (_bstIronFromDesertLoaded||_bstIronDelivered)) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _advanceTo('bst_deliver_iron'); return; }
+    if(_bfDesert){
+      const [_sx,_sy]=w2s(_bfDesert.x,_bfDesert.y);
+      const _sr=Math.max(8,_bfDesert.radius*cam.scale);
+      _drawBubble(['LOAD IRON from the DESERT PLANET'], {x:_sx,y:_sy-_sr+6}, r.alpha);
+    }
+    return;
+  }
+  // ── Phase: bst_deliver_iron ───────────────────────────────
+  // Yellow bubble pointing at ORIJEN. Rolls back to bst_load_iron if the
+  // iron is no longer in transit (player unloaded it at the wrong stop or
+  // the train ran out of iron cars). Advances when iron is delivered.
+  if(_tutorialPhase==='bst_deliver_iron'){
+    if(!_bstIronFromDesertLoaded && !_bstIronDelivered){ _advanceTo('bst_load_iron'); return; }
+    if(_tutorialFadeOutStartMs===0 && _bstIronDelivered) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _tutorialPhase='bst_all_done'; return; }
+    const _op=galaxy.planets[galaxy.origenId];
+    if(_op){
+      const [_sx,_sy]=w2s(_op.x,_op.y);
+      const _sr=Math.max(8,_op.radius*cam.scale);
+      _drawBubble(['Deliver the IRON to ORIJEN'], {x:_sx,y:_sy-_sr+6}, r.alpha);
     }
     return;
   }
@@ -17447,12 +17687,11 @@ function updateMissions(dtSd){
   const _doIntroGates=_missionTickAcc>=0.01;
   if(_doIntroGates) _missionTickAcc=0;
   if(_doIntroGates){
-  // "Build a Foundry" intro: gated on buy_second_train being completed.
-  // Fires 5 real-time seconds after that completion so the player has a beat
-  // to settle in with their new train before the next mission lands. The old
-  // 40 s flat timer from _crTutorialDoneMs could fire BEFORE buy_second_train
-  // was even accepted, let alone completed — this trigger replaces it.
-  if(_buyTrainCompletedMs>0&&Date.now()-_buyTrainCompletedMs>=5000&&!_missionPending('build_foundry')&&!missions.some(mx=>mx.id==='build_foundry'&&mx.status==='completed')){
+  // "Build a Foundry" intro: 10 real-time seconds after the create_route
+  // mission completes. _findOreTimerMs (legacy name — was for the removed
+  // Find Molten Ore mission) is stamped when create_route's status flips to
+  // 'completed' in the mission-complete block below.
+  if(_findOreTimerMs>0&&Date.now()-_findOreTimerMs>=10000&&!_missionPending('build_foundry')&&!missions.some(mx=>mx.id==='build_foundry'&&mx.status==='completed')){
     pendingMissionIntros.push({defId:'build_foundry',readySd:stardate});
   }
   // Unlock "Dispose of Hazmat" once any foundry has cumulatively produced >= 2.0 units of hazmat
@@ -17481,10 +17720,10 @@ function updateMissions(dtSd){
       pendingMissionIntros.push({defId:'visit_planet',readySd:stardate});
     }
   }
-  // buy_second_train intro: 10 real-time seconds after the create_route
-  // tutorial chain finishes. Only introduced if the player still has fewer
-  // than 2 player trains at that point (otherwise the mission is moot).
-  if(_crTutorialDoneMs>0&&Date.now()-_crTutorialDoneMs>=10000&&!_missionPending('buy_second_train')&&!missions.some(mx=>mx.id==='buy_second_train'&&mx.status==='completed')){
+  // buy_second_train intro: 10 real-time seconds after the produce_iron
+  // ("Make Iron") mission completes. Only introduced if the player still
+  // has fewer than 2 player trains at that point.
+  if(_produceIronTimerMs>0&&Date.now()-_produceIronTimerMs>=10000&&!_missionPending('buy_second_train')&&!missions.some(mx=>mx.id==='buy_second_train'&&mx.status==='completed')){
     if(trains.filter(t=>t.isPlayer).length<2){
       pendingMissionIntros.push({defId:'buy_second_train',readySd:stardate});
     }
@@ -17605,9 +17844,10 @@ function updateMissions(dtSd){
       // Start build_foundry countdown when create_route completes
       // (var name _findOreTimerMs is legacy from the removed Find Molten Ore mission)
       if(m.id==='create_route'&&_findOreTimerMs===0) _findOreTimerMs=Date.now();
-      // Stamp buy_second_train completion — gates the build_foundry intro
-      // (build_foundry no longer fires on a flat timer; it waits until buy_
-      // second_train is actually done, then a short buffer).
+      // Stamp build_foundry completion — arms the 10 s buy_second_train intro.
+      if(m.id==='build_foundry'&&_foundryCompletedMs===0) _foundryCompletedMs=Date.now();
+      // Legacy stamp (no longer gates anything — kept so any saved scripts /
+      // dashboards reading the flag still see it stamped).
       if(m.id==='buy_second_train'&&_buyTrainCompletedMs===0) _buyTrainCompletedMs=Date.now();
       // Arm 3-second create_route intro when visit_planet completes
       if(m.id==='visit_planet'&&_visitPlanetCompletedMs===0) _visitPlanetCompletedMs=Date.now();
@@ -28343,20 +28583,15 @@ function _restoreFromSave(save){
   // Loaded games have played before — treat speed-tip as permanently suppressed.
   _speedTipSuppressed=true; _speedTipStartMs=0; _speedTipNextRealMs=0; _speedTipFadeOutStartMs=0;
   _missionTipFired=true; _missionTipStartMs=0;   // suppress M-tip on loaded games
-  // Treat buy_second_train as already-completed for build_foundry's gate on
-  // load — if it's actually been completed in the save, the build_foundry
-  // intro will fire ~5 s later (or has already been added). Otherwise the
-  // gate stays armed via the timer once the player completes it in-session.
-  if(Array.isArray(save.missions)&&save.missions.some(m=>m.id==='buy_second_train'&&m.status==='completed')){
-    _buyTrainCompletedMs=Date.now();
-  } else {
-    _buyTrainCompletedMs=0;
-  }
+  // Legacy stamp (no longer gates anything; kept for completeness).
+  _buyTrainCompletedMs=(Array.isArray(save.missions)&&save.missions.some(m=>m.id==='buy_second_train'&&m.status==='completed'))?Date.now():0;
   _firstNonLowOrbitFired=true; _orbitHintStartMs=0; _orbitHintPlanetId=-1; // suppress orbit-hint on loaded games
   _prevActivePopupForSfx=null;
   _visitPlanetCompletedMs=0;
   _tutorialDoneMs=0;
   _crTutorialDoneMs=0;
+  _findOreTimerMs=0;
+  _foundryCompletedMs=0;
   // If a save was taken AFTER the visit_planet tutorial finished but BEFORE
   // create_route was introduced, re-arm the 5 s timer now so the intro
   // fires shortly after load. Trigger key changed from _tutorialDoneMs to
@@ -28365,9 +28600,15 @@ function _restoreFromSave(save){
   const _vpDone=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='visit_planet'&&m.status==='completed');
   if(_vpDone && !_crIntroduced) _visitPlanetCompletedMs=Date.now();
   if(_tutorialPhase==='done'&&!_crIntroduced) _tutorialDoneMs=Date.now();
-  // Same idea for the create_route tutorial: if the chain finished but
-  // buy_second_train hasn't fired yet, re-arm its 10 s / 40 s timers now.
+  // Re-arm the create_route → build_foundry 10 s gate if create_route is
+  // completed in the save but build_foundry hasn't been introduced yet.
+  const _bfIntroduced=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='build_foundry');
+  const _crDone=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='create_route'&&m.status==='completed');
+  if(_crDone && !_bfIntroduced) _findOreTimerMs=Date.now();
+  // Re-arm the produce_iron → buy_second_train 10 s gate.
   const _bstIntroduced=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='buy_second_train');
+  const _pIDone=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='produce_iron'&&m.status==='completed');
+  if(_pIDone && !_bstIntroduced) _produceIronTimerMs=Date.now();
   if(_tutorialPhase==='all_done'&&!_bstIntroduced) _crTutorialDoneMs=Date.now();
   _newspaper=null; // never show newspaper immediately on load
   _newspaperLastSd=save._newspaperLastSd||Math.floor(save.stardate);
@@ -28926,7 +29167,7 @@ function startGame(){
   // runs at title PLAY, BEFORE the player picks their corp name in corpsetup,
   // so corpName is still the default placeholder at this point. It fires at
   // the fadein → galaxy transition instead (same as the game_start GA event).
-  activePopup=null; popupState={}; gameSpeedIdx=SPEED_DEFAULT_IDX; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _produceIronTimerMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _hasZoomed=false; _buyTrainTipStartMs=0; _buyTrainTipShown=false; _prevActivePopupForSfx=null; _missionTipFired=false; _visitPlanetCompletedMs=0; _tutorialDoneMs=0; _crTutorialDoneMs=0; _firstNonLowOrbitFired=false; _orbitHintStartMs=0; _orbitHintPlanetId=-1; _crTrainPreselected=false;
+  activePopup=null; popupState={}; gameSpeedIdx=SPEED_DEFAULT_IDX; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _foundryCompletedMs=0; _produceIronTimerMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _hasZoomed=false; _buyTrainTipStartMs=0; _buyTrainTipShown=false; _prevActivePopupForSfx=null; _missionTipFired=false; _visitPlanetCompletedMs=0; _tutorialDoneMs=0; _crTutorialDoneMs=0; _firstNonLowOrbitFired=false; _orbitHintStartMs=0; _orbitHintPlanetId=-1; _crTrainPreselected=false;
   _newspaper=null; _newspaperLastSd=829; _newspaperPrevSpeed=0; _newspaperNextHover=false; _newspaperNextBounds=null; _newspaperPrevHover=false; _newspaperPrevBounds=null; _newspaperArchive=[]; _newspaperViewIdx=null; _paperMajorUsed=[]; _paperMinorUsed=[]; _paperLayout=0; _paperIssueNum=0; _paperIdx=randInt(0,_PAPER_NAMES.length-1); _newsEventLog=[]; _newsSnapshot=null;
   _speedLeftHover=false; _speedRightHover=false; _panelTabHover=null; _routeHereBtnHover=false; _assignBtnHover=false; _cancelRouteBtnHover=false; _planetStarNameHover=false; _starPanelPlanetHover=-1; _trainAddHover=false; _trainRowHover=-1; _pokedexSortHover=false; _pokedexRowHover=-1; _starRegistrySortHover=false; _starRegistryRowHover=-1; _goldOkHover=false; _diamondOkHover=false; _carUnlockOkHover=false; _quitYesHover=false; _quitNoHover=false; _saveGameBtnHover=false; _startBtnHover=false; _loadBtnHover=false; _htpBtnHover=false; _htpDotHover=-1; _htpSkipHover=false; pokedexRowBounds=[]; starRegistryRowBounds=[]; loadBtnBounds=null; saveGameBtnBounds=null;
   fogPoints=[]; fogGridSet=new Set(); fogCanvas=null;
