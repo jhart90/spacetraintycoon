@@ -21,8 +21,16 @@
      iframe so we bypass it. See `_ga()` in the JS for details.) -->
 <style>
   *{margin:0;padding:0;box-sizing:border-box;}
-  body{background:#000;display:flex;justify-content:center;align-items:center;height:100vh;overflow:hidden;}
-  canvas{display:block;image-rendering:pixelated;}
+  body{background:#000;display:flex;justify-content:center;align-items:center;height:100vh;overflow:hidden;
+        -webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;
+        text-rendering:optimizeLegibility;}
+  /* World canvas (#c): pixel-art sprites — keep crisp-edges scaling.
+     HD text overlay (#tc): MUST stay 'auto' so the browser smoothly
+     interpolates the device-pixel-scaled glyph bitmaps when the canvas
+     CSS size doesn't perfectly match its bitmap size. */
+  #c{display:block;image-rendering:pixelated;}
+  #tc{display:block;image-rendering:auto;-webkit-font-smoothing:antialiased;
+       -moz-osx-font-smoothing:grayscale;}
   #refresh-btn{position:fixed;bottom:28px;right:28px;width:48px;height:48px;border-radius:50%;
     background:rgba(30,40,80,0.85);border:2px solid #4af;color:#4af;font-size:22px;cursor:pointer;
     display:flex;align-items:center;justify-content:center;transition:background .2s,transform .15s;
@@ -130,7 +138,12 @@ canvas.style.imageRendering = 'auto'; // some browsers default to 'pixelated' fo
 // Path/clip/transform state is mirrored from ctx → tctx via intercepted
 // methods (save, restore, clip, translate, etc.) so a popup that clips text
 // inside its bounds clips it correctly on the overlay too.
-const DPR = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+// DPR cap raised from 3 → 5: on a 4K display (3840 px wide) with the
+// game's 900-px logical width, the ideal DPR for 1:1 device-pixel
+// mapping is ~4.27. Capping at 3 forced the browser to interpolate the
+// HD overlay back up, which is what produced the "pixelated" text reports
+// on 4K monitors. Memory cost at DPR=5: ~4500×2500×4 bytes ≈ 45 MB.
+const DPR = Math.max(1, Math.min(5, window.devicePixelRatio || 1));
 const tCanvas = document.createElement('canvas');
 tCanvas.id = 'tc';
 // Match positioning to the world canvas. pointer-events:none so all mouse
@@ -139,12 +152,28 @@ tCanvas.style.position = 'absolute';
 tCanvas.style.pointerEvents = 'none';
 tCanvas.style.left = '0';
 tCanvas.style.top = '0';
+// Belt-and-suspenders: the CSS already specifies image-rendering: auto on
+// #tc, but reasserting on the element style prevents any inherited
+// 'pixelated' rule (e.g. from a parent stylesheet) from clobbering text
+// smoothing on Chrome.
+tCanvas.style.imageRendering = 'auto';
 (canvas.parentElement || document.body).appendChild(tCanvas);
 const tctx = tCanvas.getContext('2d');
+// High-quality smoothing on the text overlay context. Default in Chrome
+// is 'low' which causes visibly chunky edges on diagonal glyph strokes
+// when the bitmap is upscaled to fit the CSS size.
+tctx.imageSmoothingEnabled = true;
+tctx.imageSmoothingQuality = 'high';
 
 function fitCanvas() {
   const s = Math.min(window.innerWidth/W, window.innerHeight/H);
-  const cssW = Math.floor(W*s), cssH = Math.floor(H*s);
+  // Snap CSS size to whole DEVICE pixels (not logical CSS px) so the
+  // browser doesn't interpolate the HD overlay bitmap when it's scaled
+  // to fit. Using plain Math.floor for cssW/cssH meant the canvas often
+  // displayed at non-integer device-pixel sizes, smearing every glyph.
+  const _devPx = window.devicePixelRatio || 1;
+  const cssW = Math.round(W*s*_devPx)/_devPx;
+  const cssH = Math.round(H*s*_devPx)/_devPx;
   canvas.style.width  = cssW+'px';
   canvas.style.height = cssH+'px';
   // Overlay sits exactly on top of the world canvas at the same CSS size,
@@ -159,8 +188,11 @@ function fitCanvas() {
   const r = canvas.getBoundingClientRect();
   tCanvas.style.left = (canvas.offsetLeft||0)+'px';
   tCanvas.style.top  = (canvas.offsetTop ||0)+'px';
-  // Re-apply the DPR scale on the fresh tctx state.
+  // Re-apply the DPR scale on the fresh tctx state. Re-enable smoothing
+  // since some browsers reset context state when the bitmap is resized.
   tctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  tctx.imageSmoothingEnabled = true;
+  tctx.imageSmoothingQuality = 'high';
 }
 fitCanvas();
 window.addEventListener('resize', fitCanvas);
@@ -223,6 +255,14 @@ window.addEventListener('resize', fitCanvas);
   }
   const _origFillText = ctx.fillText.bind(ctx);
   const _origStrokeText = ctx.strokeText.bind(ctx);
+  // Forward text calls straight through to the HD overlay context. Earlier
+  // we rounded x/y to the device-pixel grid to crisp-up small static text,
+  // but that quantization caused planet labels and any bubble/callout
+  // attached to an orbiting planet to visibly jitter — each frame's
+  // sub-pixel motion got snapped to a step. The DPR cap raise + the
+  // image-rendering CSS fix already make text crisp enough at 4K without
+  // explicit snapping, and sub-pixel positioning here keeps moving text
+  // gliding smoothly with its anchor.
   ctx.fillText = function(){ _syncTextState(); tctx.fillText.apply(tctx, arguments); };
   ctx.strokeText = function(){ _syncTextState(); tctx.strokeText.apply(tctx, arguments); };
 }
@@ -244,6 +284,23 @@ function _clearTextOverlayRect(x, y, w, h){
   tctx.save();
   tctx.setTransform(DPR,0,0,DPR,0,0);
   tctx.clearRect(x, y, w, h);
+  tctx.restore();
+}
+// Clear the overlay only within a rounded-rect shape — used by callout
+// bubbles whose opaque yellow fill is itself rounded. A plain rect-clear
+// erases the corner area BEYOND the rounded fill (and any padding margin
+// erases overlay text just outside the bubble), which reads as a visible
+// dark halo around the bubble. destination-out with a rounded-rect path
+// erases only the pixels the fill is about to cover, so the bubble's
+// edge meets surrounding overlay text cleanly with no halo.
+function _clearTextOverlayRoundRect(x, y, w, h, r){
+  tctx.save();
+  tctx.setTransform(DPR,0,0,DPR,0,0);
+  tctx.globalCompositeOperation='destination-out';
+  tctx.fillStyle='#000';
+  tctx.beginPath();
+  tctx.roundRect(x, y, w, h, r);
+  tctx.fill();
   tctx.restore();
 }
 
@@ -2275,6 +2332,14 @@ function _recomputeMissionTargets(){
 let pendingMissionIntros=[]; // {defId,readySd,targetPlanetId?,sourcePlanetId?} missions waiting to show new-mission intro popup
 let _gameStartSd=0;           // stardate at game init (used for startsAfter delays)
 let _newMissionAcceptBounds=null;
+// Snapshot of the new-mission popup's def + intro state, captured the
+// moment the popup opens. Cleared the instant the player clicks Accept.
+// If activePopup ever leaves 'new_mission' while this stash is still
+// populated (any code path closes the popup without the explicit accept
+// click), the safety-net in the main loop force-accepts the mission so
+// it can't be silently dropped — per user spec, any close is treated as
+// an accept.
+let _pendingNewMissionStash=null;
 let popupState={}; // {scroll, trainIdx, planet, fogToggleBounds, nameClickBounds, sortMode}
 let trainBuilderState=null; // null when closed; object while trainbuilder popup is open
 const POKEDEX_SORTS=['Most Orbited','A → Z','By System','By Size','# of Moons','Has Rings','Planet Type'];
@@ -14537,6 +14602,65 @@ function drawDiamondDiscoveryPopup(){
   ctx.restore();
 }
 
+// Accept-the-pending-new-mission helper. Reads its inputs from `state`
+// (either the live `popupState` when the Accept button is clicked, or the
+// stashed `_pendingNewMissionStash` when the safety-net path fires after a
+// forced close). Idempotent — bails if no def or the mission is already in
+// the active list, so calling it from both paths is safe.
+function _acceptNewMissionFromState(state){
+  if(!state) return;
+  const def=state.newMissionDef;
+  if(!def) return;
+  if(missions.some(mx=>mx.id===def.id)) return;
+  // Pre-completion analysis carried over from the intro popup: objectives
+  // it flagged as already-satisfied start in done:true state.
+  const _preDone=state.preCompletedObjIds||new Set();
+  missions.push({id:def.id,name:def.name,imageType:def.imageType,imageKey:def.imageKey||null,
+    objectives:def.objectives.map(o=>{
+      let _txt=o.text;
+      if(_txt.includes('{SOURCE}')&&state.sourcePlanetId!=null){const _sp3=_gp(state.sourcePlanetId);if(_sp3)_txt=_txt.replace('{SOURCE}',_sp3.name);}
+      if(_txt.includes('{TARGET}')&&state.targetPlanetId!=null){const _tp3=_gp(state.targetPlanetId);if(_tp3)_txt=_txt.replace('{TARGET}',_tp3.name);}
+      return {id:o.id,text:_txt,done:_preDone.has(o.id)};
+    }),
+    details:(()=>{let _d=def.details||'';
+      if(_d.includes('{SOURCE}')&&state.sourcePlanetId!=null){const _sp5=_gp(state.sourcePlanetId);if(_sp5)_d=_d.replace(/\{SOURCE\}/g,_sp5.name);}
+      if(_d.includes('{TARGET}')&&state.targetPlanetId!=null){const _tp5=_gp(state.targetPlanetId);if(_tp5)_d=_d.replace(/\{TARGET\}/g,_tp5.name);}
+      return _d;})(),reward:def.reward||null,timeLimit:def.timeLimit||null,
+    deadline:def.timeLimit?stardate+def.timeLimit:null,
+    status:'active',acceptedSd:stardate,completedSd:null,
+    // build_foundry / stellar_cartography: empty snapshot so any previously visited matching planet immediately satisfies the visit objective
+    visitedSnapshot:(def.id==='build_foundry'||def.id==='stellar_cartography')?new Set():new Set(visitedPlanetIds),ironUnlockedSnapshot:_ironCarUnlocked,
+    sourcePlanetId:state.sourcePlanetId??null,
+    targetPlanetId:state.targetPlanetId??null,
+    hazmatIncineratedSnapshot:_totalHazmatIncinerated});
+  _recomputeMissionTargets();
+  _chatMsg('MISSION STARTED: '+def.name.toUpperCase(),'rgba(255,220,80,1)');
+  // M-tip: gated on 3 simultaneously-active missions for the first time.
+  if(!_missionTipFired && missions.filter(mx=>mx.status==='active').length>=3){
+    _missionTipStartMs=Date.now(); _missionTipFired=true;
+  }
+  // buy_second_train: arm the yellow [T] trains hint (one-shot per game).
+  if(def.id==='buy_second_train' && !_buyTrainHintSuppressed){
+    _buyTrainHintStartMs=Date.now();
+    _buyTrainHintFadeOutStartMs=0;
+    _buyTrainHintSuppressed=true;
+  }
+  // create_route: deselect everything so the player can pick a fresh
+  // train / starting planet from a clean slate.
+  if(def.id==='create_route'){
+    sel=null; routeStops=[];
+    assignPending=false; routeHerePending=false;
+  }
+  // dispose_hazmat: snap the camera to frame the home desert + Gigi Prime
+  // and start the 16-second hz_intro tutorial.
+  if(def.id==='dispose_hazmat'){
+    _hazmatTutorialSnap();
+    _tutorialPhase='hz_intro';
+    _tutorialPhaseStartMs=Date.now();
+    _tutorialFadeOutStartMs=0;
+  }
+}
+
 function drawNewMissionPopup(){
   if(activePopup!=='new_mission'||!popupState.newMissionDef) return;
   const def=popupState.newMissionDef;
@@ -14569,7 +14693,7 @@ function drawNewMissionPopup(){
   if(_isRelicImg){
     popupState.relicImgClickBounds={x:imgBX,y:imgBY,w:imgBW,h:imgBH};
     if(_relicImgHov){
-      ctx.font='6px "Exo 2",sans-serif'; ctx.textAlign='center'; ctx.fillStyle='rgba(100,255,170,0.80)';
+      ctx.font='7px "Exo 2",sans-serif'; ctx.textAlign='center'; ctx.fillStyle='rgba(100,255,170,0.80)';
       ctx.fillText('click to view',imgBX+imgBW/2,imgBY+imgBH-4);
     }
   } else {
@@ -14638,8 +14762,11 @@ function drawNewMissionPopup(){
   // Body bottom = max(image bottom, right column bottom) + gap; drives reward pill centering
   const _bodyBottom=Math.max(imgBY+imgBH,_rcy)+8;
   if(def.reward||def.rewardText){
+    // Reward pill — same small-rounded-rect treatment as the upgrade
+    // PURCHASE cost pills, just with a green fill instead of red. The
+    // "REWARD" label still sits above the pill, centered.
     const _btnTop=py+ph-44;
-    const _lblH=8, _pillH=20, _lblPillGap=5;
+    const _lblH=8, _pillH=12, _lblPillGap=5;
     const _rewardGroupH=_lblH+_lblPillGap+_pillH;
     const _rewardTop=_bodyBottom+(_btnTop-_bodyBottom-_rewardGroupH)/2;
     const _lblBaseline=_rewardTop+_lblH;
@@ -14648,12 +14775,12 @@ function drawNewMissionPopup(){
     ctx.fillStyle='rgba(100,200,145,0.70)';
     ctx.fillText('REWARD',px+pw/2,_lblBaseline);
     const _rTxt=def.rewardText||('+'+_fmtCr(def.reward)+' cr');
-    ctx.font='11px "Exo 2",sans-serif';
-    const _rPW=ctx.measureText(_rTxt).width+16;
+    ctx.font='8px "Exo 2",sans-serif';
+    const _rPW=ctx.measureText(_rTxt).width+10;
     const _rPX=px+(pw-_rPW)/2;
-    ctx.fillStyle='rgba(25,72,38,0.62)';
+    ctx.fillStyle='rgba(18,110,40,0.95)';
     ctx.beginPath(); ctx.roundRect(_rPX,_rPY,_rPW,_pillH,4); ctx.fill();
-    ctx.fillStyle='rgba(135,245,168,0.97)'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillStyle='rgba(255,255,255,0.97)'; ctx.textAlign='center'; ctx.textBaseline='middle';
     ctx.fillText(_rTxt,_rPX+_rPW/2,_rPY+_pillH/2); ctx.textBaseline='alphabetic';
   }
   // Accept button (green, with hover highlight)
@@ -16746,10 +16873,19 @@ function _drawTutorialChain(stage){
     const _bW=_maxW+_pad*2;
     const _visW=W-PANEL_W;
     const _forceBelow=!!(opts&&opts.below);
-    let _bx, _by, _tailX, _drawTail=false, _belowPlacement=false;
+    let _bx, _by, _tailX, _tailTipY, _drawTail=false, _belowPlacement=false;
     if(anchorScreen){
+      // Pure sub-pixel positioning — no snapping. The HD text overlay
+      // rasterises at DPR resolution, so sub-pixel anchor positions glide
+      // smoothly between device pixels via anti-aliasing. Snapping to the
+      // logical-pixel grid (Math.round on canvas-space coords) produces
+      // ~DPR-device-pixel steps per logical-px jump, which reads as
+      // visible jitter when the anchored target (planet) glides smoothly
+      // underneath. Asymmetric rounding (rounding one axis but not the
+      // other) is even worse — horizontal stutter against smooth
+      // vertical glide. So everything here stays as floats.
       const _tipX=anchorScreen.x;
-      _bx=Math.round(_tipX-_bW/2);
+      _bx=_tipX-_bW/2;
       _bx=Math.max(8,Math.min(W-8-_bW,_bx));
       if(_forceBelow){
         _by=anchorScreen.y+_tailH+4;
@@ -16760,12 +16896,16 @@ function _drawTutorialChain(stage){
         // tail keeps pointing UP at the molten ore supply sprite.
         if(opts && typeof opts.belowY === 'number') _by=opts.belowY;
         _belowPlacement=true;
+        _tailTipY=anchorScreen.y+4;
       } else {
         const _tipY=anchorScreen.y-12;
         _by=_tipY-_tailH-_bH;
         if(_by<TOP_H+6){
           _by=anchorScreen.y+_tailH+4;
           _belowPlacement=true;
+          _tailTipY=anchorScreen.y+4;
+        } else {
+          _tailTipY=anchorScreen.y-4;
         }
       }
       _tailX=Math.max(_bx+_bR+8,Math.min(_tipX,_bx+_bW-_bR-8));
@@ -16782,13 +16922,15 @@ function _drawTutorialChain(stage){
     const _textCol   = _blue ? '#000000'               : '#1a1308';
     // Wipe HD text overlay under the bubble's body so trains-panel rows,
     // info-bar text, planet labels, chat log, etc. can't bleed THROUGH the
-    // opaque fill. NOTE: only clear the bubble's rounded-rect footprint —
-    // NOT the tail/anchor span. The tail is a narrow triangle, so
-    // extending the clear to cover the anchor would erase HD-overlay text
-    // in the wide rectangle between the anchor and the bubble where the
-    // tail itself only covers a narrow path, leaving visible "dark
-    // rectangle" gaps in popup text behind the bubble.
-    _clearTextOverlayRect(_bx-2, _by-2, _bW+4, _bH+4);
+    // opaque fill. Use the rounded-rect destination-out clear so the
+    // cleared area matches the yellow fill EXACTLY — no rectangular corner
+    // beyond the rounded edge, no outer padding. A rect-clear with -2/+4
+    // padding was leaving a visible dark halo around the bubble where
+    // overlay text was wiped without yellow fill underneath. NOTE: only
+    // clears the bubble body — NOT the tail/anchor span (the tail is a
+    // narrow triangle, so extending the clear to cover the anchor would
+    // leave dark gaps where popup text bled behind a narrow tail path).
+    _clearTextOverlayRoundRect(_bx, _by, _bW, _bH, _bR);
     ctx.globalAlpha=alpha;
     ctx.shadowColor=_shadowCol; ctx.shadowBlur=8;
     ctx.fillStyle=_fillCol;
@@ -16796,9 +16938,9 @@ function _drawTutorialChain(stage){
     if(_drawTail){
       ctx.beginPath();
       if(_belowPlacement){
-        ctx.moveTo(_tailX-7,_by); ctx.lineTo(_tailX+7,_by); ctx.lineTo(_tailX,anchorScreen.y+4); ctx.closePath(); ctx.fill();
+        ctx.moveTo(_tailX-7,_by); ctx.lineTo(_tailX+7,_by); ctx.lineTo(_tailX,_tailTipY); ctx.closePath(); ctx.fill();
       } else {
-        ctx.moveTo(_tailX-7,_by+_bH); ctx.lineTo(_tailX+7,_by+_bH); ctx.lineTo(_tailX,anchorScreen.y-4); ctx.closePath(); ctx.fill();
+        ctx.moveTo(_tailX-7,_by+_bH); ctx.lineTo(_tailX+7,_by+_bH); ctx.lineTo(_tailX,_tailTipY); ctx.closePath(); ctx.fill();
       }
     }
     ctx.shadowBlur=0; ctx.fillStyle=_textCol;
@@ -18333,19 +18475,21 @@ function drawMissionsPopup(){
       ctx.fillStyle=_urgent?'rgba(255,80,80,0.95)':'rgba(255,160,60,0.90)';
       ctx.fillText('⏱ '+_dtTxt,_rEdge,ry+22);
     }
-    // Reward pill
+    // Reward pill — small rounded rect matching the PURCHASE cost pills
+    // (white text on saturated green, instead of red), right-anchored with
+    // the "REWARD" label sitting directly above it.
     if(m.reward){
       const _rTxt='+'+_fmtCr(m.reward)+' cr';
-      ctx.font='11px "Exo 2",sans-serif';
-      const _rPW=ctx.measureText(_rTxt).width+18, _rPH=22;
-      const _rPX=_rEdge-_rPW, _rPY=ry+rh-34;
+      ctx.font='8px "Exo 2",sans-serif';
+      const _rPW=ctx.measureText(_rTxt).width+10, _rPH=12;
+      const _rPX=_rEdge-_rPW, _rPY=ry+rh-26;
       ctx.font='7px "Exo 2",sans-serif'; ctx.textAlign='right';
       ctx.fillStyle=isInactive?'rgba(72,74,80,0.42)':'rgba(100,200,145,0.70)';
       ctx.fillText('REWARD',_rEdge,_rPY-4);
-      ctx.fillStyle=isInactive?'rgba(38,38,42,0.55)':'rgba(25,72,38,0.62)';
+      ctx.fillStyle=isInactive?'rgba(38,42,38,0.60)':'rgba(18,110,40,0.95)';
       ctx.beginPath(); ctx.roundRect(_rPX,_rPY,_rPW,_rPH,4); ctx.fill();
-      ctx.font='11px "Exo 2",sans-serif';
-      ctx.fillStyle=isInactive?'rgba(82,85,94,0.62)':'rgba(135,245,168,0.97)';
+      ctx.font='8px "Exo 2",sans-serif';
+      ctx.fillStyle=isInactive?'rgba(150,160,150,0.70)':'rgba(255,255,255,0.97)';
       ctx.textAlign='center'; ctx.textBaseline='middle';
       ctx.fillText(_rTxt,_rPX+_rPW/2,_rPY+_rPH/2); ctx.textBaseline='alphabetic';
     }
@@ -22140,6 +22284,58 @@ const _TT_HINTS={
   car_glass:'Produce GLASS by running a GLASSWORKS',
   car_cargo:'Produce CARGO by running a BAKERY or JUICERY',
 };
+// Per-car supply / demand summaries shown in the tech-tree tooltip once the
+// car is unlocked. Phrased to match the in-game biome / upgrade language.
+const _TT_SUPPLY={
+  car_passenger:  'Any inhabited planet (scales w/ population)',
+  car_mail:       'Any inhabited planet (scales w/ population)',
+  car_water_tank: 'Ocean & Resort planets; Ice (high dev)',
+  car_ice:        'Ice planets; Ocean (high dev)',
+  car_sand:       'Desert, Rocky, & Ancient planets',
+  car_ore:        'Lava planets',
+  car_oil:        'Oil planets',
+  car_battery:    'Storm planets',
+  car_chemical:   'Chemical planets',
+  car_medical:    'Jungle planets',
+  car_gold:       'Planets w/ revealed gold deposits',
+  car_diamond:    'Planets w/ revealed diamond deposits',
+  car_livestock:  'Agri planets w/ a Farm',
+  car_grain:      'Agri planets w/ a Granary',
+  car_fruit:      'Agri planets w/ an Orchard',
+  car_flowers:    'Jungle/Desert/Resort w/ flower origin',
+  car_iron:       'FOUNDRY upgrades (Molten Ore + Water)',
+  car_steel:      'BLAST FURNACE upgrades (Iron + Chemical)',
+  car_glass:      'GLASSWORKS upgrades (Sand + Chemical)',
+  car_machinery:  'FACTORY upgrades (Iron + Oil)',
+  car_hazmat:     'FOUNDRY byproduct',
+  car_cargo:      'BAKERY (Grain) or JUICERY (Fruit)',
+  car_royal:      'Any inhabited planet (premium variant)',
+};
+const _TT_DEMAND={
+  car_passenger:  'Inhabited planets (Resort & Urban most)',
+  car_mail:       'Inhabited planets (Resort & Urban most)',
+  car_water_tank: 'Desert, Lava, Agri, Urban; FOUNDRY input',
+  car_ice:        'Lava, Desert, Urban, Chemical',
+  car_sand:       'Resort, Urban, Ocean, Agri; GLASSWORKS input',
+  car_ore:        'Rocky, Urban, Desert; FOUNDRY input',
+  car_oil:        'Urban, Lava, Rocky, Storm; FACTORY input',
+  car_battery:    'Urban, Resort, Ocean, Jungle, Agri, Rocky',
+  car_chemical:   'Any planet w/ upgrades; BLAST FURNACE & GLASSWORKS',
+  car_medical:    'All inhabited planets',
+  car_gold:       'Resort, Urban, Ocean (luxury markets)',
+  car_diamond:    'Resort, Urban, Ocean (luxury markets)',
+  car_livestock:  'All inhabited habitable planets',
+  car_grain:      'BAKERY input',
+  car_fruit:      'JUICERY input',
+  car_flowers:    'Jungle, Desert, Resort, Urban',
+  car_iron:       'Urban, Rocky; BLAST FURNACE & FACTORY inputs',
+  car_steel:      '"Designing a better TRAIN" mission',
+  car_glass:      'Urban planets; FACTORY input',
+  car_machinery:  'Urban planets',
+  car_hazmat:     'EJECT into a STAR for disposal',
+  car_cargo:      'Generic shipping demand',
+  car_royal:      'Resort & Urban planets',
+};
 // True for items that have an unlock hint we can show, false for the
 // bottom mystery row (blacked-out + "???" tooltip).
 function _ttIsLocked(t){
@@ -22193,39 +22389,42 @@ function _ttIsLocked(t){
 const _TT_POS={
   // Engines — single left-column at car rows 1..5 (same Y values as the
   // car grid so engines visually align horizontally with cars in each row).
-  engine_constellation:{cx:75, cy:76.25},  // row 1
-  engine_galaxy:       {cx:75, cy:148.75}, // row 2
-  engine_classJ:       {cx:75, cy:221.25}, // row 3
-  engine_classR:       {cx:75, cy:293.75}, // row 4
-  engine_N700:         {cx:75, cy:366.25}, // row 5
+  // All Y values shifted down by ~39 from the original layout so the now-
+  // shorter window can be centered vertically in the canvas.
+  engine_constellation:{cx:75, cy:115},    // row 1
+  engine_galaxy:       {cx:75, cy:187.5},  // row 2
+  engine_classJ:       {cx:75, cy:260},    // row 3
+  engine_classR:       {cx:75, cy:332.5},  // row 4
+  engine_N700:         {cx:75, cy:405},    // row 5
   // Cars - row 1 (top)
-  car_passenger:       {cx:212.5, cy:76.25},   // (1, 1)
-  car_mail:            {cx:317.5, cy:76.25},   // (2, 1)
-  car_water_tank:      {cx:422.5, cy:76.25},   // (3, 1)
-  car_ore:             {cx:580.0, cy:76.25},   // (4.5, 1)
-  car_grain:           {cx:790.0, cy:76.25},   // (6.5, 1)
+  car_passenger:       {cx:212.5, cy:115},    // (1, 1)
+  car_mail:            {cx:317.5, cy:115},    // (2, 1)
+  car_water_tank:      {cx:422.5, cy:115},    // (3, 1)
+  car_ore:             {cx:580.0, cy:115},    // (4.5, 1)
+  car_grain:           {cx:790.0, cy:115},    // (6.5, 1)
   // Cars - row 2
-  car_royal:           {cx:265.0, cy:148.75},  // (1.5, 2)
-  car_chemical:        {cx:422.5, cy:148.75},  // (3, 2)
-  car_sand:            {cx:527.5, cy:148.75},  // (4, 2)
-  car_oil:             {cx:632.5, cy:148.75},  // (5, 2)
-  car_livestock:       {cx:737.5, cy:148.75},  // (6, 2)
-  car_fruit:           {cx:842.5, cy:148.75},  // (7, 2)
+  car_royal:           {cx:265.0, cy:187.5},  // (1.5, 2)
+  car_chemical:        {cx:422.5, cy:187.5},  // (3, 2)
+  car_sand:            {cx:527.5, cy:187.5},  // (4, 2)
+  car_oil:             {cx:632.5, cy:187.5},  // (5, 2)
+  car_livestock:       {cx:737.5, cy:187.5},  // (6, 2)
+  car_fruit:           {cx:842.5, cy:187.5},  // (7, 2)
   // Cars - row 3
-  car_glass:           {cx:370.0, cy:221.25},  // (2.5, 3)
-  car_iron:            {cx:527.5, cy:221.25},  // (4, 3)
-  car_cargo:           {cx:790.0, cy:221.25},  // (6.5, 3)
+  car_glass:           {cx:370.0, cy:260},    // (2.5, 3)
+  car_iron:            {cx:527.5, cy:260},    // (4, 3)
+  car_cargo:           {cx:790.0, cy:260},    // (6.5, 3)
   // Cars - row 4
-  car_steel:           {cx:422.5, cy:293.75},  // (3, 4)
-  car_hazmat:          {cx:527.5, cy:293.75},  // (4, 4)
-  car_machinery:       {cx:632.5, cy:293.75},  // (5, 4)
-  // Cars - row 6 (bottom mystery row; row 5 left empty as a visual gap)
-  car_ice:             {cx:265.0, cy:438.75},  // (1.5, 6)
-  car_gold:            {cx:370.0, cy:438.75},  // (2.5, 6)
-  car_diamond:         {cx:475.0, cy:438.75},  // (3.5, 6)
-  car_battery:         {cx:580.0, cy:438.75},  // (4.5, 6)
-  car_medical:         {cx:685.0, cy:438.75},  // (5.5, 6)
-  car_flowers:         {cx:790.0, cy:438.75},  // (6.5, 6)
+  car_steel:           {cx:422.5, cy:332.5},  // (3, 4)
+  car_hazmat:          {cx:527.5, cy:332.5},  // (4, 4)
+  car_machinery:       {cx:632.5, cy:332.5},  // (5, 4)
+  // Cars - row 5 (mystery row, now vertically aligned with the N700 engine
+  // for a more compact layout — what used to be an empty visual-spacer row).
+  car_ice:             {cx:265.0, cy:405},    // (1.5, 5)
+  car_gold:            {cx:370.0, cy:405},    // (2.5, 5)
+  car_diamond:         {cx:475.0, cy:405},    // (3.5, 5)
+  car_battery:         {cx:580.0, cy:405},    // (4.5, 5)
+  car_medical:         {cx:685.0, cy:405},    // (5.5, 5)
+  car_flowers:         {cx:790.0, cy:405},    // (6.5, 5)
 };
 // Max-fit bounding boxes for each sprite. The actual rendered sprite is
 // always scaled to preserve its natural aspect ratio (see _ttDrawItem),
@@ -22318,9 +22517,15 @@ function _ttDrawItem(type,mystery){
     ctx.textBaseline='alphabetic';
     ctx.restore();
   } else if(imgs[type]){
-    const _natW=imgs[type].naturalWidth||CAR_W;
-    const _natH=imgs[type].naturalHeight||CAR_H;
-    const _aspect=_natW/_natH;
+    // Use the SAME canonical aspect ratio the train builder and galaxy view
+    // use — CAR_W/CAR_H (= 1.4) scaled by the per-type ENGINE_VIZ_W_MULT (a
+    // few engines + the passenger car are slightly wider than canonical).
+    // NOTE: naturalWidth/naturalHeight on the PNG file includes the sprite's
+    // transparent padding strips, so its raw aspect doesn't match the visible
+    // sprite — using natural dims caused some cars to look stretched or
+    // squished relative to galaxy view.
+    const _vizMult=ENGINE_VIZ_W_MULT[type]||1.0;
+    const _aspect=(CAR_W*_vizMult)/CAR_H;
     let _dh=sz.h, _dw=_dh*_aspect;
     if(_dw>sz.w){ _dw=sz.w; _dh=_dw/_aspect; }
     const _dx=pos.cx-_dw/2, _dy=pos.cy-_dh/2;
@@ -22344,30 +22549,35 @@ function drawTechTreePopup(){
   ctx.save();
   // Wipe the HD text overlay across the whole canvas so chat-log text,
   // top-bar stats, info-bar planet/train labels, panel-tab text, tutorial
-  // callout text, hint-bar text, etc. don't bleed through this screen's
-  // opaque dark backdrop.
+  // callout text, hint-bar text, etc. don't bleed through this screen.
   _clearTextOverlayRect(0,0,W,H);
-  // Dark backdrop covering the full canvas
-  ctx.fillStyle='rgba(4,7,18,0.97)';
+  // Dim the game underneath the centered tech-tree window.
+  ctx.fillStyle='rgba(0,0,0,0.65)';
   ctx.fillRect(0,0,W,H);
+  // Centered window — wide as the canvas, shrunk vertically so it ends
+  // just under the row-5 mystery row + N700 engine.
+  const WIN_TOP=64, WIN_BOT=440, WIN_H=WIN_BOT-WIN_TOP;
+  ctx.fillStyle='rgba(4,7,18,0.97)';
+  ctx.fillRect(0,WIN_TOP,W,WIN_H);
   ctx.strokeStyle='rgba(70,140,220,0.55)'; ctx.lineWidth=2;
-  ctx.strokeRect(3,3,W-6,H-6);
+  ctx.strokeRect(3,WIN_TOP+3,W-6,WIN_H-6);
   popupState.techTreeItemBounds=[];
-  // Top header strip
+  // Header strip across the top of the window
   const HEADER_H=26;
+  const HEADER_Y=WIN_TOP+6;
   ctx.fillStyle='rgba(40,130,220,0.92)';
-  ctx.fillRect(6,6,W-12,HEADER_H);
+  ctx.fillRect(6,HEADER_Y,W-12,HEADER_H);
   ctx.font='bold 12px Orbitron,sans-serif'; ctx.textAlign='left'; ctx.textBaseline='middle';
   ctx.fillStyle='#fff';
-  ctx.fillText('ENGINES', 18, 6+HEADER_H/2+1);
-  ctx.textAlign='center'; ctx.fillText('CARS', 540, 6+HEADER_H/2+1);
+  ctx.fillText('ENGINES', 18, HEADER_Y+HEADER_H/2+1);
+  ctx.textAlign='center'; ctx.fillText('CARS', 540, HEADER_Y+HEADER_H/2+1);
   ctx.textAlign='right'; ctx.font='10px "Exo 2",sans-serif';
   ctx.fillStyle='rgba(230,240,255,0.85)';
-  ctx.fillText('[ESC] close', W-14, 6+HEADER_H/2+1);
+  ctx.fillText('[ESC] close', W-14, HEADER_Y+HEADER_H/2+1);
   ctx.textBaseline='alphabetic';
-  // Subtle vertical divider between Engines column and Cars area
+  // Vertical divider between Engines column and Cars area
   ctx.strokeStyle='rgba(40,130,220,0.45)'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.moveTo(150,6+HEADER_H); ctx.lineTo(150,H-6); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(150,HEADER_Y+HEADER_H); ctx.lineTo(150,WIN_BOT-6); ctx.stroke();
   // Draw edges FIRST so the sprites paint over each endpoint cleanly.
   for(const [a,b] of _TT_EDGES) _ttDrawEdge(a,b);
   // Non-mystery engines + cars
@@ -22376,32 +22586,116 @@ function drawTechTreePopup(){
   // Mystery row (blacked-out silhouettes with "???")
   _ttDrawItem('engine_N700', true);
   for(const _c of _TT_MYSTERY_ROW) _ttDrawItem(_c,true);
-  // Tooltip on top of everything
+  // Tooltip on top of everything — multi-line: name, status, then either
+  // the unlock hint (locked) or Supplied-by / Demanded-by lines (unlocked
+  // car). Long supply/demand strings word-wrap so the tooltip stays inside
+  // a reasonable max-width.
   if(popupState.techTreeHover){
     const _t=popupState.techTreeHover;
     const _isMyst=!!popupState.techTreeHoverMystery;
+    const _isCar=_t.indexOf('car_')===0;
     const _name=_isMyst?'???':(_TT_NAMES[_t]||_t);
     const _isLocked=_isMyst||_ttIsLocked(_t);
-    const _hint=_isMyst?'Unknown — keep exploring':(_isLocked?(_TT_HINTS[_t]||'Locked'):'Unlocked!');
-    ctx.font='bold 10px Orbitron,sans-serif';
-    const _nW=ctx.measureText(_name).width;
-    ctx.font='10px "Exo 2",sans-serif';
-    const _hW=ctx.measureText(_hint).width;
-    const _tW=Math.max(_nW,_hW)+20, _tH=38;
-    let _tx=popupState.techTreeHoverX-_tW/2, _ty=popupState.techTreeHoverY-_tH-8;
-    if(_tx<6) _tx=6; if(_tx+_tW>W-6) _tx=W-6-_tW;
-    if(_ty<6+HEADER_H) _ty=popupState.techTreeHoverY+8;
+    // Build the lines list. Each entry is {text, bold, color}.
+    const _amber='rgba(230,200,140,0.97)';
+    const _green='rgba(170,235,190,0.97)';
+    const _bodyCol='rgba(200,215,240,0.88)';
+    const _dimCol='rgba(170,190,220,0.78)';
+    const _lines=[];
+    _lines.push({text:_name, bold:true, color:_isMyst?_amber:(_isLocked?_amber:_green)});
+    if(_isMyst){
+      _lines.push({text:'Unknown — keep exploring', bold:false, color:_amber});
+    } else if(_isLocked){
+      _lines.push({text:'Status: Locked', bold:false, color:_amber});
+      _lines.push({text:'', bold:false, color:_bodyCol}); // gap
+      _lines.push({text:_TT_HINTS[_t]||'Locked', bold:false, color:_bodyCol, wrap:true});
+    } else {
+      _lines.push({text:'Status: Unlocked', bold:false, color:_green});
+      if(_isCar){
+        const _sup=_TT_SUPPLY[_t];
+        const _dem=_TT_DEMAND[_t];
+        if(_sup){
+          _lines.push({text:'', bold:false, color:_bodyCol}); // small gap
+          _lines.push({text:'Supplied by:', bold:true, color:_dimCol});
+          _lines.push({text:_sup, bold:false, color:_bodyCol, wrap:true});
+        }
+        if(_dem){
+          _lines.push({text:'', bold:false, color:_bodyCol}); // small gap
+          _lines.push({text:'Demanded by:', bold:true, color:_dimCol});
+          _lines.push({text:_dem, bold:false, color:_bodyCol, wrap:true});
+        }
+      }
+    }
+    // Layout. _TT_PADX/PADY = inner padding. Max width ~ 300 keeps tooltip
+    // comfortable; longer wrap-flagged lines word-wrap to fit.
+    const _TT_PADX=10, _TT_PADY=8;
+    const _MAX_W=300, _LH_NAME=14, _LH_BODY=13, _GAP=3;
+    // Word-wrap a line of text given a font + max width. Returns array of strs.
+    const _wrap=(txt, font, maxW)=>{
+      if(!txt) return [''];
+      ctx.font=font;
+      const _ws=txt.split(' ');
+      const _out=[]; let _cur='';
+      for(const _w of _ws){
+        const _trial=_cur?_cur+' '+_w:_w;
+        if(ctx.measureText(_trial).width<=maxW){ _cur=_trial; }
+        else{ if(_cur) _out.push(_cur); _cur=_w; }
+      }
+      if(_cur) _out.push(_cur);
+      return _out;
+    };
+    // Expand wrap-flagged lines into multiple visual lines.
+    const _vis=[];
+    const _bodyFont='10px "Exo 2",sans-serif';
+    const _boldFont='bold 10px "Exo 2",sans-serif';
+    const _nameFont='bold 11px Orbitron,sans-serif';
+    let _maxLineW=0;
+    for(let _li=0;_li<_lines.length;_li++){
+      const _ln=_lines[_li];
+      const _isName=(_li===0);
+      const _font=_isName?_nameFont:(_ln.bold?_boldFont:_bodyFont);
+      const _segs=_ln.wrap?_wrap(_ln.text,_font,_MAX_W-_TT_PADX*2):[_ln.text];
+      for(let _si=0;_si<_segs.length;_si++){
+        ctx.font=_font;
+        const _sw=ctx.measureText(_segs[_si]).width;
+        if(_sw>_maxLineW) _maxLineW=_sw;
+        _vis.push({text:_segs[_si], font:_font, color:_ln.color, isName:_isName, isEmpty:!_segs[_si]});
+      }
+    }
+    // Compute tooltip dimensions.
+    const _tW=Math.min(_MAX_W, Math.max(120, _maxLineW+_TT_PADX*2));
+    let _tH=_TT_PADY*2;
+    for(let _vi=0;_vi<_vis.length;_vi++){
+      _tH+=_vis[_vi].isName?_LH_NAME:_LH_BODY;
+      if(_vi<_vis.length-1) _tH+=_GAP;
+      if(_vis[_vi].isEmpty) _tH-=_LH_BODY/2; // tighter gap for spacer rows
+    }
+    // Position: prefer above the hovered sprite; flip below if it would
+    // clip the header strip.
+    let _tx=popupState.techTreeHoverX-_tW/2;
+    let _ty=popupState.techTreeHoverY-_tH-8;
+    if(_tx<6) _tx=6;
+    if(_tx+_tW>W-6) _tx=W-6-_tW;
+    if(_ty<HEADER_Y+HEADER_H+2) _ty=popupState.techTreeHoverY+8;
+    // Background + border.
     ctx.fillStyle='rgba(15,25,55,0.97)';
     ctx.beginPath(); ctx.roundRect(_tx,_ty,_tW,_tH,5); ctx.fill();
     ctx.strokeStyle=_isLocked?'rgba(200,160,80,0.85)':'rgba(80,200,140,0.85)'; ctx.lineWidth=1.2;
     ctx.beginPath(); ctx.roundRect(_tx,_ty,_tW,_tH,5); ctx.stroke();
+    // Draw lines.
     ctx.textAlign='center';
-    ctx.font='bold 10px Orbitron,sans-serif';
-    ctx.fillStyle=_isLocked?'rgba(230,200,140,0.97)':'rgba(180,235,200,0.97)';
-    ctx.fillText(_name, _tx+_tW/2, _ty+14);
-    ctx.font='10px "Exo 2",sans-serif';
-    ctx.fillStyle='rgba(200,215,240,0.85)';
-    ctx.fillText(_hint, _tx+_tW/2, _ty+30);
+    let _cy=_ty+_TT_PADY+_LH_NAME-2;
+    for(let _vi=0;_vi<_vis.length;_vi++){
+      const _v=_vis[_vi];
+      if(!_v.isEmpty){
+        ctx.font=_v.font;
+        ctx.fillStyle=_v.color;
+        ctx.fillText(_v.text, _tx+_tW/2, _cy);
+      }
+      const _lh=_v.isName?_LH_NAME:_LH_BODY;
+      _cy+=_lh+_GAP;
+      if(_v.isEmpty) _cy-=_LH_BODY/2;
+    }
   }
   ctx.restore();
 }
@@ -24285,6 +24579,11 @@ function drawGalaxy(ts,dt){
       ctx.textBaseline='top';
       ctx.fillStyle=p.isStarter?'rgba(255,210,80,0.9)':'rgba(170,205,255,0.8)';
       const _stOff=5; // constant slim buffer below the planet rim
+      // Sub-pixel positioning (no rounding). The HD text overlay
+      // rasterises at DPR resolution, so floating-point sx/sy give the
+      // glyphs smooth anti-aliased sub-device-pixel motion. Logical-pixel
+      // rounding here produced visible ~DPR-device-pixel STEPS, which
+      // reads as jitter against the smoothly-orbiting planet.
       ctx.fillText(p.name,sx,sy+sr+_stOff);
       ctx.restore();
     }
@@ -25370,7 +25669,7 @@ function drawGalaxy(ts,dt){
     const _sdReserveFor=(msg)=>{
       if(!(msg && msg.sd>0)) return 0;
       const _f=ctx.font;
-      ctx.font='6px "Exo 2",sans-serif';
+      ctx.font='7px "Exo 2",sans-serif';
       const _w=ctx.measureText(_sdLabel(msg)).width + 6; // +6 px gap
       ctx.font=_f;
       return _w;
@@ -25492,7 +25791,7 @@ function drawGalaxy(ts,dt){
       // text and the timestamp can't overlap.
       if(vl.isLast&&msg.sd>0){
         const _sdTxt='S.D. '+(Math.round(msg.sd*10)/10).toFixed(1);
-        ctx.font='6px "Exo 2",sans-serif'; ctx.fillStyle='rgba(120,130,150,0.65)';
+        ctx.font='7px "Exo 2",sans-serif'; ctx.fillStyle='rgba(120,130,150,0.65)';
         ctx.shadowBlur=0; ctx.shadowColor='transparent'; ctx.textAlign='right';
         ctx.fillText(_sdTxt,_clX+_clW-5,ty);
         ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='left';
@@ -27040,6 +27339,46 @@ canvas.addEventListener('mouseup',e=>{
     if(_aiSelConfirmBounds&&cp.x>=_aiSelConfirmBounds.x&&cp.x<=_aiSelConfirmBounds.x+_aiSelConfirmBounds.w&&cp.y>=_aiSelConfirmBounds.y&&cp.y<=_aiSelConfirmBounds.y+_aiSelConfirmBounds.h){gs='fadein';fadeA=1;return;}
     if(_aiSelBackBounds&&cp.x>=_aiSelBackBounds.x&&cp.x<=_aiSelBackBounds.x+_aiSelBackBounds.w&&cp.y>=_aiSelBackBounds.y&&cp.y<=_aiSelBackBounds.y+_aiSelBackBounds.h){gs='corpsetup';return;}
   } else if(gs==='galaxy'&&!wasDrag){
+    // ── New-mission popup is hard-modal ──────────────────────────
+    // Eat EVERY click that doesn't land on the Accept button (or the
+    // optional relic-image click target). Previously the hint-bar handler
+    // a few blocks down would happily swap activePopup from 'new_mission'
+    // to e.g. 'pokedex' when the player clicked [P], silently dismissing
+    // the popup. The main-loop safety net does then force-accept the
+    // mission, but the player never sees the Accept button get pressed —
+    // which reads as "you can click out of the popup". Block at the top.
+    if(activePopup==='new_mission'){
+      // Relic image click: center camera and select target planet (popup
+      // stays open). Mirrors the same check inside the popup-interactions
+      // block below, but it has to live here too because we return early.
+      if(popupState.relicImgClickBounds&&popupState.targetPlanetId!=null){
+        const _rib=popupState.relicImgClickBounds;
+        if(cp.x>=_rib.x&&cp.x<=_rib.x+_rib.w&&cp.y>=_rib.y&&cp.y<=_rib.y+_rib.h){
+          const _rtp2=_gp(popupState.targetPlanetId);
+          if(_rtp2){
+            sel={type:'planet',data:_rtp2};
+            const _zTarget=Math.exp(Math.log(MIN_SC)+0.72*(Math.log(MAX_SC)-Math.log(MIN_SC)));
+            cam.scale=Math.max(MIN_SC,Math.min(MAX_SC,_zTarget));
+            cam.x=_rtp2.x+(PANEL_W)/(2*cam.scale); cam.y=_rtp2.y; clampCamera();
+            tracking=true; trackingOffset={x:cam.x-_rtp2.x,y:cam.y-_rtp2.y};
+          }
+          return;
+        }
+      }
+      if(_newMissionAcceptBounds){
+        const b=_newMissionAcceptBounds;
+        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+          _acceptNewMissionFromState(popupState);
+          _pendingNewMissionStash=null;
+          activePopup=null; popupState={};
+          return;
+        }
+      }
+      // Any other click — eat it. No hint-bar swap, no top-bar swap, no
+      // canvas selection, no popup interaction. The player MUST press
+      // Accept.
+      return;
+    }
     // Newspaper modal intercepts all clicks while visible. Behaviour depends on
     // whether we're in archive-browsing mode (opened via N) or auto-popup mode.
     if(_newspaper){
@@ -27349,67 +27688,15 @@ canvas.addEventListener('mouseup',e=>{
           }
         }
         if(_newMissionAcceptBounds){const b=_newMissionAcceptBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
-          const def=popupState.newMissionDef;
-          if(def&&!missions.some(mx=>mx.id===def.id)){
-            // Honour the intro popup's pre-completion analysis: any objective
-            // it flagged as already-satisfied starts in done:true state so the
-            // mission doesn't need to wait a full updateMissions tick to flip
-            // it. Falls back to all-false when no precomputed set is present.
-            const _preDone=popupState.preCompletedObjIds||new Set();
-            missions.push({id:def.id,name:def.name,imageType:def.imageType,imageKey:def.imageKey||null,
-              objectives:def.objectives.map(o=>{
-                let _txt=o.text;
-                if(_txt.includes('{SOURCE}')&&popupState.sourcePlanetId!=null){const _sp3=_gp(popupState.sourcePlanetId);if(_sp3)_txt=_txt.replace('{SOURCE}',_sp3.name);}
-                if(_txt.includes('{TARGET}')&&popupState.targetPlanetId!=null){const _tp3=_gp(popupState.targetPlanetId);if(_tp3)_txt=_txt.replace('{TARGET}',_tp3.name);}
-                return {id:o.id,text:_txt,done:_preDone.has(o.id)};
-              }),
-              details:(()=>{let _d=def.details||'';
-                if(_d.includes('{SOURCE}')&&popupState.sourcePlanetId!=null){const _sp5=_gp(popupState.sourcePlanetId);if(_sp5)_d=_d.replace(/\{SOURCE\}/g,_sp5.name);}
-                if(_d.includes('{TARGET}')&&popupState.targetPlanetId!=null){const _tp5=_gp(popupState.targetPlanetId);if(_tp5)_d=_d.replace(/\{TARGET\}/g,_tp5.name);}
-                return _d;})(),reward:def.reward||null,timeLimit:def.timeLimit||null,
-              deadline:def.timeLimit?stardate+def.timeLimit:null,
-              status:'active',acceptedSd:stardate,completedSd:null,
-              // build_foundry / stellar_cartography: empty snapshot so any previously visited matching planet immediately satisfies the visit objective
-              visitedSnapshot:(def.id==='build_foundry'||def.id==='stellar_cartography')?new Set():new Set(visitedPlanetIds),ironUnlockedSnapshot:_ironCarUnlocked,
-              sourcePlanetId:popupState.sourcePlanetId??null,
-              targetPlanetId:popupState.targetPlanetId??null,
-              hazmatIncineratedSnapshot:_totalHazmatIncinerated});
-            _recomputeMissionTargets();
-            _chatMsg('MISSION STARTED: '+def.name.toUpperCase(),'rgba(255,220,80,1)');
-            // M-tip held back until the player has 3 SIMULTANEOUSLY active
-            // missions for the first time (active = status==='active', the
-            // just-pushed mission already counts). Earlier total-length check
-            // could fire when most missions were already completed.
-            if(!_missionTipFired && missions.filter(mx=>mx.status==='active').length>=3){
-              _missionTipStartMs=Date.now(); _missionTipFired=true;
-            }
-            // buy_second_train: arm the yellow "Press T / click below" hint
-            // pointing at the [T] trains chat-log link. One-shot per game.
-            if(def.id==='buy_second_train' && !_buyTrainHintSuppressed){
-              _buyTrainHintStartMs=Date.now();
-              _buyTrainHintFadeOutStartMs=0;
-              _buyTrainHintSuppressed=true;
-            }
-            // User spec: when create_route is accepted, deselect everything
-            // so the player can pick a fresh train / starting planet.
-            if(def.id==='create_route'){
-              sel=null; routeStops=[];
-              assignPending=false; routeHerePending=false;
-            }
-            // dispose_hazmat acceptance: snap the camera so the home desert
-            // + Gigi Prime are both visible with breathing room, then start
-            // the 16-second hz_intro tutorial (yellow over desert + delayed
-            // blue companion over the star).
-            if(def.id==='dispose_hazmat'){
-              _hazmatTutorialSnap();
-              _tutorialPhase='hz_intro';
-              _tutorialPhaseStartMs=Date.now();
-              _tutorialFadeOutStartMs=0;
-            }
-          }
+          _acceptNewMissionFromState(popupState);
+          _pendingNewMissionStash=null;
           activePopup=null; popupState={};
           return;
         }}
+        // Click landed OUTSIDE the Accept button — eat it. The new-mission
+        // popup is intentionally modal: the player MUST hit Accept to close
+        // it (the safety net in the main loop catches any other path that
+        // somehow closes the popup and force-accepts the mission).
         return;
       }
       // Gold discovery
@@ -28835,6 +29122,12 @@ document.addEventListener('keydown',e=>{
       e.preventDefault();
       return;
     }
+    // New-mission popup blocks all popup-toggle hotkeys — the player MUST
+    // click Accept to close it. Without this guard, pressing P/T/M/etc.
+    // would displace the popup with a different window and the player
+    // could miss the mission. The safety-net in the main loop catches any
+    // other path that closes the popup and force-accepts the mission.
+    if(activePopup==='new_mission') return;
     if(e.key==='p'||e.key==='P'){
       activePopup=activePopup==='pokedex'?null:'pokedex';
       if(activePopup==='pokedex') popupState={scroll:0};
@@ -29080,6 +29373,10 @@ function _buildSaveObject(){
 
 function _restoreFromSave(save){
   if(!save||(save.version!==1&&save.version!==2)){ alert('Incompatible save file.'); return; }
+  // Clear any stale new-mission stash from the pre-load session — loading a
+  // save wipes activePopup, so without this the safety-net would re-push
+  // the stashed mission against the freshly-loaded mission list.
+  _pendingNewMissionStash=null;
   const sg=save.galaxy;
   // Restore stars — reattach .color from STAR_COLORS
   const stars=sg.stars.map(s=>({...s, color:STAR_COLORS[s.colorName]}));
@@ -29776,6 +30073,7 @@ async function loadGame(){
 
 function startGame(){
   galaxy=null; // always generate a fresh galaxy — prevents planet state (stations, flags) carrying over from a previous game
+  _pendingNewMissionStash=null; // clear any stale stash from a prior session
   galaxy=generateGalaxy(); makeGStars();
   // Default-ON settings for any fresh game (overridden by load-from-save).
   missionTrackerEnabled=true;
@@ -30692,7 +30990,17 @@ function init(){
   // into the (already-spent) load step where the player can't tell.
   _buildUrbanSkylineCache();
   _buildAncientRuinsCache();
-  requestAnimationFrame(loop);
+  // Wait for the inlined Orbitron / Exo 2 font faces to fully decode
+  // before starting the render loop. Without this gate, the first few
+  // frames sometimes render in the system fallback while the @font-face
+  // base64 data is still being parsed, which looks like a chunky 1-frame
+  // font flicker. document.fonts.ready resolves immediately if fonts are
+  // already decoded (the common case), so this only delays startup when
+  // it genuinely matters.
+  const _start = () => requestAnimationFrame(loop);
+  if(document.fonts && document.fonts.ready){
+    document.fonts.ready.then(_start, _start);
+  } else { _start(); }
 }
 let lastT=0;
 function loop(ts){
@@ -30904,6 +31212,17 @@ function loop(ts){
     // Enforce 1-second real-time cooldown whenever a popup is closed before showing the next one
     if(_prevHadPopup&&!activePopup) _popupCooldownUntil=Date.now()+1000;
     _prevHadPopup=!!activePopup;
+    // Safety-net for the new-mission popup: if a stash is present but the
+    // popup is no longer active, the popup was closed without going through
+    // the explicit Accept click handler (any future code path that wipes
+    // activePopup or popupState would trigger this). Per user spec, that
+    // forced-close still counts as an acceptance — pushing the mission via
+    // the stashed state, then clearing the stash so the mission can't be
+    // re-pushed on subsequent frames.
+    if(_pendingNewMissionStash && activePopup!=='new_mission'){
+      _acceptNewMissionFromState(_pendingNewMissionStash);
+      _pendingNewMissionStash=null;
+    }
     // Show new-mission intro popup (timed or prerequisite-unlocked)
     if(!activePopup&&pendingMissionIntros.length>0&&Date.now()>=_popupCooldownUntil){
       const _nmiIdx=pendingMissionIntros.findIndex(e=>stardate>=e.readySd);
@@ -30968,6 +31287,10 @@ function loop(ts){
             // which objective IDs are already done so the renderer can highlight them.
             gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='new_mission';
             popupState={newMissionDef:_nmDef,targetPlanetId:_nmiE.targetPlanetId??null,sourcePlanetId:_nmiE.sourcePlanetId??null,preCompletedObjIds:_preCompObjIds};
+            // Stash the popup state so the main-loop safety-net can force-
+            // accept the mission if the popup is ever closed without the
+            // player explicitly clicking Accept.
+            _pendingNewMissionStash={newMissionDef:_nmDef,targetPlanetId:_nmiE.targetPlanetId??null,sourcePlanetId:_nmiE.sourcePlanetId??null,preCompletedObjIds:_preCompObjIds};
             // Any mission with a target planet: auto-center camera on it, zoomed fully out
             if(_nmiE.targetPlanetId!=null){
               const _miCamP=_gp(_nmiE.targetPlanetId);
