@@ -340,15 +340,18 @@ function playSound(id){
   a.currentTime=0; a.play().catch(()=>{});
 }
 // ── soundtrack ───────────────────────────────────────────────
-// Fixed-order playlist of four tracks loaded from the GitHub assets folder.
+// Fixed-order playlist of seven tracks loaded from the GitHub assets folder.
 // The Options popup exposes Prev/Next/mute controls + a progress bar; the
 // 'ended' event advances to the next track and wraps to 0 at the end.
 const _MUSIC_BASE='https://raw.githubusercontent.com/jhart90/spacetraintycoon/localstorage-saves/assets/';
 const _MUSIC_TRACKS=[
-  {file:'01_last_train_home.mp3',     title:'Last Train Home'},
-  {file:'02_interstellar_segment.mp3',title:'Interstellar Segment'},
-  {file:'03_nebulosa_amistosa.mp3',   title:'Nebulosa Amistosa'},
-  {file:'04_midnight_cargo_run.mp3',  title:'Midnight Cargo Run'},
+  {file:'01_last_train_home.mp3',      title:'Last Train Home'},
+  {file:'02_interstellar_segment.mp3', title:'Interstellar Segment'},
+  {file:'03_star_depot_groove.mp3',    title:'Star Depot Groove'},
+  {file:'04_neon_katsu_sandwich.mp3',  title:'Neon Katsu Sandwich'},
+  {file:'05_lunar_save_point.mp3',     title:'Lunar Save Point'},
+  {file:'06_nebulosa_amistosa.mp3',    title:'Nebulosa Amistosa'},
+  {file:'07_midnight_cargo_run.mp3',   title:'Midnight Cargo Run'},
 ];
 const _soundtrack=new Audio();
 _soundtrack.volume=0.35;
@@ -2066,7 +2069,7 @@ const _PLAYER_OPENED_POPUPS=new Set([
   'car_detail','savemanager','quitconfirm'
 ]);
 let _missionTipFired=false;  // M-tip is one-shot once the player has 3 simultaneously-active missions for the first time
-let _buyTrainCompletedMs=0;  // real-time ms when buy_second_train completed (0=not yet). Legacy — no longer gates any intro after the build_foundry / buy_second_train flow was rewired.
+let _buyTrainCompletedMs=0;  // real-time ms when buy_second_train completed (0=not yet). Gates the upgrade_station mission intro 10 s later.
 let _foundryCompletedMs=0;   // real-time ms when build_foundry completed (0=not yet). Gates the buy_second_train mission intro 10 s later.
 // New-game tutorial bubble chain (zoom out → double click lava planet → build station)
 let _tutorialPhase='inactive'; // 'inactive'|'pre_zoom'|'look_around'|'look_around_pause'|'zoom_out'|'double_click'|'build_station'|'done'
@@ -16564,6 +16567,38 @@ function _drawZoomCallout(){
   ctx.restore();
 }
 
+// Snap the camera so the home-system desert planet AND Gigi Prime (the home
+// star) both fit in the visible galaxy area with a buffer on every side.
+// Centers the bounding-box midpoint at the visible viewport center (which is
+// shifted left of the canvas midpoint because of the right-side panel) and
+// disables tracking so the player can re-pan freely once the callout ends.
+function _hazmatTutorialSnap(){
+  if(!galaxy) return;
+  const _star=galaxy.stars[galaxy.homeStarId];
+  if(!_star) return;
+  let _desert=null;
+  for(const _p of galaxy.planets){
+    if(_p.starId===_star.id && _p.type && _p.type.id==='desert'){ _desert=_p; break; }
+  }
+  if(!_desert) return;
+  const _starR=_star.radius||1024;
+  const _desertR=_desert.radius||30;
+  const _bufSU=600;
+  const _xMin=Math.min(_desert.x-_desertR, _star.x-_starR) - _bufSU;
+  const _xMax=Math.max(_desert.x+_desertR, _star.x+_starR) + _bufSU;
+  const _yMin=Math.min(_desert.y-_desertR, _star.y-_starR) - _bufSU;
+  const _yMax=Math.max(_desert.y+_desertR, _star.y+_starR) + _bufSU;
+  const _vpW=W-PANEL_W, _vpH=GH-TOP_H;
+  const _scale=Math.max(MIN_SC,Math.min(MAX_SC,Math.min(_vpW/(_xMax-_xMin), _vpH/(_yMax-_yMin))));
+  cam.scale=_scale;
+  // Camera offset puts the bbox midpoint at the *visible* center, not the
+  // canvas center: +PANEL_W/(2·scale) in x to compensate for the right panel,
+  // -TOP_H/(2·scale) in y for the top bar.
+  cam.x=(_xMin+_xMax)/2 + PANEL_W/(2*_scale);
+  cam.y=(_yMin+_yMax)/2 - TOP_H/(2*_scale);
+  tracking=false;
+  if(typeof clampCamera==='function') clampCamera();
+}
 // ── New-game tutorial bubble chain ───────────────────────────
 // Multi-phase walkthrough that fires once per fresh new game (loaded saves
 // skip it). Phases (linear): pre_zoom → zoom_out → double_click →
@@ -16577,7 +16612,7 @@ function _drawTutorialChain(stage){
   // 'all_done' is the final terminal state. 'done' is NOT terminal — it
   // continues polling for the player to accept the create_route mission
   // so the next callout chain can fire.
-  if(_tutorialPhase==='inactive'||_tutorialPhase==='bst_all_done') return;
+  if(_tutorialPhase==='inactive'||_tutorialPhase==='bst_all_done'||_tutorialPhase==='hz_intro_done') return;
   // Stage gating: this function is called TWICE per frame in drawGalaxy.
   // - 'galaxy' (before popups): renders bubbles that point at planets,
   //   trains, or panel UI items so they sit UNDER any popup the player
@@ -16594,7 +16629,7 @@ function _drawTutorialChain(stage){
   // drawPanelTabs / drawTopBar, so the yellow bubble can never be partially
   // hidden behind the Stations/Trains folder tabs that sit at the top of the
   // panel.
-  const _POPUP_PHASES=new Set(['build_station','supply_demand','select_train','train_detail_edit','builder_add_cars','builder_purchase','bf_click_build_station','bf_click_foundry_upgrade']);
+  const _POPUP_PHASES=new Set(['build_station','supply_demand','select_train','train_detail_edit','builder_add_cars','builder_purchase','train_detail_post_confirm','bf_click_build_station','bf_click_foundry_upgrade','bst_builder_add_iron']);
   const _isPopupPhase=_POPUP_PHASES.has(_tutorialPhase);
   // Popup-stage calls for non-popup phases have nothing to do (no advance
   // either — that already ran in the 'galaxy' call earlier this frame).
@@ -16956,10 +16991,57 @@ function _drawTutorialChain(stage){
     const _bld=(activePopup==='trainbuilder')?trainBuilderState:null;
     if(_tutorialFadeOutStartMs===0 && activePopup!=='trainbuilder') _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
-    if(r.advanced){ _advanceTo('post_builder_wait'); return; }
+    if(r.advanced){
+      // After CONFIRM the builder closes and reopens the train detail popup
+      // (activePopup === 'train'); on CANCEL the player lands on the trains
+      // list or galaxy. Only run the post-confirm callout in the former path.
+      if(activePopup==='train') _advanceTo('train_detail_post_confirm');
+      else _advanceTo('post_builder_wait');
+      return;
+    }
     if(_bld && _bld.confirmBounds){
       const _b=_bld.confirmBounds;
       _drawBubble(['CLICK HERE to CONFIRM'], {x:_b.x+_b.w/2,y:_b.y}, r.alpha);
+    }
+    return;
+  }
+  // ── Phase: train_detail_post_confirm ──────────────────────
+  // After CONFIRM the train detail popup reopens with the player's updated
+  // train. Two bubbles below the relevant text:
+  //   • Yellow (immediate): points UP at the "-X% max speed" portion of the
+  //     cars-count line, telling the player that towing a lot of CARGO
+  //     limits an ENGINE's acceleration + max speed. Only renders if the
+  //     train is heavy enough to actually incur the penalty.
+  //   • Blue companion (delayed 10 s): points UP at the [ESC] close hint,
+  //     reminding the player how to close the popup.
+  // Both follow the popup-close fade-out (multiply by 1 - elapsed_since_close/1000).
+  if(_tutorialPhase==='train_detail_post_confirm'){
+    if(_tutorialFadeOutStartMs===0 && activePopup!=='train') _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _advanceTo('post_builder_wait'); return; }
+    // Yellow bubble — anchored at the midpoint of the "-X% max speed" text
+    // when it exists (i.e. the train has > 2 mid cars worth of cargo). The
+    // helper renders the tail tip at anchor.y + 4 in below-placement mode,
+    // which lands just below the text descender.
+    const _msB=popupState.maxSpeedTextBounds;
+    if(_msB){
+      _drawBubble(["Towing a lot of CARGO can limit an ENGINE's acceleration and max speed"],
+                  {x:_msB.x+_msB.w/2, y:_msB.y+_msB.h}, r.alpha, {below:true});
+    }
+    // Blue bubble — appears at t=10s, fades in over 1s, then follows the
+    // shared popup-close fade-out. _refT is the elapsed time used for the
+    // blue fade-in calculation: while the popup is still open it tracks
+    // real time, but once the popup closes it freezes at the moment of
+    // close so the blue bubble's pre-close fade-in level snapshots cleanly.
+    const _refT=_tutorialFadeOutStartMs>0 ? (_tutorialFadeOutStartMs-_tutorialPhaseStartMs) : _elapsed;
+    let _wouldBeBlue=0;
+    if(_refT>=10000) _wouldBeBlue=Math.min(1,(_refT-10000)/1000);
+    const _fadeOutMult=_tutorialFadeOutStartMs>0 ? Math.max(0,1-(_now-_tutorialFadeOutStartMs)/1000) : 1;
+    const _blueAlpha=_wouldBeBlue*_fadeOutMult;
+    if(_blueAlpha>0 && popupState.escBounds){
+      const _eb=popupState.escBounds;
+      _drawBubble(['Press ESC, or CLICK anywhere outside a window to close it'],
+                  {x:_eb.x+_eb.w/2, y:_eb.y+_eb.h}, _blueAlpha, {below:true, color:'blue'});
     }
     return;
   }
@@ -17424,11 +17506,46 @@ function _drawTutorialChain(stage){
   const _bstIronDelivered=!!(_bstMission && (_bstMission._ironFromDesertToOrijen||0)>=1);
   // ── Phase: bf_all_done — poll for buy_second_train becoming active with
   // the player already owning a 2nd train, then transition into bst_load_iron.
-  // Skips straight to bst_all_done if the mission is already completed.
+  // Skips straight to bst_all_done if the mission is already completed. Also
+  // detects the train builder being open during the buy phase to surface
+  // the "Add 2+ IRON cars" callout.
   if(_tutorialPhase==='bf_all_done'){
     if(_bstMission && _bstMission.status==='completed'){ _tutorialPhase='bst_all_done'; return; }
     if(_bstMission && _bstMission.status==='active' && _bstPlayerOwns2){
       _advanceTo('bst_load_iron');
+      return;
+    }
+    // Train builder open during buy_second_train (before 2nd train owned) and
+    // current build has < 2 iron cars: surface the iron-car callout. The
+    // count-gate prevents re-firing the bubble after the player has already
+    // added enough cars then re-opened the builder.
+    if(_bstMission && _bstMission.status==='active' && !_bstPlayerOwns2 &&
+       activePopup==='trainbuilder' && typeof trainBuilderState!=='undefined' && trainBuilderState){
+      const _ironCt=(trainBuilderState.cars||[]).filter(c=>c==='car_iron').length;
+      if(_ironCt<2) _advanceTo('bst_builder_add_iron');
+    }
+    return;
+  }
+  // ── Phase: bst_builder_add_iron ───────────────────────────
+  // Highlight box + bubble pointing at the IRON car button inside the train
+  // builder, prompting the player to add 2+ iron cars. Mirrors the existing
+  // builder_add_cars phase that highlighted Water + Molten Ore. Falls back
+  // to bf_all_done when the builder closes or the player buys a 2nd train,
+  // so the polling logic above can re-evaluate every frame.
+  if(_tutorialPhase==='bst_builder_add_iron'){
+    const _bld=(activePopup==='trainbuilder')?trainBuilderState:null;
+    if(!_bld){ _advanceTo('bf_all_done'); return; }
+    if(_bstPlayerOwns2){ _advanceTo('bst_load_iron'); return; }
+    const _ironCt=(_bld.cars||[]).filter(c=>c==='car_iron').length;
+    if(_tutorialFadeOutStartMs===0 && _ironCt>=2) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _advanceTo('bf_all_done'); return; }
+    if(Array.isArray(_bld.carBtnBounds)){
+      const _ib=_bld.carBtnBounds.find(cb=>cb&&cb.type==='car_iron');
+      if(_ib){
+        _drawHighlightBox(_ib.x,_ib.y,_ib.w,_ib.h,r.alpha,3);
+        _drawBubble(['Add 2+ IRON cars to this TRAIN'], {x:_ib.x+_ib.w/2,y:_ib.y+_ib.h}, r.alpha, {below:true});
+      }
     }
     return;
   }
@@ -17465,6 +17582,55 @@ function _drawTutorialChain(stage){
       const [_sx,_sy]=w2s(_op.x,_op.y);
       const _sr=Math.max(8,_op.radius*cam.scale);
       _drawBubble(['Deliver the IRON to ORIJEN'], {x:_sx,y:_sy-_sr+6}, r.alpha);
+    }
+    return;
+  }
+  // ── Phase: hz_intro ───────────────────────────────────────
+  // Dispose-of-Hazmat acceptance walkthrough. Fires when the player accepts
+  // the dispose_hazmat mission popup; the click handler sets the phase here
+  // and snaps the camera to frame the home desert + Gigi Prime.
+  //   • Yellow bubble over the desert planet:
+  //     "Industrial activity (like producing IRON) also produces HAZMAT…"
+  //       — 1 s fade-in, 14 s plateau (15 s total), 1 s fade-out.
+  //   • Blue companion bubble at Gigi Prime, delayed 3 s after the yellow:
+  //     "HAZMAT must be disposed of by EJECTING it into a STAR"
+  //       — 1 s fade-in at t=3, 11 s plateau (12 s total), 1 s fade-out.
+  // Both end at t=16 s, then phase transitions to hz_intro_done (terminal).
+  if(_tutorialPhase==='hz_intro'){
+    // Save/load safety — if the phase was restored without a fresh start
+    // timer, re-stamp it now so the 16 s countdown restarts cleanly.
+    if(_tutorialPhaseStartMs===0) _tutorialPhaseStartMs=_now;
+    const _t=_now-_tutorialPhaseStartMs;
+    if(_t>=16000){ _tutorialPhase='hz_intro_done'; return; }
+    let _yA=0;
+    if(_t<1000) _yA=_t/1000;
+    else if(_t<15000) _yA=1;
+    else _yA=Math.max(0,1-(_t-15000)/1000);
+    let _bA=0;
+    if(_t>=3000){
+      const _bt=_t-3000;
+      if(_bt<1000) _bA=_bt/1000;
+      else if(_bt<12000) _bA=1;
+      else _bA=Math.max(0,1-(_bt-12000)/1000);
+    }
+    const _hzStar=galaxy.stars[galaxy.homeStarId];
+    let _hzDesert=null;
+    if(_hzStar){
+      for(const _p of galaxy.planets){
+        if(_p.starId===_hzStar.id && _p.type && _p.type.id==='desert'){ _hzDesert=_p; break; }
+      }
+    }
+    if(_hzDesert && _yA>0){
+      const [_dsx,_dsy]=w2s(_hzDesert.x,_hzDesert.y);
+      const _dsr=Math.max(8,_hzDesert.radius*cam.scale);
+      _drawBubble(['Industrial activity (like producing IRON) also produces HAZMAT as a byproduct'],
+                  {x:_dsx,y:_dsy-_dsr+6}, _yA);
+    }
+    if(_hzStar && _bA>0){
+      const [_ssx,_ssy]=w2s(_hzStar.x,_hzStar.y);
+      const _ssr=Math.max(8,_hzStar.radius*cam.scale);
+      _drawBubble(['HAZMAT must be disposed of by EJECTING it into a STAR'],
+                  {x:_ssx,y:_ssy-_ssr+6}, _bA, {color:'blue'});
     }
     return;
   }
@@ -17707,8 +17873,8 @@ function updateMissions(dtSd){
   if(_visitPlanetCompletedMs>0&&Date.now()-_visitPlanetCompletedMs>=5000&&!_missionPending('create_route')&&!missions.some(mx=>mx.id==='create_route'&&mx.status==='completed')){
     pendingMissionIntros.push({defId:'create_route',readySd:stardate});
   }
-  // upgrade_station intro: 10 real-time seconds after produce_iron completes
-  if(_produceIronTimerMs>0&&Date.now()-_produceIronTimerMs>=10000&&!_missionPending('upgrade_station')){
+  // upgrade_station intro: 10 real-time seconds after buy_second_train completes
+  if(_buyTrainCompletedMs>0&&Date.now()-_buyTrainCompletedMs>=10000&&!_missionPending('upgrade_station')){
     pendingMissionIntros.push({defId:'upgrade_station',readySd:stardate});
   }
   // visit_planet intro: held back at game start; introduced only after the
@@ -19236,9 +19402,20 @@ function drawTrainDetailPopup(){
   {
     const _midCars=Math.max(0,t.cars.length-2);
     const _penPct=Math.round(Math.max(0,_midCars-2)*5);
-    let _carsTxt=t.cars.length+' cars';
-    if(_penPct>0) _carsTxt+='  (-'+_penPct+'% acceleration, -'+_penPct+'% max speed)';
+    const _baseCarsTxt=t.cars.length+' cars';
+    const _accelTxt=_penPct>0?('  (-'+_penPct+'% acceleration, '):'';
+    const _maxSpeedTxt=_penPct>0?('-'+_penPct+'% max speed)'):'';
+    const _carsTxt=_baseCarsTxt+_accelTxt+_maxSpeedTxt;
     ctx.fillText(_carsTxt,px+14,py+154);
+    // Track the "-X% max speed" portion bounds for the tutorial bubble that
+    // points up at this text after the player CONFIRMs their train edits.
+    if(_penPct>0){
+      const _prefixW=ctx.measureText(_baseCarsTxt+_accelTxt).width;
+      const _msW=ctx.measureText(_maxSpeedTxt).width;
+      popupState.maxSpeedTextBounds={x:px+14+_prefixW, y:py+143, w:_msW, h:14};
+    } else {
+      popupState.maxSpeedTextBounds=null;
+    }
   }
   const rc=Object.values(t.routeCounts||{}).reduce((a,b)=>a+b,0);
   ctx.fillText('Route segments completed:  '+rc,px+14,py+172);
@@ -26808,6 +26985,16 @@ canvas.addEventListener('mouseup',e=>{
               sel=null; routeStops=[];
               assignPending=false; routeHerePending=false;
             }
+            // dispose_hazmat acceptance: snap the camera so the home desert
+            // + Gigi Prime are both visible with breathing room, then start
+            // the 16-second hz_intro tutorial (yellow over desert + delayed
+            // blue companion over the star).
+            if(def.id==='dispose_hazmat'){
+              _hazmatTutorialSnap();
+              _tutorialPhase='hz_intro';
+              _tutorialPhaseStartMs=Date.now();
+              _tutorialFadeOutStartMs=0;
+            }
           }
           activePopup=null; popupState={};
           return;
@@ -28583,8 +28770,13 @@ function _restoreFromSave(save){
   // Loaded games have played before — treat speed-tip as permanently suppressed.
   _speedTipSuppressed=true; _speedTipStartMs=0; _speedTipNextRealMs=0; _speedTipFadeOutStartMs=0;
   _missionTipFired=true; _missionTipStartMs=0;   // suppress M-tip on loaded games
-  // Legacy stamp (no longer gates anything; kept for completeness).
-  _buyTrainCompletedMs=(Array.isArray(save.missions)&&save.missions.some(m=>m.id==='buy_second_train'&&m.status==='completed'))?Date.now():0;
+  // Re-arm the buy_second_train → upgrade_station 10 s gate if buy_second_train
+  // is completed in the save but upgrade_station hasn't been introduced yet.
+  {
+    const _bstDone=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='buy_second_train'&&m.status==='completed');
+    const _usIntroduced=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='upgrade_station');
+    _buyTrainCompletedMs=(_bstDone && !_usIntroduced)?Date.now():0;
+  }
   _firstNonLowOrbitFired=true; _orbitHintStartMs=0; _orbitHintPlanetId=-1; // suppress orbit-hint on loaded games
   _prevActivePopupForSfx=null;
   _visitPlanetCompletedMs=0;
