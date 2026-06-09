@@ -22699,15 +22699,47 @@ function _ttDrawItem(type,mystery){
     let _dw, _dh, _dx, _dy;
     if(_sc){
       const _bx=_sc[0], _by=_sc[1], _bw=_sc[2], _bh=_sc[3], _srcAR=_sc[4];
-      // Bundle dims sized so the visible content renders at
-      // (_targetH * _srcAR) × _targetH.
+      // Sizing: lock render-x : render-y to match the SOURCE FILE aspect
+      // (sourceW / sourceH) so the source→render pixel scale stays
+      // UNIFORM in x and y. Anything else introduces a per-axis stretch
+      // that turns circular features (like the machinery car's gear) into
+      // ovals. Earlier we used `_srcAR` (content bbox aspect) for width
+      // and `_bh` (bundle bbox height) for height — but those two figures
+      // disagreed because the source PNG has very faint pixels along its
+      // bottom edge that change which alpha threshold sees them. The two
+      // aspects differing by ~7 % is exactly the gear-squish the player
+      // reported.
+      //
+      // Now: _dh sized so the bundle's visible content renders at
+      // _targetH px tall, _dw scaled from _dh by the source file aspect
+      // — this guarantees the bundle's pixel grid is rendered with the
+      // same x and y scale, so any circle in source stays a circle on
+      // screen. For non-square sources (e.g. car_mail's 1348×1167) this
+      // produces a non-square render box that exactly UNDOES the
+      // non-uniform shrink done when the source was packed into the
+      // 160×160 bundle — preserving source proportions either way.
+      const _sn=(typeof SPRITE_NATURAL!=='undefined')?SPRITE_NATURAL[type]:null;
+      const _srcFileAR=(_sn&&_sn[1])?(_sn[0]/_sn[1]):1.0;
       _dh=_targetH*160/Math.max(1,_bh);
-      _dw=(_targetH*_srcAR)*160/Math.max(1,_bw);
-      // Anchor the content bbox's CENTRE on pos.cx / pos.cy.
+      _dw=_dh*_srcFileAR;
+      // Anchor the content bbox's CENTRE on pos.cx (horizontal).
       const _ccxBundle=_bx+_bw/2;
-      const _ccyBundle=_by+_bh/2;
       _dx=pos.cx-_ccxBundle*(_dw/160);
-      _dy=pos.cy-_ccyBundle*(_dh/160);
+      // Vertical anchor: most sprites centre their content on pos.cy,
+      // but car_machinery's larger target (58 px vs the row-default
+      // 42 px) would otherwise hang its bottom edge 8 px below the rest
+      // of row 4 (steel, hazmat, etc.). Bottom-align machinery to the
+      // shared row baseline (pos.cy + default car target / 2 = pos.cy + 21)
+      // so its bottom matches its row-mates while the extra height grows
+      // UPWARD into the otherwise-empty space above.
+      if(type==='car_machinery'){
+        const _rowBaselineY=pos.cy+21; // 42/2 — bottom edge of the standard car target
+        // Bundle drawn so that (_by+_bh)*(_dh/160) below _dy = _rowBaselineY
+        _dy=_rowBaselineY-(_by+_bh)*(_dh/160);
+      } else {
+        const _ccyBundle=_by+_bh/2;
+        _dy=pos.cy-_ccyBundle*(_dh/160);
+      }
     } else {
       // Fallback: canonical-aspect rendering (centres opaque vertically)
       const _vizMult=ENGINE_VIZ_W_MULT[type]||1.0;
