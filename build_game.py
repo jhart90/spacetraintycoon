@@ -1269,8 +1269,16 @@ const ENGINE_ACCEL_RATE  = {engine_constellation:TRANSIT_ACCEL*1, engine_galaxy:
 const ENGINE_MAINT_DECAY = {engine_constellation:MAINT_DECAY_PER_AU, engine_galaxy:MAINT_DECAY_PER_AU*0.8, engine_classJ:MAINT_DECAY_PER_AU*0.6, engine_classR:MAINT_DECAY_PER_AU*0.4, engine_N700:MAINT_DECAY_PER_AU*0.25};
 const ENGINE_REPAIR_MULT = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.3,   engine_classR:1.6,   engine_N700:2.0};
 const ENGINE_ORB_GAP     = {engine_constellation:CAR_ORB_GAP, engine_galaxy:52, engine_classJ:56, engine_classR:57, engine_N700:60}; // gap engine→car[1]
-const ENGINE_ORB_W_MULT  = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.2,   engine_classR:1.235, engine_N700:1.4,  car_passenger:1.05}; // visual width scale in world view
-const ENGINE_VIZ_W_MULT  = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.2,   engine_classR:1.235, engine_N700:1.4,  car_passenger:1.05}; // visual width scale in UI strips/builder
+// car_mail multiplier 0.84 = (new source file W/H ratio of ~1.177 averaged
+// over full 1.155 + empty 1.199) divided by canonical CAR_W/CAR_H 1.4. The
+// updated car_mail.png + car_mail_empty.png sprites have a different (more
+// square) file aspect than the previous sprites, so leaving the default
+// 1.0 mult would stretch the new sprites horizontally to fit the old
+// 112×80 frame. Applying 0.84 renders the mail car at ~94×80 — narrower
+// than other cars on the rails but faithful to the new source artwork.
+// Applied to BOTH maps so world-view (orbit) and UI strips/builder match.
+const ENGINE_ORB_W_MULT  = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.2,   engine_classR:1.235, engine_N700:1.4,  car_passenger:1.05, car_mail:0.84}; // visual width scale in world view
+const ENGINE_VIZ_W_MULT  = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.2,   engine_classR:1.235, engine_N700:1.4,  car_passenger:1.05, car_mail:0.84}; // visual width scale in UI strips/builder
 // Asset values for corporation net-worth calculation
 const CAR_ASSET_VALUE = {
   engine_constellation:10000, engine_galaxy:20000, engine_classJ:50000, engine_classR:70000, engine_N700:100000,
