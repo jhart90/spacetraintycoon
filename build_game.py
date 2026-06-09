@@ -22676,41 +22676,73 @@ function _ttDrawItem(type,mystery){
     ctx.textBaseline='alphabetic';
     ctx.restore();
   } else if(imgs[type]){
-    // ── Target-opaque-height sizing ─────────────────────────────
-    // Different sprites have very different transparent-padding fractions:
-    // engine_constellation's SPRITE_BOT is 0.163 (~84% opaque), but
-    // engine_classR's is 0.278 (~72% opaque). If we draw every bundle at
-    // the SAME cell height the visible body of Class R ends up ~14% shorter
-    // than Constellation's — exactly the "Class R looks too small" complaint.
+    // ── Render at TRUE source content aspect via SPRITE_CONTENT ────────
+    // SPRITE_CONTENT[type] = [bx, by, bw, bh, srcAR] is auto-computed at
+    // build time from the source PNG: (bx,by,bw,bh) is the content bbox
+    // inside the bundled 160x160 image, and srcAR is the source content's
+    // own width/height aspect ratio (in the source PNG itself).
     //
-    // Fix: pick a target opaque-content height per cell type and back-solve
-    // the bundle height per sprite so the VISIBLE body matches across all
-    // items. Bundle height varies (taller for high-padding sprites), but
-    // the visible opaque portion lines up. The transparent extension can
-    // spill outside the cell rect — the cells have ~30 px of dead space
-    // on each side at engine row and ~12 px between cars, plenty of room
-    // for the transparent bottom strip not to clash with neighbours.
+    // Previously we drew every sprite at a fixed canonical aspect
+    // (CAR_W*W_MULT / CAR_H) ≈ 1.4-1.6, which works for cars whose
+    // source PNG aspect happens to be ~1.0-1.15 but mangles sprites
+    // whose source aspect differs sharply — e.g. the new car_mail
+    // (source content aspect 2.644) and engine_classR (2.922) come
+    // out visibly stretched horizontally because their natural content
+    // is squashed into a canonical-aspect frame.
     //
-    // Width comes from the canonical CAR_W/CAR_H aspect scaled by
-    // ENGINE_VIZ_W_MULT (so Class R stays appropriately wider than
-    // Constellation — that part of the design was already correct).
-    // ENGINE_VIZ_H_MULT is intentionally NOT consulted here: it's tuned
-    // for the train builder's coordinated-rail preview, not for an
-    // independent grid like the tech tree, and using it caused Class R
-    // to render narrower than its peers.
+    // The fix: pick a TARGET content height (50 px for engines, 42 px
+    // for cars) and back-solve bundle dimensions so the visible body
+    // renders at that height × srcAR-natural width. Bundle box may
+    // extend beyond the cell rect, but the extra is transparent
+    // padding — visually invisible. Content positions (bx,by,bw,bh)
+    // let us anchor the visible body's CENTRE at pos.cx, pos.cy so
+    // every sprite shares a baseline regardless of where its content
+    // sits within its bundle.
     //
-    // Opaque content is vertically centred on pos.cy so all engines (and
-    // all cars) sit at the same baseline within their row.
+    // Why 42 not 48 for cars: at target 48, car_mail's natural width
+    // becomes 48*2.644 = 127 px, which overflows the column spacing
+    // (105 px between car_passenger and car_mail centres) and visibly
+    // bumps into the passenger column. 42 brings mail down to 111 px,
+    // leaving ~6 px gap between adjacent content edges.
+    //
+    // Fallback for any type with no SPRITE_CONTENT entry: revert to
+    // the canonical-aspect path so unknown sprites still render.
     const _isEng=type.indexOf('engine_')===0;
-    const _targetOpaqueH=_isEng?52:48;
-    const _vizMult=ENGINE_VIZ_W_MULT[type]||1.0;
-    const _aspect=(CAR_W*_vizMult)/CAR_H;
-    const _bp=SPRITE_BOT[type]||0;
-    const _opaqueFrac=Math.max(0.1, 1-_bp);
-    let _dh=_targetOpaqueH/_opaqueFrac;
-    let _dw=_dh*_aspect;
-    const _dx=pos.cx-_dw/2;
-    const _dy=pos.cy-_targetOpaqueH/2;
+    // Per-sprite content-height target. Most cars (passenger / mail /
+    // water / ore / etc.) share a ~2.0-2.6 content aspect ratio, so a
+    // single 42 px target reads consistently across them. car_machinery
+    // is the outlier — its source content is much squarer (1.453 aspect,
+    // i.e. nearly as tall as it is wide), so at the shared 42 target the
+    // rendered body comes out narrow (only ~61 px wide vs passenger's 87)
+    // and visibly small in its cell. Bumping its target to 58 brings the
+    // rendered width to ~84 px (parity with passenger) AND fills the
+    // cell vertically — appropriately representing the tall industrial
+    // shape of the source artwork.
+    const _targetH=_isEng?50:(type==='car_machinery'?58:42);
+    const _sc=(typeof SPRITE_CONTENT!=='undefined')?SPRITE_CONTENT[type]:null;
+    let _dw, _dh, _dx, _dy;
+    if(_sc){
+      const _bx=_sc[0], _by=_sc[1], _bw=_sc[2], _bh=_sc[3], _srcAR=_sc[4];
+      // Bundle dims sized so the visible content renders at
+      // (_targetH * _srcAR) × _targetH.
+      _dh=_targetH*160/Math.max(1,_bh);
+      _dw=(_targetH*_srcAR)*160/Math.max(1,_bw);
+      // Anchor the content bbox's CENTRE on pos.cx / pos.cy.
+      const _ccxBundle=_bx+_bw/2;
+      const _ccyBundle=_by+_bh/2;
+      _dx=pos.cx-_ccxBundle*(_dw/160);
+      _dy=pos.cy-_ccyBundle*(_dh/160);
+    } else {
+      // Fallback: canonical-aspect rendering (centres opaque vertically)
+      const _vizMult=ENGINE_VIZ_W_MULT[type]||1.0;
+      const _aspect=(CAR_W*_vizMult)/CAR_H;
+      const _bp=SPRITE_BOT[type]||0;
+      const _opaqueFrac=Math.max(0.1, 1-_bp);
+      _dh=_targetH/_opaqueFrac;
+      _dw=_dh*_aspect;
+      _dx=pos.cx-_dw/2;
+      _dy=pos.cy-_targetH/2;
+    }
     ctx.save();
     if(_locked){
       try{ ctx.filter='grayscale(1) brightness(0.55) contrast(0.85)'; }catch(e){}
@@ -22737,8 +22769,12 @@ function drawTechTreePopup(){
   ctx.fillStyle='rgba(0,0,0,0.65)';
   ctx.fillRect(0,0,W,H);
   // Centered window — wide as the canvas, shrunk vertically so it ends
-  // just under the row-5 mystery row + N700 engine.
-  const WIN_TOP=64, WIN_BOT=440, WIN_H=WIN_BOT-WIN_TOP;
+  // just under the row-5 mystery row + N700 engine. WIN_TOP raised from
+  // 64 → 36 so the window itself extends higher (sitting just under the
+  // 28 px top bar with a small 8 px buffer), giving the header strip and
+  // upper rows of sprites more breathing room without changing the item
+  // positions below.
+  const WIN_TOP=36, WIN_BOT=440, WIN_H=WIN_BOT-WIN_TOP;
   ctx.fillStyle='rgba(4,7,18,0.97)';
   ctx.fillRect(0,WIN_TOP,W,WIN_H);
   ctx.strokeStyle='rgba(70,140,220,0.55)'; ctx.lineWidth=2;
