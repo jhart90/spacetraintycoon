@@ -28,7 +28,7 @@ sprite_bottoms = assets.get("sprite_bottoms", {})
 # (a) bringing oversized sources (~1300x1100) down to the standard bundle size
 # and (b) refreshing the bundled image when the source PNG has been updated.
 OVERSIZED = [
-    "car_medical", "car_medical_empty",
+    "car_mail", "car_mail_empty",
 ]
 
 def process_sprite(name):

@@ -188,6 +188,21 @@ const tctx = tCanvas.getContext('2d');
 // when the bitmap is upscaled to fit the CSS size.
 tctx.imageSmoothingEnabled = true;
 tctx.imageSmoothingQuality = 'high';
+// Disable font hinting on the HD overlay. Hinting is what the rasterizer
+// does to snap glyph outlines to whole pixels for crispness — but for
+// animated text whose anchor drifts sub-pixel between frames, the snap
+// alternates between two glyph variants and reads as visible per-glyph
+// jitter. Diagnostic clue: the jitter only appears at non-max zoom
+// levels, where the on-screen motion per frame is small enough for the
+// eye to fixate on individual glyphs; at max zoom the motion-blur of
+// fast travel masks it. `textRendering = 'geometricPrecision'` tells the
+// rasterizer to render glyphs at their true geometric position with no
+// hinting, so sub-pixel motion translates to smooth anti-aliased
+// drift instead of glyph-shape flicker. Supported in Chrome 109+,
+// Firefox 138+, Safari 16+. We set it once here on the overlay's
+// initial context state so every later setTransform / save / restore
+// pair inherits it.
+try{ tctx.textRendering = 'geometricPrecision'; }catch(e){}
 
 function fitCanvas() {
   const s = Math.min(window.innerWidth/W, window.innerHeight/H);
@@ -213,10 +228,12 @@ function fitCanvas() {
   tCanvas.style.left = (canvas.offsetLeft||0)+'px';
   tCanvas.style.top  = (canvas.offsetTop ||0)+'px';
   // Re-apply the DPR scale on the fresh tctx state. Re-enable smoothing
-  // since some browsers reset context state when the bitmap is resized.
+  // and geometricPrecision text rendering since assigning canvas.width/
+  // height resets ALL context state (including these) back to defaults.
   tctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   tctx.imageSmoothingEnabled = true;
   tctx.imageSmoothingQuality = 'high';
+  try{ tctx.textRendering = 'geometricPrecision'; }catch(e){}
 }
 fitCanvas();
 window.addEventListener('resize', fitCanvas);
