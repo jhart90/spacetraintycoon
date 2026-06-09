@@ -157,7 +157,10 @@
       "Bash(xxd)",
       "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8766/index.html)",
       "Bash(curl -sI \"https://raw.githubusercontent.com/jhart90/spacetraintycoon/localstorage-saves/assets/04_neon_katsu_sandwich.mp3\")",
-      "Bash(set PYTHONIOENCODING=utf-8)"
+      "Bash(set PYTHONIOENCODING=utf-8)",
+      "Bash(cat .gitignore)",
+      "Bash(git check-ignore *)",
+      "Bash(git status *)"
     ]
   },
   "hooks": {

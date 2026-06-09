@@ -296,16 +296,92 @@ window.addEventListener('resize', fitCanvas);
   }
   const _origFillText = ctx.fillText.bind(ctx);
   const _origStrokeText = ctx.strokeText.bind(ctx);
-  // Forward text calls straight through to the HD overlay context. Earlier
-  // we rounded x/y to the device-pixel grid to crisp-up small static text,
-  // but that quantization caused planet labels and any bubble/callout
-  // attached to an orbiting planet to visibly jitter — each frame's
-  // sub-pixel motion got snapped to a step. The DPR cap raise + the
-  // image-rendering CSS fix already make text crisp enough at 4K without
-  // explicit snapping, and sub-pixel positioning here keeps moving text
-  // gliding smoothly with its anchor.
-  ctx.fillText = function(){ _syncTextState(); tctx.fillText.apply(tctx, arguments); };
-  ctx.strokeText = function(){ _syncTextState(); tctx.strokeText.apply(tctx, arguments); };
+  // ── Bilinear-Y composite: smooth sub-device-pixel vertical motion ──
+  // Diagnostic that drove this design:
+  //   • Text jitter on slow-moving anchors (orbiting planets at low
+  //     zoom) is VERTICAL-only — horizontal motion is smooth.
+  //   • Planet sprites themselves look smooth in BOTH axes.
+  //   • Jitter persists despite (a) textRendering='geometricPrecision'
+  //     to disable hinting and (b) explicit Math.round Y-snap to the
+  //     device-pixel grid.
+  //
+  // That asymmetry rules out symmetric causes (font hinting, axis-
+  // symmetric snap) and points at the well-known canvas rasterizer
+  // behavior: HORIZONTAL anti-aliasing uses LCD sub-pixel rendering
+  // (RGB stripes → 3× sub-pixel resolution across the screen), but
+  // VERTICAL anti-aliasing only has grayscale alpha (1× resolution).
+  // As text drifts sub-pixel vertically, the rasterizer snaps the
+  // baseline to the nearest integer device row — the snapped row
+  // alternates between frames, producing visible per-glyph wobble.
+  // Pre-snapping Y doesn't help because the rasterizer's own snap fires
+  // after our value lands, on whatever fractional offset its internal
+  // metrics introduce (font ascent, etc.).
+  //
+  // Fix: render the glyph TWICE at the two bracketing integer device-
+  // pixel Y rows, with alpha weights based on the fractional part —
+  // (1-frac) and frac respectively — composited additively via
+  // `globalCompositeOperation='lighter'`. The per-pixel alpha at any
+  // glyph pixel covered by both renders sums to (1-frac)+frac = 1.0;
+  // at edge pixels covered by only one render it's (1-frac) or frac.
+  // That distribution is mathematically identical to bilinear
+  // interpolation between two clean integer-Y rasterizations — true
+  // sub-device-pixel Y motion that the rasterizer can't undo because
+  // each individual draw IS at a clean integer row.
+  //
+  // Cost: 2× fillText calls per text draw for sub-pixel Y (skipped
+  // when Y is already on a device row). Typical frame has <100 text
+  // draws so the overhead is <1ms. The 'lighter' composite is restored
+  // to the previous mode after the dual draw so other drawing on the
+  // overlay is unaffected.
+  ctx.fillText = function(text, x, y, maxWidth){
+    _syncTextState();
+    const dpy = y * DPR;
+    const yFloor = Math.floor(dpy);
+    const frac = dpy - yFloor;
+    const yFloorLog = yFloor / DPR;
+    if(frac < 0.001){
+      // Already on a device-pixel row — single draw is correct
+      if(maxWidth !== undefined) tctx.fillText(text, x, yFloorLog, maxWidth);
+      else tctx.fillText(text, x, yFloorLog);
+      return;
+    }
+    const yCeilLog = (yFloor + 1) / DPR;
+    const savedAlpha = tctx.globalAlpha;
+    const savedComp  = tctx.globalCompositeOperation;
+    tctx.globalCompositeOperation = 'lighter';
+    tctx.globalAlpha = savedAlpha * (1 - frac);
+    if(maxWidth !== undefined) tctx.fillText(text, x, yFloorLog, maxWidth);
+    else tctx.fillText(text, x, yFloorLog);
+    tctx.globalAlpha = savedAlpha * frac;
+    if(maxWidth !== undefined) tctx.fillText(text, x, yCeilLog, maxWidth);
+    else tctx.fillText(text, x, yCeilLog);
+    tctx.globalCompositeOperation = savedComp;
+    tctx.globalAlpha = savedAlpha;
+  };
+  ctx.strokeText = function(text, x, y, maxWidth){
+    _syncTextState();
+    const dpy = y * DPR;
+    const yFloor = Math.floor(dpy);
+    const frac = dpy - yFloor;
+    const yFloorLog = yFloor / DPR;
+    if(frac < 0.001){
+      if(maxWidth !== undefined) tctx.strokeText(text, x, yFloorLog, maxWidth);
+      else tctx.strokeText(text, x, yFloorLog);
+      return;
+    }
+    const yCeilLog = (yFloor + 1) / DPR;
+    const savedAlpha = tctx.globalAlpha;
+    const savedComp  = tctx.globalCompositeOperation;
+    tctx.globalCompositeOperation = 'lighter';
+    tctx.globalAlpha = savedAlpha * (1 - frac);
+    if(maxWidth !== undefined) tctx.strokeText(text, x, yFloorLog, maxWidth);
+    else tctx.strokeText(text, x, yFloorLog);
+    tctx.globalAlpha = savedAlpha * frac;
+    if(maxWidth !== undefined) tctx.strokeText(text, x, yCeilLog, maxWidth);
+    else tctx.strokeText(text, x, yCeilLog);
+    tctx.globalCompositeOperation = savedComp;
+    tctx.globalAlpha = savedAlpha;
+  };
 }
 // Called once at the start of each frame to wipe the overlay before the
 // new frame's text is laid down.
@@ -1269,16 +1345,16 @@ const ENGINE_ACCEL_RATE  = {engine_constellation:TRANSIT_ACCEL*1, engine_galaxy:
 const ENGINE_MAINT_DECAY = {engine_constellation:MAINT_DECAY_PER_AU, engine_galaxy:MAINT_DECAY_PER_AU*0.8, engine_classJ:MAINT_DECAY_PER_AU*0.6, engine_classR:MAINT_DECAY_PER_AU*0.4, engine_N700:MAINT_DECAY_PER_AU*0.25};
 const ENGINE_REPAIR_MULT = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.3,   engine_classR:1.6,   engine_N700:2.0};
 const ENGINE_ORB_GAP     = {engine_constellation:CAR_ORB_GAP, engine_galaxy:52, engine_classJ:56, engine_classR:57, engine_N700:60}; // gap engine→car[1]
-// car_mail multiplier 0.84 = (new source file W/H ratio of ~1.177 averaged
-// over full 1.155 + empty 1.199) divided by canonical CAR_W/CAR_H 1.4. The
-// updated car_mail.png + car_mail_empty.png sprites have a different (more
-// square) file aspect than the previous sprites, so leaving the default
-// 1.0 mult would stretch the new sprites horizontally to fit the old
-// 112×80 frame. Applying 0.84 renders the mail car at ~94×80 — narrower
-// than other cars on the rails but faithful to the new source artwork.
-// Applied to BOTH maps so world-view (orbit) and UI strips/builder match.
-const ENGINE_ORB_W_MULT  = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.2,   engine_classR:1.235, engine_N700:1.4,  car_passenger:1.05, car_mail:0.84}; // visual width scale in world view
-const ENGINE_VIZ_W_MULT  = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.2,   engine_classR:1.235, engine_N700:1.4,  car_passenger:1.05, car_mail:0.84}; // visual width scale in UI strips/builder
+// car_mail width-multiplier 1.05 = parity with car_passenger. An earlier
+// pass set this to 0.84 (matching the new sprite's source file aspect),
+// but the resulting mail car visibly read as "too small" in the tech
+// tree and train builder preview — those views compare mail right next
+// to passenger, and a 20% width gap looks wrong. Matching passenger's
+// 1.05 makes the mail car frame the same size as passenger; the matching
+// ENGINE_VIZ_H_MULT.car_mail = 1.139 keeps the visible body the same
+// height too (compensating for the new sprite's extra bottom padding).
+const ENGINE_ORB_W_MULT  = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.2,   engine_classR:1.235, engine_N700:1.4,  car_passenger:1.05, car_mail:1.05}; // visual width scale in world view
+const ENGINE_VIZ_W_MULT  = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.2,   engine_classR:1.235, engine_N700:1.4,  car_passenger:1.05, car_mail:1.05}; // visual width scale in UI strips/builder
 // Asset values for corporation net-worth calculation
 const CAR_ASSET_VALUE = {
   engine_constellation:10000, engine_galaxy:20000, engine_classJ:50000, engine_classR:70000, engine_N700:100000,
@@ -1350,7 +1426,16 @@ function _genCeoCandidate(rosterEntry){
   return {ceoName:rosterEntry.name,ceoSprite:rosterEntry.sprite,logoSprite:'logo_placeholder',
           salary,primaryPerk:perks.primaryPerk,secondaryPerk:perks.secondaryPerk};
 }
-const ENGINE_VIZ_H_MULT  = {engine_constellation:1.000, engine_galaxy:0.957, engine_classJ:0.983, engine_classR:1.460, engine_N700:1.217, car_passenger:1.05}; // visual height multiplier — equalises opaque height across all engines
+// car_mail height-multiplier 1.139 = passenger's effective opaque height
+// (1.05 H_MULT × 0.80 opaque-fraction = 0.84) divided by car_mail's own
+// opaque-fraction (1 − 0.2625 = 0.7375). The new car_mail.png + car_mail_empty
+// sprites have ~6 % more transparent bottom padding than the other cars
+// (sprite_bot 0.2625 vs the ~0.18-0.20 typical), so without an H_MULT bump
+// the visible-content height ends up ~8 % shorter than passenger's at the
+// same render frame — making the mail car read as smaller in the train
+// builder preview and tech tree. 1.139 cancels the extra padding so the
+// visible body matches passenger's height exactly.
+const ENGINE_VIZ_H_MULT  = {engine_constellation:1.000, engine_galaxy:0.957, engine_classJ:0.983, engine_classR:1.460, engine_N700:1.217, car_passenger:1.05, car_mail:1.139}; // visual height multiplier — equalises opaque height across all engines
 const ENGINE_MAX_RANGE   = {engine_constellation:15000, engine_galaxy:25000, engine_classJ:40000, engine_classR:50000, engine_N700:70000};
 // Per-engine hard cap on mid cars (between engine and caboose). Constellation
 // and Galaxy are the small/starter engines and are capped tighter than the
@@ -1419,7 +1504,7 @@ function testOrbits(){
 function formatPop(n){
   if(n>=1e9){ const v=n/1e9; return (v>=10?Math.round(v):Math.round(v*10)/10)+'B'; }
   if(n>=1e6){ const v=n/1e6; return (v>=10?Math.round(v):Math.round(v*10)/10)+'M'; }
-  if(n>=1e3){ const r=Math.round(n/1000)*1000; return r.toString().replace(/\B(?=(\d{3})+(?!\d))/g,','); }
+  if(n>=1e3){ const v=n/1e3; return (v>=10?Math.round(v):Math.round(v*10)/10)+'K'; }
   return Math.round(n).toString();
 }
 function _fmtCr(n){
@@ -15394,8 +15479,11 @@ function drawCorpPopup(){
   const _ceoCX=_midX+(pw-(_midX-px))/2; // horizontal centre of right pane
   const _portW=76, _portH=76;
   const _portX=Math.round(_ceoCX-_portW/2), _ceoBaseY=py+46;
-  // "CHIEF EXECUTIVE OFFICER" above portrait
-  ctx.font='7px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,145,215,0.52)'; ctx.textAlign='center';
+  // "CHIEF EXECUTIVE OFFICER" above portrait — font/size matched to the
+  // "LIQUID ASSETS" label on the left financials pane (10 px Exo 2,
+  // rgba(100,145,215,0.55)) so the two top-of-pane labels visually
+  // weigh the same across the divider.
+  ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,145,215,0.55)'; ctx.textAlign='center';
   ctx.fillText('CHIEF EXECUTIVE OFFICER',_ceoCX,_ceoBaseY+8);
   // Portrait (centred) — blur + CHANGE overlay on hover
   popupState.ceoPortraitBounds={x:_portX,y:_ceoBaseY+14,w:_portW,h:_portH};
@@ -15478,22 +15566,25 @@ function drawCorpPopup(){
   const _bLH=20;  // left col line-height
   const _bRLH=20; // right col line-height
 
-  // Shared row helpers
+  // Shared row helpers — every font size in this pane bumped +2 px (labels
+  // 9→11, values 11→13, headers 9→11, AI rivals 7→9) per user request,
+  // without changing the pane geometry (_bLH=20 still holds — 20 px of
+  // line-height comfortably absorbs the 2-px bump on bold-13 Orbitron).
   const _dRow=(lbl,val,x,y)=>{
-    ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,145,215,0.52)'; ctx.textAlign='left';
+    ctx.font='11px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,145,215,0.52)'; ctx.textAlign='left';
     ctx.fillText(lbl,x,y);
-    ctx.font='bold 11px Orbitron,sans-serif'; ctx.fillStyle='rgba(185,215,255,0.92)'; ctx.textAlign='right';
+    ctx.font='bold 13px Orbitron,sans-serif'; ctx.fillStyle='rgba(185,215,255,0.92)'; ctx.textAlign='right';
     ctx.fillText(val,x+160,y);
   };
   _dRow2=(_lbl,_val,x,y)=>{
-    ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,145,215,0.52)'; ctx.textAlign='left';
+    ctx.font='11px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,145,215,0.52)'; ctx.textAlign='left';
     ctx.fillText(_lbl,x,y);
-    ctx.font='bold 11px Orbitron,sans-serif'; ctx.fillStyle='rgba(185,215,255,0.92)'; ctx.textAlign='right';
+    ctx.font='bold 13px Orbitron,sans-serif'; ctx.fillStyle='rgba(185,215,255,0.92)'; ctx.textAlign='right';
     ctx.fillText(_val,x+240,y);
   };
 
   // Left: Exploration (with new discovery stats)
-  ctx.font='bold 9px Orbitron,sans-serif'; ctx.fillStyle='rgba(140,180,255,0.7)'; ctx.textAlign='left';
+  ctx.font='bold 11px Orbitron,sans-serif'; ctx.fillStyle='rgba(140,180,255,0.7)'; ctx.textAlign='left';
   ctx.fillText('EXPLORATION',_bLX,_bY);
   const _visitedStars=new Set(galaxy.planets.filter(p=>visitedPlanetIds.has(p.id)).map(p=>p.starId));
   _dRow('Planets Discovered',discoveredPlanetIds.size+'',_bLX,_bY+_bLH*1);
@@ -15518,7 +15609,7 @@ function drawCorpPopup(){
   _dRow('Phenomena Discovered',_phenomena+'',_bLX,_bY+_bLH*8);
 
   // Right: Fleet summary + Operations
-  ctx.font='bold 9px Orbitron,sans-serif'; ctx.fillStyle='rgba(140,180,255,0.7)'; ctx.textAlign='left';
+  ctx.font='bold 11px Orbitron,sans-serif'; ctx.fillStyle='rgba(140,180,255,0.7)'; ctx.textAlign='left';
   ctx.fillText('FLEET & OPERATIONS',_bRX,_bY);
   const _pTrains=trains.filter(t=>t.isPlayer);
   const _nCars=_pTrains.reduce((s,t)=>s+(t.cars||[]).filter(c=>!ENGINE_TYPES_ALL.includes(c)&&c!=='caboose').length,0);
@@ -15545,7 +15636,7 @@ function drawCorpPopup(){
       const _aiNW=_aiComputeNetWorth();
       const _aiNWTxt=_aiNW>=1000000?(_aiNW/1000000).toFixed(1)+'M cr':_aiNW>=1000?Math.round(_aiNW/1000)+'k cr':_aiNW+' cr';
       const _aiNWStr='rivals: '+_aiCorp.name.split(' ').slice(0,2).join(' ')+' · '+_aiNWTxt+' · '+_aiCorp.trainIndices.length+' trains · '+_aiCorp.stationsBuilt+' stn';
-      ctx.font='7px "Exo 2",sans-serif';ctx.textAlign='left';
+      ctx.font='9px "Exo 2",sans-serif';ctx.textAlign='left';
       ctx.fillStyle='rgba(232,147,32,0.70)';
       ctx.fillText(_aiNWStr,_bRX-170,_bY+_bRLH*9+4);
     }
@@ -19203,8 +19294,12 @@ function drawCheatsPopup(){
   if(activePopup!=='cheats') return;
   // Hidden popup reachable only by pressing 'C' while the Options popup is
   // open. Amber palette to visually distinguish from the cool-blue Options.
-  // Houses the four planet-shortcut cheats AND the Fog of War toggle so the
-  // standard Options popup stays free of "viewing-mode" debug toggles.
+  // Compact 7-row layout — uniform 36 px row spacing replaces the old
+  // 42-62 px gaps + per-section dividers so we fit Add Credits, three
+  // planet-shortcut rows (Flower / Colony / Rival), Fog of War,
+  // Export Planet Data, AND the new Unlock All row inside the SAME
+  // 300×360 popup footprint as before. Smaller label/subtitle fonts
+  // (11/9) and a 20 px button replace the 12/10 + 22 px button.
   const pw=300, ph=360;
   const [px,py]=drawPopupBase(pw,ph,'rgba(255,170,60,0.7)');
   ctx.save();
@@ -19214,115 +19309,113 @@ function drawCheatsPopup(){
   ctx.fillStyle='rgba(190,130,60,0.55)'; ctx.fillText('[ESC] close',px+pw-10,py+21);
   ctx.strokeStyle='rgba(180,90,40,0.35)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(px,py+28); ctx.lineTo(px+pw,py+28); ctx.stroke();
-  // Add Credits row
-  const ry2=py+58;
-  ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
-  ctx.fillStyle='rgba(255,210,150,0.92)'; ctx.fillText('Add Credits',px+18,ry2);
-  ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(200,150,90,0.55)';
-  ctx.fillText('+10,000 per click',px+18,ry2+16);
-  const acW=80,acH=22,acX=px+pw-18-acW,acT=ry2-14;
-  const _acHov=!!popupState.addCreditsHover;
-  ctx.fillStyle=_acHov?'rgba(32,155,72,0.98)':'rgba(22,108,52,0.88)'; ctx.fillRect(acX,acT,acW,acH);
-  ctx.strokeStyle=_acHov?'rgba(70,220,110,0.90)':'rgba(45,195,85,0.75)'; ctx.lineWidth=1; ctx.strokeRect(acX,acT,acW,acH);
-  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
-  ctx.fillStyle='#afa'; ctx.fillText('+10,000',acX+acW/2,acT+acH/2+4);
-  popupState.addCreditsBtnBounds={x:acX,y:acT,w:acW,h:acH};
-  // Divider
-  ctx.strokeStyle='rgba(180,90,40,0.35)'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.moveTo(px,py+95); ctx.lineTo(px+pw,py+95); ctx.stroke();
-  // Flower Planet row
+  // ── Compact row helper ──────────────────────────────────────────
+  // All 7 rows share the same geometry: title @ ry, subtitle @ ry+11,
+  // button @ ry-13 with height 20. Each row gets a unique button label,
+  // button color palette, and (for shortcut rows) an availability flag
+  // for the greyed-out look when the target doesn't exist yet.
+  const _drawRow = (idx, label, sub, btnLabel, btnW, palette, available, hoverKey, boundsKey) => {
+    // Row 0 starts 28 px below the title divider (py+28) — gives the
+    // "Add Credits" label some visual breathing room rather than crowding
+    // it right under the rule. All subsequent rows step by 36 px from there.
+    const ry = py + 56 + idx * 36;
+    const labelCol = available ? palette.label : palette.labelDis;
+    const subCol   = available ? palette.sub   : palette.subDis;
+    ctx.textAlign='left';
+    ctx.font='11px "Exo 2",sans-serif'; ctx.fillStyle=labelCol;
+    ctx.fillText(label, px+16, ry);
+    ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle=subCol;
+    ctx.fillText(sub, px+16, ry+11);
+    const bW=btnW, bH=20, bX=px+pw-16-bW, bT=ry-13;
+    const hov = available && !!popupState[hoverKey];
+    const btnBg     = available ? (hov ? palette.btnBgHov     : palette.btnBg    ) : palette.btnBgDis;
+    const btnStroke = available ? (hov ? palette.btnStrokeHov : palette.btnStroke) : palette.btnStrokeDis;
+    const btnText   = available ? palette.btnText : palette.btnTextDis;
+    ctx.fillStyle=btnBg; ctx.fillRect(bX,bT,bW,bH);
+    ctx.strokeStyle=btnStroke; ctx.lineWidth=1; ctx.strokeRect(bX,bT,bW,bH);
+    ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
+    ctx.fillStyle=btnText; ctx.fillText(btnLabel, bX+bW/2, bT+bH/2+3);
+    popupState[boundsKey] = available ? {x:bX,y:bT,w:bW,h:bH} : null;
+  };
+  // ── Row 0: Add Credits (always available) ──
+  _drawRow(0, 'Add Credits', '+100,000 per click', '+100,000', 78, {
+    label:'rgba(255,210,150,0.92)', sub:'rgba(200,150,90,0.55)',
+    btnBg:'rgba(22,108,52,0.88)', btnBgHov:'rgba(32,155,72,0.98)',
+    btnStroke:'rgba(45,195,85,0.75)', btnStrokeHov:'rgba(70,220,110,0.90)',
+    btnText:'#afa',
+  }, true, 'addCreditsHover', 'addCreditsBtnBounds');
+  // ── Row 1: Flower Planet (greyed if not yet generated) ──
   const _flowerP=galaxy&&galaxy.planets.find(p=>p.isFlowersOrigin);
-  const _flwAvail=!!_flowerP;
-  const ry3=py+120;
-  ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
-  ctx.fillStyle=_flwAvail?'rgba(255,160,220,0.92)':'rgba(120,100,115,0.5)'; ctx.fillText('Flower Planet',px+18,ry3);
-  ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle=_flwAvail?'rgba(200,130,175,0.55)':'rgba(100,85,100,0.4)';
-  ctx.fillText(_flwAvail?_flowerP.name:'unavailable',px+18,ry3+14);
-  const fpW=60,fpH=22,fpX=px+pw-18-fpW,fpT=ry3-14;
-  const _fpHov=_flwAvail&&!!popupState.flowerPlanetHover;
-  ctx.fillStyle=_flwAvail?(_fpHov?'rgba(220,60,160,0.98)':'rgba(170,40,120,0.88)'):('rgba(40,35,50,0.65)');
-  ctx.fillRect(fpX,fpT,fpW,fpH);
-  ctx.strokeStyle=_flwAvail?(_fpHov?'rgba(255,120,210,0.90)':'rgba(210,80,165,0.65)'):('rgba(70,60,80,0.4)'); ctx.lineWidth=1; ctx.strokeRect(fpX,fpT,fpW,fpH);
-  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
-  ctx.fillStyle=_flwAvail?'#ffcce8':'rgba(100,90,110,0.6)'; ctx.fillText('FIND →',fpX+fpW/2,fpT+fpH/2+4);
-  popupState.flowerPlanetBtnBounds=_flwAvail?{x:fpX,y:fpT,w:fpW,h:fpH}:null;
-  // Colony Planet row
+  _drawRow(1, 'Flower Planet', _flowerP?_flowerP.name:'unavailable', 'FIND →', 58, {
+    label:'rgba(255,160,220,0.92)', labelDis:'rgba(120,100,115,0.5)',
+    sub:'rgba(200,130,175,0.55)',  subDis:'rgba(100,85,100,0.4)',
+    btnBg:'rgba(170,40,120,0.88)', btnBgHov:'rgba(220,60,160,0.98)', btnBgDis:'rgba(40,35,50,0.65)',
+    btnStroke:'rgba(210,80,165,0.65)', btnStrokeHov:'rgba(255,120,210,0.90)', btnStrokeDis:'rgba(70,60,80,0.4)',
+    btnText:'#ffcce8', btnTextDis:'rgba(100,90,110,0.6)',
+  }, !!_flowerP, 'flowerPlanetHover', 'flowerPlanetBtnBounds');
+  // ── Row 2: Colony Planet (greyed if not yet generated) ──
   const _colonyP=galaxy&&galaxy.planets.find(p=>p.isColonyTrainSource);
-  const _colAvail=!!_colonyP;
-  const ry4=py+162;
-  ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
-  ctx.fillStyle=_colAvail?'rgba(255,190,100,0.92)':'rgba(120,110,85,0.5)'; ctx.fillText('Colony Planet',px+18,ry4);
-  ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle=_colAvail?'rgba(200,155,80,0.55)':'rgba(100,95,70,0.4)';
-  ctx.fillText(_colAvail?_colonyP.name:'unavailable',px+18,ry4+14);
-  const cpBW=60,cpBH=22,cpBX=px+pw-18-cpBW,cpBT=ry4-14;
-  const _cpHov=_colAvail&&!!popupState.colonyPlanetHover;
-  ctx.fillStyle=_colAvail?(_cpHov?'rgba(200,120,20,0.98)':'rgba(155,88,14,0.88)'):('rgba(40,38,30,0.65)');
-  ctx.fillRect(cpBX,cpBT,cpBW,cpBH);
-  ctx.strokeStyle=_colAvail?(_cpHov?'rgba(255,180,60,0.90)':'rgba(200,140,40,0.65)'):('rgba(70,65,50,0.4)'); ctx.lineWidth=1; ctx.strokeRect(cpBX,cpBT,cpBW,cpBH);
-  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
-  ctx.fillStyle=_colAvail?'#ffe8b0':'rgba(100,95,70,0.6)'; ctx.fillText('FIND →',cpBX+cpBW/2,cpBT+cpBH/2+4);
-  popupState.colonyPlanetBtnBounds=_colAvail?{x:cpBX,y:cpBT,w:cpBW,h:cpBH}:null;
-  // Rival row
+  _drawRow(2, 'Colony Planet', _colonyP?_colonyP.name:'unavailable', 'FIND →', 58, {
+    label:'rgba(255,190,100,0.92)', labelDis:'rgba(120,110,85,0.5)',
+    sub:'rgba(200,155,80,0.55)',  subDis:'rgba(100,95,70,0.4)',
+    btnBg:'rgba(155,88,14,0.88)', btnBgHov:'rgba(200,120,20,0.98)', btnBgDis:'rgba(40,38,30,0.65)',
+    btnStroke:'rgba(200,140,40,0.65)', btnStrokeHov:'rgba(255,180,60,0.90)', btnStrokeDis:'rgba(70,65,50,0.4)',
+    btnText:'#ffe8b0', btnTextDis:'rgba(100,95,70,0.6)',
+  }, !!_colonyP, 'colonyPlanetHover', 'colonyPlanetBtnBounds');
+  // ── Row 3: Rival (greyed if no AI corp yet) ──
   const _rivalP=galaxy&&_aiCorp&&galaxy.planets[_aiCorp.homePlanetId];
-  const _rivAvail=!!_rivalP;
-  const ry5=py+204;
-  ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
-  ctx.fillStyle=_rivAvail?'rgba(255,150,120,0.92)':'rgba(120,95,90,0.5)'; ctx.fillText('Rival',px+18,ry5);
-  ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle=_rivAvail?'rgba(220,140,110,0.55)':'rgba(105,85,80,0.4)';
-  ctx.fillText(_rivAvail?_rivalP.name:'unavailable',px+18,ry5+14);
-  const rvW=60,rvH=22,rvX=px+pw-18-rvW,rvT=ry5-14;
-  const _rvHov=_rivAvail&&!!popupState.rivalBtnHover;
-  ctx.fillStyle=_rivAvail?(_rvHov?'rgba(210,55,40,0.98)':'rgba(165,40,28,0.88)'):('rgba(45,35,32,0.65)');
-  ctx.fillRect(rvX,rvT,rvW,rvH);
-  ctx.strokeStyle=_rivAvail?(_rvHov?'rgba(255,130,100,0.92)':'rgba(220,90,70,0.70)'):('rgba(75,55,50,0.4)'); ctx.lineWidth=1; ctx.strokeRect(rvX,rvT,rvW,rvH);
-  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
-  ctx.fillStyle=_rivAvail?'#ffd8c8':'rgba(105,85,80,0.6)'; ctx.fillText('FIND →',rvX+rvW/2,rvT+rvH/2+4);
-  popupState.rivalBtnBounds=_rivAvail?{x:rvX,y:rvT,w:rvW,h:rvH}:null;
-  // Divider before Fog of War
-  ctx.strokeStyle='rgba(180,90,40,0.35)'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.moveTo(px,py+235); ctx.lineTo(px+pw,py+235); ctx.stroke();
-  // Fog of War row (moved from the Options popup so the standard options menu
-  // stays free of debug-style toggles; the same green ON/OFF pill style is
-  // preserved so muscle memory still works).
-  const ry6=py+265;
-  ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
-  ctx.fillStyle='rgba(255,210,150,0.92)'; ctx.fillText('Fog of War',px+18,ry6);
-  ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(200,150,90,0.55)';
-  ctx.fillText('Hides unexplored regions',px+18,ry6+16);
-  const fwW=48,fwH=22,fwX=px+pw-18-fwW,fwT=ry6-16;
-  const _fogHov=!!popupState.fogToggleHover;
-  ctx.fillStyle=fogEnabled?(_fogHov?'rgba(45,200,90,0.97)':'rgba(30,160,70,0.85)'):(_fogHov?'rgba(70,70,105,0.90)':'rgba(50,50,75,0.75)');
-  ctx.fillRect(fwX,fwT,fwW,fwH);
-  ctx.strokeStyle=fogEnabled?(_fogHov?'rgba(80,240,110,0.85)':'rgba(50,220,90,0.7)'):(_fogHov?'rgba(100,100,145,0.70)':'rgba(70,70,100,0.5)'); ctx.lineWidth=1;
-  ctx.strokeRect(fwX,fwT,fwW,fwH);
-  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
-  ctx.fillStyle='#fff'; ctx.fillText(fogEnabled?'ON':'OFF',fwX+fwW/2,fwT+fwH/2+4);
-  popupState.fogToggleBounds={x:fwX,y:fwT,w:fwW,h:fwH};
-  // Divider before Export Planet Data
-  ctx.strokeStyle='rgba(180,90,40,0.35)'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.moveTo(px,py+295); ctx.lineTo(px+pw,py+295); ctx.stroke();
-  // Export Planet Data row — greyed out unless the player has a planet
-  // selected. Writes the same JSON schema discussed previously to a
-  // downloadable <planet>_planet.json file.
+  _drawRow(3, 'Rival', _rivalP?_rivalP.name:'unavailable', 'FIND →', 58, {
+    label:'rgba(255,150,120,0.92)', labelDis:'rgba(120,95,90,0.5)',
+    sub:'rgba(220,140,110,0.55)', subDis:'rgba(105,85,80,0.4)',
+    btnBg:'rgba(165,40,28,0.88)', btnBgHov:'rgba(210,55,40,0.98)', btnBgDis:'rgba(45,35,32,0.65)',
+    btnStroke:'rgba(220,90,70,0.70)', btnStrokeHov:'rgba(255,130,100,0.92)', btnStrokeDis:'rgba(75,55,50,0.4)',
+    btnText:'#ffd8c8', btnTextDis:'rgba(105,85,80,0.6)',
+  }, !!_rivalP, 'rivalBtnHover', 'rivalBtnBounds');
+  // ── Row 4: Fog of War — toggle pill (ON/OFF replaces the standard label) ──
+  // Handled out-of-band from _drawRow because the button label is dynamic
+  // (ON vs OFF) and the button colour palette swaps based on `fogEnabled`,
+  // not on availability. Same geometry as the other rows.
+  {
+    const ry=py+56+4*36;
+    ctx.textAlign='left'; ctx.font='11px "Exo 2",sans-serif';
+    ctx.fillStyle='rgba(255,210,150,0.92)'; ctx.fillText('Fog of War',px+16,ry);
+    ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(200,150,90,0.55)';
+    ctx.fillText('Hides unexplored regions',px+16,ry+11);
+    const bW=44,bH=20,bX=px+pw-16-bW,bT=ry-13;
+    const _fogHov=!!popupState.fogToggleHover;
+    ctx.fillStyle=fogEnabled?(_fogHov?'rgba(45,200,90,0.97)':'rgba(30,160,70,0.85)'):(_fogHov?'rgba(70,70,105,0.90)':'rgba(50,50,75,0.75)');
+    ctx.fillRect(bX,bT,bW,bH);
+    ctx.strokeStyle=fogEnabled?(_fogHov?'rgba(80,240,110,0.85)':'rgba(50,220,90,0.7)'):(_fogHov?'rgba(100,100,145,0.70)':'rgba(70,70,100,0.5)');
+    ctx.lineWidth=1; ctx.strokeRect(bX,bT,bW,bH);
+    ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
+    ctx.fillStyle='#fff'; ctx.fillText(fogEnabled?'ON':'OFF',bX+bW/2,bT+bH/2+3);
+    popupState.fogToggleBounds={x:bX,y:bT,w:bW,h:bH};
+  }
+  // ── Row 5: Export Planet Data (greyed unless a planet is selected) ──
   const _selIsPlanet=!!(typeof sel!=='undefined' && sel && sel.type==='planet' && sel.data);
   const _expP=_selIsPlanet?sel.data:null;
-  const ry7=py+325;
-  ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
-  ctx.fillStyle=_selIsPlanet?'rgba(255,210,150,0.92)':'rgba(120,110,90,0.5)';
-  ctx.fillText('Export Planet Data',px+18,ry7);
-  ctx.font='10px "Exo 2",sans-serif';
-  ctx.fillStyle=_selIsPlanet?'rgba(200,150,90,0.55)':'rgba(105,95,80,0.4)';
-  ctx.fillText(_selIsPlanet?('Selected: '+_expP.name):'no planet selected',px+18,ry7+16);
-  const epW=72, epH=22, epX=px+pw-18-epW, epT=ry7-14;
-  const _epHov=_selIsPlanet&&!!popupState.exportPlanetHover;
-  ctx.fillStyle=_selIsPlanet?(_epHov?'rgba(32,155,72,0.98)':'rgba(22,108,52,0.88)'):'rgba(40,40,45,0.65)';
-  ctx.fillRect(epX,epT,epW,epH);
-  ctx.strokeStyle=_selIsPlanet?(_epHov?'rgba(70,220,110,0.90)':'rgba(45,195,85,0.75)'):'rgba(75,70,65,0.4)';
-  ctx.lineWidth=1; ctx.strokeRect(epX,epT,epW,epH);
-  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
-  ctx.fillStyle=_selIsPlanet?'#afa':'rgba(100,95,80,0.6)';
-  ctx.fillText('EXPORT',epX+epW/2,epT+epH/2+4);
-  popupState.exportPlanetBtnBounds=_selIsPlanet?{x:epX,y:epT,w:epW,h:epH}:null;
+  _drawRow(5, 'Export Planet Data',
+    _selIsPlanet?('Selected: '+_expP.name):'no planet selected',
+    'EXPORT', 68, {
+      label:'rgba(255,210,150,0.92)', labelDis:'rgba(120,110,90,0.5)',
+      sub:'rgba(200,150,90,0.55)',  subDis:'rgba(105,95,80,0.4)',
+      btnBg:'rgba(22,108,52,0.88)', btnBgHov:'rgba(32,155,72,0.98)', btnBgDis:'rgba(40,40,45,0.65)',
+      btnStroke:'rgba(45,195,85,0.75)', btnStrokeHov:'rgba(70,220,110,0.90)', btnStrokeDis:'rgba(75,70,65,0.4)',
+      btnText:'#afa', btnTextDis:'rgba(100,95,80,0.6)',
+    }, _selIsPlanet, 'exportPlanetHover', 'exportPlanetBtnBounds');
+  // ── Row 6: Unlock All — sets every engine + train-car unlock flag ──
+  // Unconditionally available; matches the canonical reset list in
+  // startGame() / _restoreFromSave() (engines: classJ + classR + N700;
+  // cars: iron, steel, glass, machinery, cargo, hazmat, royal, flowers,
+  // medical, grain, livestock, fruit). Button uses a cyan/teal palette
+  // distinct from the row above so the player can tell which row it is
+  // at a glance.
+  _drawRow(6, 'Unlock All', 'All engines & train cars', 'UNLOCK', 66, {
+    label:'rgba(180,235,255,0.92)', sub:'rgba(140,195,225,0.55)',
+    btnBg:'rgba(28,118,148,0.88)', btnBgHov:'rgba(40,170,210,0.98)',
+    btnStroke:'rgba(80,200,235,0.75)', btnStrokeHov:'rgba(120,240,255,0.92)',
+    btnText:'#cef',
+  }, true, 'unlockAllHover', 'unlockAllBtnBounds');
   ctx.restore();
 }
 
@@ -21662,6 +21755,10 @@ function drawPlanetDetailPopup(){
   const _boldU='bold 12px “Exo 2”,sans-serif';
   const _lblU='9px “Exo 2”,sans-serif';
   const _lblC='rgba(100,145,215,0.52)';
+  // Per-unit suffix font (SU, K, M, B). Renders 4 px smaller than the value
+  // font and bold, in the value's own color — so the unit reads like a
+  // typographic subscript stuck to the number rather than a separate label.
+  const _sfxU='bold 8px “Exo 2”,sans-serif';
   ctx.textAlign='left';
 
   // helper: draw dim label then bright value on same baseline
@@ -21700,7 +21797,8 @@ function drawPlanetDetailPopup(){
     ctx.font=_lblU; ctx.fillStyle=_lblC;
     const _rdiv='  \xb7  RADIUS:  '; ctx.fillText(_rdiv,_tx,ls+16); _tx+=ctx.measureText(_rdiv).width;
     ctx.font=_normU; ctx.fillStyle=_col; ctx.fillText(p.radius+'',_tx,ls+16); _tx+=ctx.measureText(p.radius+'').width;
-    ctx.font=_lblU; ctx.fillStyle=_lblC; ctx.fillText('  SU',_tx,ls+16);
+    // SU unit: same colour as the radius value, smaller + bold per design.
+    ctx.font=_sfxU; ctx.fillStyle=_col; ctx.fillText(' SU',_tx,ls+16);
   }
 
   // Orbit — value then bold SU, then dim “from”, then colored star name
@@ -21709,7 +21807,8 @@ function drawPlanetDetailPopup(){
     ctx.font=_lblU; ctx.fillStyle=_lblC;
     const _olbl='ORBIT:  '; ctx.fillText(_olbl,_tx,ls+32); _tx+=ctx.measureText(_olbl).width;
     ctx.font=_normU; ctx.fillStyle=_col; const _ov=Math.round(p.orbitRadius)+''; ctx.fillText(_ov,_tx,ls+32); _tx+=ctx.measureText(_ov).width;
-    ctx.font=_lblU; ctx.fillStyle=_lblC; const _au='  SU'; ctx.fillText(_au,_tx,ls+32); _tx+=ctx.measureText(_au).width;
+    // SU unit: same colour as the orbit value, smaller + bold per design.
+    ctx.font=_sfxU; ctx.fillStyle=_col; const _au=' SU'; ctx.fillText(_au,_tx,ls+32); _tx+=ctx.measureText(_au).width;
     ctx.font=_lblU; ctx.fillStyle=_lblC; const _frm='  from '; ctx.fillText(_frm,_tx,ls+32); _tx+=ctx.measureText(_frm).width;
     const _sLinkHov=!!popupState.orbitStarLinkHover;
     ctx.fillStyle=_sLinkHov?'#ffffff':star.color.core; ctx.font=_boldU;
@@ -21721,16 +21820,27 @@ function drawPlanetDetailPopup(){
     ctx.globalAlpha=1;
   }
 
-  // Population
+  // Population — split off any K/M/B rounding suffix and render it at the
+  // same colour as the digit value but in the smaller-bold _sfxU font, so
+  // the suffix reads like a typographic subscript stuck to the number.
   {
     const _popDisp=p.population?formatPop(p.population):(['storm','lava','chemical'].includes(p.type.id)?'Uninhabitable':'Uninhabited');
     const _sfx=_popDisp.slice(-1);
-    const _hasSfx=_popDisp.length>1&&(_sfx==='M'||_sfx==='B');
+    const _hasSfx=_popDisp.length>1&&(_sfx==='K'||_sfx==='M'||_sfx==='B');
     ctx.font=_lblU; ctx.fillStyle=_lblC;
     ctx.fillText('POPULATION:  ',lx,ls+48);
     const _lw=ctx.measureText('POPULATION:  ').width;
-    ctx.font=_normU; ctx.fillStyle=_col;
-    ctx.fillText(_popDisp,lx+_lw,ls+48);
+    let _tx=lx+_lw;
+    if(_hasSfx){
+      const _num=_popDisp.slice(0,-1);
+      ctx.font=_normU; ctx.fillStyle=_col;
+      ctx.fillText(_num,_tx,ls+48); _tx+=ctx.measureText(_num).width;
+      ctx.font=_sfxU; ctx.fillStyle=_col;
+      ctx.fillText(_sfx,_tx,ls+48);
+    } else {
+      ctx.font=_normU; ctx.fillStyle=_col;
+      ctx.fillText(_popDisp,_tx,ls+48);
+    }
   }
 
   // Coords
@@ -22566,18 +22676,41 @@ function _ttDrawItem(type,mystery){
     ctx.textBaseline='alphabetic';
     ctx.restore();
   } else if(imgs[type]){
-    // Use the SAME canonical aspect ratio the train builder and galaxy view
-    // use — CAR_W/CAR_H (= 1.4) scaled by the per-type ENGINE_VIZ_W_MULT (a
-    // few engines + the passenger car are slightly wider than canonical).
-    // NOTE: naturalWidth/naturalHeight on the PNG file includes the sprite's
-    // transparent padding strips, so its raw aspect doesn't match the visible
-    // sprite — using natural dims caused some cars to look stretched or
-    // squished relative to galaxy view.
+    // ── Target-opaque-height sizing ─────────────────────────────
+    // Different sprites have very different transparent-padding fractions:
+    // engine_constellation's SPRITE_BOT is 0.163 (~84% opaque), but
+    // engine_classR's is 0.278 (~72% opaque). If we draw every bundle at
+    // the SAME cell height the visible body of Class R ends up ~14% shorter
+    // than Constellation's — exactly the "Class R looks too small" complaint.
+    //
+    // Fix: pick a target opaque-content height per cell type and back-solve
+    // the bundle height per sprite so the VISIBLE body matches across all
+    // items. Bundle height varies (taller for high-padding sprites), but
+    // the visible opaque portion lines up. The transparent extension can
+    // spill outside the cell rect — the cells have ~30 px of dead space
+    // on each side at engine row and ~12 px between cars, plenty of room
+    // for the transparent bottom strip not to clash with neighbours.
+    //
+    // Width comes from the canonical CAR_W/CAR_H aspect scaled by
+    // ENGINE_VIZ_W_MULT (so Class R stays appropriately wider than
+    // Constellation — that part of the design was already correct).
+    // ENGINE_VIZ_H_MULT is intentionally NOT consulted here: it's tuned
+    // for the train builder's coordinated-rail preview, not for an
+    // independent grid like the tech tree, and using it caused Class R
+    // to render narrower than its peers.
+    //
+    // Opaque content is vertically centred on pos.cy so all engines (and
+    // all cars) sit at the same baseline within their row.
+    const _isEng=type.indexOf('engine_')===0;
+    const _targetOpaqueH=_isEng?52:48;
     const _vizMult=ENGINE_VIZ_W_MULT[type]||1.0;
     const _aspect=(CAR_W*_vizMult)/CAR_H;
-    let _dh=sz.h, _dw=_dh*_aspect;
-    if(_dw>sz.w){ _dw=sz.w; _dh=_dw/_aspect; }
-    const _dx=pos.cx-_dw/2, _dy=pos.cy-_dh/2;
+    const _bp=SPRITE_BOT[type]||0;
+    const _opaqueFrac=Math.max(0.1, 1-_bp);
+    let _dh=_targetOpaqueH/_opaqueFrac;
+    let _dw=_dh*_aspect;
+    const _dx=pos.cx-_dw/2;
+    const _dy=pos.cy-_targetOpaqueH/2;
     ctx.save();
     if(_locked){
       try{ ctx.filter='grayscale(1) brightness(0.55) contrast(0.85)'; }catch(e){}
@@ -25450,8 +25583,18 @@ function drawGalaxy(ts,dt){
       ctx.fillStyle=p.type.hi;
       ctx.fillText(p.name+(p.isStarter?' [HOME]':''),textX,GH+22);
       ctx.font='12px "Exo 2",sans-serif'; ctx.fillStyle='#8bc';
-      // Row 2: Type · Size · Orbit (Orbit appended on the same left-column row)
-      ctx.fillText(`Type: ${p.type.id.toUpperCase()}  ·  Size: ${p.size}  ·  Orbit: ${Math.round(p.orbitRadius)} SU`,textX,GH+40);
+      // Row 2: Type · Size · Orbit (Orbit appended on the same left-column row).
+      // SU rendered separately at 8 px bold (4 sizes smaller than the 12 px
+      // value font) in the same #8bc colour as the orbit value — same visual
+      // treatment as the planet-detail popup.
+      {
+        const _pre=`Type: ${p.type.id.toUpperCase()}  ·  Size: ${p.size}  ·  Orbit: ${Math.round(p.orbitRadius)}`;
+        ctx.font='12px "Exo 2",sans-serif'; ctx.fillStyle='#8bc';
+        ctx.fillText(_pre,textX,GH+40);
+        const _preW=ctx.measureText(_pre).width;
+        ctx.font='bold 8px "Exo 2",sans-serif';
+        ctx.fillText(' SU',textX+_preW,GH+40);
+      }
       // Row 3: Star: NAME · Coords: (X, Y) — Star name remains clickable
       ctx.fillStyle='#8bc';
       ctx.fillText('Star: ',textX,GH+56);
@@ -25852,12 +25995,13 @@ function drawGalaxy(ts,dt){
   // ── Bottom hint bar ──────────────────────────────────────────
   ctx.textAlign='left'; ctx.font='9px "Exo 2",sans-serif';
   const _hints=[
-    {label:'[P] planets', popup:'pokedex',    initState:()=>({scroll:0})},
-    {label:'[Y] stars',   popup:'starregistry',initState:()=>({starScroll:0})},
-    {label:'[T] trains',  popup:'trains',     initState:()=>({scroll:0})},
-    {label:'[R] routes',  popup:'routes',     initState:()=>({scroll:0})},
-    {label:'[M] missions',popup:'missions',   initState:()=>({mScroll:0})},
-    {label:'[O] options', popup:'options',    initState:()=>({})},
+    {label:'[P] planets',  popup:'pokedex',    initState:()=>({scroll:0})},
+    {label:'[Y] stars',    popup:'starregistry',initState:()=>({starScroll:0})},
+    {label:'[T] trains',   popup:'trains',     initState:()=>({scroll:0})},
+    {label:'[R] routes',   popup:'routes',     initState:()=>({scroll:0})},
+    {label:'[I] tech tree',popup:'techtree',   initState:()=>({})},
+    {label:'[M] missions', popup:'missions',   initState:()=>({mScroll:0})},
+    {label:'[O] options',  popup:'options',    initState:()=>({})},
   ];
   _hintBounds=[];
   let _hx=8; const _hy=GH-8;
@@ -27083,6 +27227,8 @@ canvas.addEventListener('mousemove',e=>{
     popupState.rivalBtnHover=!!(_rvbb&&cp.x>=_rvbb.x&&cp.x<=_rvbb.x+_rvbb.w&&cp.y>=_rvbb.y&&cp.y<=_rvbb.y+_rvbb.h);
     const _epbb=popupState.exportPlanetBtnBounds;
     popupState.exportPlanetHover=!!(_epbb&&cp.x>=_epbb.x&&cp.x<=_epbb.x+_epbb.w&&cp.y>=_epbb.y&&cp.y<=_epbb.y+_epbb.h);
+    const _uabb=popupState.unlockAllBtnBounds;
+    popupState.unlockAllHover=!!(_uabb&&cp.x>=_uabb.x&&cp.x<=_uabb.x+_uabb.w&&cp.y>=_uabb.y&&cp.y<=_uabb.y+_uabb.h);
     const _astb=popupState.autosaveToggleBounds;
     popupState.autosaveToggleHover=!!(_astb&&cp.x>=_astb.x&&cp.x<=_astb.x+_astb.w&&cp.y>=_astb.y&&cp.y<=_astb.y+_astb.h);
     const _mttb=popupState.missionTrackerToggleBounds;
@@ -27096,7 +27242,7 @@ canvas.addEventListener('mousemove',e=>{
     popupState.optionsSaveBtnHover=!!(_osbb&&cp.x>=_osbb.x&&cp.x<=_osbb.x+_osbb.w&&cp.y>=_osbb.y&&cp.y<=_osbb.y+_osbb.h);
     const _oeb=popupState.optionsEscBounds;
     popupState.optionsEscHover=!!(_oeb&&cp.x>=_oeb.x&&cp.x<=_oeb.x+_oeb.w&&cp.y>=_oeb.y&&cp.y<=_oeb.y+_oeb.h);
-    if(popupState.fogToggleHover||popupState.addCreditsHover||popupState.flowerPlanetHover||popupState.colonyPlanetHover||popupState.rivalBtnHover||popupState.exportPlanetHover||popupState.autosaveToggleHover||popupState.missionTrackerToggleHover||popupState.controlsBtnHover||popupState.optionsSaveBtnHover||popupState.optionsEscHover) canvas.style.cursor='pointer';
+    if(popupState.fogToggleHover||popupState.addCreditsHover||popupState.flowerPlanetHover||popupState.colonyPlanetHover||popupState.rivalBtnHover||popupState.exportPlanetHover||popupState.unlockAllHover||popupState.autosaveToggleHover||popupState.missionTrackerToggleHover||popupState.controlsBtnHover||popupState.optionsSaveBtnHover||popupState.optionsEscHover) canvas.style.cursor='pointer';
   }
   // Controls popup — [ESC] close hit detection (lives in its own block since
   // the Options/Cheats hover detector only runs while those two popups are
@@ -27835,7 +27981,7 @@ canvas.addEventListener('mouseup',e=>{
       // Options add credits button
       if(activePopup==='cheats'&&popupState.addCreditsBtnBounds){
         const b=popupState.addCreditsBtnBounds;
-        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ credits+=10000; creditDelta+=10000; spawnCreditFloatScreen(b.x+b.w/2,b.y,10000); return; }
+        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ credits+=100000; creditDelta+=100000; spawnCreditFloatScreen(b.x+b.w/2,b.y,100000); return; }
       }
       // Options: Flower Planet button
       if(activePopup==='cheats'&&popupState.flowerPlanetBtnBounds){
@@ -27874,6 +28020,24 @@ canvas.addEventListener('mouseup',e=>{
         const b=popupState.exportPlanetBtnBounds;
         if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
           if(sel&&sel.type==='planet'&&sel.data) _downloadPlanetJson(sel.data);
+          return;
+        }
+      }
+      // Cheats: Unlock All — flip every engine + train-car unlock flag to
+      // true in one shot. Matches the canonical reset list in startGame()
+      // / _restoreFromSave() so we cover every flag the game tracks.
+      // Idempotent: re-clicking with everything already unlocked is a
+      // no-op. Single chat-log message confirms the action; no popup
+      // queue (no need to chain car-unlock popups for cheated unlocks).
+      if(activePopup==='cheats'&&popupState.unlockAllBtnBounds){
+        const b=popupState.unlockAllBtnBounds;
+        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+          _classJEngineUnlocked=true; _classREngineUnlocked=true; _N700EngineUnlocked=true;
+          _ironCarUnlocked=true; _steelCarUnlocked=true; _glassCarUnlocked=true;
+          _machineryCarUnlocked=true; _cargoCarUnlocked=true; _hazmatCarUnlocked=true;
+          _royalCarUnlocked=true; _flowersCarUnlocked=true; _medicalCarUnlocked=true;
+          _grainCarUnlocked=true; _livestockCarUnlocked=true; _fruitCarUnlocked=true;
+          _chatMsg('ALL ENGINES & TRAIN CARS UNLOCKED','rgba(180,235,255,1)');
           return;
         }
       }
