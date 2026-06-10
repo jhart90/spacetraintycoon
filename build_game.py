@@ -1620,7 +1620,7 @@ function _carSpriteMetrics(type, carBodyH){
   const _boxW=_boxH*_fileAR;                             // box draw width — undistorted
   const _bodyCx=_solidLeft+_solidW/2;                    // solid centre in bundle px
   const _bodyW=_solidW/160*_boxW;                        // visible body width (px)
-  return {boxW:_boxW, boxH:_boxH,
+  return {boxW:_boxW, boxH:_boxH, visH:_visH,            // visH = visible (solid) body height
           drawXoff:-(_bodyCx/160)*_boxW,                 // body centre → coupling x
           bodyW:_bodyW, halfW:_bodyW/2,
           bot:(typeof SPRITE_BOT!=='undefined'?(SPRITE_BOT[type]||0):0)};
@@ -1652,6 +1652,53 @@ function _fitTrainScreen(names, boxW, maxAboveH){
   const gapTot=(names.length-1)*_TRAIN_GAP_RATIO;
   const carBodyH=Math.min(boxW/Math.max(0.001,sumBodyW+gapTot), maxAboveH/maxAbove);
   const lay=_layoutTrainScreen(names, carBodyH); lay.carBodyH=carBodyH; return lay;
+}
+// Render a LEFT-ANCHORED overflow train-car strip using the shared galaxy-view
+// metrics (de-stretched, area-consistent, solid-body centred, tightly coupled,
+// bottom-aligned on stripY+stripH). Used by the right Trains panel rows, the
+// Train Details popup "large car strip", and the info-bar selected-train line —
+// all of which pack cars from the left and fade out on overflow. The TALLEST
+// car (engine) fills stripH; regular cars sit shorter, reproducing the galaxy
+// roofline hierarchy. Caller owns the clip rect + the right-edge fade.
+//   c2  : 2D context (may be an offscreen panel canvas)
+//   opts.full    : per-car loaded-bool array override (else train.carFull)
+//   opts.fogEmpty: dim mid empty cars (info-bar fog look)
+//   opts.maxX    : stop once a car's left edge passes this x (default stripX+stripW + a car)
+// Returns the layout {cars, totalW, carBodyH} so the caller can decide whether
+// to paint its overflow fade.
+function _drawTrainCarStrip(c2, train, stripX, stripY, stripW, stripH, opts){
+  opts=opts||{};
+  const names=train.cars||[];
+  if(!names.length) return {cars:[], totalW:0, carBodyH:0};
+  // Fit on the VISIBLE BODY height (not the full box) so the body fills the
+  // strip — these strips CLIP, so the transparent box margin above can spill
+  // out harmlessly. The tallest visible body (engine/caboose) fills stripH;
+  // regular cars sit slightly shorter, reproducing the galaxy roofline.
+  let _maxVis=0.0001;
+  for(const n of names){ const v=_carSpriteMetrics(n,1).visH; if(v>_maxVis)_maxVis=v; }
+  const _cbH=stripH/_maxVis;
+  const lay=_layoutTrainScreen(names, _cbH); lay.carBodyH=_cbH;
+  const maxX=(opts.maxX!=null?opts.maxX:stripX+stripW+_cbH*3);
+  for(let ci=0;ci<lay.cars.length;ci++){
+    const lc=lay.cars[ci], m=lc.m;
+    const scx=stripX+lc.cx;                         // coupling centre
+    if(scx-m.halfW>maxX) break;                     // fully past the right edge
+    const drawX=scx+m.drawXoff;
+    const drawY=stripY+stripH-m.boxH*(1-m.bot);     // bottom-align visible body
+    const full=opts.full?(opts.full[ci]??false):(train.carFull?.[ci]??false);
+    const sprN=getCarSprite(names[ci],full);
+    const isMid=ci>0&&ci<names.length-1;
+    const fog=opts.fogEmpty&&isMid&&!full;
+    if(imgs[sprN]){
+      if(fog) c2.filter='brightness(1.8) saturate(0.18) opacity(0.40)';
+      c2.drawImage(_sprForSize(sprN,m.boxW,m.boxH),drawX,drawY,m.boxW,m.boxH);
+      if(fog) c2.filter='none';
+    } else {
+      c2.fillStyle=ci===0?'#4af':ci===names.length-1?'#f84':'#888';
+      c2.fillRect(scx-m.halfW,drawY,Math.max(1,m.bodyW-1),m.boxH);
+    }
+  }
+  return lay;
 }
 // car_mail width-multiplier 1.05 mirrors car_passenger. The new car_mail
 // + car_mail_empty sources are now 1254×1254 squares with content aspect
@@ -12355,20 +12402,9 @@ function _renderPanelRowToCanvas(train, isSelected, c, PANEL_W_local, ROW_H, STR
   const stripX=7, stripY=16;
   cc.save();
   cc.beginPath(); cc.rect(stripX,stripY,STRIP_W,STRIP_H); cc.clip();
-  let _stripCx=stripX;
-  for(let ci=0;ci<train.cars.length&&_stripCx<stripX+STRIP_W+carPW;ci++){
-    const _cpw=_carVizW(train.cars[ci],carPW);
-    const _cph=_carVizH(train.cars[ci],STRIP_H);
-    const _csn=getCarSprite(train.cars[ci],train.carFull?.[ci]??false);
-    const _cbp=SPRITE_BOT[_csn]||SPRITE_BOT[train.cars[ci]]||0;
-    const _sdy=stripY+STRIP_H-_cph*(1-_cbp);
-    if(imgs[_csn]) cc.drawImage(_sprForSize(_csn,_cpw,_cph),_stripCx,_sdy,_cpw,_cph);
-    else{
-      cc.fillStyle=ci===0?'#4af':ci===train.cars.length-1?'#f84':'#888';
-      cc.fillRect(_stripCx,stripY,_cpw-1,STRIP_H);
-    }
-    _stripCx+=_cpw;
-  }
+  // Galaxy-view metrics (de-stretched, area-consistent, tightly coupled,
+  // bottom-aligned). Shared with the Train Details popup + info-bar strip.
+  _drawTrainCarStrip(cc, train, stripX, stripY, STRIP_W, STRIP_H, {});
   // Fade gradient (transparent → panel bg)
   const _panelBg=isSelected?'rgba(12,22,44,1)':'rgba(4,8,20,1)';
   const fadeG=cc.createLinearGradient(stripX+STRIP_W*0.70,0,stripX+STRIP_W,0);
@@ -20146,17 +20182,10 @@ function drawTrainDetailPopup(){
   ctx.beginPath(); ctx.moveTo(px,py+44); ctx.lineTo(px+pw,py+44); ctx.stroke();
   // Large car strip
   const SY=py+52, SH=42, SW=pw-28;
-  const sc=SH/CAR_H, cpw=CAR_W*sc;
   ctx.save(); ctx.beginPath(); ctx.rect(px+14,SY,SW,SH); ctx.clip();
-  {let _scx=px+14; for(let ci=0;ci<t.cars.length;ci++){
-    const _cw=_carVizW(t.cars[ci],cpw);
-    const _bpsn=getCarSprite(t.cars[ci],t.carFull?.[ci]??false);
-    const _bp=SPRITE_BOT[_bpsn]||SPRITE_BOT[t.cars[ci]]||0;
-    const _dy=~~(SY+SH*_bp);
-    if(imgs[_bpsn]) ctx.drawImage(_sprForSize(_bpsn,_cw,SH),_scx,_dy,_cw,SH);
-    else{ ctx.fillStyle=ci===0?'#4af':ci===t.cars.length-1?'#f84':'#888'; ctx.fillRect(_scx,SY,_cw-1,SH); }
-    _scx+=_cw;
-  }}
+  // Galaxy-view metrics (de-stretched, area-consistent, tightly coupled,
+  // bottom-aligned) via the shared strip renderer.
+  _drawTrainCarStrip(ctx, t, px+14, SY, SW, SH, {});
   // Fade right edge
   const fg=ctx.createLinearGradient(px+14+SW*0.6,0,px+14+SW,0);
   fg.addColorStop(0,'rgba(3,6,20,0)'); fg.addColorStop(1,'rgba(3,6,20,0.95)');
@@ -26215,34 +26244,20 @@ function drawGalaxy(ts,dt){
       const _lw=ctx.measureText(_ibLabel).width;
       const _csX=Math.round(32+_lw+10);
       const _csSH=22; // strip car height
-      const _csCW=~~(_csSH*CAR_W/CAR_H); // ~30px per car
       const _csY=Math.round(GH+22-_csSH+4); // align to text cap-height
       const _csMaxX=W-PANEL_W-14-120; // leave room for status badge
       const _csAvailW=_csMaxX-_csX;
-      if(_csAvailW>=_csCW){
-        const _csMaxN=Math.floor(_csAvailW/_csCW);
-        const _csOverflow=st.cars.length>_csMaxN;
-        const _csN=_csOverflow?_csMaxN:st.cars.length;
+      if(_csAvailW>=20){
         ctx.save(); ctx.beginPath(); ctx.rect(_csX,_csY,_csAvailW,_csSH); ctx.clip();
-        for(let ci=0;ci<_csN;ci++){
-          const cx2=_csX+ci*_csCW;
-          const _isFull=st.carFull?.[ci]??false;
-          const _isMid=ci>0&&ci<st.cars.length-1;
-          const _fogEmpty=_isMid&&!_isFull;
-          const _cSprN=getCarSprite(st.cars[ci],_isFull);
-          const _cimg=imgs[_cSprN];
-          const _csBp=SPRITE_BOT[_cSprN]||SPRITE_BOT[st.cars[ci]]||0;
-          const _csDy=~~(_csY+_csSH*_csBp);
-          if(_fogEmpty) ctx.filter='brightness(1.8) saturate(0.18) opacity(0.40)';
-          if(_cimg) ctx.drawImage(_cimg,cx2,_csDy,_csCW,_csSH);
-          else{ ctx.fillStyle=ci===0?'#4af':ci===st.cars.length-1?'#f84':'#888'; ctx.fillRect(cx2,_csY,_csCW-1,_csSH); }
-          if(_fogEmpty) ctx.filter='none';
-        }
-        if(_csOverflow){
-          const _fadeX=_csX+(_csMaxN-1)*_csCW+_csCW/2;
-          const _fg=ctx.createLinearGradient(_fadeX,0,_csX+_csMaxN*_csCW,0);
+        // Galaxy-view metrics (de-stretched, area-consistent, tightly coupled,
+        // bottom-aligned), with mid-car empty fogging. Shared strip renderer.
+        const _ibLay=_drawTrainCarStrip(ctx, st, _csX, _csY, _csAvailW, _csSH, {fogEmpty:true, maxX:_csX+_csAvailW});
+        // Right-edge fade when the train overflows the available width.
+        if(_ibLay.totalW>_csAvailW){
+          const _fadeW=Math.min(_csAvailW,16);
+          const _fg=ctx.createLinearGradient(_csX+_csAvailW-_fadeW,0,_csX+_csAvailW,0);
           _fg.addColorStop(0,'rgba(6,10,26,0)'); _fg.addColorStop(1,'rgba(6,10,26,1)');
-          ctx.fillStyle=_fg; ctx.fillRect(_fadeX,_csY,_csCW/2,_csSH);
+          ctx.fillStyle=_fg; ctx.fillRect(_csX+_csAvailW-_fadeW,_csY,_fadeW,_csSH);
         }
         ctx.restore();
       }
