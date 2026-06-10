@@ -309,55 +309,25 @@ window.addEventListener('resize', fitCanvas);
   // draws so the overhead is <1ms. The 'lighter' composite is restored
   // to the previous mode after the dual draw so other drawing on the
   // overlay is unaffected.
-  ctx.fillText = function(text, x, y, maxWidth){
-    _syncTextState();
-    const dpy = y * DPR;
-    const yFloor = Math.floor(dpy);
-    const frac = dpy - yFloor;
-    const yFloorLog = yFloor / DPR;
-    if(frac < 0.001){
-      // Already on a device-pixel row — single draw is correct
-      if(maxWidth !== undefined) tctx.fillText(text, x, yFloorLog, maxWidth);
-      else tctx.fillText(text, x, yFloorLog);
-      return;
-    }
-    const yCeilLog = (yFloor + 1) / DPR;
-    const savedAlpha = tctx.globalAlpha;
-    const savedComp  = tctx.globalCompositeOperation;
-    tctx.globalCompositeOperation = 'lighter';
-    tctx.globalAlpha = savedAlpha * (1 - frac);
-    if(maxWidth !== undefined) tctx.fillText(text, x, yFloorLog, maxWidth);
-    else tctx.fillText(text, x, yFloorLog);
-    tctx.globalAlpha = savedAlpha * frac;
-    if(maxWidth !== undefined) tctx.fillText(text, x, yCeilLog, maxWidth);
-    else tctx.fillText(text, x, yCeilLog);
-    tctx.globalCompositeOperation = savedComp;
-    tctx.globalAlpha = savedAlpha;
-  };
-  ctx.strokeText = function(text, x, y, maxWidth){
-    _syncTextState();
-    const dpy = y * DPR;
-    const yFloor = Math.floor(dpy);
-    const frac = dpy - yFloor;
-    const yFloorLog = yFloor / DPR;
-    if(frac < 0.001){
-      if(maxWidth !== undefined) tctx.strokeText(text, x, yFloorLog, maxWidth);
-      else tctx.strokeText(text, x, yFloorLog);
-      return;
-    }
-    const yCeilLog = (yFloor + 1) / DPR;
-    const savedAlpha = tctx.globalAlpha;
-    const savedComp  = tctx.globalCompositeOperation;
-    tctx.globalCompositeOperation = 'lighter';
-    tctx.globalAlpha = savedAlpha * (1 - frac);
-    if(maxWidth !== undefined) tctx.strokeText(text, x, yFloorLog, maxWidth);
-    else tctx.strokeText(text, x, yFloorLog);
-    tctx.globalAlpha = savedAlpha * frac;
-    if(maxWidth !== undefined) tctx.strokeText(text, x, yCeilLog, maxWidth);
-    else tctx.strokeText(text, x, yCeilLog);
-    tctx.globalCompositeOperation = savedComp;
-    tctx.globalAlpha = savedAlpha;
-  };
+  // Direct passthrough to the HD overlay. An earlier iteration of this
+  // override implemented a bilinear-Y composite (render the glyph at the
+  // two bracketing integer device-pixel Y rows with alpha (1-frac) / frac
+  // composited via `globalCompositeOperation = 'lighter'`) to address a
+  // vertical-only jitter the user reported on text anchored to orbiting
+  // planets at low zoom. The trick worked for that motion case but
+  // ALWAYS fires whenever y has a sub-pixel component — including static
+  // UI text whose Y position happens to end in 0.5 (e.g. button labels
+  // computed as `top + h/2 + 3.5`). For those the extra alpha-blended
+  // second render produced visibly soft / pixelated glyph edges, which
+  // the user reported on the planet-detail upgrade buttons, tabs, and
+  // the "PLANET DETAILS" lower-bar button. Modern canvas rasterizers
+  // (Chrome, Edge, Firefox, Safari) already do sub-pixel positioning of
+  // glyphs with proper anti-aliasing on their own; the manual composite
+  // was fighting them and losing crispness on static text everywhere.
+  // Reverting to direct passthrough — text on the HD overlay rasterises
+  // at full DPR resolution and stays crisp.
+  ctx.fillText = function(){ _syncTextState(); tctx.fillText.apply(tctx, arguments); };
+  ctx.strokeText = function(){ _syncTextState(); tctx.strokeText.apply(tctx, arguments); };
 }
 // Called once at the start of each frame to wipe the overlay before the
 // new frame's text is laid down.
@@ -22694,7 +22664,19 @@ function _ttDrawItem(type,mystery){
     // rendered width to ~84 px (parity with passenger) AND fills the
     // cell vertically — appropriately representing the tall industrial
     // shape of the source artwork.
-    const _targetH=_isEng?50:(type==='car_machinery'?58:42);
+    // Sprites whose source content is taller-per-width than the typical
+    // car (car_passenger ≈ 2.06 aspect) need a bigger height target to
+    // visually match their row-mates. Both machinery (content aspect 1.45)
+    // and sand (content aspect 1.73) come out visibly narrow at the
+    // default 42 px target — bumping them lets the rendered body width
+    // (target × content aspect) match passenger's ~86 px width:
+    //   machinery: 58 × 1.45 ≈ 84 px (parity with passenger)
+    //   sand:      50 × 1.73 ≈ 86 px (parity with passenger)
+    // Both are also bottom-aligned below so the extra height grows
+    // UPWARD into otherwise-empty cell space rather than dropping the
+    // sprite's bottom below the row.
+    const _bumpedH={car_machinery:58, car_sand:50}[type];
+    const _targetH=_isEng?50:(_bumpedH||42);
     const _sc=(typeof SPRITE_CONTENT!=='undefined')?SPRITE_CONTENT[type]:null;
     let _dw, _dh, _dx, _dy;
     if(_sc){
@@ -22726,15 +22708,15 @@ function _ttDrawItem(type,mystery){
       const _ccxBundle=_bx+_bw/2;
       _dx=pos.cx-_ccxBundle*(_dw/160);
       // Vertical anchor: most sprites centre their content on pos.cy,
-      // but car_machinery's larger target (58 px vs the row-default
-      // 42 px) would otherwise hang its bottom edge 8 px below the rest
-      // of row 4 (steel, hazmat, etc.). Bottom-align machinery to the
-      // shared row baseline (pos.cy + default car target / 2 = pos.cy + 21)
-      // so its bottom matches its row-mates while the extra height grows
-      // UPWARD into the otherwise-empty space above.
-      if(type==='car_machinery'){
-        const _rowBaselineY=pos.cy+21; // 42/2 — bottom edge of the standard car target
-        // Bundle drawn so that (_by+_bh)*(_dh/160) below _dy = _rowBaselineY
+      // but the "bumped target" sprites (machinery, sand — anything in
+      // _bumpedH above) get a larger _targetH than their row mates. If
+      // we centred them on pos.cy their bottoms would hang below the row
+      // baseline by (_targetH − 42)/2 px. Instead, bottom-align to the
+      // shared row baseline (pos.cy + 21 = bottom edge of the 42 px
+      // default car target) so the extra height grows UPWARD into the
+      // otherwise-empty space above.
+      if(_bumpedH){
+        const _rowBaselineY=pos.cy+21; // 42/2 — bottom of the standard car target
         _dy=_rowBaselineY-(_by+_bh)*(_dh/160);
       } else {
         const _ccyBundle=_by+_bh/2;
