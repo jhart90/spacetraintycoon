@@ -107,9 +107,30 @@ def _content_info(bundled_b64, source_path):
     except Exception:
         return None
 
+def _solid_bundle_width(bundled_b64, thresh=30):
+    """Width (px) of the bundled sprite's SOLID body — the alpha>thresh bbox,
+    excluding the faint anti-aliasing halo that the alpha>0 content bbox
+    includes. Sprites vary a lot in halo width (iron/passenger ≈ 0 px, but
+    mail/oil/battery ≈ 5-6 px), so the a>0 width over-spaces those cars in
+    galaxy view. The solid width is what the eye reads as the car's edge, so
+    galaxy-view coupling spacing uses THIS, giving consistent gaps for every
+    car-to-car pair. Returns None if undecodable."""
+    try:
+        from PIL import Image
+        import io
+        bim = Image.open(io.BytesIO(base64.b64decode(bundled_b64))).convert("RGBA")
+        mask = bim.getchannel("A").point(lambda p: 255 if p > thresh else 0)
+        bb = mask.getbbox()
+        if not bb:
+            return None
+        return bb[2] - bb[0]
+    except Exception:
+        return None
+
 _sprite_dir = "sprites"
 _natural = {}
 _content = {}
+_solidw = {}
 if os.path.isdir(_sprite_dir):
     for _name, _b64 in assets.items():
         _p = os.path.join(_sprite_dir, _name + ".png")
@@ -120,16 +141,21 @@ if os.path.isdir(_sprite_dir):
             _ci = _content_info(_b64, _p)
             if _ci:
                 _content[_name] = _ci
+            _sw = _solid_bundle_width(_b64)
+            if _sw:
+                _solidw[_name] = _sw
 sprite_nat_entries = ", ".join(f'"{k}":[{v[0]},{v[1]}]' for k, v in _natural.items())
 sprite_content_entries = ", ".join(
     f'"{k}":[{v[0]},{v[1]},{v[2]},{v[3]},{v[4]}]' for k, v in _content.items()
 )
+sprite_solidw_entries = ", ".join(f'"{k}":{v}' for k, v in _solidw.items())
 
 asset_js = (
     "const ASSETS = {\n" + ",\n".join(asset_js_lines) + "\n};\n"
     + f"const SPRITE_BOT = {{{sprite_bot_entries}}};\n"
     + f"const SPRITE_NATURAL = {{{sprite_nat_entries}}};\n"
-    + f"const SPRITE_CONTENT = {{{sprite_content_entries}}};"
+    + f"const SPRITE_CONTENT = {{{sprite_content_entries}}};\n"
+    + f"const SPRITE_SOLID_W = {{{sprite_solidw_entries}}};"
 )
 
 JS = r"""
@@ -1496,22 +1522,45 @@ const ENGINE_ORB_GAP     = {engine_constellation:52, engine_galaxy:53, engine_cl
 const ENGINE_GALAXY_H_TIER = {engine_constellation:1.0, engine_galaxy:1.05, engine_classJ:1.10, engine_classR:1.06, engine_N700:1.16};
 // Galaxy-view train render scale (the draw loop multiplies each sprite's
 // base height fraction by this) and the desired VISIBLE gap (world units)
-// between every adjacent unit. _carOffset uses per-sprite half-widths so
-// the visible gap stays CONSTANT regardless of each car's width — the old
-// uniform-center-spacing approach left wider/narrower cars (engine, mail,
-// caboose) with visibly different gaps that grew toward the tail.
+// between adjacent units. _carOffset uses per-sprite half-widths so the
+// visible gap stays constant regardless of each car's width.
 const _GAL_SCALE = 1.5;
+// Visible gap (world units) between adjacent units. With _carGalWorldHalfW
+// now using each sprite's SOLID body width (SPRITE_SOLID_W, the alpha>30
+// extent) instead of the faint-AA-inflated content bbox, the half-width
+// estimate is accurate for EVERY car type — so one uniform gap produces a
+// consistent visible slit at every coupling (engine↔car, car↔car,
+// car↔caboose). Tuned to ≈ the clean coupling gap in the reference photo.
 const _GALAXY_CAR_GAP = 1.5;
-// Visible body HALF-width of a galaxy-view sprite, in world units. Mirrors
-// the draw loop exactly: visibleWidth = vf · CAR_ORB_H · contentAspect,
-// where vf = baseFraction · _GAL_SCALE and contentAspect = SPRITE_CONTENT[4].
+// Visible body HALF-width of a galaxy-view sprite, in world units. Computed
+// with the EXACT formula the draw loop renders at:
+//   visibleWidth = _vf · CAR_ORB_H · fileAR · (solidW / bh)
+// where _vf = baseFraction · _GAL_SCALE, fileAR = SPRITE_NATURAL w/h, bh =
+// the content-bbox HEIGHT inside the 160 bundle (the draw loop sizes the box
+// from this), and solidW = the SOLID body width (SPRITE_SOLID_W, alpha>30).
+//
+// Using the SOLID width — not the alpha>0 content bbox width (SPRITE_CONTENT
+// [2]) — is the key fix: the a>0 bbox includes a faint anti-aliasing halo
+// that's ~0 px on some sprites (iron, passenger, engines) but ~5-6 px on
+// others (mail, oil, battery, hazmat, sand, grain, caboose…). That halo is
+// invisible to the eye but was inflating the spacing for those cars, so
+// all-iron trains looked perfectly tight while mixed trains had fat,
+// uneven gaps. The solid (alpha>30) width is what the eye reads as the
+// car's edge, making the half-width accurate for EVERY type → uniform
+// visible gaps across all car-to-car pairs.
 function _carGalWorldHalfW(type){
   const _vf = (type==='caboose' ? 0.66
             : (type&&type.indexOf('engine_')===0) ? 0.66*(ENGINE_GALAXY_H_TIER[type]||1.0)
             : 0.60) * _GAL_SCALE;
   const _sc = (typeof SPRITE_CONTENT!=='undefined') ? SPRITE_CONTENT[type] : null;
-  const _asp = _sc ? _sc[4] : 2.0;
-  return _vf * CAR_ORB_H * _asp / 2;
+  const _sn = (typeof SPRITE_NATURAL!=='undefined') ? SPRITE_NATURAL[type] : null;
+  const _fileAR = (_sn && _sn[1]) ? _sn[0]/_sn[1] : 1.0;
+  const _bh = _sc ? _sc[3] : 72;
+  // Prefer the solid-body width; fall back to the content-bbox width.
+  const _w = (typeof SPRITE_SOLID_W!=='undefined' && SPRITE_SOLID_W[type]!=null)
+             ? SPRITE_SOLID_W[type]
+             : (_sc ? _sc[2] : 148);
+  return _vf * CAR_ORB_H * _fileAR * _w / (_bh * 2);
 }
 // car_mail width-multiplier 1.05 mirrors car_passenger. The new car_mail
 // + car_mail_empty sources are now 1254×1254 squares with content aspect
@@ -1781,6 +1830,9 @@ function _carOffset(train,i){
   if(!train||!train.cars||i<=0) return 0;
   let _off=0;
   for(let _j=1;_j<=i;_j++){
+    // Uniform visible gap at every coupling — the solid-width half-widths
+    // are accurate per car, so a single gap reads consistently across all
+    // pairs (engine↔car, car↔car, car↔caboose).
     _off += _carGalWorldHalfW(train.cars[_j-1]) + _carGalWorldHalfW(train.cars[_j]) + _GALAXY_CAR_GAP;
   }
   return _off;
@@ -4327,9 +4379,16 @@ function _drawCutsceneBg(ts){
 function _introToCorpSetup(){
   gs='corpsetup';
   // Roll back every cutscene-only override (Dyson Sphere on the panned
-  // star, Large Station on the resort planet, Factory mark on the urban
-  // planet) so the gameplay galaxy starts in its real generated state.
+  // star, regular Station on the ancient/resort portrait planet, Factory
+  // mark on the urban planet) so the gameplay galaxy starts in its real
+  // generated state. (The cutscene only ever sets `hasStation`, never
+  // `hasLargeStation` — there is no large-station override.)
   _restoreIntroOverrides();
+  // Defensive: the A Mad Scientist intro must come ONLY from an in-gameplay
+  // Large Station purchase. Make sure nothing in the cutscene left its timer
+  // armed or the mission queued/active as we leave the intro.
+  _madScientistTimerMs=0;
+  pendingMissionIntros=pendingMissionIntros.filter(_e=>_e&&_e.defId!=='mad_scientist');
   // Reset Orijen + the tutorial lava planet back to their AT-GENERATION
   // orbit positions. updatePlanetOrbits has been running every cutscene
   // frame so these two planets can drift far apart if the player lingers
@@ -6486,26 +6545,39 @@ function _spawnCargoBeam(train, dt){
   const carIdx=train.cargoQueue[0];
   const isLoading=train.cargoPhase==='loading';
   const lifetime=30;           // ~0.5 s at 60 fps; independent of game speed
-  // Lead the car's orbital motion: particles spawn now but arrive `lifetime` dt-
-  // units later. During that interval the car's orbit angle advances by
-  // ORB_SPD*lifetime (t.angle -= ORB_SPD*dt per frame). For loading, aim the
-  // beam at the *future* car position so particles meet the car on arrival.
-  // For unloading, use the *current* car position so particles depart from
-  // where the car is now (and trail behind as the car moves on).
+  // Lead the car's orbital motion: particles spawn now but arrive `lifetime`
+  // GAME-time units later (the particle integrator now advances with dtG, the
+  // same game-speed-scaled delta the train orbits with — see
+  // _updateCargoParticles). Because both the particle flight AND the car's
+  // orbit advance in game-time, the car moves exactly ORB_SPD*lifetime
+  // (angular) during the flight REGARDLESS of game speed, so the lead is a
+  // fixed ORB_SPD*lifetime and the beam stays locked on the car at 0.5×, 1×,
+  // 2×, 5× and 10×. For loading, aim at the *future* car position so
+  // particles meet the car on arrival; for unloading, use the *current*
+  // position (particles depart from where the car is now and trail behind).
   const _leadAng = isLoading ? -ORB_SPD*lifetime : 0;
   const _ang = train.angle + _leadAng + _carOffset(train,carIdx)/train.orbitR;
   const carWx = planet.x + train.orbitR*Math.cos(_ang);
   const carWy = planet.y + train.orbitR*Math.sin(_ang);
-  const carRot = Math.atan2(-Math.cos(_ang), Math.sin(_ang));
-  // Loading: 15% from front toward back (0.35 × half-car-width offset from centre toward front)
-  // Unloading: centre of car (no offset)
-  const carFrac=isLoading?0.35:0.0;
-  const carEndX=carWx+Math.cos(carRot)*CAR_ORB_W*carFrac;
-  const carEndY=carWy+Math.sin(carRot)*CAR_ORB_W*carFrac;
-  // Direction from planet centre toward car endpoint → surface attachment point
-  const dx=carEndX-planet.x, dy=carEndY-planet.y;
+  // Radial attachment point on the car. carWx,carWy sits at the car's OUTER
+  // edge — the part FURTHEST from the planet — because the car sprite is
+  // bottom-aligned so its body extends radially INWARD (toward the planet)
+  // from that point. Aiming there made the beam run all the way to the far
+  // side of the car. Instead, move the car-side endpoint INWARD (toward the
+  // planet) by the car's visible radial height, so the beam meets the car's
+  // TOP — the edge closest to the planet's surface — and is correspondingly
+  // a touch shorter. Tangentially centred (no along-length offset).
+  const _styp = train.cars[carIdx];
+  const _vfCar = (_styp==='caboose' ? 0.66
+              : (_styp&&_styp.indexOf('engine_')===0) ? 0.66*(ENGINE_GALAXY_H_TIER[_styp]||1.0)
+              : 0.60) * _GAL_SCALE;
+  const _carRadialH = _vfCar * CAR_ORB_H; // car's visible radial extent (world units)
+  // Outward radial unit vector at the car's angle (planet centre → car).
+  const dx=carWx-planet.x, dy=carWy-planet.y;
   const dist=Math.hypot(dx,dy)||1;
   const nx=dx/dist, ny=dy/dist;
+  // Car-side endpoint: pulled inward by the full body height to the top edge.
+  const carEndX=carWx - nx*_carRadialH, carEndY=carWy - ny*_carRadialH;
   const surfX=planet.x+nx*planet.radius, surfY=planet.y+ny*planet.radius;
   const srcX=isLoading?surfX:carEndX, srcY=isLoading?surfY:carEndY;
   const dstX=isLoading?carEndX:surfX, dstY=isLoading?carEndY:surfY;
@@ -6546,10 +6618,14 @@ function _spawnCargoBeam(train, dt){
     });
   }
 }
-function _updateCargoParticles(dt){
+// Advance cargo-beam particles in GAME time (dtG), matching the train's
+// orbital motion. This keeps the beam flight-time proportional to game speed
+// so the beam stays tight and correctly aimed at 0.5×–10× (with raw dt the
+// beam under-/over-shot the moving car at non-1× speeds).
+function _updateCargoParticles(dtG){
   for(let i=cargoParticles.length-1;i>=0;i--){
     const p=cargoParticles[i];
-    p.x+=p.vx*dt; p.y+=p.vy*dt; p.life-=dt;
+    p.x+=p.vx*dtG; p.y+=p.vy*dtG; p.life-=dtG;
     if(p.life<=0) cargoParticles.splice(i,1);
   }
 }
@@ -28746,7 +28822,7 @@ canvas.addEventListener('mouseup',e=>{
             // Large Station does NOT fire the mission ("on game start" bug).
             // Only arms if the mission hasn't already fired/completed and the
             // timer isn't already running.
-            if(_madScientistTimerMs===0&&!_missionPending('mad_scientist')){
+            if(gs==='galaxy'&&_madScientistTimerMs===0&&!_missionPending('mad_scientist')){
               _madScientistTimerMs=Date.now();
             }
             // User spec #4: queueing trains at MED tier here are now cargo-ready.
@@ -31709,7 +31785,7 @@ function loop(ts){
     updateAICorp(dtG);
     updatePlanetOrbits(dtG,dt);
     updateFog(_dtSd);
-    _updateCargoParticles(dt);
+    _updateCargoParticles(dtG);
     _updateCreditFloats(dt);
     for(let _pi=pendingCreditDeltas.length-1;_pi>=0;_pi--){pendingCreditDeltas[_pi].timer-=dt;if(pendingCreditDeltas[_pi].timer<=0){creditDelta+=pendingCreditDeltas[_pi].amount;pendingCreditDeltas.splice(_pi,1);}}
     if(zoomReturnTimer>0){zoomReturnTimer-=dt;if(zoomReturnTimer<=0){zoomReturnTimer=0;zoomReturnPos=null;}}
@@ -31725,6 +31801,15 @@ function loop(ts){
       // Founding chat message — uses the player-chosen corpName, not the
       // default placeholder that was in scope during startGame().
       _chatMsg(corpName+' founded.','rgba(255,230,120,1)',8000);
+      // ── Bulletproof mission-state reset at the start of real gameplay ──
+      // Nothing in the title / intro cutscene / corpsetup / aiselect / fadein
+      // sequence may seed a mission. The A Mad Scientist intro is armed ONLY
+      // by an in-gameplay Large Station purchase, so wipe its timer here, and
+      // defensively drop any mad_scientist that somehow reached the pending
+      // queue or the active list before gameplay even began.
+      _madScientistTimerMs=0;
+      pendingMissionIntros=pendingMissionIntros.filter(_e=>_e&&_e.defId!=='mad_scientist');
+      for(let _mi=missions.length-1;_mi>=0;_mi--){ if(missions[_mi]&&missions[_mi].id==='mad_scientist') missions.splice(_mi,1); }
       // Arm the new-game tutorial bubble chain. The first bubble fades in
       // 2s after the galaxy view first appears (see _drawTutorialChain).
       if(_tutorialPhase==='inactive'&&_tutorialLavaPlanetId>=0){
@@ -31747,7 +31832,7 @@ function loop(ts){
     updateAICorp(dtG);
     updatePlanetOrbits(dtG,dt);
     updateFog(_dtSd);
-    _updateCargoParticles(dt);
+    _updateCargoParticles(dtG);
     _updateCreditFloats(dt);
     for(let _pi=pendingCreditDeltas.length-1;_pi>=0;_pi--){pendingCreditDeltas[_pi].timer-=dt;if(pendingCreditDeltas[_pi].timer<=0){creditDelta+=pendingCreditDeltas[_pi].amount;pendingCreditDeltas.splice(_pi,1);}}
     if(zoomReturnTimer>0){zoomReturnTimer-=dt;if(zoomReturnTimer<=0){zoomReturnTimer=0;zoomReturnPos=null;}}
