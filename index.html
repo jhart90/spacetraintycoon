@@ -138,12 +138,27 @@ canvas.style.imageRendering = 'auto'; // some browsers default to 'pixelated' fo
 // Path/clip/transform state is mirrored from ctx → tctx via intercepted
 // methods (save, restore, clip, translate, etc.) so a popup that clips text
 // inside its bounds clips it correctly on the overlay too.
-// DPR cap raised from 3 → 5: on a 4K display (3840 px wide) with the
-// game's 900-px logical width, the ideal DPR for 1:1 device-pixel
-// mapping is ~4.27. Capping at 3 forced the browser to interpolate the
-// HD overlay back up, which is what produced the "pixelated" text reports
-// on 4K monitors. Memory cost at DPR=5: ~4500×2500×4 bytes ≈ 45 MB.
-const DPR = Math.max(1, Math.min(5, window.devicePixelRatio || 1));
+// HD-overlay resolution factor. THE critical sharpness lever.
+//
+// The world canvas is a fixed 900×500 logical bitmap that gets CSS-scaled
+// up by `s` (= min(innerW/900, innerH/500), usually 2–4×) to fill the
+// window, then again by the device pixel ratio. So the overlay is actually
+// displayed across  W · s · devicePixelRatio  REAL device pixels. For
+// pixel-perfect (maximally sharp) text the overlay BITMAP must have exactly
+// that many pixels — i.e. DPR must be  s · devicePixelRatio , NOT just
+// devicePixelRatio. The old formula ignored `s`, so on essentially every
+// screen the overlay was under-resolved by a factor of `s` (~2–4×) and the
+// browser upscaled it — soft text everywhere, worst on big/4K displays.
+//
+// DPR is recomputed in fitCanvas() (it depends on window size) and is a
+// `let` so the ctx→tctx mirroring closures, which read it live, always use
+// the current value. Capped at 6 to bound memory (900·6 × 500·6 × 4B ≈
+// 65 MB worst case); 4K lands around 4.3.
+function _computeDPR(){
+  const _s = Math.min(window.innerWidth/W, window.innerHeight/H);
+  return Math.max(1, Math.min(6, _s * (window.devicePixelRatio || 1)));
+}
+let DPR = _computeDPR();
 const tCanvas = document.createElement('canvas');
 tCanvas.id = 'tc';
 // Match positioning to the world canvas. pointer-events:none so all mouse
@@ -182,6 +197,9 @@ try{ tctx.textRendering = 'geometricPrecision'; }catch(e){}
 
 function fitCanvas() {
   const s = Math.min(window.innerWidth/W, window.innerHeight/H);
+  // Recompute the overlay resolution from the CURRENT window size so the
+  // bitmap stays matched to real device pixels after any resize/zoom.
+  DPR = _computeDPR();
   // Snap CSS size to whole DEVICE pixels (not logical CSS px) so the
   // browser doesn't interpolate the HD overlay bitmap when it's scaled
   // to fit. Using plain Math.floor for cssW/cssH meant the canvas often
@@ -213,6 +231,19 @@ function fitCanvas() {
 }
 fitCanvas();
 window.addEventListener('resize', fitCanvas);
+
+// ── Smooth-text mode flag ─────────────────────────────────────
+// Default text rendering is DIRECT to the HD overlay (tctx.fillText at full
+// DPR) — maximally sharp, which is what all stationary UI text (menus,
+// buttons, panels, chat log, top bar) wants. Only text that tracks a
+// MOVING anchor (planet / star labels, callout bubbles) sets this flag
+// true to route through the cached-glyph-bitmap + drawImage path, which
+// trades a hair of sharpness for jitter-free sub-pixel motion. Callers
+// set it true immediately before such draws and reset it false right
+// after (see drawGalaxy planet/star labels and _drawBubble). Because the
+// default is the sharp path, any draw site we DON'T explicitly opt in
+// stays crisp — the stationary-sharpness priority can't regress.
+let _smoothTextMode = false;
 
 // ── ctx → tctx state mirroring ────────────────────────────────
 // Path / transform / clip / save-restore commands all forward to tctx so the
@@ -417,8 +448,19 @@ window.addEventListener('resize', fitCanvas);
     // Blit so the bitmap's pen lands exactly at (x, y).
     tctx.drawImage(e.canvas, x - e.penX, y - e.penY, e.w, e.h);
   }
-  ctx.fillText   = function(text, x, y){ _syncTextState(); _drawTextViaBM(text, x, y, 0); };
-  ctx.strokeText = function(text, x, y){ _syncTextState(); _drawTextViaBM(text, x, y, 1); };
+  ctx.fillText = function(text, x, y, maxWidth){
+    _syncTextState();
+    if(_smoothTextMode){ _drawTextViaBM(text, x, y, 0); return; }
+    // Default: direct, native, full-DPR rasterisation → sharpest possible.
+    if(maxWidth!==undefined) tctx.fillText(text, x, y, maxWidth);
+    else tctx.fillText(text, x, y);
+  };
+  ctx.strokeText = function(text, x, y, maxWidth){
+    _syncTextState();
+    if(_smoothTextMode){ _drawTextViaBM(text, x, y, 1); return; }
+    if(maxWidth!==undefined) tctx.strokeText(text, x, y, maxWidth);
+    else tctx.strokeText(text, x, y);
+  };
 }
 // Called once at the start of each frame to wipe the overlay before the
 // new frame's text is laid down.
@@ -1363,6 +1405,34 @@ const MISSION_DEFS=[
      if(oid==='deliver_5_chemical') return !!(m._chemicalDeliveries>=5);
      return false;
    }},
+  {id:'mad_scientist',
+   name:'A Mad Scientist',
+   imageType:'car', imageKey:'engine_classJ',
+   // pickup_scientist is REVERTABLE: it's "done" only while the scientist
+   // is actually aboard a player train (or already delivered to Orijen).
+   // If the player drops the passenger anywhere other than Orijen, the
+   // objective rolls back to incomplete (see revertableObjectives handling
+   // in the objective sweep).
+   revertableObjectives:['pickup_scientist'],
+   objectives:[
+     {id:'pickup_scientist',  text:'Send a TRAIN equipped with a [Passenger Car] to pick up the Mad Scientist (1 unit of [Passengers]) from {SOURCE}'},
+     {id:'deliver_scientist', text:'Deliver the Mad Scientist back to ORIJEN'},
+   ],
+   details:"A Mad Scientist on {SOURCE} has requested a meeting with the CEO of {CORP}. He claims to have designed a Space Train Engine with longer range, better acceleration, and a higher top speed than even the top-of-the-line GALAXY CLASS engines — and he wants to discuss it in person.",
+   reward:null, rewardText:'A new engine type', timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='pickup_scientist'){
+       // Done if the scientist has been delivered to Orijen (terminal), OR
+       // is CURRENTLY aboard a player train — a loaded passenger car whose
+       // cargo was sourced from the mission's source urban planet.
+       if(m._scientistDelivered) return true;
+       if(!galaxy||m.sourcePlanetId==null) return false;
+       return trains.some(t=>t.isPlayer&&t.carCargo&&t.carCargoSource&&t.cars.some((c,ci)=>
+         (t.carFull?.[ci])&&t.carCargo[ci]==='passengers'&&t.carCargoSource[ci]===m.sourcePlanetId));
+     }
+     if(oid==='deliver_scientist') return !!m._scientistDelivered;
+     return false;
+   }},
 ];
 const MAINT_DECAY_PER_AU   = 0.00001; // maintenance fraction lost per SU in transit (constellation base)
 const REPAIR_COST_PER_MAINT = 600;     // credits per car per 1.0 maintenance fraction lost (constellation base)
@@ -1372,15 +1442,14 @@ const CLOUD_SPEED      = 0.000070; // rad/frame-unit — slow atmospheric drift
 // Car world-unit dimensions when rendered in galaxy view.
 const CAR_ORB_W = 56;   // arc footprint (width)
 const CAR_ORB_H = 28;   // radial footprint (height)
-// center-to-center spacing between cars (overlap sprite margins). Reduced
-// 48 → 30 when galaxy-view cars were de-stretched to their true source
-// aspect: the visible car body lost ~9 world units of half-width (from
-// ~26.5 to ~17.3), so the old 48 spacing — tuned for the wider stretched
-// cars — left visible gaps between cars. Dropping by ~2× the per-side
-// shrink (≈18) restores the slight sprite-margin overlap the train had
-// before. This constant also drives in-orbit angular spacing and train
-// tail length, so the whole train compacts coherently.
-const CAR_ORB_GAP = 30;
+// center-to-center spacing between cars (world units). Set so the VISIBLE
+// gap between adjacent units is a slight ~5 world units (≈5 px at the
+// reference zoom): spacing = halfWidthA + halfWidthB + 5, with half-widths
+// derived from the de-stretched sprite sizes at _GAL_SCALE=1.5. A car body
+// is ~52 wide (half ~26), so car↔car = 26+26+5 = 57. The caboose is a touch
+// narrower, so car↔caboose comes out ~6. This constant also drives in-orbit
+// angular spacing and train tail length, so the whole train stays coherent.
+const CAR_ORB_GAP = 57;
 
 // ── Per-engine properties (keyed by car type string) ─────────
 //   Order: constellation → galaxy → classJ → classR → N700
@@ -1389,13 +1458,13 @@ const ENGINE_MAX_SPD     = {engine_constellation:4,     engine_galaxy:6,     eng
 const ENGINE_ACCEL_RATE  = {engine_constellation:TRANSIT_ACCEL*1, engine_galaxy:TRANSIT_ACCEL*2, engine_classJ:TRANSIT_ACCEL*4, engine_classR:TRANSIT_ACCEL*8, engine_N700:TRANSIT_ACCEL*12};
 const ENGINE_MAINT_DECAY = {engine_constellation:MAINT_DECAY_PER_AU, engine_galaxy:MAINT_DECAY_PER_AU*0.8, engine_classJ:MAINT_DECAY_PER_AU*0.6, engine_classR:MAINT_DECAY_PER_AU*0.4, engine_N700:MAINT_DECAY_PER_AU*0.25};
 const ENGINE_REPAIR_MULT = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.3,   engine_classR:1.6,   engine_N700:2.0};
-// gap engine→car[1] (world units). Retuned after the engines were ALSO
-// de-stretched to their true source aspect (they used to render ~50 wide
-// from the legacy 2:1-box path; now they're natural width). Each value ≈
-// engineHalfWidth + carHalfWidth − ~4 overlap, computed from the new
-// per-engine visible widths. Class R is long (content aspect 2.9) so it
-// keeps the widest gap; the others sit near the car-to-car spacing.
-const ENGINE_ORB_GAP     = {engine_constellation:30, engine_galaxy:30, engine_classJ:32, engine_classR:42, engine_N700:37};
+// gap engine→car[1] (world units). Set per-engine for a slight ~5-world-unit
+// visible gap between the engine's rear and the first car: spacing =
+// engineHalfWidth + carHalfWidth(~26) + 5. Engine half-widths come from the
+// de-stretched sizes at _GAL_SCALE=1.5 (Constellation ~24.5 … Class R ~42.9,
+// the longest). So the wider/longer engines keep proportionally bigger gaps
+// while every engine→car coupling shows the same ~5 px slit.
+const ENGINE_ORB_GAP     = {engine_constellation:55, engine_galaxy:57, engine_classJ:59, engine_classR:74, engine_N700:67};
 // Per-engine visible-height tier for galaxy view (multiplied into the
 // base engine body height). Modest progression so bigger engines read as
 // bigger without the very-wide Class R / N700 sprites ballooning. Caboose
@@ -2458,6 +2527,7 @@ let _playerDeliveryCount=0;
 let _galaxyCensusTimerMs=0;     // real-time ms when 15th planet was visited (0=not yet)
 let _sandstormCheckSd=0;        // last SD at which sandstorm_relief trigger was checked
 let _bhResearchTimerMs=0;       // real-time ms when bh_research's two gate conditions first both held (0=not armed). Not persisted; re-arms on load.
+let _madScientistTimerMs=0;     // real-time ms when player PURCHASED their first Large Station (0=not armed). Armed at the purchase click, not from state; not persisted (so loading a save with a pre-existing Large Station won't fire the mission).
 let _csSelectedCeo=0;    // corpsetup: selected CEO index (0/1/2)
 let _csCeoOptions=[];    // corpsetup: array of 3 CEO candidate objects
 let _csNameHover=false;  // corpsetup: hovering corp name input field
@@ -4099,7 +4169,7 @@ function _drawCutsceneBg(ts){
       const fs=Math.min(13,Math.max(10,sr*.14+9));
       ctx.font=fs+'px "Exo 2",sans-serif'; ctx.textAlign='center';
       ctx.fillStyle='rgba(255,230,150,0.85)';
-      ctx.fillText(s.name,sx,sy+sr+14);
+      _smoothTextMode=true; ctx.fillText(s.name,sx,sy+sr+14); _smoothTextMode=false;
       ctx.restore();
     }
   }
@@ -4186,7 +4256,7 @@ function _drawCutsceneBg(ts){
       ctx.font=fs+'px "Exo 2",sans-serif'; ctx.textAlign='center';
       ctx.textBaseline='top';
       ctx.fillStyle='rgba(170,205,255,0.8)';
-      ctx.fillText(p.name,sx,sy+sr+5);
+      _smoothTextMode=true; ctx.fillText(p.name,sx,sy+sr+5); _smoothTextMode=false;
       ctx.restore();
     }
   }
@@ -6140,6 +6210,13 @@ function _processCargoQueue(t, p){
           // Seeking a Way Home: check if this delivery completes the mission objective
           const _shMx=missions.find(mx=>mx.id==='seeking_home'&&mx.status==='active');
           if(t.isPlayer&&_shMx&&p.id===_shMx.targetPlanetId&&src&&src.id===_shMx.sourcePlanetId) _shMx._rockyDelivered=true;
+          // A Mad Scientist: delivered when a passenger sourced from the
+          // mission's urban source planet is dropped at ORIJEN (the home
+          // planet). Dropping it anywhere else does NOT set this flag, so
+          // the revertable pickup objective rolls back (the scientist is no
+          // longer aboard and not yet home).
+          const _msMx=missions.find(mx=>mx.id==='mad_scientist'&&mx.status==='active');
+          if(t.isPlayer&&_msMx&&galaxy&&p.id===galaxy.origenId&&src&&src.id===_msMx.sourcePlanetId) _msMx._scientistDelivered=true;
           // Researching a better passenger car: count deliveries to the home planet
           const _rrMx=missions.find(mx=>mx.id==='research_royal_car'&&mx.status==='active');
           if(t.isPlayer&&_rrMx&&p.id===_rrMx.targetPlanetId){ _rrMx._origenPassengersCount=(_rrMx._origenPassengersCount||0)+1; }
@@ -12698,10 +12775,11 @@ function updateFoundries(dtG){
             pendingCarUnlocks.push({sprite:'car_steel',displayName:'Steel Car'});
             _chatMsg('STEEL CAR UNLOCKED','rgba(220,230,245,1)');
             _ga('car_unlocked',{car_type:'steel', cargo:'steel', sd:Math.floor(stardate)});
-            // Arm the 10-second timer for the "Designing a better space train"
-            // mission intro. updateMissions() also re-arms this on next tick
-            // if the save/load wiped it.
-            if(_steelMissionTimerMs===0) _steelMissionTimerMs=Date.now();
+            // NOTE: the "Designing a better space train" 10-second intro
+            // timer is NOT armed here anymore. It now requires BOTH steel
+            // produced AND the Class J engine already unlocked, so the arm
+            // lives entirely in updateMissions() where both conditions are
+            // checked together (Class J may unlock before or after steel).
           }
           // Hazmat byproduct: each steel unit also produces 0.5 hazmat — the
           // forging slag from melting iron + chemicals. Mirrors the foundry's
@@ -14802,6 +14880,7 @@ function _acceptNewMissionFromState(state){
     details:(()=>{let _d=def.details||'';
       if(_d.includes('{SOURCE}')&&state.sourcePlanetId!=null){const _sp5=_gp(state.sourcePlanetId);if(_sp5)_d=_d.replace(/\{SOURCE\}/g,_sp5.name);}
       if(_d.includes('{TARGET}')&&state.targetPlanetId!=null){const _tp5=_gp(state.targetPlanetId);if(_tp5)_d=_d.replace(/\{TARGET\}/g,_tp5.name);}
+      if(_d.includes('{CORP}')) _d=_d.replace(/\{CORP\}/g,corpName||'your corporation');
       return _d;})(),reward:def.reward||null,timeLimit:def.timeLimit||null,
     deadline:def.timeLimit?stardate+def.timeLimit:null,
     status:'active',acceptedSd:stardate,completedSd:null,
@@ -14888,6 +14967,7 @@ function drawNewMissionPopup(){
     let _dtTxt=def.details;
     if(_dtTxt.includes('{SOURCE}')&&popupState.sourcePlanetId!=null){const _sp4=_gp(popupState.sourcePlanetId);if(_sp4)_dtTxt=_dtTxt.replace(/\{SOURCE\}/g,_sp4.name);}
     if(_dtTxt.includes('{TARGET}')&&popupState.targetPlanetId!=null){const _tp4=_gp(popupState.targetPlanetId);if(_tp4)_dtTxt=_dtTxt.replace(/\{TARGET\}/g,_tp4.name);}
+    if(_dtTxt.includes('{CORP}')) _dtTxt=_dtTxt.replace(/\{CORP\}/g,corpName||'your corporation');
     const _dtWords=_dtTxt.split(' ');
     let _dtLine='';
     for(const _w of _dtWords){
@@ -17129,7 +17209,14 @@ function _drawTutorialChain(stage){
     ctx.shadowBlur=0; ctx.fillStyle=_textCol;
     ctx.font='10px "Exo 2",sans-serif';
     ctx.textAlign='center'; ctx.textBaseline='middle';
+    // Callout bubbles can track an orbiting planet (anchorScreen) → use the
+    // smooth bitmap text path so the body text glides with the bubble.
+    // Centred, screen-anchored bubbles (no anchor) are stationary, but the
+    // smooth path is positionally exact either way, so enable it for all
+    // bubble text uniformly.
+    _smoothTextMode=true;
     for(let _i=0;_i<lines.length;_i++) ctx.fillText(lines[_i],_bx+_bW/2,_by+_pad/2+_lh/2+_i*_lh);
+    _smoothTextMode=false;
     ctx.textBaseline='alphabetic';
     ctx.restore();
   };
@@ -18283,9 +18370,13 @@ function updateMissions(dtSd){
       pendingMissionIntros.push({defId:'buy_second_train',readySd:stardate});
     }
   }
-  // design_better_train intro: arm timer once first steel produced; fire 10 real-time seconds later.
-  // The timer self-rearms on load (since it's not persisted) so it survives save/load cycles.
-  if(_steelMissionTimerMs===0&&_steelCarUnlocked&&!_missionPending('design_better_train')){
+  // design_better_train intro: requires BOTH (a) steel has been produced
+  // AND (b) the Class J engine is ALREADY unlocked. The 10-second real-time
+  // countdown arms only once both hold (Class J may unlock before or after
+  // steel — e.g. via the Mad Scientist mission or the revenue/corp-value
+  // gate), then fires 10 s later. The timer is not persisted, so it
+  // re-arms on load if both conditions still hold.
+  if(_steelMissionTimerMs===0&&_steelCarUnlocked&&_classJEngineUnlocked&&!_missionPending('design_better_train')){
     _steelMissionTimerMs=Date.now();
   }
   if(_steelMissionTimerMs>0&&Date.now()-_steelMissionTimerMs>=10000&&!_missionPending('design_better_train')){
@@ -18377,6 +18468,33 @@ function updateMissions(dtSd){
       _bhResearchTimerMs=0; // a gate condition lapsed before firing — disarm
     }
   }
+  // mad_scientist: fires 60 real-time seconds after the player PURCHASES
+  // their first Large Station. The timer is armed at the purchase-button
+  // click (see draw... build handler) — NOT from detecting the persistent
+  // hasLargeStation state — so loading a save that already has a Large
+  // Station won't fire it on game start. Timer not persisted: if the
+  // player reloads during the 60 s window the mission simply won't fire
+  // (acceptable edge case; avoids the load-time false trigger). Source =
+  // a random URBAN planet 20k–60k SU from the home star (Gigi Prime) with
+  // no rival/AI station.
+  if(_madScientistTimerMs>0&&Date.now()-_madScientistTimerMs>=60000&&
+     !_missionPending('mad_scientist')&&!missions.some(mx=>mx.id==='mad_scientist')){
+    const _msHomeP=galaxy.planets[galaxy.origenId];
+    const _msHs=_msHomeP?galaxy.stars[_msHomeP.starId]:null;
+    if(_msHs){
+      const _msPool=galaxy.planets.filter(p=>{
+        if(!p||!p.type||p.type.id!=='urban'||p.aiHasStation) return false;
+        const _d=Math.hypot(p.x-_msHs.x,p.y-_msHs.y);
+        return _d>20000&&_d<60000;
+      });
+      if(_msPool.length){
+        const _msP=_msPool[Math.floor(Math.random()*_msPool.length)];
+        pendingMissionIntros.push({defId:'mad_scientist',readySd:stardate,sourcePlanetId:_msP.id,targetPlanetId:galaxy.origenId});
+        _madScientistTimerMs=0; // fired — disarm
+      }
+      // empty pool (no eligible urban planet) → leave armed; re-checks next tick
+    }
+  }
   } // end of throttled intro-gate block — active-mission sweep below runs every frame
   if(!missions.length) return;
   for(const m of missions){
@@ -18390,7 +18508,21 @@ function updateMissions(dtSd){
     }
     let allDone=true;
     for(const obj of m.objectives){
-      if(!obj.done&&def.checkObj(obj.id,m)){
+      // Revertable objectives (e.g. mad_scientist's pickup) re-evaluate
+      // checkObj EVERY frame and may flip back to incomplete — used when an
+      // objective reflects a transient state (cargo currently aboard a
+      // train) rather than a one-way milestone. Non-revertable objectives
+      // keep the original one-way latch (once done, stays done).
+      const _revertable=def.revertableObjectives&&def.revertableObjectives.includes(obj.id);
+      if(_revertable){
+        const _nowDone=!!def.checkObj(obj.id,m);
+        if(_nowDone&&!obj.done){
+          obj.done=true;
+          if(m.objectives.length>1) _chatMsg(m.name+': objective done — '+((obj.text||'').replace(/\[([^\]]+)\]/g,'$1')),'rgba(160,230,200,1)');
+        } else if(!_nowDone&&obj.done){
+          obj.done=false; // rolled back — transient condition no longer holds
+        }
+      } else if(!obj.done&&def.checkObj(obj.id,m)){
         obj.done=true;
         // Log the FULL objective text (no slice/ellipsis). The chat-log
         // renderer already word-wraps long messages into as many rows as
@@ -18450,6 +18582,16 @@ function updateMissions(dtSd){
           _chatMsg('CLASS R ENGINE UNLOCKED','rgba(255,140,80,1)');
           _ga('engine_unlocked',{engine:'classR', sd:Math.floor(stardate)});
         }
+      }
+      // A Mad Scientist complete: the scientist's design is the next-tier
+      // engine above Galaxy — unlock the Class J. Idempotent (skips if the
+      // player already unlocked Class J via the revenue/corp-value gate or
+      // the design_better_train mission).
+      if(m.id==='mad_scientist'&&!_classJEngineUnlocked){
+        _classJEngineUnlocked=true;
+        pendingEngineUnlocks.push({sprite:'engine_classJ',displayName:'Class J Engine'});
+        _chatMsg('CLASS J ENGINE UNLOCKED','rgba(255,200,80,1)');
+        _ga('engine_unlocked',{engine:'classJ', sd:Math.floor(stardate)});
       }
       // Outbreak complete: spawn reward train (Galaxy engine + Medical car + Caboose) in HIGH orbit
       if(m.id==='outbreak'&&m.targetPlanetId!=null){
@@ -24661,7 +24803,7 @@ function drawGalaxy(ts,dt){
       ctx.save();
       const fs=Math.min(13,Math.max(10,sr*.14+9));
       ctx.font=`${fs}px "Exo 2",sans-serif`; ctx.textAlign='center';
-      ctx.fillStyle='rgba(255,230,150,0.85)'; ctx.fillText(s.name,sx,sy+sr+14);
+      ctx.fillStyle='rgba(255,230,150,0.85)'; _smoothTextMode=true; ctx.fillText(s.name,sx,sy+sr+14); _smoothTextMode=false;
       ctx.restore();
     }
   }
@@ -24900,12 +25042,11 @@ function drawGalaxy(ts,dt){
       ctx.textBaseline='top';
       ctx.fillStyle=p.isStarter?'rgba(255,210,80,0.9)':'rgba(170,205,255,0.8)';
       const _stOff=5; // constant slim buffer below the planet rim
-      // Sub-pixel positioning (no rounding). The HD text overlay
-      // rasterises at DPR resolution, so floating-point sx/sy give the
-      // glyphs smooth anti-aliased sub-device-pixel motion. Logical-pixel
-      // rounding here produced visible ~DPR-device-pixel STEPS, which
-      // reads as jitter against the smoothly-orbiting planet.
-      ctx.fillText(p.name,sx,sy+sr+_stOff);
+      // Planet labels track an orbiting planet → route through the smooth
+      // (cached-bitmap + drawImage) text path so sub-pixel motion glides
+      // instead of jittering. Stationary UI text stays on the sharp direct
+      // path (default _smoothTextMode=false).
+      _smoothTextMode=true; ctx.fillText(p.name,sx,sy+sr+_stOff); _smoothTextMode=false;
       ctx.restore();
     }
   }
@@ -25243,9 +25384,13 @@ function drawGalaxy(ts,dt){
       // per category so engines and the caboose stand a bit taller than
       // the mid-train cars — reproducing the reference rooflines — while
       // width then follows naturally from the source aspect.
-      const _vf = _styp==='caboose' ? 0.66
+      // Base fractions of ch: cars 0.60, caboose/engine-base 0.66 — all
+      // scaled by GAL_SCALE for the galaxy-view render size. (Was 2.0;
+      // reduced to 1.5 per user request — 25% smaller.)
+      const _GAL_SCALE=1.5;
+      const _vf = (_styp==='caboose' ? 0.66
                 : _styp.indexOf('engine_')===0 ? 0.66*(ENGINE_GALAXY_H_TIER[_styp]||1.0)
-                : 0.60;
+                : 0.60) * _GAL_SCALE;
       const _sc=(typeof SPRITE_CONTENT!=='undefined')?SPRITE_CONTENT[_styp]:null;
       const _sn=(typeof SPRITE_NATURAL!=='undefined')?SPRITE_NATURAL[_styp]:null;
       const _bhB =_sc?_sc[3]:160;                       // content height inside 160 bundle
@@ -28535,6 +28680,16 @@ canvas.addEventListener('mouseup',e=>{
             p.hasLargeStation=true;
             _ga('station_upgraded_large',{biome:p.type.id, planet:p.name, sd:Math.floor(stardate)});
             playSound('construction_complete');
+            // A Mad Scientist: arm the 60-second intro timer the moment the
+            // player PURCHASES a Large Station (this click). Armed here — at
+            // the purchase EVENT — rather than from detecting the persistent
+            // hasLargeStation state, so loading a save that already has a
+            // Large Station does NOT fire the mission ("on game start" bug).
+            // Only arms if the mission hasn't already fired/completed and the
+            // timer isn't already running.
+            if(_madScientistTimerMs===0&&!_missionPending('mad_scientist')){
+              _madScientistTimerMs=Date.now();
+            }
             // User spec #4: queueing trains at MED tier here are now cargo-ready.
             _promoteQueueingTrainsAtPlanet(p);
           }
@@ -29901,7 +30056,7 @@ function _restoreFromSave(save){
   _paperLayout=save._paperLayout||0;
   _newsEventLog=save._newsEventLog||[]; _newsSnapshot=save._newsSnapshot||null;
   _newspaperArchive=save._newspaperArchive||[]; _newspaperViewIdx=null;
-  _sandstormCheckSd=save._sandstormCheckSd||0; _bhResearchTimerMs=0; // real-time timer: re-arm fresh on load
+  _sandstormCheckSd=save._sandstormCheckSd||0; _bhResearchTimerMs=0; _madScientistTimerMs=0; // real-time timers: re-arm fresh on load
   _totalPassengersDelivered=save._totalPassengersDelivered||0; _totalHazmatIncinerated=save._totalHazmatIncinerated||0;
   _anyCargoProduced=!!save._anyCargoProduced;
   trainyard=save.trainyard||{}; financeLedger=save.financeLedger||[]; _ledgerSummary=save._ledgerSummary||{totalRevenue:0,totalCost:0,totalInterest:0}; purchaseLedger=save.purchaseLedger||[]; corpValueHistory=save.corpValueHistory||{};
@@ -30500,7 +30655,7 @@ function startGame(){
   _ironCarUnlocked=false; _steelCarUnlocked=false; _glassCarUnlocked=false; _machineryCarUnlocked=false; _hazmatCarUnlocked=false; _royalCarUnlocked=false; _flowersCarUnlocked=false; _medicalCarUnlocked=false; _grainCarUnlocked=false; _livestockCarUnlocked=false; _fruitCarUnlocked=false; _cargoCarUnlocked=false; _totalPassengersDelivered=0; _totalHazmatIncinerated=0; _anyCargoProduced=false;
   _classJEngineUnlocked=false; _classREngineUnlocked=false; _N700EngineUnlocked=false;
   _steelProdLog=[]; _steelMissionTimerMs=0;
-  _sensorUpgradeActive=false; _stationCostDiscount=0; _galaxyCensusTimerMs=0; _sandstormCheckSd=0; _bhResearchTimerMs=0;
+  _sensorUpgradeActive=false; _stationCostDiscount=0; _galaxyCensusTimerMs=0; _sandstormCheckSd=0; _bhResearchTimerMs=0; _madScientistTimerMs=0;
   _playerDeliveryCount=0; // new game starts with zero successful deliveries logged
   missions=[]; _recomputeMissionTargets();
   _gameStartSd=stardate;
@@ -31632,6 +31787,7 @@ function loop(ts){
                 details:(()=>{let _d=_nmDef.details||'';
                   if(_d.includes('{SOURCE}')&&_nmiE.sourcePlanetId!=null){const _sp6=_gp(_nmiE.sourcePlanetId);if(_sp6)_d=_d.replace(/\{SOURCE\}/g,_sp6.name);}
                   if(_d.includes('{TARGET}')&&_nmiE.targetPlanetId!=null){const _tp6=_gp(_nmiE.targetPlanetId);if(_tp6)_d=_d.replace(/\{TARGET\}/g,_tp6.name);}
+                  if(_d.includes('{CORP}')) _d=_d.replace(/\{CORP\}/g,corpName||'your corporation');
                   return _d;})(),reward:_nmDef.reward||null,timeLimit:_nmDef.timeLimit||null,
                 deadline:_nmDef.timeLimit?stardate+_nmDef.timeLimit:null,
                 status:'active',acceptedSd:stardate,completedSd:null,
