@@ -1443,13 +1443,13 @@ const CLOUD_SPEED      = 0.000070; // rad/frame-unit — slow atmospheric drift
 const CAR_ORB_W = 56;   // arc footprint (width)
 const CAR_ORB_H = 28;   // radial footprint (height)
 // center-to-center spacing between cars (world units). Set so the VISIBLE
-// gap between adjacent units is a slight ~5 world units (≈5 px at the
-// reference zoom): spacing = halfWidthA + halfWidthB + 5, with half-widths
-// derived from the de-stretched sprite sizes at _GAL_SCALE=1.5. A car body
-// is ~52 wide (half ~26), so car↔car = 26+26+5 = 57. The caboose is a touch
-// narrower, so car↔caboose comes out ~6. This constant also drives in-orbit
-// angular spacing and train tail length, so the whole train stays coherent.
-const CAR_ORB_GAP = 57;
+// gap between adjacent units is a slight ~1 world unit: spacing =
+// halfWidthA + halfWidthB + 1, with half-widths derived from the
+// de-stretched sprite sizes at _GAL_SCALE=1.5. A car body is ~52 wide
+// (half ~26), so car↔car = 26+26+1 = 53. The caboose is a touch narrower,
+// so car↔caboose comes out ~2. This constant also drives in-orbit angular
+// spacing and train tail length, so the whole train stays coherent.
+const CAR_ORB_GAP = 53;
 
 // ── Per-engine properties (keyed by car type string) ─────────
 //   Order: constellation → galaxy → classJ → classR → N700
@@ -1458,18 +1458,37 @@ const ENGINE_MAX_SPD     = {engine_constellation:4,     engine_galaxy:6,     eng
 const ENGINE_ACCEL_RATE  = {engine_constellation:TRANSIT_ACCEL*1, engine_galaxy:TRANSIT_ACCEL*2, engine_classJ:TRANSIT_ACCEL*4, engine_classR:TRANSIT_ACCEL*8, engine_N700:TRANSIT_ACCEL*12};
 const ENGINE_MAINT_DECAY = {engine_constellation:MAINT_DECAY_PER_AU, engine_galaxy:MAINT_DECAY_PER_AU*0.8, engine_classJ:MAINT_DECAY_PER_AU*0.6, engine_classR:MAINT_DECAY_PER_AU*0.4, engine_N700:MAINT_DECAY_PER_AU*0.25};
 const ENGINE_REPAIR_MULT = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.3,   engine_classR:1.6,   engine_N700:2.0};
-// gap engine→car[1] (world units). Set per-engine for a slight ~5-world-unit
+// gap engine→car[1] (world units). Set per-engine for a slight ~1-world-unit
 // visible gap between the engine's rear and the first car: spacing =
-// engineHalfWidth + carHalfWidth(~26) + 5. Engine half-widths come from the
+// engineHalfWidth + carHalfWidth(~26) + 1. Engine half-widths come from the
 // de-stretched sizes at _GAL_SCALE=1.5 (Constellation ~24.5 … Class R ~42.9,
 // the longest). So the wider/longer engines keep proportionally bigger gaps
-// while every engine→car coupling shows the same ~5 px slit.
-const ENGINE_ORB_GAP     = {engine_constellation:55, engine_galaxy:57, engine_classJ:59, engine_classR:74, engine_N700:67};
+// while every engine→car coupling shows the same ~1-unit slit.
+const ENGINE_ORB_GAP     = {engine_constellation:52, engine_galaxy:53, engine_classJ:55, engine_classR:70, engine_N700:63};
 // Per-engine visible-height tier for galaxy view (multiplied into the
 // base engine body height). Modest progression so bigger engines read as
 // bigger without the very-wide Class R / N700 sprites ballooning. Caboose
 // and regular cars don't use this (fixed fractions in the draw loop).
 const ENGINE_GALAXY_H_TIER = {engine_constellation:1.0, engine_galaxy:1.05, engine_classJ:1.10, engine_classR:1.06, engine_N700:1.16};
+// Galaxy-view train render scale (the draw loop multiplies each sprite's
+// base height fraction by this) and the desired VISIBLE gap (world units)
+// between every adjacent unit. _carOffset uses per-sprite half-widths so
+// the visible gap stays CONSTANT regardless of each car's width — the old
+// uniform-center-spacing approach left wider/narrower cars (engine, mail,
+// caboose) with visibly different gaps that grew toward the tail.
+const _GAL_SCALE = 1.5;
+const _GALAXY_CAR_GAP = 1.5;
+// Visible body HALF-width of a galaxy-view sprite, in world units. Mirrors
+// the draw loop exactly: visibleWidth = vf · CAR_ORB_H · contentAspect,
+// where vf = baseFraction · _GAL_SCALE and contentAspect = SPRITE_CONTENT[4].
+function _carGalWorldHalfW(type){
+  const _vf = (type==='caboose' ? 0.66
+            : (type&&type.indexOf('engine_')===0) ? 0.66*(ENGINE_GALAXY_H_TIER[type]||1.0)
+            : 0.60) * _GAL_SCALE;
+  const _sc = (typeof SPRITE_CONTENT!=='undefined') ? SPRITE_CONTENT[type] : null;
+  const _asp = _sc ? _sc[4] : 2.0;
+  return _vf * CAR_ORB_H * _asp / 2;
+}
 // car_mail width-multiplier 1.05 mirrors car_passenger. The new car_mail
 // + car_mail_empty sources are now 1254×1254 squares with content aspect
 // ~2.06 — essentially identical to car_passenger — so matching its
@@ -1728,8 +1747,24 @@ function getCarSprite(carType, isFull){
 const ENGINE_TYPES_ALL=['engine_constellation','engine_galaxy','engine_classJ','engine_classR','engine_N700'];
 function isEngineType(t){ return ENGINE_TYPES_ALL.includes(t); }
 function _engGap(train){ return ENGINE_ORB_GAP[train.cars?.[0]]??CAR_ORB_GAP; }
-function _carOffset(train,i){ return i===0?0:_engGap(train)+(i-1)*CAR_ORB_GAP; }
-function _trainTailLen(train){ const n=train.cars.length; return n<=1?0:_engGap(train)+(n-2)*CAR_ORB_GAP; }
+// Cumulative center-to-center offset (world units) of car `i` behind the
+// engine, summing each adjacent coupling as halfWidth(prev)+halfWidth(cur)+
+// _GALAXY_CAR_GAP. Because the spacing follows the actual sprite widths,
+// the VISIBLE gap between every pair (engine↔car, car↔car, car↔caboose)
+// is a constant _GALAXY_CAR_GAP — no more gaps that grow toward the tail
+// where narrower cars (mail) and the caboose sit.
+function _carOffset(train,i){
+  if(!train||!train.cars||i<=0) return 0;
+  let _off=0;
+  for(let _j=1;_j<=i;_j++){
+    _off += _carGalWorldHalfW(train.cars[_j-1]) + _carGalWorldHalfW(train.cars[_j]) + _GALAXY_CAR_GAP;
+  }
+  return _off;
+}
+function _trainTailLen(train){
+  if(!train||!train.cars) return 0;
+  return _carOffset(train, train.cars.length-1);
+}
 // Load penalty: each mid car past the 2nd shaves 5% off the engine's max
 // speed AND acceleration. Mid cars = train.cars.length - 2 (the engine at
 // index 0 and the caboose at the end aren't counted). Formula:
@@ -25385,9 +25420,9 @@ function drawGalaxy(ts,dt){
       // the mid-train cars — reproducing the reference rooflines — while
       // width then follows naturally from the source aspect.
       // Base fractions of ch: cars 0.60, caboose/engine-base 0.66 — all
-      // scaled by GAL_SCALE for the galaxy-view render size. (Was 2.0;
-      // reduced to 1.5 per user request — 25% smaller.)
-      const _GAL_SCALE=1.5;
+      // scaled by the module-level _GAL_SCALE (1.5) for the galaxy-view
+      // render size. _carGalWorldHalfW() uses the SAME formula so the
+      // width-aware spacing in _carOffset stays consistent with rendering.
       const _vf = (_styp==='caboose' ? 0.66
                 : _styp.indexOf('engine_')===0 ? 0.66*(ENGINE_GALAXY_H_TIER[_styp]||1.0)
                 : 0.60) * _GAL_SCALE;
