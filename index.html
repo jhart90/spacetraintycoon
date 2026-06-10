@@ -2577,6 +2577,11 @@ let _medicalCarUnlocked=false; // true once player first visits a Jungle-type pl
 let _grainCarUnlocked=false;   // true once player first visits a granary agri planet
 let _livestockCarUnlocked=false; // true once player first visits a farm agri planet
 let _fruitCarUnlocked=false;   // true once player first visits an orchard agri planet
+// Cheats: "Unlock All" sets this true. The 7 cars gated by planet
+// visits/discoveries rather than _XxxCarUnlocked flags (gold, diamond, oil,
+// battery, chemical, sand, ice) check this flag too, so the cheat unlocks
+// EVERY car. Persisted so a cheated save stays cheated.
+let _cheatUnlockAllCars=false;
 let _sensorUpgradeActive=false; // true once galaxy_census mission completed
 let _stationCostDiscount=0;     // fraction (0.10=10%) permanent discount from corporate_expansion mission
 // Counts player-train deliveries that produced NON-ZERO revenue. One
@@ -23334,6 +23339,7 @@ function drawTrainBuilderPopup(){
   const _iceUnlocked=galaxy&&galaxy.planets.some(p=>p.type.id==='ice'&&visitedPlanetIds.has(p.id));
   // Map each car type to its locked state
   const _carLocked=(t)=>{
+    if(_cheatUnlockAllCars) return false; // "Unlock All" cheat — everything buildable
     if(t==='car_gold')     return !_goldUnlocked;
     if(t==='car_diamond')  return !_diamondUnlocked;
     if(t==='car_oil')      return !_oilUnlocked;
@@ -28426,6 +28432,10 @@ canvas.addEventListener('mouseup',e=>{
           _machineryCarUnlocked=true; _cargoCarUnlocked=true; _hazmatCarUnlocked=true;
           _royalCarUnlocked=true; _flowersCarUnlocked=true; _medicalCarUnlocked=true;
           _grainCarUnlocked=true; _livestockCarUnlocked=true; _fruitCarUnlocked=true;
+          // The remaining 7 cars (gold, diamond, oil, battery, chemical, sand,
+          // ice) gate on planet visits/discoveries, not flags — this catch-all
+          // unlocks them too.
+          _cheatUnlockAllCars=true;
           _chatMsg('ALL ENGINES & TRAIN CARS UNLOCKED','rgba(180,235,255,1)');
           return;
         }
@@ -29954,6 +29964,7 @@ function _buildSaveObject(){
     pokedexSortIdx, pokedexDiscoveredOnly, starRegistrySortIdx, starRegistryVisitedOnly, autosaveEnabled, missionTrackerEnabled,
     _gameStartSd, _ironCarUnlocked, _steelCarUnlocked, _glassCarUnlocked, _machineryCarUnlocked, _hazmatCarUnlocked, _royalCarUnlocked, _flowersCarUnlocked, _medicalCarUnlocked,
     _grainCarUnlocked, _livestockCarUnlocked, _fruitCarUnlocked, _cargoCarUnlocked,
+    _cheatUnlockAllCars,
     _classJEngineUnlocked, _classREngineUnlocked, _N700EngineUnlocked,
     _steelProdLog,
     _sensorUpgradeActive, _stationCostDiscount, _sandstormCheckSd, _playerDeliveryCount,
@@ -30085,6 +30096,7 @@ function _restoreFromSave(save){
   _gameStartSd=save._gameStartSd||save.stardate;
   _ironCarUnlocked=!!save._ironCarUnlocked; _steelCarUnlocked=!!save._steelCarUnlocked; _glassCarUnlocked=!!save._glassCarUnlocked; _machineryCarUnlocked=!!save._machineryCarUnlocked; _hazmatCarUnlocked=!!save._hazmatCarUnlocked; _royalCarUnlocked=!!save._royalCarUnlocked; _flowersCarUnlocked=!!save._flowersCarUnlocked; _medicalCarUnlocked=!!save._medicalCarUnlocked;
   _grainCarUnlocked=!!save._grainCarUnlocked; _livestockCarUnlocked=!!save._livestockCarUnlocked; _fruitCarUnlocked=!!save._fruitCarUnlocked; _cargoCarUnlocked=!!save._cargoCarUnlocked;
+  _cheatUnlockAllCars=!!save._cheatUnlockAllCars;
   _classJEngineUnlocked=!!save._classJEngineUnlocked; _classREngineUnlocked=!!save._classREngineUnlocked; _N700EngineUnlocked=!!save._N700EngineUnlocked;
   _steelProdLog=Array.isArray(save._steelProdLog)?save._steelProdLog:[];
   _steelMissionTimerMs=0; // re-armed by updateMissions() if the design_better_train intro hasn't fired yet
@@ -30738,7 +30750,7 @@ function startGame(){
   pendingEngineUnlocks=[];
   pendingMissionIntros=[];
   pendingAncientPopups=[]; _ancientTranslatedWords=new Set();
-  _ironCarUnlocked=false; _steelCarUnlocked=false; _glassCarUnlocked=false; _machineryCarUnlocked=false; _hazmatCarUnlocked=false; _royalCarUnlocked=false; _flowersCarUnlocked=false; _medicalCarUnlocked=false; _grainCarUnlocked=false; _livestockCarUnlocked=false; _fruitCarUnlocked=false; _cargoCarUnlocked=false; _totalPassengersDelivered=0; _totalHazmatIncinerated=0; _anyCargoProduced=false;
+  _ironCarUnlocked=false; _steelCarUnlocked=false; _glassCarUnlocked=false; _machineryCarUnlocked=false; _hazmatCarUnlocked=false; _royalCarUnlocked=false; _flowersCarUnlocked=false; _medicalCarUnlocked=false; _grainCarUnlocked=false; _livestockCarUnlocked=false; _fruitCarUnlocked=false; _cargoCarUnlocked=false; _cheatUnlockAllCars=false; _totalPassengersDelivered=0; _totalHazmatIncinerated=0; _anyCargoProduced=false;
   _classJEngineUnlocked=false; _classREngineUnlocked=false; _N700EngineUnlocked=false;
   _steelProdLog=[]; _steelMissionTimerMs=0;
   _sensorUpgradeActive=false; _stationCostDiscount=0; _galaxyCensusTimerMs=0; _sandstormCheckSd=0; _bhResearchTimerMs=0; _madScientistTimerMs=0;
