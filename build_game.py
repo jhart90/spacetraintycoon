@@ -238,6 +238,19 @@ function fitCanvas() {
 fitCanvas();
 window.addEventListener('resize', fitCanvas);
 
+// ── Smooth-text mode flag ─────────────────────────────────────
+// Default text rendering is DIRECT to the HD overlay (tctx.fillText at full
+// DPR) — maximally sharp, which is what all stationary UI text (menus,
+// buttons, panels, chat log, top bar) wants. Only text that tracks a
+// MOVING anchor (planet / star labels, callout bubbles) sets this flag
+// true to route through the cached-glyph-bitmap + drawImage path, which
+// trades a hair of sharpness for jitter-free sub-pixel motion. Callers
+// set it true immediately before such draws and reset it false right
+// after (see drawGalaxy planet/star labels and _drawBubble). Because the
+// default is the sharp path, any draw site we DON'T explicitly opt in
+// stays crisp — the stationary-sharpness priority can't regress.
+let _smoothTextMode = false;
+
 // ── ctx → tctx state mirroring ────────────────────────────────
 // Path / transform / clip / save-restore commands all forward to tctx so the
 // overlay tracks the world canvas's logical state perfectly. setTransform
@@ -360,52 +373,68 @@ window.addEventListener('resize', fitCanvas);
   // text doesn't re-rasterise per frame; LRU eviction keeps memory
   // bounded.
   //
-  // Properties handled at draw time (not baked into cache): textAlign,
-  // textBaseline, globalAlpha — these only shift the destination
-  // position or the composite alpha, so they don't change the glyph
-  // bitmap itself.
+  // Positioning is done the bulletproof way: the offscreen bitmap is
+  // rendered with the EXACT textAlign + textBaseline the caller set, with
+  // the pen at a known interior point. The browser therefore performs all
+  // align/baseline math itself (identically to native fillText), and we
+  // simply blit the bitmap so the pen maps back to (x, y). No manual
+  // baseline/metric math on our side — that was the source of the
+  // "labels render too high" bug (manual baseline math didn't match the
+  // browser's font-metric interpretation, especially for 'top' and
+  // 'middle'). The pen-relative glyph extents come from measureText's
+  // actualBoundingBox* taken WITH the same align/baseline, so the bitmap
+  // is sized to contain the glyphs no matter which way they extend.
   const _txtBmCache = new Map();
-  const _TXT_BM_MAX = 600;
-  function _getTextBM(text, font, fillStyle, strokeStyle, lineWidth){
-    const key = text+'|'+font+'|'+fillStyle+'|'+(strokeStyle||'')+'|'+(lineWidth||0);
+  const _TXT_BM_MAX = 800;
+  function _getTextBM(text, font, fillStyle, strokeStyle, lineWidth, align, baseline){
+    const key = text+'|'+font+'|'+fillStyle+'|'+(strokeStyle||'')+'|'+(lineWidth||0)+'|'+align+'|'+baseline;
     let e = _txtBmCache.get(key);
     if(e){
       _txtBmCache.delete(key); _txtBmCache.set(key, e); // LRU bump
       return e;
     }
-    // Measure
+    // Measure WITH the caller's align + baseline so the actualBoundingBox
+    // extents are relative to the pen for this exact configuration.
     tctx.save();
     tctx.font = font;
+    tctx.textAlign = align;
+    tctx.textBaseline = baseline;
     const tm = tctx.measureText(text);
     tctx.restore();
-    const ascent  = tm.fontBoundingBoxAscent  || tm.actualBoundingBoxAscent  || (parseInt(font)||10);
-    const descent = tm.fontBoundingBoxDescent || tm.actualBoundingBoxDescent || 2;
-    const lw = lineWidth || 0;
-    const padX = 2 + lw;
-    const padY = 2 + lw;
-    const w = Math.max(1, Math.ceil(tm.width) + padX*2);
-    const h = Math.max(1, Math.ceil(ascent + descent) + padY*2);
+    const fontPx = parseInt(font) || 10;
+    const exL = (typeof tm.actualBoundingBoxLeft   === 'number') ? tm.actualBoundingBoxLeft   : 0;
+    const exR = (typeof tm.actualBoundingBoxRight  === 'number') ? tm.actualBoundingBoxRight  : (tm.width||fontPx);
+    const exA = (typeof tm.actualBoundingBoxAscent === 'number') ? tm.actualBoundingBoxAscent : fontPx;
+    const exD = (typeof tm.actualBoundingBoxDescent=== 'number') ? tm.actualBoundingBoxDescent: fontPx*0.3;
+    const lw  = lineWidth || 0;
+    const pad = 2 + lw;
+    // Pen position inside the bitmap = (distance from pen to left edge of
+    // glyphs) + pad, and likewise for the top.
+    const penX = Math.ceil(exL) + pad;
+    const penY = Math.ceil(exA) + pad;
+    const w = Math.max(1, Math.ceil(exL + exR) + pad*2);
+    const h = Math.max(1, Math.ceil(exA + exD) + pad*2);
     const c = document.createElement('canvas');
     c.width  = Math.ceil(w * DPR);
     c.height = Math.ceil(h * DPR);
     const cx = c.getContext('2d');
     cx.setTransform(DPR, 0, 0, DPR, 0, 0);
     cx.font = font;
-    cx.textAlign = 'left';
-    cx.textBaseline = 'alphabetic';
+    cx.textAlign = align;
+    cx.textBaseline = baseline;
     cx.imageSmoothingEnabled = true;
     cx.imageSmoothingQuality = 'high';
     try{ cx.textRendering = 'geometricPrecision'; }catch(_){}
     if(strokeStyle){
       cx.strokeStyle = strokeStyle;
       cx.lineWidth = lw || 1;
-      cx.strokeText(text, padX, padY + ascent);
+      cx.strokeText(text, penX, penY);
     }
     if(fillStyle){
       cx.fillStyle = fillStyle;
-      cx.fillText(text, padX, padY + ascent);
+      cx.fillText(text, penX, penY);
     }
-    e = { canvas:c, w, h, glyphW:tm.width, ascent, descent, leftPad:padX, topPad:padY };
+    e = { canvas:c, w, h, penX, penY };
     if(_txtBmCache.size >= _TXT_BM_MAX){
       const oldKey = _txtBmCache.keys().next().value;
       _txtBmCache.delete(oldKey);
@@ -419,27 +448,25 @@ window.addEventListener('resize', fitCanvas);
     const fill  = mode===0 ? tctx.fillStyle   : null;
     const stk   = mode===1 ? tctx.strokeStyle : null;
     const lw    = mode===1 ? tctx.lineWidth   : null;
-    const align = tctx.textAlign;
-    const base  = tctx.textBaseline;
-    const e = _getTextBM(text, font, fill, stk, lw);
-    // X offset by textAlign
-    let dx = x;
-    if(align==='center') dx -= e.glyphW/2;
-    else if(align==='right'||align==='end') dx -= e.glyphW;
-    // Y offset by textBaseline — translate the caller's y into the
-    // bitmap's alphabetic-baseline coordinate, then back into the
-    // bitmap's top-left.
-    let baselineY = y;
-    if(base==='top')                       baselineY = y + e.ascent;
-    else if(base==='middle')               baselineY = y + (e.ascent - e.descent)/2;
-    else if(base==='bottom'||base==='ideographic') baselineY = y - e.descent;
-    // else 'alphabetic' or 'hanging': y already at baseline (treat hanging≈alphabetic)
-    const drawX = dx - e.leftPad;
-    const drawY = baselineY - e.topPad - e.ascent;
-    tctx.drawImage(e.canvas, drawX, drawY, e.w, e.h);
+    const align = tctx.textAlign || 'start';
+    const base  = tctx.textBaseline || 'alphabetic';
+    const e = _getTextBM(text, font, fill, stk, lw, align, base);
+    // Blit so the bitmap's pen lands exactly at (x, y).
+    tctx.drawImage(e.canvas, x - e.penX, y - e.penY, e.w, e.h);
   }
-  ctx.fillText   = function(text, x, y){ _syncTextState(); _drawTextViaBM(text, x, y, 0); };
-  ctx.strokeText = function(text, x, y){ _syncTextState(); _drawTextViaBM(text, x, y, 1); };
+  ctx.fillText = function(text, x, y, maxWidth){
+    _syncTextState();
+    if(_smoothTextMode){ _drawTextViaBM(text, x, y, 0); return; }
+    // Default: direct, native, full-DPR rasterisation → sharpest possible.
+    if(maxWidth!==undefined) tctx.fillText(text, x, y, maxWidth);
+    else tctx.fillText(text, x, y);
+  };
+  ctx.strokeText = function(text, x, y, maxWidth){
+    _syncTextState();
+    if(_smoothTextMode){ _drawTextViaBM(text, x, y, 1); return; }
+    if(maxWidth!==undefined) tctx.strokeText(text, x, y, maxWidth);
+    else tctx.strokeText(text, x, y);
+  };
 }
 // Called once at the start of each frame to wipe the overlay before the
 // new frame's text is laid down.
@@ -1393,7 +1420,15 @@ const CLOUD_SPEED      = 0.000070; // rad/frame-unit — slow atmospheric drift
 // Car world-unit dimensions when rendered in galaxy view.
 const CAR_ORB_W = 56;   // arc footprint (width)
 const CAR_ORB_H = 28;   // radial footprint (height)
-const CAR_ORB_GAP = 48; // center-to-center spacing between cars (overlap sprite margins)
+// center-to-center spacing between cars (overlap sprite margins). Reduced
+// 48 → 30 when galaxy-view cars were de-stretched to their true source
+// aspect: the visible car body lost ~9 world units of half-width (from
+// ~26.5 to ~17.3), so the old 48 spacing — tuned for the wider stretched
+// cars — left visible gaps between cars. Dropping by ~2× the per-side
+// shrink (≈18) restores the slight sprite-margin overlap the train had
+// before. This constant also drives in-orbit angular spacing and train
+// tail length, so the whole train compacts coherently.
+const CAR_ORB_GAP = 30;
 
 // ── Per-engine properties (keyed by car type string) ─────────
 //   Order: constellation → galaxy → classJ → classR → N700
@@ -1402,7 +1437,18 @@ const ENGINE_MAX_SPD     = {engine_constellation:4,     engine_galaxy:6,     eng
 const ENGINE_ACCEL_RATE  = {engine_constellation:TRANSIT_ACCEL*1, engine_galaxy:TRANSIT_ACCEL*2, engine_classJ:TRANSIT_ACCEL*4, engine_classR:TRANSIT_ACCEL*8, engine_N700:TRANSIT_ACCEL*12};
 const ENGINE_MAINT_DECAY = {engine_constellation:MAINT_DECAY_PER_AU, engine_galaxy:MAINT_DECAY_PER_AU*0.8, engine_classJ:MAINT_DECAY_PER_AU*0.6, engine_classR:MAINT_DECAY_PER_AU*0.4, engine_N700:MAINT_DECAY_PER_AU*0.25};
 const ENGINE_REPAIR_MULT = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.3,   engine_classR:1.6,   engine_N700:2.0};
-const ENGINE_ORB_GAP     = {engine_constellation:CAR_ORB_GAP, engine_galaxy:52, engine_classJ:56, engine_classR:57, engine_N700:60}; // gap engine→car[1]
+// gap engine→car[1] (world units). Retuned after the engines were ALSO
+// de-stretched to their true source aspect (they used to render ~50 wide
+// from the legacy 2:1-box path; now they're natural width). Each value ≈
+// engineHalfWidth + carHalfWidth − ~4 overlap, computed from the new
+// per-engine visible widths. Class R is long (content aspect 2.9) so it
+// keeps the widest gap; the others sit near the car-to-car spacing.
+const ENGINE_ORB_GAP     = {engine_constellation:30, engine_galaxy:30, engine_classJ:32, engine_classR:42, engine_N700:37};
+// Per-engine visible-height tier for galaxy view (multiplied into the
+// base engine body height). Modest progression so bigger engines read as
+// bigger without the very-wide Class R / N700 sprites ballooning. Caboose
+// and regular cars don't use this (fixed fractions in the draw loop).
+const ENGINE_GALAXY_H_TIER = {engine_constellation:1.0, engine_galaxy:1.05, engine_classJ:1.10, engine_classR:1.06, engine_N700:1.16};
 // car_mail width-multiplier 1.05 mirrors car_passenger. The new car_mail
 // + car_mail_empty sources are now 1254×1254 squares with content aspect
 // ~2.06 — essentially identical to car_passenger — so matching its
@@ -2459,7 +2505,7 @@ let _stationCostDiscount=0;     // fraction (0.10=10%) permanent discount from c
 let _playerDeliveryCount=0;
 let _galaxyCensusTimerMs=0;     // real-time ms when 15th planet was visited (0=not yet)
 let _sandstormCheckSd=0;        // last SD at which sandstorm_relief trigger was checked
-let _bhResearchCheckSd=0;       // last SD at which bh_research trigger was checked
+let _bhResearchTimerMs=0;       // real-time ms when bh_research's two gate conditions first both held (0=not armed). Not persisted; re-arms on load.
 let _csSelectedCeo=0;    // corpsetup: selected CEO index (0/1/2)
 let _csCeoOptions=[];    // corpsetup: array of 3 CEO candidate objects
 let _csNameHover=false;  // corpsetup: hovering corp name input field
@@ -4101,7 +4147,7 @@ function _drawCutsceneBg(ts){
       const fs=Math.min(13,Math.max(10,sr*.14+9));
       ctx.font=fs+'px "Exo 2",sans-serif'; ctx.textAlign='center';
       ctx.fillStyle='rgba(255,230,150,0.85)';
-      ctx.fillText(s.name,sx,sy+sr+14);
+      _smoothTextMode=true; ctx.fillText(s.name,sx,sy+sr+14); _smoothTextMode=false;
       ctx.restore();
     }
   }
@@ -4188,7 +4234,7 @@ function _drawCutsceneBg(ts){
       ctx.font=fs+'px "Exo 2",sans-serif'; ctx.textAlign='center';
       ctx.textBaseline='top';
       ctx.fillStyle='rgba(170,205,255,0.8)';
-      ctx.fillText(p.name,sx,sy+sr+5);
+      _smoothTextMode=true; ctx.fillText(p.name,sx,sy+sr+5); _smoothTextMode=false;
       ctx.restore();
     }
   }
@@ -18354,20 +18400,29 @@ function updateMissions(dtSd){
       }
     }
   }
-  // bh_research: 0.5% chance per 0.1 SD once player has a station on a chemical planet (and bhResearchPlanetIds exist)
+  // bh_research: fires 60 real-time seconds after BOTH gate conditions
+  // first hold simultaneously —
+  //   (1) the player has a STATION on a CHEMICAL planet, and
+  //   (2) the player has built a TERMINAL upgrade on ANY planet
+  //       (p.hasTerminal is set only by the player's terminal-upgrade
+  //        button, so it's reliably player-built).
+  // The 60 s timer arms when both first hold and DISARMS if either lapses
+  // before it fires. Still gated on designated research-target planets
+  // existing. Timer uses Date.now() and is not persisted — on load it
+  // re-arms fresh if the conditions still hold (matches the other
+  // real-time mission timers).
   const _bhRpIds=galaxy.bhResearchPlanetIds&&galaxy.bhResearchPlanetIds.length?galaxy.bhResearchPlanetIds:(galaxy.bhResearchPlanetId?[galaxy.bhResearchPlanetId]:[]);
-  if(!_missionPending('bh_research')&&_bhRpIds.length>0){
-    if(_bhResearchCheckSd===0) _bhResearchCheckSd=_gameStartSd;
-    const _chemStp=galaxy.planets.filter(p=>p.type.id==='chemical'&&p.playerBuiltStation);
-    if(_chemStp.length){
-      while(stardate-_bhResearchCheckSd>=0.1){
-        _bhResearchCheckSd+=0.1;
-        if(Math.random()<0.005){
-          const _bhTgt=_bhRpIds[Math.floor(Math.random()*_bhRpIds.length)];
-          pendingMissionIntros.push({defId:'bh_research',readySd:stardate,targetPlanetId:_bhTgt});
-          break;
-        }
+  if(!_missionPending('bh_research')&&!missions.some(mx=>mx.id==='bh_research')&&_bhRpIds.length>0){
+    const _bhChemStation=galaxy.planets.some(p=>p.type.id==='chemical'&&p.playerBuiltStation);
+    const _bhTerminalBuilt=galaxy.planets.some(p=>p.hasTerminal);
+    if(_bhChemStation&&_bhTerminalBuilt){
+      if(_bhResearchTimerMs===0) _bhResearchTimerMs=Date.now();
+      else if(Date.now()-_bhResearchTimerMs>=60000){
+        const _bhTgt=_bhRpIds[Math.floor(Math.random()*_bhRpIds.length)];
+        pendingMissionIntros.push({defId:'bh_research',readySd:stardate,targetPlanetId:_bhTgt});
       }
+    } else {
+      _bhResearchTimerMs=0; // a gate condition lapsed before firing — disarm
     }
   }
   } // end of throttled intro-gate block — active-mission sweep below runs every frame
@@ -24654,7 +24709,7 @@ function drawGalaxy(ts,dt){
       ctx.save();
       const fs=Math.min(13,Math.max(10,sr*.14+9));
       ctx.font=`${fs}px "Exo 2",sans-serif`; ctx.textAlign='center';
-      ctx.fillStyle='rgba(255,230,150,0.85)'; ctx.fillText(s.name,sx,sy+sr+14);
+      ctx.fillStyle='rgba(255,230,150,0.85)'; _smoothTextMode=true; ctx.fillText(s.name,sx,sy+sr+14); _smoothTextMode=false;
       ctx.restore();
     }
   }
@@ -24893,12 +24948,11 @@ function drawGalaxy(ts,dt){
       ctx.textBaseline='top';
       ctx.fillStyle=p.isStarter?'rgba(255,210,80,0.9)':'rgba(170,205,255,0.8)';
       const _stOff=5; // constant slim buffer below the planet rim
-      // Sub-pixel positioning (no rounding). The HD text overlay
-      // rasterises at DPR resolution, so floating-point sx/sy give the
-      // glyphs smooth anti-aliased sub-device-pixel motion. Logical-pixel
-      // rounding here produced visible ~DPR-device-pixel STEPS, which
-      // reads as jitter against the smoothly-orbiting planet.
-      ctx.fillText(p.name,sx,sy+sr+_stOff);
+      // Planet labels track an orbiting planet → route through the smooth
+      // (cached-bitmap + drawImage) text path so sub-pixel motion glides
+      // instead of jittering. Stationary UI text stays on the sharp direct
+      // path (default _smoothTextMode=false).
+      _smoothTextMode=true; ctx.fillText(p.name,sx,sy+sr+_stOff); _smoothTextMode=false;
       ctx.restore();
     }
   }
@@ -25216,23 +25270,42 @@ function drawGalaxy(ts,dt){
         }
       }
     }
-    for(let i=0;i<train.cars.length;i++){
+    // Draw cars BACK-TO-FRONT (tail first, engine last) so each forward
+    // car renders ON TOP of the car behind it — matching the reference
+    // where the engine overlaps car 2, car 2 overlaps car 3, etc.
+    for(let i=train.cars.length-1;i>=0;i--){
       const [wx,wy,rot]=getTrainCarPos(train,i);
       const [sx,sy]=w2s(wx,wy);
       if(i===0&&train.isPlayer){
         const ti=trains.indexOf(train);
         trainGalaxyBounds.push({x:sx,y:sy,r:Math.max(cw*0.8,20),trainIdx:ti});
       }
-      const _wcw=_carWorldW(train.cars[i],cw);
-      const _ech=_carVizH(train.cars[i],ch); // height with engine-size multiplier applied
-      const _esn=getCarSprite(train.cars[i],train.carFull?.[i]??false);
-      const _ebp=SPRITE_BOT[_esn]||SPRITE_BOT[train.cars[i]]||0; // transparent bottom fraction
+      const _styp=train.cars[i];
+      const _esn=getCarSprite(_styp,train.carFull?.[i]??false);
+      const _ebp=SPRITE_BOT[_esn]||SPRITE_BOT[_styp]||0; // transparent bottom fraction
+      // Unified sizing: EVERY sprite — engine, car, and caboose — renders
+      // at its TRUE source content aspect (box aspect = source file aspect,
+      // so no horizontal stretch) and bottom-aligned (visible body bottom
+      // on the rail line via SPRITE_BOT). Visible body height is assigned
+      // per category so engines and the caboose stand a bit taller than
+      // the mid-train cars — reproducing the reference rooflines — while
+      // width then follows naturally from the source aspect.
+      const _vf = _styp==='caboose' ? 0.66
+                : _styp.indexOf('engine_')===0 ? 0.66*(ENGINE_GALAXY_H_TIER[_styp]||1.0)
+                : 0.60;
+      const _sc=(typeof SPRITE_CONTENT!=='undefined')?SPRITE_CONTENT[_styp]:null;
+      const _sn=(typeof SPRITE_NATURAL!=='undefined')?SPRITE_NATURAL[_styp]:null;
+      const _bhB =_sc?_sc[3]:160;                       // content height inside 160 bundle
+      const _fileAR=(_sn&&_sn[1])?(_sn[0]/_sn[1]):1.0;  // source PNG file aspect
+      const _visH=_vf*ch;
+      const _ech=_visH*160/Math.max(1,_bhB);            // box height so visible body = _visH
+      const _wcw=_ech*_fileAR;                          // box width — undistorted
       ctx.save(); ctx.translate(sx,sy); ctx.rotate(rot); ctx.scale(-1,1);
       if(imgs[_esn]&&_wcw>8) ctx.drawImage(_sprForSize(_esn,_wcw,_ech),-_wcw/2,-_ech*(1-_ebp),_wcw,_ech);
       else{ ctx.fillStyle=i===0?'#4af':i===train.cars.length-1?'#f84':'#ccc'; ctx.fillRect(-_wcw/2,-_ech*(1-_ebp),_wcw,_ech*(1-_ebp)); }
       ctx.restore();
       // Hazmat warning light: flashing yellow glow when car is full
-      if(train.cars[i]==='car_hazmat'&&(train.carFull?.[i]??false)&&_wcw>8){
+      if(_styp==='car_hazmat'&&(train.carFull?.[i]??false)&&_wcw>8){
         const _ft=Date.now()*0.009;
         const _fint=Math.pow(Math.max(0,Math.sin(_ft)),0.5); // quick on, gradual fade
         const _lx=sx+_ech*(1-_ebp)*0.8*Math.sin(rot);
@@ -29689,7 +29762,7 @@ function _buildSaveObject(){
     _grainCarUnlocked, _livestockCarUnlocked, _fruitCarUnlocked, _cargoCarUnlocked,
     _classJEngineUnlocked, _classREngineUnlocked, _N700EngineUnlocked,
     _steelProdLog,
-    _sensorUpgradeActive, _stationCostDiscount, _sandstormCheckSd, _bhResearchCheckSd, _playerDeliveryCount,
+    _sensorUpgradeActive, _stationCostDiscount, _sandstormCheckSd, _playerDeliveryCount,
     _totalPassengersDelivered, _totalHazmatIncinerated, _anyCargoProduced,
     trainyard, financeLedger:_trimmedFinance, _ledgerSummary:_builtLedgerSummary, purchaseLedger, corpValueHistory, corpStatsHistory, aiCorpStatsHistory, _corp, _ceoHireCandidates,
     creditSnapshots, lastCreditSnapshotSd,
@@ -29875,7 +29948,7 @@ function _restoreFromSave(save){
   _paperLayout=save._paperLayout||0;
   _newsEventLog=save._newsEventLog||[]; _newsSnapshot=save._newsSnapshot||null;
   _newspaperArchive=save._newspaperArchive||[]; _newspaperViewIdx=null;
-  _sandstormCheckSd=save._sandstormCheckSd||0; _bhResearchCheckSd=save._bhResearchCheckSd||0;
+  _sandstormCheckSd=save._sandstormCheckSd||0; _bhResearchTimerMs=0; // real-time timer: re-arm fresh on load
   _totalPassengersDelivered=save._totalPassengersDelivered||0; _totalHazmatIncinerated=save._totalHazmatIncinerated||0;
   _anyCargoProduced=!!save._anyCargoProduced;
   trainyard=save.trainyard||{}; financeLedger=save.financeLedger||[]; _ledgerSummary=save._ledgerSummary||{totalRevenue:0,totalCost:0,totalInterest:0}; purchaseLedger=save.purchaseLedger||[]; corpValueHistory=save.corpValueHistory||{};
@@ -30474,7 +30547,7 @@ function startGame(){
   _ironCarUnlocked=false; _steelCarUnlocked=false; _glassCarUnlocked=false; _machineryCarUnlocked=false; _hazmatCarUnlocked=false; _royalCarUnlocked=false; _flowersCarUnlocked=false; _medicalCarUnlocked=false; _grainCarUnlocked=false; _livestockCarUnlocked=false; _fruitCarUnlocked=false; _cargoCarUnlocked=false; _totalPassengersDelivered=0; _totalHazmatIncinerated=0; _anyCargoProduced=false;
   _classJEngineUnlocked=false; _classREngineUnlocked=false; _N700EngineUnlocked=false;
   _steelProdLog=[]; _steelMissionTimerMs=0;
-  _sensorUpgradeActive=false; _stationCostDiscount=0; _galaxyCensusTimerMs=0; _sandstormCheckSd=0; _bhResearchCheckSd=0;
+  _sensorUpgradeActive=false; _stationCostDiscount=0; _galaxyCensusTimerMs=0; _sandstormCheckSd=0; _bhResearchTimerMs=0;
   _playerDeliveryCount=0; // new game starts with zero successful deliveries logged
   missions=[]; _recomputeMissionTargets();
   _gameStartSd=stardate;
