@@ -107,14 +107,17 @@ def _content_info(bundled_b64, source_path):
     except Exception:
         return None
 
-def _solid_bundle_width(bundled_b64, thresh=30):
-    """Width (px) of the bundled sprite's SOLID body — the alpha>thresh bbox,
-    excluding the faint anti-aliasing halo that the alpha>0 content bbox
-    includes. Sprites vary a lot in halo width (iron/passenger ≈ 0 px, but
-    mail/oil/battery ≈ 5-6 px), so the a>0 width over-spaces those cars in
-    galaxy view. The solid width is what the eye reads as the car's edge, so
-    galaxy-view coupling spacing uses THIS, giving consistent gaps for every
-    car-to-car pair. Returns None if undecodable."""
+def _solid_bundle_bbox(bundled_b64, thresh=30):
+    """Horizontal SOLID bbox of the bundled sprite as (left_x, width) at
+    alpha>thresh, excluding the faint anti-aliasing halo the alpha>0 content
+    bbox includes. Two uses in galaxy view:
+      • width  → coupling spacing (the eye reads the solid edge, so consistent
+                 gaps for every car-to-car pair; halos vary 0-6 px per sprite).
+      • left_x → horizontal CENTRING: some sprites (notably car_ore) have their
+                 body off-centre in the 160 bundle, so drawing them centred on
+                 the bundle midpoint shifts the body off the car's position and
+                 skews the gaps. Centring on the SOLID body's centre fixes it.
+    Returns None if undecodable."""
     try:
         from PIL import Image
         import io
@@ -123,14 +126,14 @@ def _solid_bundle_width(bundled_b64, thresh=30):
         bb = mask.getbbox()
         if not bb:
             return None
-        return bb[2] - bb[0]
+        return (bb[0], bb[2] - bb[0])
     except Exception:
         return None
 
 _sprite_dir = "sprites"
 _natural = {}
 _content = {}
-_solidw = {}
+_solid = {}
 if os.path.isdir(_sprite_dir):
     for _name, _b64 in assets.items():
         _p = os.path.join(_sprite_dir, _name + ".png")
@@ -141,21 +144,22 @@ if os.path.isdir(_sprite_dir):
             _ci = _content_info(_b64, _p)
             if _ci:
                 _content[_name] = _ci
-            _sw = _solid_bundle_width(_b64)
-            if _sw:
-                _solidw[_name] = _sw
+            _sb = _solid_bundle_bbox(_b64)
+            if _sb:
+                _solid[_name] = _sb
 sprite_nat_entries = ", ".join(f'"{k}":[{v[0]},{v[1]}]' for k, v in _natural.items())
 sprite_content_entries = ", ".join(
     f'"{k}":[{v[0]},{v[1]},{v[2]},{v[3]},{v[4]}]' for k, v in _content.items()
 )
-sprite_solidw_entries = ", ".join(f'"{k}":{v}' for k, v in _solidw.items())
+# SPRITE_SOLID[name] = [solidLeftX, solidWidth] in the 160 bundle (alpha>30).
+sprite_solid_entries = ", ".join(f'"{k}":[{v[0]},{v[1]}]' for k, v in _solid.items())
 
 asset_js = (
     "const ASSETS = {\n" + ",\n".join(asset_js_lines) + "\n};\n"
     + f"const SPRITE_BOT = {{{sprite_bot_entries}}};\n"
     + f"const SPRITE_NATURAL = {{{sprite_nat_entries}}};\n"
     + f"const SPRITE_CONTENT = {{{sprite_content_entries}}};\n"
-    + f"const SPRITE_SOLID_W = {{{sprite_solidw_entries}}};"
+    + f"const SPRITE_SOLID = {{{sprite_solid_entries}}};"
 )
 
 JS = r"""
@@ -1526,7 +1530,7 @@ const ENGINE_GALAXY_H_TIER = {engine_constellation:1.0, engine_galaxy:1.05, engi
 // visible gap stays constant regardless of each car's width.
 const _GAL_SCALE = 1.5;
 // Visible gap (world units) between adjacent units. With _carGalWorldHalfW
-// now using each sprite's SOLID body width (SPRITE_SOLID_W, the alpha>30
+// now using each sprite's SOLID body width (SPRITE_SOLID, the alpha>30
 // extent) instead of the faint-AA-inflated content bbox, the half-width
 // estimate is accurate for EVERY car type — so one uniform gap produces a
 // consistent visible slit at every coupling (engine↔car, car↔car,
@@ -1537,7 +1541,7 @@ const _GALAXY_CAR_GAP = 1.5;
 //   visibleWidth = _vf · CAR_ORB_H · fileAR · (solidW / bh)
 // where _vf = baseFraction · _GAL_SCALE, fileAR = SPRITE_NATURAL w/h, bh =
 // the content-bbox HEIGHT inside the 160 bundle (the draw loop sizes the box
-// from this), and solidW = the SOLID body width (SPRITE_SOLID_W, alpha>30).
+// from this), and solidW = the SOLID body width (SPRITE_SOLID, alpha>30).
 //
 // Using the SOLID width — not the alpha>0 content bbox width (SPRITE_CONTENT
 // [2]) — is the key fix: the a>0 bbox includes a faint anti-aliasing halo
@@ -1557,9 +1561,8 @@ function _carGalWorldHalfW(type){
   const _fileAR = (_sn && _sn[1]) ? _sn[0]/_sn[1] : 1.0;
   const _bh = _sc ? _sc[3] : 72;
   // Prefer the solid-body width; fall back to the content-bbox width.
-  const _w = (typeof SPRITE_SOLID_W!=='undefined' && SPRITE_SOLID_W[type]!=null)
-             ? SPRITE_SOLID_W[type]
-             : (_sc ? _sc[2] : 148);
+  const _ss = (typeof SPRITE_SOLID!=='undefined') ? SPRITE_SOLID[type] : null;
+  const _w = _ss ? _ss[1] : (_sc ? _sc[2] : 148);
   return _vf * CAR_ORB_H * _fileAR * _w / (_bh * 2);
 }
 // car_mail width-multiplier 1.05 mirrors car_passenger. The new car_mail
@@ -25539,9 +25542,16 @@ function drawGalaxy(ts,dt){
       const _visH=_vf*ch;
       const _ech=_visH*160/Math.max(1,_bhB);            // box height so visible body = _visH
       const _wcw=_ech*_fileAR;                          // box width — undistorted
+      // Horizontal CENTRING: place the sprite so its SOLID body centre lands
+      // on the car position (the coupling reference), instead of the bundle
+      // midpoint. Most sprites are body-centred (no shift), but a few (e.g.
+      // car_ore) sit off-centre in the 160 bundle, which skewed their gaps.
+      const _ssD=(typeof SPRITE_SOLID!=='undefined')?SPRITE_SOLID[_styp]:null;
+      const _bodyCx=_ssD?(_ssD[0]+_ssD[1]/2):80;        // solid body centre in bundle px
+      const _drawX=-(_bodyCx/160)*_wcw;                 // so body centre maps to x=0
       ctx.save(); ctx.translate(sx,sy); ctx.rotate(rot); ctx.scale(-1,1);
-      if(imgs[_esn]&&_wcw>8) ctx.drawImage(_sprForSize(_esn,_wcw,_ech),-_wcw/2,-_ech*(1-_ebp),_wcw,_ech);
-      else{ ctx.fillStyle=i===0?'#4af':i===train.cars.length-1?'#f84':'#ccc'; ctx.fillRect(-_wcw/2,-_ech*(1-_ebp),_wcw,_ech*(1-_ebp)); }
+      if(imgs[_esn]&&_wcw>8) ctx.drawImage(_sprForSize(_esn,_wcw,_ech),_drawX,-_ech*(1-_ebp),_wcw,_ech);
+      else{ ctx.fillStyle=i===0?'#4af':i===train.cars.length-1?'#f84':'#ccc'; ctx.fillRect(_drawX,-_ech*(1-_ebp),_wcw,_ech*(1-_ebp)); }
       ctx.restore();
       // Hazmat warning light: flashing yellow glow when car is full
       if(_styp==='car_hazmat'&&(train.carFull?.[i]??false)&&_wcw>8){
