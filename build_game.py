@@ -333,25 +333,113 @@ window.addEventListener('resize', fitCanvas);
   // draws so the overhead is <1ms. The 'lighter' composite is restored
   // to the previous mode after the dual draw so other drawing on the
   // overlay is unaffected.
-  // Direct passthrough to the HD overlay. An earlier iteration of this
-  // override implemented a bilinear-Y composite (render the glyph at the
-  // two bracketing integer device-pixel Y rows with alpha (1-frac) / frac
-  // composited via `globalCompositeOperation = 'lighter'`) to address a
-  // vertical-only jitter the user reported on text anchored to orbiting
-  // planets at low zoom. The trick worked for that motion case but
-  // ALWAYS fires whenever y has a sub-pixel component — including static
-  // UI text whose Y position happens to end in 0.5 (e.g. button labels
-  // computed as `top + h/2 + 3.5`). For those the extra alpha-blended
-  // second render produced visibly soft / pixelated glyph edges, which
-  // the user reported on the planet-detail upgrade buttons, tabs, and
-  // the "PLANET DETAILS" lower-bar button. Modern canvas rasterizers
-  // (Chrome, Edge, Firefox, Safari) already do sub-pixel positioning of
-  // glyphs with proper anti-aliasing on their own; the manual composite
-  // was fighting them and losing crispness on static text everywhere.
-  // Reverting to direct passthrough — text on the HD overlay rasterises
-  // at full DPR resolution and stays crisp.
-  ctx.fillText = function(){ _syncTextState(); tctx.fillText.apply(tctx, arguments); };
-  ctx.strokeText = function(){ _syncTextState(); tctx.strokeText.apply(tctx, arguments); };
+  // ── Cached-glyph-bitmap + drawImage approach ────────────────────
+  // Two prior approaches both lost on one axis:
+  //   • Direct fillText passthrough: canvas rasterisers do horizontal
+  //     sub-pixel AA (LCD RGB stripes give 3× X resolution) but only
+  //     grayscale vertical AA — so animated text whose Y drifts
+  //     sub-pixel between frames gets per-glyph baseline snapping
+  //     that reads as vertical jitter. Visible on orbiting planet
+  //     labels + tutorial bubbles at low zoom.
+  //   • `'lighter'` bilinear-Y composite: split the glyph between
+  //     the two bracketing integer Y rows with (1-frac)/frac alpha.
+  //     Mathematically clean for fully-opaque interior pixels, but
+  //     it HALVES the anti-aliased edge pixels' intensity (each edge
+  //     pixel ends up in only one of the two layers, so its alpha
+  //     drops from 1.0 to (1-frac) or frac). That's why static UI
+  //     text — purchase buttons, tabs, the "PLANET DETAILS" label —
+  //     looked pixelated: the AA edge pattern was being destroyed
+  //     even on text that never moves.
+  //
+  // The clean fix: render each (text, font, fill, stroke, lineWidth)
+  // combination ONCE to an offscreen canvas at integer position
+  // (crisp glyph rasterisation, edge AA intact), then `drawImage`
+  // it to the HD overlay at the actual target X/Y. drawImage's
+  // bilinear interpolation is SYMMETRIC in X and Y — no asymmetric
+  // baseline snap, no destroyed AA pattern. Cached so repeated UI
+  // text doesn't re-rasterise per frame; LRU eviction keeps memory
+  // bounded.
+  //
+  // Properties handled at draw time (not baked into cache): textAlign,
+  // textBaseline, globalAlpha — these only shift the destination
+  // position or the composite alpha, so they don't change the glyph
+  // bitmap itself.
+  const _txtBmCache = new Map();
+  const _TXT_BM_MAX = 600;
+  function _getTextBM(text, font, fillStyle, strokeStyle, lineWidth){
+    const key = text+'|'+font+'|'+fillStyle+'|'+(strokeStyle||'')+'|'+(lineWidth||0);
+    let e = _txtBmCache.get(key);
+    if(e){
+      _txtBmCache.delete(key); _txtBmCache.set(key, e); // LRU bump
+      return e;
+    }
+    // Measure
+    tctx.save();
+    tctx.font = font;
+    const tm = tctx.measureText(text);
+    tctx.restore();
+    const ascent  = tm.fontBoundingBoxAscent  || tm.actualBoundingBoxAscent  || (parseInt(font)||10);
+    const descent = tm.fontBoundingBoxDescent || tm.actualBoundingBoxDescent || 2;
+    const lw = lineWidth || 0;
+    const padX = 2 + lw;
+    const padY = 2 + lw;
+    const w = Math.max(1, Math.ceil(tm.width) + padX*2);
+    const h = Math.max(1, Math.ceil(ascent + descent) + padY*2);
+    const c = document.createElement('canvas');
+    c.width  = Math.ceil(w * DPR);
+    c.height = Math.ceil(h * DPR);
+    const cx = c.getContext('2d');
+    cx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    cx.font = font;
+    cx.textAlign = 'left';
+    cx.textBaseline = 'alphabetic';
+    cx.imageSmoothingEnabled = true;
+    cx.imageSmoothingQuality = 'high';
+    try{ cx.textRendering = 'geometricPrecision'; }catch(_){}
+    if(strokeStyle){
+      cx.strokeStyle = strokeStyle;
+      cx.lineWidth = lw || 1;
+      cx.strokeText(text, padX, padY + ascent);
+    }
+    if(fillStyle){
+      cx.fillStyle = fillStyle;
+      cx.fillText(text, padX, padY + ascent);
+    }
+    e = { canvas:c, w, h, glyphW:tm.width, ascent, descent, leftPad:padX, topPad:padY };
+    if(_txtBmCache.size >= _TXT_BM_MAX){
+      const oldKey = _txtBmCache.keys().next().value;
+      _txtBmCache.delete(oldKey);
+    }
+    _txtBmCache.set(key, e);
+    return e;
+  }
+  function _drawTextViaBM(text, x, y, mode /* 0=fill, 1=stroke */){
+    if(text===''||text==null) return;
+    const font  = tctx.font;
+    const fill  = mode===0 ? tctx.fillStyle   : null;
+    const stk   = mode===1 ? tctx.strokeStyle : null;
+    const lw    = mode===1 ? tctx.lineWidth   : null;
+    const align = tctx.textAlign;
+    const base  = tctx.textBaseline;
+    const e = _getTextBM(text, font, fill, stk, lw);
+    // X offset by textAlign
+    let dx = x;
+    if(align==='center') dx -= e.glyphW/2;
+    else if(align==='right'||align==='end') dx -= e.glyphW;
+    // Y offset by textBaseline — translate the caller's y into the
+    // bitmap's alphabetic-baseline coordinate, then back into the
+    // bitmap's top-left.
+    let baselineY = y;
+    if(base==='top')                       baselineY = y + e.ascent;
+    else if(base==='middle')               baselineY = y + (e.ascent - e.descent)/2;
+    else if(base==='bottom'||base==='ideographic') baselineY = y - e.descent;
+    // else 'alphabetic' or 'hanging': y already at baseline (treat hanging≈alphabetic)
+    const drawX = dx - e.leftPad;
+    const drawY = baselineY - e.topPad - e.ascent;
+    tctx.drawImage(e.canvas, drawX, drawY, e.w, e.h);
+  }
+  ctx.fillText   = function(text, x, y){ _syncTextState(); _drawTextViaBM(text, x, y, 0); };
+  ctx.strokeText = function(text, x, y){ _syncTextState(); _drawTextViaBM(text, x, y, 1); };
 }
 // Called once at the start of each frame to wipe the overlay before the
 // new frame's text is laid down.
@@ -1315,14 +1403,10 @@ const ENGINE_ACCEL_RATE  = {engine_constellation:TRANSIT_ACCEL*1, engine_galaxy:
 const ENGINE_MAINT_DECAY = {engine_constellation:MAINT_DECAY_PER_AU, engine_galaxy:MAINT_DECAY_PER_AU*0.8, engine_classJ:MAINT_DECAY_PER_AU*0.6, engine_classR:MAINT_DECAY_PER_AU*0.4, engine_N700:MAINT_DECAY_PER_AU*0.25};
 const ENGINE_REPAIR_MULT = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.3,   engine_classR:1.6,   engine_N700:2.0};
 const ENGINE_ORB_GAP     = {engine_constellation:CAR_ORB_GAP, engine_galaxy:52, engine_classJ:56, engine_classR:57, engine_N700:60}; // gap engine→car[1]
-// car_mail width-multiplier 1.05 = parity with car_passenger. An earlier
-// pass set this to 0.84 (matching the new sprite's source file aspect),
-// but the resulting mail car visibly read as "too small" in the tech
-// tree and train builder preview — those views compare mail right next
-// to passenger, and a 20% width gap looks wrong. Matching passenger's
-// 1.05 makes the mail car frame the same size as passenger; the matching
-// ENGINE_VIZ_H_MULT.car_mail = 1.139 keeps the visible body the same
-// height too (compensating for the new sprite's extra bottom padding).
+// car_mail width-multiplier 1.05 mirrors car_passenger. The new car_mail
+// + car_mail_empty sources are now 1254×1254 squares with content aspect
+// ~2.06 — essentially identical to car_passenger — so matching its
+// multipliers gives identical visual proportions in every view.
 const ENGINE_ORB_W_MULT  = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.2,   engine_classR:1.235, engine_N700:1.4,  car_passenger:1.05, car_mail:1.05}; // visual width scale in world view
 const ENGINE_VIZ_W_MULT  = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.2,   engine_classR:1.235, engine_N700:1.4,  car_passenger:1.05, car_mail:1.05}; // visual width scale in UI strips/builder
 // Asset values for corporation net-worth calculation
@@ -1396,16 +1480,7 @@ function _genCeoCandidate(rosterEntry){
   return {ceoName:rosterEntry.name,ceoSprite:rosterEntry.sprite,logoSprite:'logo_placeholder',
           salary,primaryPerk:perks.primaryPerk,secondaryPerk:perks.secondaryPerk};
 }
-// car_mail height-multiplier 1.139 = passenger's effective opaque height
-// (1.05 H_MULT × 0.80 opaque-fraction = 0.84) divided by car_mail's own
-// opaque-fraction (1 − 0.2625 = 0.7375). The new car_mail.png + car_mail_empty
-// sprites have ~6 % more transparent bottom padding than the other cars
-// (sprite_bot 0.2625 vs the ~0.18-0.20 typical), so without an H_MULT bump
-// the visible-content height ends up ~8 % shorter than passenger's at the
-// same render frame — making the mail car read as smaller in the train
-// builder preview and tech tree. 1.139 cancels the extra padding so the
-// visible body matches passenger's height exactly.
-const ENGINE_VIZ_H_MULT  = {engine_constellation:1.000, engine_galaxy:0.957, engine_classJ:0.983, engine_classR:1.460, engine_N700:1.217, car_passenger:1.05, car_mail:1.139}; // visual height multiplier — equalises opaque height across all engines
+const ENGINE_VIZ_H_MULT  = {engine_constellation:1.000, engine_galaxy:0.957, engine_classJ:0.983, engine_classR:1.460, engine_N700:1.217, car_passenger:1.05}; // visual height multiplier — equalises opaque height across all engines
 const ENGINE_MAX_RANGE   = {engine_constellation:15000, engine_galaxy:25000, engine_classJ:40000, engine_classR:50000, engine_N700:70000};
 // Per-engine hard cap on mid cars (between engine and caboose). Constellation
 // and Galaxy are the small/starter engines and are capped tighter than the
@@ -22735,13 +22810,20 @@ function _ttDrawItem(type,mystery){
       // but the "bumped target" sprites (machinery, sand — anything in
       // _bumpedH above) get a larger _targetH than their row mates. If
       // we centred them on pos.cy their bottoms would hang below the row
-      // baseline by (_targetH − 42)/2 px. Instead, bottom-align to the
-      // shared row baseline (pos.cy + 21 = bottom edge of the 42 px
-      // default car target) so the extra height grows UPWARD into the
-      // otherwise-empty space above.
+      // baseline. Instead, align their VISIBLE body bottom (using
+      // SPRITE_BOT, which captures the last row of substantial content
+      // at α>30 threshold) to where the centred cars' visible bodies
+      // end — that empirical row-2 baseline is ~pos.cy + 20 once you
+      // factor in each centred car's own sprite_bot. Anchoring by
+      // SPRITE_BOT rather than the bundle bbox skips any faint
+      // sub-threshold pixels that extend the bbox below the visible
+      // body — a real concern for car_sand whose bbox runs 11 bundle
+      // rows past the visible content due to LANCZOS-resize artefacts.
       if(_bumpedH){
-        const _rowBaselineY=pos.cy+21; // 42/2 — bottom of the standard car target
-        _dy=_rowBaselineY-(_by+_bh)*(_dh/160);
+        const _rowBaselineY=pos.cy+20;
+        const _spriteBot=(typeof SPRITE_BOT!=='undefined')?(SPRITE_BOT[type]||0):0;
+        const _vbBundle=160*(1-_spriteBot); // last visible row in the bundle
+        _dy=_rowBaselineY-_vbBundle*(_dh/160);
       } else {
         const _ccyBundle=_by+_bh/2;
         _dy=pos.cy-_ccyBundle*(_dh/160);

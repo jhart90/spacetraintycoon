@@ -30,6 +30,9 @@ sprite_bottoms = assets.get("sprite_bottoms", {})
 OVERSIZED = [
     "car_mail", "car_mail_empty",
 ]
+# (Re-running for car_mail/car_mail_empty to pick up the new 1254×1254
+# square source files — refreshes assets.json with up-to-date bundled
+# images and sprite_bottoms.)
 
 def process_sprite(name):
     path = os.path.join(SPRITES_DIR, f"{name}.png")
