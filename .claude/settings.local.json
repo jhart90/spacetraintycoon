@@ -168,7 +168,8 @@
       "Bash(awk -F: '$1>=23338 && $1<=24200')",
       "Bash(node -e \"const fs=require\\('fs'\\);const h=fs.readFileSync\\('index.html','utf8'\\);const m=[...h.matchAll\\(/<script>\\([\\\\s\\\\S]*?\\)<\\\\/script>/g\\)];let ok=true;m.forEach\\(\\(x,i\\)=>{try{new Function\\(x[1]\\);}catch\\(e\\){console.log\\('Script block '+i+' ERROR:',e.message\\);ok=false;}}\\);console.log\\(ok?'All '+m.length+' script blocks parse OK':'PARSE ERRORS'\\);\")",
       "PowerShell($n=\\(Get-Command node -ErrorAction SilentlyContinue\\); if\\($n\\){node --version}else{\"node not found\"})",
-      "Bash(awk '{print \"index.html:\", $5, \"bytes\"}')"
+      "Bash(awk '{print \"index.html:\", $5, \"bytes\"}')",
+      "Bash(awk -F: '$1>=23330 && $1<=23620')"
     ]
   },
   "hooks": {

@@ -1517,20 +1517,27 @@ function _carGalAreaFactor(type){
   const _aspect=(_sn[0]/_sn[1])*_ss[1]/_ss[2];   // visible aspect = fileAR · solidW/solidH
   return Math.sqrt(_GAL_REF_ASPECT/Math.max(0.5,_aspect));
 }
+// Visible body aspect (w/h) of a specific bundled sprite key, from its SOLID
+// bbox (falls back to the alpha>0 content bbox, then 2.0). Used to reserve a
+// car's coupling slot from whichever of its full/empty sprites is widest.
+function _galSpriteAspect(key){
+  const _ss=(typeof SPRITE_SOLID!=='undefined')?SPRITE_SOLID[key]:null;
+  const _sn=(typeof SPRITE_NATURAL!=='undefined')?SPRITE_NATURAL[key]:null;
+  if(_ss&&_ss[2]&&_sn&&_sn[1]) return (_sn[0]/_sn[1])*_ss[1]/_ss[2];
+  const _sc=(typeof SPRITE_CONTENT!=='undefined')?SPRITE_CONTENT[key]:null;
+  if(_sc&&_sc[3]&&_sn&&_sn[1]) return (_sn[0]/_sn[1])*_sc[2]/_sc[3];
+  return 2.0;
+}
 function _carGalWorldHalfW(type){
   const _vf = (type==='caboose' ? 0.66
             : (type&&type.indexOf('engine_')===0) ? 0.66*(ENGINE_GALAXY_H_TIER[type]||1.0)
             : 0.60) * _GAL_SCALE;
-  const _sc = (typeof SPRITE_CONTENT!=='undefined') ? SPRITE_CONTENT[type] : null;
-  const _sn = (typeof SPRITE_NATURAL!=='undefined') ? SPRITE_NATURAL[type] : null;
-  const _fileAR = (_sn && _sn[1]) ? _sn[0]/_sn[1] : 1.0;
-  // Use the SOLID body width AND height (SPRITE_SOLID = [left,w,h]) so this
-  // matches the draw loop, which now sizes the box from the solid height too.
-  // Falls back to the alpha>0 content bbox (SPRITE_CONTENT) if unavailable.
-  const _ss = (typeof SPRITE_SOLID!=='undefined') ? SPRITE_SOLID[type] : null;
-  const _w  = _ss ? _ss[1] : (_sc ? _sc[2] : 148);
-  const _bh = (_ss && _ss[2]) ? _ss[2] : (_sc ? _sc[3] : 72);
-  return _vf * CAR_ORB_H * _fileAR * _w / (_bh * 2) * _carGalAreaFactor(type);
+  // Full-sprite body half-width = aspect · visibleBodyHeight / 2 (area-consistent).
+  // Spacing follows the LOADED sprite width so coupling stays tight — no gaps. An
+  // unloaded car uses a flatter/wider empty sprite (same AREA, so ~20% wider) and
+  // may extend marginally past this slot, which reads better than the visible
+  // gaps a max(full,empty) reservation produced around full sand/flowers/fruit.
+  return _vf * CAR_ORB_H * _carGalAreaFactor(type) * _galSpriteAspect(type) / 2;
 }
 // ── Shared SCREEN-SPACE sprite metrics ───────────────────────────────────────
 // Reuses the SAME sizing rules as the galaxy-view draw loop (de-stretched to
@@ -1542,18 +1549,28 @@ function _carGalWorldHalfW(type){
 // Returns box draw size, the x-offset that puts the solid body centre on the
 // car's coupling point, the visible body width, its half (for spacing), and
 // the transparent-bottom fraction.
-function _carSpriteMetrics(type, carBodyH){
+// `spriteKey` (optional) selects the bundled sprite whose geometry AND
+// area-consistency factor size the car — pass the empty-variant key when drawing
+// an unloaded car. Sizing from the DRAWN sprite means: (a) the body fills the
+// strip/rail correctly (empty bin/flat sprites occupy a different fraction of
+// their 160 bundle), and (b) all cars that share an empty sprite (sand+flowers →
+// car_bin_empty) render at the EXACT same dimensions, since area-consistency is
+// computed from that shared sprite's aspect — not each car's loaded aspect.
+// Every car (full or empty) ends with the same visible AREA; a loaded car is a
+// touch taller/narrower than its empty (flatter/wider) state.
+function _carSpriteMetrics(type, carBodyH, spriteKey){
   const _catMul = (type==='caboose') ? (0.66/0.60)
                 : (type&&type.indexOf('engine_')===0) ? (0.66/0.60)*(ENGINE_GALAXY_H_TIER[type]||1.0)
                 : 1.0;
-  const _sn=(typeof SPRITE_NATURAL!=='undefined')?SPRITE_NATURAL[type]:null;
-  const _ss=(typeof SPRITE_SOLID!=='undefined')?SPRITE_SOLID[type]:null;
-  const _sc=(typeof SPRITE_CONTENT!=='undefined')?SPRITE_CONTENT[type]:null;
+  const _gk=(spriteKey && typeof SPRITE_SOLID!=='undefined' && SPRITE_SOLID[spriteKey])?spriteKey:type;
+  const _sn=(typeof SPRITE_NATURAL!=='undefined')?(SPRITE_NATURAL[_gk]||SPRITE_NATURAL[type]):null;
+  const _ss=(typeof SPRITE_SOLID!=='undefined')?(SPRITE_SOLID[_gk]||SPRITE_SOLID[type]):null;
+  const _sc=(typeof SPRITE_CONTENT!=='undefined')?(SPRITE_CONTENT[_gk]||SPRITE_CONTENT[type]):null;
   const _fileAR=(_sn&&_sn[1])?(_sn[0]/_sn[1]):1.0;
   const _solidW=_ss?_ss[1]:(_sc?_sc[2]:148);
   const _solidH=(_ss&&_ss[2])?_ss[2]:(_sc?_sc[3]:72);
   const _solidLeft=_ss?_ss[0]:(_sc?_sc[0]:6);
-  const _visH=carBodyH*_catMul*_carGalAreaFactor(type);  // visible body height (px)
+  const _visH=carBodyH*_catMul*_carGalAreaFactor(_gk);   // visible body height (px) — from DRAWN sprite
   const _boxH=_visH*160/Math.max(1,_solidH);             // box draw height (px)
   const _boxW=_boxH*_fileAR;                             // box draw width — undistorted
   const _bodyCx=_solidLeft+_solidW/2;                    // solid centre in bundle px
@@ -1561,7 +1578,7 @@ function _carSpriteMetrics(type, carBodyH){
   return {boxW:_boxW, boxH:_boxH, visH:_visH,            // visH = visible (solid) body height
           drawXoff:-(_bodyCx/160)*_boxW,                 // body centre → coupling x
           bodyW:_bodyW, halfW:_bodyW/2,
-          bot:(typeof SPRITE_BOT!=='undefined'?(SPRITE_BOT[type]||0):0)};
+          bot:(typeof SPRITE_BOT!=='undefined'?((SPRITE_BOT[_gk]??SPRITE_BOT[type])||0):0)};
 }
 // Gap between coupled cars as a fraction of a regular car's body height —
 // matches the galaxy-view _GALAXY_CAR_GAP relative to its body height so the
@@ -1572,6 +1589,9 @@ const _TRAIN_GAP_RATIO = _GALAXY_CAR_GAP/(_GAL_SCALE*0.60*CAR_ORB_H);
 // the full train width. Spacing uses each car's half body width + the gap, so
 // cars couple tightly regardless of their individual widths.
 function _layoutTrainScreen(names, carBodyH){
+  // Position with each car's FULL-sprite half-width so coupling stays tight (no
+  // reservation gaps). The per-car `m` stored is the full-sprite metric; callers
+  // that draw a possibly-empty car recompute the drawn metric with its key.
   const cars=[]; let cursor=0, prevHalf=0; const gap=carBodyH*_TRAIN_GAP_RATIO;
   for(let i=0;i<names.length;i++){
     const m=_carSpriteMetrics(names[i],carBodyH);
@@ -1612,19 +1632,25 @@ function _drawTrainCarStrip(c2, train, stripX, stripY, stripW, stripH, opts){
   // strip — these strips CLIP, so the transparent box margin above can spill
   // out harmlessly. The tallest visible body (engine/caboose) fills stripH;
   // regular cars sit slightly shorter, reproducing the galaxy roofline.
+  // opts.scale (default 1) shrinks the cars within the strip (bottom-aligned),
+  // e.g. 0.9 = render the sprites at 90% size.
+  const _scl=(opts.scale!=null?opts.scale:1);
   let _maxVis=0.0001;
   for(const n of names){ const v=_carSpriteMetrics(n,1).visH; if(v>_maxVis)_maxVis=v; }
-  const _cbH=stripH/_maxVis;
+  const _cbH=stripH*_scl/_maxVis;
   const lay=_layoutTrainScreen(names, _cbH); lay.carBodyH=_cbH;
   const maxX=(opts.maxX!=null?opts.maxX:stripX+stripW+_cbH*3);
   for(let ci=0;ci<lay.cars.length;ci++){
-    const lc=lay.cars[ci], m=lc.m;
-    const scx=stripX+lc.cx;                         // coupling centre
-    if(scx-m.halfW>maxX) break;                     // fully past the right edge
-    const drawX=scx+m.drawXoff;
-    const drawY=stripY+stripH-m.boxH*(1-m.bot);     // bottom-align visible body
+    const lc=lay.cars[ci];
+    const scx=stripX+lc.cx;                         // coupling centre (reserved-slot based)
+    if(scx-lc.m.halfW>maxX) break;                  // fully past the right edge
     const full=opts.full?(opts.full[ci]??false):(train.carFull?.[ci]??false);
     const sprN=getCarSprite(names[ci],full);
+    // Box from the sprite ACTUALLY drawn so empty variants fill the same body
+    // height as full ones; position stays on the reserved-slot centre.
+    const m=_carSpriteMetrics(names[ci],_cbH,sprN);
+    const drawX=scx+m.drawXoff;
+    const drawY=stripY+stripH-m.boxH*(1-m.bot);     // bottom-align visible body
     const isMid=ci>0&&ci<names.length-1;
     const fog=opts.fogEmpty&&isMid&&!full;
     if(imgs[sprN]){
@@ -12342,7 +12368,8 @@ function _renderPanelRowToCanvas(train, isSelected, c, PANEL_W_local, ROW_H, STR
   cc.beginPath(); cc.rect(stripX,stripY,STRIP_W,STRIP_H); cc.clip();
   // Galaxy-view metrics (de-stretched, area-consistent, tightly coupled,
   // bottom-aligned). Shared with the Train Details popup + info-bar strip.
-  _drawTrainCarStrip(cc, train, stripX, stripY, STRIP_W, STRIP_H, {});
+  // scale 0.9 = sprites rendered 10% smaller in the right panel rows.
+  _drawTrainCarStrip(cc, train, stripX, stripY, STRIP_W, STRIP_H, {scale:0.9});
   // Fade gradient (transparent → panel bg)
   const _panelBg=isSelected?'rgba(12,22,44,1)':'rgba(4,8,20,1)';
   const fadeG=cc.createLinearGradient(stripX+STRIP_W*0.70,0,stripX+STRIP_W,0);
@@ -20123,7 +20150,8 @@ function drawTrainDetailPopup(){
   ctx.save(); ctx.beginPath(); ctx.rect(px+14,SY,SW,SH); ctx.clip();
   // Galaxy-view metrics (de-stretched, area-consistent, tightly coupled,
   // bottom-aligned) via the shared strip renderer.
-  _drawTrainCarStrip(ctx, t, px+14, SY, SW, SH, {});
+  // scale 0.8 = sprites rendered 20% smaller in the Train Details preview.
+  _drawTrainCarStrip(ctx, t, px+14, SY, SW, SH, {scale:0.8});
   // Fade right edge
   const fg=ctx.createLinearGradient(px+14+SW*0.6,0,px+14+SW,0);
   fg.addColorStop(0,'rgba(3,6,20,0)'); fg.addColorStop(1,'rgba(3,6,20,0.95)');
@@ -25605,20 +25633,25 @@ function drawGalaxy(ts,dt){
       const _vf = (_styp==='caboose' ? 0.66
                 : _styp.indexOf('engine_')===0 ? 0.66*(ENGINE_GALAXY_H_TIER[_styp]||1.0)
                 : 0.60) * _GAL_SCALE;
-      const _sc=(typeof SPRITE_CONTENT!=='undefined')?SPRITE_CONTENT[_styp]:null;
-      const _sn=(typeof SPRITE_NATURAL!=='undefined')?SPRITE_NATURAL[_styp]:null;
-      const _ssD=(typeof SPRITE_SOLID!=='undefined')?SPRITE_SOLID[_styp]:null;
-      // Size the box from the SOLID body height (SPRITE_SOLID[2]) so the
-      // visible body fills _visH. Using the alpha>0 content height made
-      // car_sand (faint dust halo inflates its a0 height ~13 px) render small.
+      // Size the box from the SPRITE ACTUALLY DRAWN (_esn — the empty variant
+      // when this car is unloaded), not the base type. Empty bin/flat sprites
+      // (e.g. car_bin_empty shared by sand+flowers, car_fruit_empty) occupy a
+      // different fraction of their 160 bundle than the loaded sprite, so sizing
+      // from the base type rendered them small. _af/_vf below stay base-type so
+      // the visible body HEIGHT is identical full vs empty (no resize on load).
+      const _dk=(typeof SPRITE_SOLID!=='undefined'&&SPRITE_SOLID[_esn])?_esn:_styp;
+      const _sc=(typeof SPRITE_CONTENT!=='undefined')?SPRITE_CONTENT[_dk]:null;
+      const _sn=(typeof SPRITE_NATURAL!=='undefined')?SPRITE_NATURAL[_dk]:null;
+      const _ssD=(typeof SPRITE_SOLID!=='undefined')?SPRITE_SOLID[_dk]:null;
+      // Box sized from the DRAWN sprite's SOLID body height so its body fills _visH.
       const _bhB =(_ssD&&_ssD[2])?_ssD[2]:(_sc?_sc[3]:160);
       const _fileAR=(_sn&&_sn[1])?(_sn[0]/_sn[1]):1.0;  // source PNG file aspect
-      // Area-consistency: stubbier cars (sand/grain) get scaled UP so every
-      // regular car has the same visible AREA, not the same height — height
-      // alone made low-aspect cars render narrow & look small. Engines and
-      // caboose keep factor 1 (deliberate height-based hierarchy). MUST match
-      // _carGalWorldHalfW so the width-aware spacing stays consistent.
-      const _af=_carGalAreaFactor(_styp);
+      // Area-consistency from the DRAWN sprite (_dk): every car — full or empty —
+      // ends with the same visible AREA. Computing it from the drawn sprite (not
+      // the base type) makes cars that share an empty sprite (sand+flowers →
+      // car_bin_empty) render at the EXACT same size when unloaded. Engines and
+      // caboose keep factor 1 (deliberate height-based hierarchy).
+      const _af=_carGalAreaFactor(_dk);
       const _visH=_vf*ch*_af;
       const _ech=_visH*160/Math.max(1,_bhB);            // box height so visible body = _visH
       const _wcw=_ech*_fileAR;                          // box width — undistorted
@@ -26759,6 +26792,21 @@ function galaxyClick(sx,sy,shiftKey){
     for(let i=0;i<train.cars.length;i++){
       const [cx,cy]=getTrainCarPos(train,i);
       if(Math.hypot(wx-cx,wy-cy)<hitCarR){
+        // Toggle-to-planet: trains render on top of their orbited planet, so a
+        // click near an orbiting train always hits the car first. If this SAME
+        // train is already selected AND it's sitting in orbit of a planet (not
+        // in interplanetary/interstellar transit), flip the selection to that
+        // planet — letting the player reach the planet under the train, and
+        // toggling back to the train on the next click.
+        const _alreadySel = sel && sel.type==='car' && sel.data.trainIdx===ti;
+        const _inOrbit = train.planetId!=null && (!train.route || train.route.phase!=='transit');
+        if(_alreadySel && _inOrbit){
+          const _op=_gp(train.planetId);
+          if(_op){
+            sel={type:'planet',data:_op}; routeStops=[]; assignPending=false; routeHerePending=false;
+            return;
+          }
+        }
         sel={type:'car',data:{trainIdx:ti,carIdx:i,car:train.cars[i]}}; routeStops=[]; assignPending=false; routeHerePending=false;
         // Switch the right-side panel to Trains and scroll so the selected
         // train's row sits at the top (or as close as the panel can show
