@@ -1673,6 +1673,23 @@ function _fitTrainScreen(names, boxW, maxAboveH){
   const carBodyH=Math.min(boxW/Math.max(0.001,sumBodyW+gapTot), maxAboveH/maxAbove);
   const lay=_layoutTrainScreen(names, carBodyH); lay.carBodyH=carBodyH; return lay;
 }
+// Draw ONE car/engine sprite with the SAME de-stretched proportions as the
+// galaxy/Train-Preview (true source aspect, body sized from the SOLID bbox),
+// CONTAIN-fit within (availW × availH), horizontally centred on cellCx and
+// bottom-aligned so the visible body bottom sits on baseY. Replaces the old
+// "stretch the whole 160 bundle into a 1.4 box" path used by the Train Builder
+// selector buttons + Engine Details preview, which rendered bodies squished and
+// short. `key` = sprite to draw (defaults to type). _catMul cancels in a single
+// contain-fit, so engines and cars fill their box equally.
+function _drawFittedSprite(c2, type, cellCx, baseY, availW, availH, key){
+  key=key||type;
+  if(!imgs[key]) return;
+  const _m1=_carSpriteMetrics(type,1,key);
+  if(!(_m1.bodyW>0)||!(_m1.visH>0)) return;
+  const _cb=Math.min(availW/_m1.bodyW, availH/_m1.visH);
+  const _m=_carSpriteMetrics(type,_cb,key);
+  c2.drawImage(_sprForSize(key,_m.boxW,_m.boxH), cellCx+_m.drawXoff, baseY-_m.boxH*(1-_m.bot), _m.boxW, _m.boxH);
+}
 // Render a LEFT-ANCHORED overflow train-car strip using the shared galaxy-view
 // metrics (de-stretched, area-consistent, solid-body centred, tightly coupled,
 // bottom-aligned on stripY+stripH). Used by the right Trains panel rows, the
@@ -6763,9 +6780,18 @@ function _spawnCargoBeam(train, dt){
   const nx=dx/dist, ny=dy/dist;
   // Car-side endpoint: pulled inward by the full body height to the top edge.
   const carEndX=carWx - nx*_carRadialH, carEndY=carWy - ny*_carRadialH;
-  const surfX=planet.x+nx*planet.radius, surfY=planet.y+ny*planet.radius;
-  const srcX=isLoading?surfX:carEndX, srcY=isLoading?surfY:carEndY;
-  const dstX=isLoading?carEndX:surfX, dstY=isLoading?carEndY:surfY;
+  // Planet-side endpoint: a FIXED reach further inward from the car's top edge —
+  // NOT the planet surface. Anchoring to the surface made the beam span the
+  // orbit→surface gap, which scales with planet size (≈51 world at XS LOW orbit
+  // up to ≈148 at XXL), so the beam looked short on small planets and very long
+  // on big ones. Using a constant reach relative to the car makes BOTH endpoints
+  // sit at the same place relative to the target car on every size (XS–XXL).
+  // The reach (1.7× the car's radial height ≈ 43) stays below the smallest
+  // LOW-orbit gap, so the beam never dips below any planet's surface.
+  const _BEAM_REACH = _carRadialH * 1.7;
+  const planEndX=carEndX - nx*_BEAM_REACH, planEndY=carEndY - ny*_BEAM_REACH;
+  const srcX=isLoading?planEndX:carEndX, srcY=isLoading?planEndY:carEndY;
+  const dstX=isLoading?carEndX:planEndX, dstY=isLoading?carEndY:planEndY;
   const beamLen=Math.hypot(dstX-srcX,dstY-srcY);
   if(beamLen<2) return;
   const bdx=(dstX-srcX)/beamLen, bdy=(dstY-srcY)/beamLen;
@@ -20236,13 +20262,28 @@ function drawTrainDetailPopup(){
   // Stats
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
   ctx.fillStyle='rgba(200,140,60,0.75)'; ctx.fillText('TRAIN STATS',px+14,py+118);
-  ctx.font='12px "Exo 2",sans-serif'; ctx.fillStyle='rgba(200,180,140,0.85)';
-  const dist=Math.round(t.totalDist||0);
-  ctx.fillText('Total distance:  '+dist.toLocaleString()+' SU',px+14,py+136);
-  // Car count + load penalty: every mid car past the 2nd shaves 5% off both
+  ctx.font='12px "Exo 2",sans-serif';
+  // 1. Currently at (now the first stat row)
+  const pl=_gp(t.planetId);
+  if(pl){
+    const _plStar=galaxy.stars[pl.starId];
+    ctx.fillStyle='rgba(150,180,220,0.75)';
+    ctx.fillText('Currently at:  '+(pl.isStarProxy?'[star orbit] '+(_plStar?.name||'?'):pl.name+' · '+(_plStar?.name||'?')),px+14,py+136);
+  } else {
+    ctx.fillStyle='rgba(150,180,220,0.55)';
+    ctx.fillText('Currently at:  in transit',px+14,py+136);
+  }
+  // 2. Current cargo — loaded cars only, grouped by cargo type (e.g. "PSNGR x3, MAIL x1")
+  {
+    const _filled=_trainCargoFilledCounts(t);
+    const _cargoTxt=Object.entries(_filled).sort((a,b)=>b[1]-a[1])
+      .map(([ct,n])=>(CARGO_SHORT[ct]||ct.slice(0,5).toUpperCase())+' x'+n).join(', ')||'(empty)';
+    ctx.fillStyle='rgba(200,180,140,0.85)';
+    ctx.fillText('Current cargo:  '+_cargoTxt,px+14,py+154);
+  }
+  // 3. Car count + load penalty: every mid car past the 2nd shaves 5% off both
   // acceleration and max speed (see _trainLoadMult). Only show the penalty
-  // suffix when it's nonzero (i.e. mid car count > 2) so short trains read
-  // cleanly without a "(0% / 0%)" tag.
+  // suffix when it's nonzero so short trains read cleanly without "(0% / 0%)".
   {
     const _midCars=Math.max(0,t.cars.length-2);
     const _penPct=Math.round(Math.max(0,_midCars-2)*5);
@@ -20250,37 +20291,31 @@ function drawTrainDetailPopup(){
     const _accelTxt=_penPct>0?('  (-'+_penPct+'% acceleration, '):'';
     const _maxSpeedTxt=_penPct>0?('-'+_penPct+'% max speed)'):'';
     const _carsTxt=_baseCarsTxt+_accelTxt+_maxSpeedTxt;
-    ctx.fillText(_carsTxt,px+14,py+154);
+    ctx.fillStyle='rgba(200,180,140,0.85)';
+    ctx.fillText(_carsTxt,px+14,py+172);
     // Track the "-X% max speed" portion bounds for the tutorial bubble that
     // points up at this text after the player CONFIRMs their train edits.
     if(_penPct>0){
       const _prefixW=ctx.measureText(_baseCarsTxt+_accelTxt).width;
       const _msW=ctx.measureText(_maxSpeedTxt).width;
-      popupState.maxSpeedTextBounds={x:px+14+_prefixW, y:py+143, w:_msW, h:14};
+      popupState.maxSpeedTextBounds={x:px+14+_prefixW, y:py+161, w:_msW, h:14};
     } else {
       popupState.maxSpeedTextBounds=null;
     }
   }
-  const rc=Object.values(t.routeCounts||{}).reduce((a,b)=>a+b,0);
-  ctx.fillText('Route segments completed:  '+rc,px+14,py+172);
-  // Most orbited
+  // 4. Total distance
+  const dist=Math.round(t.totalDist||0);
+  ctx.fillStyle='rgba(200,180,140,0.85)';
+  ctx.fillText('Total distance:  '+dist.toLocaleString()+' SU',px+14,py+190);
+  // 5. Planets visited (distinct planets this train has orbited)
+  const _planetsVisited=Object.keys(t.orbitCounts||{}).length;
+  ctx.fillText('Planets visited:  '+_planetsVisited,px+14,py+208);
+  // 6. Most orbited
   const oc=Object.entries(t.orbitCounts||{}).sort((a,b)=>b[1]-a[1]);
   if(oc.length>0){
     const [pid,cnt]=oc[0];
     const pn=galaxy.planets[pid]?.name||'?';
-    ctx.fillText('Most orbited:  '+pn+'  ('+cnt+' orbit'+(cnt!==1?'s':'')+')',px+14,py+190);
-  }
-  if(oc.length>1){
-    const [pid2,c2]=oc[1];
-    ctx.fillStyle='rgba(160,140,110,0.6)';
-    ctx.fillText('2nd:  '+(galaxy.planets[pid2]?.name||'?')+'  ('+c2+')',px+14,py+206);
-  }
-  // Currently orbiting
-  const pl=_gp(t.planetId);
-  if(pl){
-    ctx.fillStyle='rgba(150,180,220,0.6)'; ctx.font='12px "Exo 2",sans-serif';
-    const _plStar=galaxy.stars[pl.starId];
-    ctx.fillText('Currently at:  '+(pl.isStarProxy?'[star orbit] '+(_plStar?.name||'?'):pl.name+' · '+(_plStar?.name||'?')),px+14,py+226);
+    ctx.fillText('Most orbited:  '+pn+'  ('+cnt+' orbit'+(cnt!==1?'s':'')+')',px+14,py+226);
   }
   // ── Maintenance section ──────────────────────────────────────
   ctx.strokeStyle='rgba(80,60,30,0.4)'; ctx.lineWidth=1;
@@ -20327,9 +20362,7 @@ function drawTrainDetailPopup(){
     }
     _finRow('REVENUE', rev, py+312);
     _finRow('COSTS',  -cost, py+330);
-    ctx.strokeStyle='rgba(80,60,30,0.25)'; ctx.lineWidth=0.5;
-    ctx.beginPath(); ctx.moveTo(px+14,py+338); ctx.lineTo(px+pw-14,py+338); ctx.stroke();
-    _finRow('PROFIT', profit, py+352);
+    _finRow('PROFIT', profit, py+348);
   }
   // ── Current Route section ─────────────────────────────────────
   // The whole panel is a single click target: clicking anywhere inside it
@@ -22803,11 +22836,15 @@ function _drawEngineDetailsPanel(mainPx,mainPy,eng){
   ctx.fillText('ENGINE DETAILS',upX+upW/2,mainPy+18);
   ctx.strokeStyle='rgba(40,80,160,0.35)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(upX+1,mainPy+25); ctx.lineTo(upX+upW-3,mainPy+25); ctx.stroke();
-  // Engine sprite — drawn at correct aspect ratio (wider than tall)
+  // Engine sprite — de-stretched contain-fit (matches the Train Preview), not
+  // the old stretch-into-box which rendered the engine body short. Width kept at
+  // sprW; bottom kept at the old body baseline (sprY + sprH·(1-bp)).
   if(imgs[eng]){
     ctx.save();
     ctx.shadowColor='rgba(80,160,255,0.45)'; ctx.shadowBlur=14;
-    ctx.drawImage(_sprForSize(eng,sprW,sprH),sprX,sprY,sprW,sprH);
+    const _bp=SPRITE_BOT[eng]||0;
+    const _baseY=sprY+sprH*(1-_bp);
+    _drawFittedSprite(ctx, eng, sprX+sprW/2, _baseY, sprW, sprH*(1-_bp), eng);
     ctx.restore();
   }
   // Engine name
@@ -22860,12 +22897,14 @@ function _drawCarBtn(bx,by,bw,bh,carType,isSelected,isGreyed,tyCount=0,isHov=fal
   ctx.beginPath(); ctx.rect(bx,by,bw,sprH); ctx.clip(); // clip so tall engine sprites don't overflow cell
   if(isGreyed) ctx.globalAlpha=0.22;
   if(imgs[carType]){
-    // Use sprH directly (no VIZ_H_MULT) so all sprites fit the fixed-size button cell.
-    // Center the opaque portion (above the SPRITE_BOT transparent strip) within the cell.
+    // De-stretched contain-fit (matches the Train Preview proportions) instead
+    // of stretching the whole bundle into the 1.4 box — the old path squished
+    // bodies short. Width footprint kept at sprW; the body grows TALLER, with
+    // its bottom kept at the same baseline the old centred render used
+    // (by + sprH·(2-bp)/2), so width + bottom placement are unchanged.
     const _bp=SPRITE_BOT[carType]||0;
-    const _opaqueH=sprH*(1-_bp);
-    const _drawY=by+sprH/2-_opaqueH/2;
-    ctx.drawImage(_sprForSize(carType,sprW,sprH),sprX,_drawY,sprW,sprH);
+    const _baseY=by+sprH*(2-_bp)/2;
+    _drawFittedSprite(ctx, carType, bx+bw/2, _baseY, sprW, _baseY-by, carType);
   }
   ctx.restore();
   if(isSelected){ ctx.strokeStyle='rgba(80,160,255,0.95)'; ctx.lineWidth=2; ctx.strokeRect(bx,by,bw,sprH); }
@@ -26798,6 +26837,20 @@ function galaxyClick(sx,sy,shiftKey){
       if(d<hitR&&d<nearestD){ nearestD=d; nearestP=galaxy.starProxyMap?.[star.proxyPlanetId]||{...star,isStar:true}; }
     }
     if(nearestP){
+      // Seed the FIRST route stop from an ALREADY-SELECTED planet/star when no
+      // route has been started yet, so "planet selected → shift+click another
+      // planet" starts a route. This is the path hit after the train→planet
+      // selection toggle (which leaves a planet selected with empty routeStops);
+      // before this, the shift+click only re-selected the clicked planet. The
+      // selected-train case is seeded separately in the block below.
+      if(routeStops.length===0 && sel){
+        if(sel.type==='planet' && sel.data && sel.data!==nearestP){
+          routeStops=[sel.data];
+        } else if(sel.type==='star' && sel.data){
+          const _selProxy=galaxy.starProxyMap?.[sel.data.proxyPlanetId];
+          if(_selProxy && _selProxy!==nearestP) routeStops=[_selProxy];
+        }
+      }
       if(routeStops.length>=1||(sel&&sel.type==='car')){
         // If a train-in-orbit is selected with no route started, seed from its
         // current planet. This block now fires for star + star-proxy targets too
