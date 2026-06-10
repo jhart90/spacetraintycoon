@@ -107,26 +107,35 @@ def _content_info(bundled_b64, source_path):
     except Exception:
         return None
 
-def _solid_bundle_bbox(bundled_b64, thresh=30):
-    """Horizontal SOLID bbox of the bundled sprite as (left_x, width) at
-    alpha>thresh, excluding the faint anti-aliasing halo the alpha>0 content
-    bbox includes. Two uses in galaxy view:
-      • width  → coupling spacing (the eye reads the solid edge, so consistent
-                 gaps for every car-to-car pair; halos vary 0-6 px per sprite).
-      • left_x → horizontal CENTRING: some sprites (notably car_ore) have their
-                 body off-centre in the 160 bundle, so drawing them centred on
-                 the bundle midpoint shifts the body off the car's position and
-                 skews the gaps. Centring on the SOLID body's centre fixes it.
-    Returns None if undecodable."""
+def _solid_bundle_bbox(bundled_b64, thresh=30, mincount=3):
+    """SOLID bbox of the bundled sprite as (left_x, width, height) at
+    alpha>thresh, excluding the faint anti-aliasing/glow halo the alpha>0
+    content bbox includes. Galaxy-view uses:
+      • width  → coupling spacing (the eye reads the solid edge; halos vary
+                 0-6 px per sprite, which over-spaced some cars).
+      • height → render box height AND the spacing denominator. The draw loop
+                 sizes the box so the body fills the target height; using the
+                 a0 (alpha>0) height instead made car_sand — whose dust halo
+                 inflates its a0 height ~13 px past the solid body — render
+                 only ~86% scale.
+      • left_x → horizontal CENTRING on the solid body's centre (some sprites,
+                 e.g. car_ore, sit off-centre in the 160 bundle).
+    Density criterion: a row/column counts only if it has >= `mincount`
+    pixels above the alpha threshold. This excludes SPARSE halos — e.g.
+    car_sand's dust effect sprinkles 1-2 faint pixels per row well above the
+    metal body; a plain getbbox would include them and over-size the bundle
+    height, shrinking the rendered body. Returns None if undecodable."""
     try:
         from PIL import Image
-        import io
+        import io, numpy as np
         bim = Image.open(io.BytesIO(base64.b64decode(bundled_b64))).convert("RGBA")
-        mask = bim.getchannel("A").point(lambda p: 255 if p > thresh else 0)
-        bb = mask.getbbox()
-        if not bb:
+        al = np.array(bim)[:, :, 3]
+        mask = al > thresh
+        rows = np.where(mask.sum(axis=1) >= mincount)[0]
+        cols = np.where(mask.sum(axis=0) >= mincount)[0]
+        if not len(rows) or not len(cols):
             return None
-        return (bb[0], bb[2] - bb[0])
+        return (int(cols[0]), int(cols[-1] - cols[0] + 1), int(rows[-1] - rows[0] + 1))
     except Exception:
         return None
 
@@ -151,8 +160,8 @@ sprite_nat_entries = ", ".join(f'"{k}":[{v[0]},{v[1]}]' for k, v in _natural.ite
 sprite_content_entries = ", ".join(
     f'"{k}":[{v[0]},{v[1]},{v[2]},{v[3]},{v[4]}]' for k, v in _content.items()
 )
-# SPRITE_SOLID[name] = [solidLeftX, solidWidth] in the 160 bundle (alpha>30).
-sprite_solid_entries = ", ".join(f'"{k}":[{v[0]},{v[1]}]' for k, v in _solid.items())
+# SPRITE_SOLID[name] = [solidLeftX, solidWidth, solidHeight] in the 160 bundle (alpha>30).
+sprite_solid_entries = ", ".join(f'"{k}":[{v[0]},{v[1]},{v[2]}]' for k, v in _solid.items())
 
 asset_js = (
     "const ASSETS = {\n" + ",\n".join(asset_js_lines) + "\n};\n"
@@ -1559,10 +1568,12 @@ function _carGalWorldHalfW(type){
   const _sc = (typeof SPRITE_CONTENT!=='undefined') ? SPRITE_CONTENT[type] : null;
   const _sn = (typeof SPRITE_NATURAL!=='undefined') ? SPRITE_NATURAL[type] : null;
   const _fileAR = (_sn && _sn[1]) ? _sn[0]/_sn[1] : 1.0;
-  const _bh = _sc ? _sc[3] : 72;
-  // Prefer the solid-body width; fall back to the content-bbox width.
+  // Use the SOLID body width AND height (SPRITE_SOLID = [left,w,h]) so this
+  // matches the draw loop, which now sizes the box from the solid height too.
+  // Falls back to the alpha>0 content bbox (SPRITE_CONTENT) if unavailable.
   const _ss = (typeof SPRITE_SOLID!=='undefined') ? SPRITE_SOLID[type] : null;
-  const _w = _ss ? _ss[1] : (_sc ? _sc[2] : 148);
+  const _w  = _ss ? _ss[1] : (_sc ? _sc[2] : 148);
+  const _bh = (_ss && _ss[2]) ? _ss[2] : (_sc ? _sc[3] : 72);
   return _vf * CAR_ORB_H * _fileAR * _w / (_bh * 2);
 }
 // car_mail width-multiplier 1.05 mirrors car_passenger. The new car_mail
@@ -25537,7 +25548,11 @@ function drawGalaxy(ts,dt){
                 : 0.60) * _GAL_SCALE;
       const _sc=(typeof SPRITE_CONTENT!=='undefined')?SPRITE_CONTENT[_styp]:null;
       const _sn=(typeof SPRITE_NATURAL!=='undefined')?SPRITE_NATURAL[_styp]:null;
-      const _bhB =_sc?_sc[3]:160;                       // content height inside 160 bundle
+      const _ssD=(typeof SPRITE_SOLID!=='undefined')?SPRITE_SOLID[_styp]:null;
+      // Size the box from the SOLID body height (SPRITE_SOLID[2]) so the
+      // visible body fills _visH. Using the alpha>0 content height made
+      // car_sand (faint dust halo inflates its a0 height ~13 px) render small.
+      const _bhB =(_ssD&&_ssD[2])?_ssD[2]:(_sc?_sc[3]:160);
       const _fileAR=(_sn&&_sn[1])?(_sn[0]/_sn[1]):1.0;  // source PNG file aspect
       const _visH=_vf*ch;
       const _ech=_visH*160/Math.max(1,_bhB);            // box height so visible body = _visH
@@ -25546,7 +25561,6 @@ function drawGalaxy(ts,dt){
       // on the car position (the coupling reference), instead of the bundle
       // midpoint. Most sprites are body-centred (no shift), but a few (e.g.
       // car_ore) sit off-centre in the 160 bundle, which skewed their gaps.
-      const _ssD=(typeof SPRITE_SOLID!=='undefined')?SPRITE_SOLID[_styp]:null;
       const _bodyCx=_ssD?(_ssD[0]+_ssD[1]/2):80;        // solid body centre in bundle px
       const _drawX=-(_bodyCx/160)*_wcw;                 // so body centre maps to x=0
       ctx.save(); ctx.translate(sx,sy); ctx.rotate(rot); ctx.scale(-1,1);
