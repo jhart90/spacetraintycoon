@@ -934,7 +934,7 @@ const _MISSION_PLANET_STYLES = [
 function _objTokenize(text){
   const out=[]; let i=0, cur='';
   const flush=()=>{ if(cur){ for(const w of cur.split(/\s+/)) if(w) out.push({text:w,color:null}); cur=''; } };
-  const _isWord=(c)=>c!==undefined && /[A-Za-z0-9']/.test(c);
+  const _isWord=(c)=>c!==undefined && /[A-Za-z0-9]/.test(c); // matches regex \b (so "ORIJEN's" still colours ORIJEN)
   while(i<text.length){
     // Planet-name phrases → uppercased + coloured (one coloured token per word
     // so the wrapper can still break the phrase across lines). Word-boundary
@@ -1646,12 +1646,14 @@ function _fitTrainScreen(names, boxW, maxAboveH){
 // contain-fit, so engines and cars fill their box equally.
 function _drawFittedSprite(c2, type, cellCx, baseY, availW, availH, key){
   key=key||type;
-  if(!imgs[key]) return;
+  if(!imgs[key]) return null;
   const _m1=_carSpriteMetrics(type,1,key);
-  if(!(_m1.bodyW>0)||!(_m1.visH>0)) return;
+  if(!(_m1.bodyW>0)||!(_m1.visH>0)) return null;
   const _cb=Math.min(availW/_m1.bodyW, availH/_m1.visH);
   const _m=_carSpriteMetrics(type,_cb,key);
   c2.drawImage(_sprForSize(key,_m.boxW,_m.boxH), cellCx+_m.drawXoff, baseY-_m.boxH*(1-_m.bot), _m.boxW, _m.boxH);
+  // Visible-body rect (bottom-aligned on baseY) so callers can align labels.
+  return {bodyW:_m.bodyW, visH:_m.visH, top:baseY-_m.visH, bottom:baseY, cx:cellCx};
 }
 // Render a LEFT-ANCHORED overflow train-car strip using the shared galaxy-view
 // metrics (de-stretched, area-consistent, solid-body centred, tightly coupled,
@@ -19201,15 +19203,16 @@ function drawMissionsPopup(){
     // Details — italic 12px, word-wrapped
     let _mRowY=ry+29;
     if(m.details){
-      ctx.font='italic 12px "Exo 2",sans-serif'; ctx.textAlign='left';
-      ctx.fillStyle=isDone?'rgba(68,70,78,0.50)':'rgba(138,162,200,0.72)';
-      const _dtWords=m.details.split(' '); let _dtLine='';
-      for(const _w of _dtWords){
-        const _t=_dtLine?_dtLine+' '+_w:_w;
-        if(ctx.measureText(_t).width<=cMaxW) _dtLine=_t;
-        else{ if(_dtLine){ctx.fillText(_dtLine,cX,_mRowY);} _dtLine=_w; _mRowY+=_mDtLH; }
+      ctx.textAlign='left';
+      // Tokenised so ORIJEN / LAVA PLANET / DESERT PLANET get uppercased +
+      // biome-coloured here too (same as the objectives below).
+      const _mDtFontStr='italic 12px "Exo 2",sans-serif';
+      const _mDtBaseCol=isDone?'rgba(68,70,78,0.50)':'rgba(138,162,200,0.72)';
+      const _mDtLines=_objWrapTokens(_objTokenize(m.details), cMaxW, _mDtFontStr);
+      for(let _li=0;_li<_mDtLines.length;_li++){
+        _objDrawLine(_mDtLines[_li], cX, _mRowY, _mDtFontStr, _mDtBaseCol);
+        if(_li<_mDtLines.length-1) _mRowY+=_mDtLH;
       }
-      if(_dtLine) ctx.fillText(_dtLine,cX,_mRowY);
       _mRowY+=_mDtLH+4;
     }
     // Objectives — 11px text, 14px checkbox, word-wrapped, hover-aware, with progress bars
@@ -22533,7 +22536,8 @@ function drawPlanetDetailPopup(){
         let sx=cx;
         // Each icon de-stretched (galaxy-view proportions), bottom-aligned in
         // the row and tiled by the fixed sprW cell width.
-        const _icon=(ix)=>_drawFittedSprite(ctx, sprKey, ix+sprW/2, cy+sprH, sprW, sprH, _dk);
+        let _iconMet=null;
+        const _icon=(ix)=>{ const _r=_drawFittedSprite(ctx, sprKey, ix+sprW/2, cy+sprH, sprW, sprH, _dk); if(_r) _iconMet=_r; };
         if(img){
           for(let i=0;i<n;i++){ _icon(sx); sx+=sprW; }
           if(!overflow&&frac>=0.5){
@@ -22547,9 +22551,14 @@ function drawPlanetDetailPopup(){
             ctx.fillStyle=_fg; ctx.fillRect(fadeX,cy,sprW/2,sprH);
           }
         }
-        ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
+        // Vertically centre the ×N label on the SPRITE's visible body (which is
+        // bottom-aligned in the cell), not on the cell — otherwise it floats too
+        // high above the shorter de-stretched sprites.
+        const _lblCY = _iconMet ? (_iconMet.top + _iconMet.visH/2) : (cy+sprH/2);
+        ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left'; ctx.textBaseline='middle';
         ctx.fillStyle=labelCol||'rgba(180,220,255,0.9)';
-        ctx.fillText('\xd7'+(amount%1===0?amount.toFixed(0):amount.toFixed(1)),sx+2,cy+sprH/2+3.5);
+        ctx.fillText('\xd7'+(amount%1===0?amount.toFixed(0):amount.toFixed(1)),sx+2,_lblCY);
+        ctx.textBaseline='alphabetic';
       }
 
       // Dark background
@@ -23889,7 +23898,9 @@ function drawTrainBuilderPopup(){
   // Confirm
   const trainCost=s.engine?_trainCost:0; // zero if no engine selected yet
   const canAffordTrain=credits>=trainCost;
-  const canConfirm=s.engine!==null&&canAffordTrain;
+  // A valid train MUST have a caboose — grey out Confirm/Purchase without one.
+  const _hasCaboose=!!s.caboose;
+  const canConfirm=s.engine!==null&&_hasCaboose&&canAffordTrain;
   const cfW=110, cfX=px+12;
   s.confirmBounds={x:cfX,y:btnRowY,w:cfW,h:btnH,active:canConfirm};
   const _tbCfHov=canConfirm&&!!s.confirmHover;
@@ -23907,6 +23918,7 @@ function drawTrainBuilderPopup(){
   ctx.font='9px "Exo 2",sans-serif'; ctx.textAlign='left';
   ctx.fillStyle='rgba(110,140,180,0.55)';
   if(!s.engine) ctx.fillText('Select an engine to continue',cfX+cfW+12,btnRowY+btnH/2+3);
+  else if(!_hasCaboose){ ctx.fillStyle='rgba(220,80,60,0.75)'; ctx.fillText('Add a CABOOSE to continue',cfX+cfW+12,btnRowY+btnH/2+3); }
   else if(!canAffordTrain){ ctx.fillStyle='rgba(220,80,60,0.75)'; ctx.fillText('Need '+_fmtCr(trainCost-credits)+' more credits',cfX+cfW+12,btnRowY+btnH/2+3); }
   else if(trainCost===0) ctx.fillText(_isEdit?'No net new cars — free':'Engine only — add cars above',cfX+cfW+12,btnRowY+btnH/2+3);
   else { const _cTxt='-'+_fmtCr(trainCost)+' cr'; ctx.font='8px "Exo 2",sans-serif'; const _cPW=ctx.measureText(_cTxt).width+10,_cPH=13; const _cPX=cfX+cfW+12,_cPY=btnRowY+btnH/2-_cPH/2; ctx.fillStyle='rgba(110,18,18,0.92)'; ctx.beginPath(); ctx.roundRect(_cPX,_cPY,_cPW,_cPH,4); ctx.fill(); ctx.fillStyle='rgba(255,255,255,0.97)'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(_cTxt,_cPX+_cPW/2,_cPY+_cPH/2); ctx.textBaseline='alphabetic'; }
@@ -23997,7 +24009,7 @@ function drawTrainsPopup(){
     ctx.save(); ctx.beginPath(); ctx.rect(px+10,SY,SW,SH); ctx.clip();
     // Galaxy-view metrics (de-stretched, area-consistent, tightly coupled,
     // bottom-aligned) via the shared strip renderer.
-    _drawTrainCarStrip(ctx, train, px+10, SY, SW, SH, {});
+    _drawTrainCarStrip(ctx, train, px+10, SY, SW, SH, {scale:0.75});
     // Fade gradient — the gradient end color must match whatever's actually
     // behind the row (the popup bg rgba(3,6,20,0.97) + any per-row bg layered
     // on top). Hover rows get a brighter end so the train's rear doesn't
@@ -24179,16 +24191,9 @@ function drawRoutesPopup(){
       // the planet panes below).
       routesPopupVizBounds.push({x:_VIZ_X0, y:_vizY, w:_vizW, h:_vizH, trainIdx:ti});
       ctx.save(); ctx.beginPath(); ctx.rect(_VIZ_X0,_vizY,_vizW,_vizH); ctx.clip();
-      let _scx=_VIZ_X0;
-      for(let ci=0;ci<train.cars.length;ci++){
-        const _cw=_carVizW(train.cars[ci],_carDrawW);
-        const _sn=getCarSprite(train.cars[ci],train.carFull?.[ci]??false);
-        const _bp=SPRITE_BOT[_sn]||SPRITE_BOT[train.cars[ci]]||0;
-        const _dy=~~(_vizY+_vizH*_bp);
-        if(imgs[_sn]) ctx.drawImage(_sprForSize(_sn,_cw,_vizH),_scx,_dy,_cw,_vizH);
-        else{ ctx.fillStyle=ci===0?'#4af':ci===train.cars.length-1?'#f84':'#888'; ctx.fillRect(_scx,_vizY,_cw-1,_vizH); }
-        _scx+=_cw;
-      }
+      // Galaxy-view metrics (de-stretched, area-consistent, tightly coupled,
+      // bottom-aligned) via the shared strip renderer.
+      _drawTrainCarStrip(ctx, train, _VIZ_X0, _vizY, _vizW, _vizH, {});
       // Right-edge fade — matches the EFFECTIVE row background underneath so
       // the gradient blends seamlessly instead of always fading to near-black.
       // Effective color = drawPopupBase fill rgba(3,6,20,0.97) composited
@@ -31053,7 +31058,7 @@ function startGame(){
   missionTrackerEnabled=true;
   const origen=galaxy.planets[galaxy.origenId];
 
-  const playerCars=['engine_constellation','car_passenger','car_passenger','car_mail','caboose'];
+  const playerCars=['engine_constellation','car_passenger','car_mail','caboose'];
 
   trains=[
     makeGalaxyTrain('IRON EXPRESS',galaxy.origenId,'LOW',playerCars,true),
