@@ -178,7 +178,16 @@
       "Bash(grep -n \"_drawBubble\\(\\\\['.*'\\\\], {x:_sx\" build_game.py)",
       "Bash(grep -c \"target:{x:_sx,y:_sy}\" build_game.py)",
       "Bash(awk -F: '$1>=1090 && $1<=1550')",
-      "Bash(awk -F: '$1>=19065 && $1<=19320')"
+      "Bash(awk -F: '$1>=19065 && $1<=19320')",
+      "Bash(awk -F: '$1>=23560 && $1<=23940 || $1>=24210 && $1<=24230 || $1>=28000 && $1<=29000')",
+      "Bash(awk -F: '$1>=23555 && $1<=23935')",
+      "Bash(awk -F: '$1>=19065 && $1<=19300')",
+      "Bash(awk -F: '$1>=25000 && $1<=26000')",
+      "Bash(awk -F: '$1>=17580 && $1<=17640')",
+      "mcp__mcp-registry__search_mcp_registry",
+      "mcp__mcp-registry__list_connectors",
+      "WebSearch",
+      "WebFetch(domain:developers.google.com)"
     ]
   },
   "hooks": {

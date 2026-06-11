@@ -700,6 +700,7 @@ function getCP(e){
 }
 
 // ── title constants ──────────────────────────────────────────
+const GAME_VERSION = 'v0.4.3'; // shown bottom-left of the title screen
 const CAR_MID = ['car_passenger','car_royal','car_water_tank','car_cargo','car_livestock','car_mail','car_ice','car_sand','car_ore','car_iron','car_hazmat','car_oil','car_battery','car_chemical'];
 const CAR_W=112, CAR_H=80, RAIL_Y=H*0.68;
 const T_PALS = [
@@ -3396,6 +3397,12 @@ function drawTitleScreen(ts,dt){
   ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillStyle=_loadBtnHover?'rgba(255,225,120,1.0)':'rgba(210,170,80,0.95)';
   ctx.fillText('LOAD GAME',W/2,lby+lbh/2);
   ctx.restore();
+  // Version number — dark grey, bottom-left corner.
+  ctx.save();
+  ctx.font='11px "Exo 2",sans-serif'; ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+  ctx.fillStyle='rgba(95,100,112,0.8)';
+  ctx.fillText(GAME_VERSION, 12, H-12);
+  ctx.restore();
   // Mute button — bottom-right corner of title screen
   const _mbSz=32, _mbX=W-_mbSz-14, _mbY=H-_mbSz-14;
   _muteBtnBounds={x:_mbX,y:_mbY,w:_mbSz,h:_mbSz};
@@ -5154,8 +5161,8 @@ function _doStartGame(){
   _corp.ceoSalary=_cho.ceoSalary; _corp.lastHireSD=null;
   _ceoHireCandidates=_csCeoOptions.filter((_,i)=>i!==_csSelectedCeo)
     .map(c=>{ const _r=CEO_ROSTER.find(r=>r.name===c.ceoName)||CEO_ROSTER[0]; return _genCeoCandidate(_r); });
-  // First-time entry to aiselect in this new-game flow → preselect Normal.
-  if(!_aiSelectSeen){ _aiDifficulty='normal'; _aiSelectSeen=true; }
+  // First-time entry to aiselect in this new-game flow → preselect Very Hard.
+  if(!_aiSelectSeen){ _aiDifficulty='very_hard'; _aiSelectSeen=true; }
   gs='aiselect';
 }
 function drawCorpSetup(ts){
@@ -17639,7 +17646,22 @@ function _drawTutorialChain(stage){
   // fade-in. No bubble drawn this phase — just a timer that hands off to
   // zoom_out once elapsed.
   if(_tutorialPhase==='look_around_pause'){
-    if(_elapsed>=1000){ _tutorialPhase='zoom_out'; _tutorialPhaseStartMs=_now; _tutorialFadeOutStartMs=0; }
+    if(_elapsed>=1000){
+      // The ZOOM OUT tip is about to fade in — but if the player is already
+      // zoomed out enough that the target lava planet is fully in view (the
+      // same condition that would complete the zoom_out phase), skip the tip
+      // entirely and fade in the DOUBLE CLICK bubble next instead.
+      let _skipZoom=false;
+      const _lp0=galaxy.planets[_tutorialLavaPlanetId];
+      if(_lp0){
+        const [_sx0,_sy0]=w2s(_lp0.x,_lp0.y);
+        const _sr0=_lp0.radius*cam.scale;
+        const _BUF=30, _visW0=W-PANEL_W;
+        _skipZoom=(_sx0-_sr0>=_BUF && _sx0+_sr0<=_visW0-_BUF && _sy0-_sr0>=TOP_H+_BUF && _sy0+_sr0<=GH-_BUF);
+      }
+      _tutorialPhase=_skipZoom?'double_click':'zoom_out';
+      _tutorialPhaseStartMs=_now; _tutorialFadeOutStartMs=0;
+    }
     return;
   }
   // ── Phase: zoom_out ────────────────────────────────────────
@@ -19167,7 +19189,9 @@ function drawMissionsPopup(){
     let mname=m.name;
     while(ctx.measureText(mname).width>cMaxW&&mname.length>4) mname=mname.slice(0,-1);
     if(mname.length<m.name.length) mname+='…';
-    ctx.fillText(mname,cX,ry+18);
+    // Name sits a touch higher (was ry+18) to open up more breathing room
+    // between it and the italic details line that starts at ry+29.
+    ctx.fillText(mname,cX,ry+14);
     // Status badge + deadline countdown for active timed missions
     const _rEdge=px+pw-22;
     ctx.textAlign='right'; ctx.font='bold 7px Orbitron,sans-serif';
@@ -24193,7 +24217,7 @@ function drawRoutesPopup(){
       ctx.save(); ctx.beginPath(); ctx.rect(_VIZ_X0,_vizY,_vizW,_vizH); ctx.clip();
       // Galaxy-view metrics (de-stretched, area-consistent, tightly coupled,
       // bottom-aligned) via the shared strip renderer.
-      _drawTrainCarStrip(ctx, train, _VIZ_X0, _vizY, _vizW, _vizH, {});
+      _drawTrainCarStrip(ctx, train, _VIZ_X0, _vizY, _vizW, _vizH, {scale:0.8});
       // Right-edge fade — matches the EFFECTIVE row background underneath so
       // the gradient blends seamlessly instead of always fading to near-black.
       // Effective color = drawPopupBase fill rgba(3,6,20,0.97) composited
@@ -25731,6 +25755,16 @@ function drawGalaxy(ts,dt){
   // Train orbit dashes + cars for every train
   trainGalaxyBounds=[];
   const cw=Math.max(4,56*cam.scale), ch=Math.max(2,28*cam.scale);
+  // Orbit-ring cull AABB derived from the ACTUAL galaxy-viewport corners
+  // (s2w of the visible rect). The cam-centred _vMin/_vMax AABB used elsewhere
+  // is centred on screen (W/2, GH/2), but the visible galaxy region is
+  // [0..W-PANEL_W] × [TOP_H..GH] — offset by the right panel + top bar — so its
+  // bottom/left edges fell INSIDE the true viewport and clipped orbit rings near
+  // those edges. These corners are exact; plus a generous 140-screen-px margin
+  // so a ring is never culled while any part of it could be on screen.
+  const _orbCullM=140/cam.scale;
+  const [_orbVMinX,_orbVMinY]=s2w(0,TOP_H);
+  const [_orbVMaxX,_orbVMaxY]=s2w(W-PANEL_W,GH);
   for(const train of trains){
     // Show departure-planet orbit dash (always visible; trailing cars may still orbit it during transit)
     const showOrbitDash=!train.route||train.route.phase==='orbit'||train.route.phase==='waiting'||train.route.phase==='transit';
@@ -25738,8 +25772,9 @@ function drawGalaxy(ts,dt){
       const tp=_gp(train.planetId);
       if(tp){
         const _orW=train.orbitR;
-        // Skip if the orbit ring's world-space bounding box is entirely off-screen.
-        if(!(tp.x+_orW<_vMinX||tp.x-_orW>_vMaxX||tp.y+_orW<_vMinY||tp.y-_orW>_vMaxY)){
+        // Skip only if the orbit ring's bbox is fully outside the TRUE viewport
+        // (+margin) — see _orbVMin/_orbVMax above.
+        if(!(tp.x+_orW<_orbVMinX-_orbCullM||tp.x-_orW>_orbVMaxX+_orbCullM||tp.y+_orW<_orbVMinY-_orbCullM||tp.y-_orW>_orbVMaxY+_orbCullM)){
           const [ox,oy]=w2s(tp.x,tp.y);
           ctx.strokeStyle=train.isPlayer?'rgba(80,160,255,0.15)':'rgba(255,160,60,0.15)';
           ctx.lineWidth=1; ctx.setLineDash([4,7]);
@@ -25754,7 +25789,7 @@ function drawGalaxy(ts,dt){
       const toP=_gp(r.stops[r.toIdx]);
       if(toP){
         const _orW=r.arrivalOrbitR;
-        if(!(toP.x+_orW<_vMinX||toP.x-_orW>_vMaxX||toP.y+_orW<_vMinY||toP.y-_orW>_vMaxY)){
+        if(!(toP.x+_orW<_orbVMinX-_orbCullM||toP.x-_orW>_orbVMaxX+_orbCullM||toP.y+_orW<_orbVMinY-_orbCullM||toP.y-_orW>_orbVMaxY+_orbCullM)){
           const [ox,oy]=w2s(toP.x,toP.y);
           ctx.strokeStyle=train.isPlayer?'rgba(80,160,255,0.10)':'rgba(255,160,60,0.10)';
           ctx.lineWidth=1; ctx.setLineDash([4,7]);
