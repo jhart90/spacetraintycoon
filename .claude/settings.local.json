@@ -171,7 +171,14 @@
       "Bash(awk '{print \"index.html:\", $5, \"bytes\"}')",
       "Bash(awk -F: '$1>=23330 && $1<=23620')",
       "Bash(awk 'NR>=20191 && NR<=20405' build_game.py)",
-      "Bash(awk 'NR>=6743 && NR<=6825' build_game.py)"
+      "Bash(awk 'NR>=6743 && NR<=6825' build_game.py)",
+      "Bash(awk -F: '$1>=12450 && $1<=12620')",
+      "Bash(awk -F: '$1>=17560 && $1<=17960')",
+      "Bash(awk -F: '$1>=17960 && $1<=18260')",
+      "Bash(grep -n \"_drawBubble\\(\\\\['.*'\\\\], {x:_sx\" build_game.py)",
+      "Bash(grep -c \"target:{x:_sx,y:_sy}\" build_game.py)",
+      "Bash(awk -F: '$1>=1090 && $1<=1550')",
+      "Bash(awk -F: '$1>=19065 && $1<=19320')"
     ]
   },
   "hooks": {

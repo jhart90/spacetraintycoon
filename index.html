@@ -922,10 +922,35 @@ function _cargoTextColor(name){
 // whole (including the literal brackets) and pick up the resource's
 // CARGO_TEXT_COLORS color + bold weight at render time. Everything else
 // is split by whitespace into ordinary tokens.
+// Special planet names that get UPPERCASED + biome-coloured wherever they
+// appear in mission objective / details text. Colours come from the biome
+// palette (PTYPES): resort-ocean blue, lava red, desert sand. Multi-word
+// phrases are listed so a bare "planet" never matches on its own.
+const _MISSION_PLANET_STYLES = [
+  {re:/^lava\s+planet\b/i,   up:'LAVA PLANET',   color:'#ff4020'}, // lava biome (hi)
+  {re:/^desert\s+planet\b/i, up:'DESERT PLANET', color:'#f0a040'}, // desert biome (hi)
+  {re:/^orijen\b/i,          up:'ORIJEN',        color:'#38aaf0'}, // resort ocean (hi)
+];
 function _objTokenize(text){
   const out=[]; let i=0, cur='';
   const flush=()=>{ if(cur){ for(const w of cur.split(/\s+/)) if(w) out.push({text:w,color:null}); cur=''; } };
+  const _isWord=(c)=>c!==undefined && /[A-Za-z0-9']/.test(c);
   while(i<text.length){
+    // Planet-name phrases → uppercased + coloured (one coloured token per word
+    // so the wrapper can still break the phrase across lines). Word-boundary
+    // checked on BOTH sides so e.g. "DESERTED" or a mid-word match never hits.
+    if(!_isWord(text[i-1])){
+      let hit=null;
+      for(const ps of _MISSION_PLANET_STYLES){
+        const m=ps.re.exec(text.slice(i));
+        if(m && !_isWord(text[i+m[0].length])){ hit={ps,len:m[0].length}; break; }
+      }
+      if(hit){
+        flush();
+        for(const w of hit.ps.up.split(/\s+/)) out.push({text:w, color:hit.ps.color});
+        i+=hit.len; continue;
+      }
+    }
     const ch=text[i];
     if(ch==='['){
       const rb=text.indexOf(']',i);
@@ -2641,6 +2666,7 @@ let activePopup=null; // null|'pokedex'|'options'|'train'|'planet'|'trains'|'tra
 let _popupCooldownUntil=0; // real-time ms: next pending popup won't show until after this
 let _prevHadPopup=false;   // tracks activePopup truthy→falsy transition for cooldown
 let _missionTipStartMs=0;    // real-time ms when the [M] missions callout bubble was triggered (0=inactive)
+let _missionTipPending=false; // armed but waiting for other callouts/tooltips to clear before showing
 let _speedTipStartMs=0;      // real-time ms when the speed-button callout bubble was triggered (0=inactive)
 let _speedTipSuppressed=false; // true once the player has clicked either speed arrow at least once
 // Periodic re-introduction state. The bubble first appears 30s after the
@@ -12338,20 +12364,15 @@ function getTrainStatus(train){
 // When any of those change, the cached canvas is regenerated; otherwise the
 // existing canvas is blitted. Most frames have ~37 of 38 cache hits.
 function _panelRowCacheKey(train, isSelected){
-  const r = train.route;
-  const phase = r ? r.phase : 'none';
+  // GRAPHICS-only key. The cached canvas now holds ONLY the row graphics
+  // (selection wash, car-sprite strip, fade, divider); ALL TEXT is drawn LIVE
+  // each frame via the main ctx so it lands on the sharp HD overlay rather than
+  // being baked into the cache and downsampled to the logical main canvas (which
+  // halved its resolution and made the panel text look blurry). So the cache
+  // only needs to invalidate on car composition / load state / selection / DPR
+  // — NOT on name / status / location (which change far more often).
   const carsK = (train.cars||[]).map((c,i)=>c+(train.carFull?.[i]?'F':'E')).join('|');
-  const fromP = r ? _gp(r.stops[r.fromIdx]) : null;
-  const toP   = r ? _gp(r.stops[r.toIdx])   : null;
-  const planet = _gp(train.planetId);
-  const star = galaxy.stars[planet?.starId??0]??galaxy.stars[0];
-  const broken = ((train.maintenance??1)<=0) ? 'B' : 'O';
-  const st = getTrainStatus(train);
-  const locK = (fromP?.id||'-')+'>'+(toP?.id||'-')+'/'+(planet?.id||'-')+'/'+(star?.id||'-');
-  // DPR is part of the key so a window-move between low- and high-DPI
-  // monitors triggers a re-render at the new resolution (cache canvases
-  // are also resized below when this changes).
-  return train.name+'|'+(train.color||'')+'|'+carsK+'|'+phase+'|'+(train.orbitTier||'')+'|'+locK+'|'+broken+'|'+(isSelected?'S':'-')+'|'+st.text+'|'+st.color+'|d'+DPR;
+  return carsK+'|'+(isSelected?'S':'-')+'|d'+DPR;
 }
 // Render a single panel row to an offscreen canvas at local (0..PANEL_W, 0..ROW_H)
 // LOGICAL coordinates. The given canvas is sized PANEL_W*DPR × ROW_H*DPR (HD
@@ -12374,21 +12395,8 @@ function _renderPanelRowToCanvas(train, isSelected, c, PANEL_W_local, ROW_H, STR
     cc.strokeStyle='rgba(80,160,255,0.25)'; cc.lineWidth=1;
     cc.strokeRect(2,0,PANEL_W_local-4,ROW_H-2);
   }
-  // Train name (broken trains → red, otherwise train color)
-  cc.font='bold 9px Orbitron,sans-serif'; cc.textAlign='left';
-  const _broken=((train.maintenance??1)<=0);
-  cc.fillStyle=_broken?'#ff4444':(train.color||'#4af');
-  let tname=train.name;
-  const _tnMaxW=PANEL_W_local-14-(_broken?14:0);
-  while(cc.measureText(tname).width>_tnMaxW&&tname.length>4) tname=tname.slice(0,-1);
-  if(tname!==train.name) tname+='…';
-  cc.fillText(tname,7,12);
-  // Broken icon (flashing wrench) is NOT drawn into the cache — it animates
-  // every 450 ms and would force constant cache invalidation. Stored on the
-  // canvas as a `_brokenIconX` hint so the live blit code can draw it on top
-  // at the correct position next to the train name.
-  c._brokenIconX = _broken ? 7+cc.measureText(tname).width+2 : -1;
-  // Strip clip + car sprites
+  // Car-sprite strip (GRAPHICS only — all text is drawn live by
+  // _drawPanelRowTextLive so it lands sharp on the HD overlay).
   const stripX=7, stripY=16;
   cc.save();
   cc.beginPath(); cc.rect(stripX,stripY,STRIP_W,STRIP_H); cc.clip();
@@ -12402,48 +12410,68 @@ function _renderPanelRowToCanvas(train, isSelected, c, PANEL_W_local, ROW_H, STR
   fadeG.addColorStop(0,isSelected?'rgba(12,22,44,0)':'rgba(4,8,20,0)'); fadeG.addColorStop(1,_panelBg);
   cc.fillStyle=fadeG; cc.fillRect(stripX,stripY,STRIP_W,STRIP_H);
   cc.restore();
-  // Location / route / status line
-  const rph=train.route?train.route.phase:null;
-  const onRoute=rph==='transit'||rph==='waiting';
-  const _carsTxt=`${train.cars.length} cars`;
-  cc.font='11px "Exo 2",sans-serif'; cc.textAlign='right';
-  cc.fillStyle='rgba(120,160,220,0.55)';
-  cc.fillText(_carsTxt,PANEL_W_local-5,stripY+STRIP_H+11);
-  const _carsW=cc.measureText(_carsTxt).width+6;
-  const _locMaxW=PANEL_W_local-14-_carsW;
-  cc.textAlign='left';
-  if(onRoute){
-    const r=train.route;
-    const fromP=_gp(r.stops[r.fromIdx]);
-    const toP=_gp(r.stops[r.toIdx]);
-    cc.fillStyle='rgba(255,210,80,0.80)';
-    let seg=fromP.name+' → '+toP.name;
-    while(cc.measureText(seg).width>_locMaxW&&seg.length>6) seg=seg.slice(0,-1);
-    if(seg.length<(fromP.name+' → '+toP.name).length) seg+='…';
-    cc.fillText(seg,7,stripY+STRIP_H+11);
-  } else {
-    const planet=_gp(train.planetId);
-    const star=galaxy.stars[planet?.starId??0]??galaxy.stars[0];
-    cc.fillStyle='rgba(120,180,255,0.75)';
-    const _locFull=planet?.isStarProxy?('★ '+star.name+' orbit'):((planet?.name||'?')+' · '+star.name);
-    let loc=_locFull;
-    while(cc.measureText(loc).width>_locMaxW&&loc.length>6) loc=loc.slice(0,-1);
-    if(loc.length<_locFull.length) loc+='…';
-    cc.fillText(loc,7,stripY+STRIP_H+11);
-  }
-  cc.font='11px "Exo 2",sans-serif';
-  cc.fillStyle='rgba(80,160,200,0.55)';
-  cc.fillText(onRoute?'ON ROUTE':train.orbitTier+' ORBIT',7,stripY+STRIP_H+22);
-  cc.font='bold 9px Orbitron,sans-serif'; cc.textAlign='right';
-  const st=getTrainStatus(train);
-  let stxt=st.text;
-  while(cc.measureText(stxt).width>PANEL_W_local-14&&stxt.length>4) stxt=stxt.slice(0,-1);
-  if(stxt!==st.text) stxt+='…';
-  cc.fillStyle=st.color; cc.fillText(stxt,PANEL_W_local-5,stripY+STRIP_H+22);
   // Divider after the row
   cc.strokeStyle='rgba(40,80,160,0.25)'; cc.lineWidth=1;
   cc.beginPath(); cc.moveTo(6,ROW_H-2); cc.lineTo(PANEL_W_local-6,ROW_H-2); cc.stroke();
   cc.restore();
+}
+// Draws a panel row's TEXT live (every frame) through the MAIN ctx, so it lands
+// on the device-res HD text overlay instead of being baked into the row cache
+// canvas (the main canvas is logical-res, so the cache blit downsampled the
+// text and made it look blurry vs. the rest of the game). (ox,oy) = the row's
+// top-left in screen coords. Mirrors the exact layout the cache used. Includes
+// the flashing broken-wrench icon (it needs the live name width anyway).
+function _drawPanelRowTextLive(train, isSelected, ox, oy, PANEL_W_local, ROW_H, STRIP_H, STRIP_W){
+  const stripY=16;
+  // Train name (broken → red, else train color)
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
+  const _broken=((train.maintenance??1)<=0);
+  ctx.fillStyle=_broken?'#ff4444':(train.color||'#4af');
+  let tname=train.name;
+  const _tnMaxW=PANEL_W_local-14-(_broken?14:0);
+  while(ctx.measureText(tname).width>_tnMaxW&&tname.length>4) tname=tname.slice(0,-1);
+  if(tname!==train.name) tname+='…';
+  ctx.fillText(tname,ox+7,oy+12);
+  if(_broken){ _drawBrokenIcon(ox+7+ctx.measureText(tname).width+2, oy+12, 10); }
+  // Cars count (right)
+  const rph=train.route?train.route.phase:null;
+  const onRoute=rph==='transit'||rph==='waiting';
+  const _carsTxt=`${train.cars.length} cars`;
+  ctx.font='11px "Exo 2",sans-serif'; ctx.textAlign='right';
+  ctx.fillStyle='rgba(120,160,220,0.55)';
+  ctx.fillText(_carsTxt,ox+PANEL_W_local-5,oy+stripY+STRIP_H+11);
+  const _carsW=ctx.measureText(_carsTxt).width+6;
+  const _locMaxW=PANEL_W_local-14-_carsW;
+  ctx.textAlign='left';
+  if(onRoute){
+    const r=train.route;
+    const fromP=_gp(r.stops[r.fromIdx]);
+    const toP=_gp(r.stops[r.toIdx]);
+    ctx.fillStyle='rgba(255,210,80,0.80)';
+    let seg=fromP.name+' → '+toP.name;
+    while(ctx.measureText(seg).width>_locMaxW&&seg.length>6) seg=seg.slice(0,-1);
+    if(seg.length<(fromP.name+' → '+toP.name).length) seg+='…';
+    ctx.fillText(seg,ox+7,oy+stripY+STRIP_H+11);
+  } else {
+    const planet=_gp(train.planetId);
+    const star=galaxy.stars[planet?.starId??0]??galaxy.stars[0];
+    ctx.fillStyle='rgba(120,180,255,0.75)';
+    const _locFull=planet?.isStarProxy?('★ '+star.name+' orbit'):((planet?.name||'?')+' · '+star.name);
+    let loc=_locFull;
+    while(ctx.measureText(loc).width>_locMaxW&&loc.length>6) loc=loc.slice(0,-1);
+    if(loc.length<_locFull.length) loc+='…';
+    ctx.fillText(loc,ox+7,oy+stripY+STRIP_H+11);
+  }
+  ctx.font='11px "Exo 2",sans-serif';
+  ctx.fillStyle='rgba(80,160,200,0.55)';
+  ctx.fillText(onRoute?'ON ROUTE':train.orbitTier+' ORBIT',ox+7,oy+stripY+STRIP_H+22);
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='right';
+  const st=getTrainStatus(train);
+  let stxt=st.text;
+  while(ctx.measureText(stxt).width>PANEL_W_local-14&&stxt.length>4) stxt=stxt.slice(0,-1);
+  if(stxt!==st.text) stxt+='…';
+  ctx.fillStyle=st.color; ctx.fillText(stxt,ox+PANEL_W_local-5,oy+stripY+STRIP_H+22);
+  ctx.textAlign='left';
 }
 
 // ── trains panel ─────────────────────────────────────────────
@@ -12516,13 +12544,11 @@ function drawTrainsPanel(){
       // canvas's logical (0,0) maps to the panel-row top-left (px, ry-1)
       // — the -1 accounts for the original selection highlight's offset.
       ctx.drawImage(_cc.canvas, 0, 0, _hdW, _hdH, px, ry-1, PANEL_W, ROW_H);
-      // ── Live broken icon (flashing wrench) ──
-      // Drawn on top of the cached row so the flash animates without forcing
-      // cache invalidation. The cache renderer stashes the icon X-position on
-      // the canvas as `_brokenIconX` (= -1 when not broken).
-      if(_cc.canvas._brokenIconX >= 0){
-        _drawBrokenIcon(px + _cc.canvas._brokenIconX, (ry-1) + 12, 10);
-      }
+      // ── Live row TEXT (name / cars / location / status + flashing broken
+      // wrench) ── Drawn every frame via the main ctx so it composites onto the
+      // sharp HD overlay rather than the downsampled cache. Same (px, ry-1)
+      // origin the cache blit uses.
+      _drawPanelRowTextLive(train, isSelected, px, ry-1, PANEL_W, ROW_H, STRIP_H, STRIP_W);
       // ── Dynamic progress bar overlay (per-frame, in-transit only) ──
       // Not cached because the progress % ticks every frame. Drawn on top
       // of the cached row in the same coordinates the original code used.
@@ -15167,7 +15193,9 @@ function _acceptNewMissionFromState(state){
   _chatMsg('MISSION STARTED: '+def.name.toUpperCase(),'rgba(255,220,80,1)');
   // M-tip: gated on 3 simultaneously-active missions for the first time.
   if(!_missionTipFired && missions.filter(mx=>mx.status==='active').length>=3){
-    _missionTipStartMs=Date.now(); _missionTipFired=true;
+    // QUEUE the tip rather than showing it immediately — _maybeStartMissionTip
+    // promotes it to active once no other callout/tooltip is on screen.
+    _missionTipPending=true; _missionTipFired=true;
   }
   // buy_second_train: arm the yellow [T] trains hint (one-shot per game).
   if(def.id==='buy_second_train' && !_buyTrainHintSuppressed){
@@ -15235,21 +15263,22 @@ function drawNewMissionPopup(){
   // Flavor / details text — italic 12px, word-wrapped, ABOVE objectives
   if(def.details){
     const _dtLH=15;
-    ctx.font='italic 12px "Exo 2",sans-serif'; ctx.textAlign='left';
-    ctx.fillStyle='rgba(150,185,220,0.80)';
+    ctx.textAlign='left';
     // Resolve {SOURCE}/{TARGET} placeholders before word-wrap.
     let _dtTxt=def.details;
     if(_dtTxt.includes('{SOURCE}')&&popupState.sourcePlanetId!=null){const _sp4=_gp(popupState.sourcePlanetId);if(_sp4)_dtTxt=_dtTxt.replace(/\{SOURCE\}/g,_sp4.name);}
     if(_dtTxt.includes('{TARGET}')&&popupState.targetPlanetId!=null){const _tp4=_gp(popupState.targetPlanetId);if(_tp4)_dtTxt=_dtTxt.replace(/\{TARGET\}/g,_tp4.name);}
     if(_dtTxt.includes('{CORP}')) _dtTxt=_dtTxt.replace(/\{CORP\}/g,corpName||'your corporation');
-    const _dtWords=_dtTxt.split(' ');
-    let _dtLine='';
-    for(const _w of _dtWords){
-      const _t=_dtLine?_dtLine+' '+_w:_w;
-      if(ctx.measureText(_t).width<=cMaxW){ _dtLine=_t; }
-      else{ if(_dtLine){ctx.fillText(_dtLine,cX,_rcy);} _dtLine=_w; _rcy+=_dtLH; }
+    // Tokenise + word-wrap so ORIJEN / LAVA PLANET / DESERT PLANET get
+    // uppercased + biome-coloured (same system the objectives use). Italic base
+    // font; coloured planet tokens render bold-italic in their biome colour.
+    const _dtFontStr='italic 12px "Exo 2",sans-serif';
+    const _dtBaseCol='rgba(150,185,220,0.80)';
+    const _dtLines=_objWrapTokens(_objTokenize(_dtTxt), cMaxW, _dtFontStr);
+    for(let _li=0;_li<_dtLines.length;_li++){
+      _objDrawLine(_dtLines[_li], cX, _rcy, _dtFontStr, _dtBaseCol);
+      if(_li<_dtLines.length-1) _rcy+=_dtLH;
     }
-    if(_dtLine) ctx.fillText(_dtLine,cX,_rcy);
     _rcy+=_dtLH+7; // gap after details before objectives
   }
   // OBJECTIVES label
@@ -15258,9 +15287,10 @@ function drawNewMissionPopup(){
   ctx.fillText('OBJECTIVES',cX,_rcy);
   _rcy+=15;
   if(!popupState.objBounds) popupState.objBounds=[];
-  const _objLH=15; // line height for wrapped objective lines
-  // Measure ○ glyph width at the larger checkbox size for text offset
-  ctx.font='14px "Exo 2",sans-serif';
+  const _objLH=13; // line height for wrapped objective lines (slightly tightened
+                   // so long objective lists never reach the reward pill/button)
+  // Measure ○ glyph width at the checkbox size for text offset
+  ctx.font='12px "Exo 2",sans-serif';
   const _cbW=Math.round(ctx.measureText('○').width)+5;
   const _preCompIds=popupState.preCompletedObjIds||new Set();
   for(let _oi=0;_oi<def.objectives.length;_oi++){
@@ -15274,7 +15304,7 @@ function drawNewMissionPopup(){
     if(_ot.includes('{SOURCE}')&&popupState.sourcePlanetId!=null){const _sp2=_gp(popupState.sourcePlanetId);if(_sp2)_ot=_ot.replace('{SOURCE}',_sp2.name);}
     if(_ot.includes('{TARGET}')&&popupState.targetPlanetId!=null){const _tp2=_gp(popupState.targetPlanetId);if(_tp2)_ot=_ot.replace('{TARGET}',_tp2.name);}
     // Tokenize for colored [Name] segments, then word-wrap by tokens.
-    const _objFontStr='11px "Exo 2",sans-serif';
+    const _objFontStr='10px "Exo 2",sans-serif';
     const _objTxtW=cMaxW-_cbW;
     const _objTokens=_objTokenize(_ot);
     const _objLines=_objWrapTokens(_objTokens,_objTxtW,_objFontStr);
@@ -15282,7 +15312,7 @@ function drawNewMissionPopup(){
     const _objRowStartY=_rcy-13;
     popupState.objBounds[_oi]={x:cX,y:_objRowStartY,w:cMaxW,h:_objRowTotalH};
     // Draw checkbox: ✓ (green) for pre-completed objectives, ○ for pending
-    ctx.font='14px "Exo 2",sans-serif'; ctx.fillStyle=_baseCol;
+    ctx.font='12px "Exo 2",sans-serif'; ctx.fillStyle=_baseCol;
     ctx.fillText(_isPreComp?'✓':'○',cX,_rcy);
     // Draw each wrapped line of objective text (tokens with their own colors)
     for(let _li=0;_li<_objLines.length;_li++){
@@ -15290,16 +15320,19 @@ function drawNewMissionPopup(){
     }
     _rcy+=_objRowTotalH;
   }
-  // Body bottom = max(image bottom, right column bottom) + gap; drives reward pill centering
-  const _bodyBottom=Math.max(imgBY+imgBH,_rcy)+8;
   if(def.reward||def.rewardText){
     // Reward pill — same small-rounded-rect treatment as the upgrade
     // PURCHASE cost pills, just with a green fill instead of red. The
-    // "REWARD" label still sits above the pill, centered.
+    // "REWARD" label sits above the pill, centered.
+    // Anchor the whole reward group a FIXED gap above the accept button's TOP
+    // EDGE — not centered in the (variable) gap below the body content — so the
+    // pill always lands in the same place relative to the button regardless of
+    // image height / objective count (which previously slid it up and down).
     const _btnTop=py+ph-44;
     const _lblH=8, _pillH=12, _lblPillGap=5;
     const _rewardGroupH=_lblH+_lblPillGap+_pillH;
-    const _rewardTop=_bodyBottom+(_btnTop-_bodyBottom-_rewardGroupH)/2;
+    const _rewardGroupGap=8; // gap between the pill's bottom and the button's top edge
+    const _rewardTop=_btnTop-_rewardGroupGap-_rewardGroupH;
     const _lblBaseline=_rewardTop+_lblH;
     const _rPY=_lblBaseline+_lblPillGap;
     ctx.font='7px "Exo 2",sans-serif'; ctx.textAlign='center';
@@ -16981,6 +17014,28 @@ function _drawMissionImage(m,cx,cy,w,h){
   ctx.restore();
 }
 
+// True when any OTHER on-screen hint / callout / tutorial bubble is currently
+// showing. Used to DEFER (queue) the [M] mission tip so it never overlaps an
+// already-visible tooltip or callout bubble — it waits until they all clear.
+function _anyCalloutOrTooltipActive(){
+  if(_buyTrainHintStartMs>0) return true;
+  if(_buyTrainPlusHintStartMs>0) return true;
+  if(_speedTipStartMs>0) return true;
+  if(_orbitHintStartMs>0) return true;
+  if(_zoomCalloutStartMs>0) return true;
+  // Tutorial chain bubble active (any phase other than fully-off / finished).
+  if(typeof _tutorialPhase!=='undefined' && _tutorialPhase && _tutorialPhase!=='inactive' && _tutorialPhase!=='all_done') return true;
+  // Visit-planet orange hint shows while a visit_planet mission is active.
+  if(typeof missions!=='undefined' && missions.some(m=>m.status==='active' && m.id==='visit_planet')) return true;
+  return false;
+}
+// Promote a queued [M] mission tip to active once nothing else is showing.
+function _maybeStartMissionTip(){
+  if(_missionTipPending && !_missionTipStartMs && !_anyCalloutOrTooltipActive()){
+    _missionTipStartMs=Date.now();
+    _missionTipPending=false;
+  }
+}
 function _drawMissionTip(){
   if(!_missionTipStartMs) return;
   const _elpMs=Date.now()-_missionTipStartMs;
@@ -17410,8 +17465,35 @@ function _drawTutorialChain(stage){
     const _bW=_maxW+_pad*2;
     const _visW=W-PANEL_W;
     const _forceBelow=!!(opts&&opts.below);
-    let _bx, _by, _tailX, _tailTipY, _drawTail=false, _belowPlacement=false;
+    let _bx, _by, _tailDir='down', _tailTipX, _tailTipY, _drawTail=false;
     if(anchorScreen){
+      // opts.target = the actual object's screen centre (only world-anchored
+      // bubbles pass it). When that target is COMPLETELY outside the viewable
+      // galaxy area (panned/zoomed off-screen), keep the bubble fully inside
+      // the viewport and aim the tail at the viewport EDGE in the target's
+      // direction. UI-anchored bubbles (no target) keep the exact placement
+      // below — their anchors may sit in the panel/popups (outside the galaxy
+      // viewport) yet are perfectly visible, so they must NOT be clamped.
+      const _tgt = (opts && opts.target) ? opts.target : null;
+      const _vpL=4, _vpT=TOP_H+4, _vpR=W-PANEL_W-4, _vpB=GH-4;
+      const _offTarget = _tgt && (_tgt.x<_vpL||_tgt.x>_vpR||_tgt.y<_vpT||_tgt.y>_vpB);
+      if(_offTarget){
+        const _edgeX=Math.max(_vpL,Math.min(_vpR,_tgt.x));
+        const _edgeY=Math.max(_vpT,Math.min(_vpB,_tgt.y));
+        const _ovL=_vpL-_tgt.x, _ovR=_tgt.x-_vpR, _ovT=_vpT-_tgt.y, _ovB=_tgt.y-_vpB;
+        // Dock against the edge the target most overshoots; tail points out to it.
+        if(Math.max(_ovL,_ovR) >= Math.max(_ovT,_ovB)) _tailDir=(_ovR>=_ovL)?'right':'left';
+        else _tailDir=(_ovB>=_ovT)?'down':'up';
+        if(_tailDir==='right'){ _bx=_edgeX-_tailH-_bW; _by=_edgeY-_bH/2; }
+        else if(_tailDir==='left'){ _bx=_edgeX+_tailH; _by=_edgeY-_bH/2; }
+        else if(_tailDir==='down'){ _bx=_edgeX-_bW/2; _by=_edgeY-_tailH-_bH; }
+        else { _bx=_edgeX-_bW/2; _by=_edgeY+_tailH; } // up
+        // Clamp the bubble fully inside the viewport.
+        _bx=Math.max(_vpL,Math.min(_vpR-_bW,_bx));
+        _by=Math.max(_vpT,Math.min(_vpB-_bH,_by));
+        _tailTipX=_edgeX; _tailTipY=_edgeY;
+        _drawTail=true;
+      } else {
       // Pure sub-pixel positioning — no snapping. The HD text overlay
       // rasterises at DPR resolution, so sub-pixel anchor positions glide
       // smoothly between device pixels via anti-aliasing. Snapping to the
@@ -17432,21 +17514,23 @@ function _drawTutorialChain(stage){
         // every cargo car sprite in supply + demand rows) while the
         // tail keeps pointing UP at the molten ore supply sprite.
         if(opts && typeof opts.belowY === 'number') _by=opts.belowY;
-        _belowPlacement=true;
+        _tailDir='up';
         _tailTipY=anchorScreen.y+4;
       } else {
         const _tipY=anchorScreen.y-12;
         _by=_tipY-_tailH-_bH;
         if(_by<TOP_H+6){
           _by=anchorScreen.y+_tailH+4;
-          _belowPlacement=true;
+          _tailDir='up';
           _tailTipY=anchorScreen.y+4;
         } else {
+          _tailDir='down';
           _tailTipY=anchorScreen.y-4;
         }
       }
-      _tailX=Math.max(_bx+_bR+8,Math.min(_tipX,_bx+_bW-_bR-8));
+      _tailTipX=Math.max(_bx+_bR+8,Math.min(_tipX,_bx+_bW-_bR-8));
       _drawTail=true;
+      }
     } else {
       _bx=Math.round(_visW/2 - _bW/2);
       _by=Math.round((TOP_H+GH)/2 - _bH/2);
@@ -17473,12 +17557,25 @@ function _drawTutorialChain(stage){
     ctx.fillStyle=_fillCol;
     ctx.beginPath(); ctx.roundRect(_bx,_by,_bW,_bH,_bR); ctx.fill();
     if(_drawTail){
+      // Unified tail for all four directions. For up/down the base sits on the
+      // top/bottom edge (clamped within the rounded corners); for left/right it
+      // sits on the side edge. The tip is (_tailTipX,_tailTipY) — the anchor for
+      // on-screen bubbles, or the viewport edge point for off-screen targets.
       ctx.beginPath();
-      if(_belowPlacement){
-        ctx.moveTo(_tailX-7,_by); ctx.lineTo(_tailX+7,_by); ctx.lineTo(_tailX,_tailTipY); ctx.closePath(); ctx.fill();
-      } else {
-        ctx.moveTo(_tailX-7,_by+_bH); ctx.lineTo(_tailX+7,_by+_bH); ctx.lineTo(_tailX,_tailTipY); ctx.closePath(); ctx.fill();
+      if(_tailDir==='down'){
+        const _tb=Math.max(_bx+_bR+8,Math.min(_tailTipX,_bx+_bW-_bR-8));
+        ctx.moveTo(_tb-7,_by+_bH); ctx.lineTo(_tb+7,_by+_bH); ctx.lineTo(_tailTipX,_tailTipY);
+      } else if(_tailDir==='up'){
+        const _tb=Math.max(_bx+_bR+8,Math.min(_tailTipX,_bx+_bW-_bR-8));
+        ctx.moveTo(_tb-7,_by); ctx.lineTo(_tb+7,_by); ctx.lineTo(_tailTipX,_tailTipY);
+      } else if(_tailDir==='right'){
+        const _tb=Math.max(_by+_bR+8,Math.min(_tailTipY,_by+_bH-_bR-8));
+        ctx.moveTo(_bx+_bW,_tb-7); ctx.lineTo(_bx+_bW,_tb+7); ctx.lineTo(_tailTipX,_tailTipY);
+      } else { // left
+        const _tb=Math.max(_by+_bR+8,Math.min(_tailTipY,_by+_bH-_bR-8));
+        ctx.moveTo(_bx,_tb-7); ctx.lineTo(_bx,_tb+7); ctx.lineTo(_tailTipX,_tailTipY);
       }
+      ctx.closePath(); ctx.fill();
     }
     ctx.shadowBlur=0; ctx.fillStyle=_textCol;
     ctx.font='10px "Exo 2",sans-serif';
@@ -17572,7 +17669,7 @@ function _drawTutorialChain(stage){
     if(_lp){
       const [_sx,_sy]=w2s(_lp.x,_lp.y);
       const _sr=Math.max(8,_lp.radius*cam.scale);
-      _drawBubble(['DOUBLE CLICK on this PLANET to view details'], {x:_sx,y:_sy-_sr}, r.alpha);
+      _drawBubble(['DOUBLE CLICK on this PLANET to view details'], {x:_sx,y:_sy-_sr}, r.alpha, {target:{x:_sx,y:_sy}});
     }
     return;
   }
@@ -17862,7 +17959,7 @@ function _drawTutorialChain(stage){
       // bubble's tail tip (which the helper renders at anchor.y - 4)
       // lands exactly on the planet's edge — bubble appears to be just
       // barely touching the planet rather than floating well above it.
-      _drawBubble(['CLICK HERE to select another planet with a STATION'], {x:_sx,y:_sy-_sr+4}, r.alpha);
+      _drawBubble(['CLICK HERE to select another planet with a STATION'], {x:_sx,y:_sy-_sr+4}, r.alpha, {target:{x:_sx,y:_sy}});
     }
     return;
   }
@@ -17923,7 +18020,7 @@ function _drawTutorialChain(stage){
     if(_t0){
       const [_tx,_ty]=getTrainCarPos(_t0,0);
       const [_sx,_sy]=w2s(_tx,_ty);
-      _drawBubble(['Your train is on the way!'], {x:_sx,y:_sy-14}, r.alpha);
+      _drawBubble(['Your train is on the way!'], {x:_sx,y:_sy-14}, r.alpha, {target:{x:_sx,y:_sy}});
     }
     return;
   }
@@ -18028,7 +18125,7 @@ function _drawTutorialChain(stage){
     if(_lp){
       const [_sx,_sy]=w2s(_lp.x,_lp.y);
       const _sr=Math.max(8,_lp.radius*cam.scale);
-      _drawBubble(['CLICK on the LAVA PLANET to START a ROUTE'], {x:_sx,y:_sy-_sr+6}, r.alpha);
+      _drawBubble(['CLICK on the LAVA PLANET to START a ROUTE'], {x:_sx,y:_sy-_sr+6}, r.alpha, {target:{x:_sx,y:_sy}});
     }
     return;
   }
@@ -18046,7 +18143,7 @@ function _drawTutorialChain(stage){
     if(_op){
       const [_sx,_sy]=w2s(_op.x,_op.y);
       const _sr=Math.max(8,_op.radius*cam.scale);
-      _drawBubble(['SHIFT+CLICK on ORIJEN to ADD a STOP to your ROUTE'], {x:_sx,y:_sy-_sr+6}, r.alpha);
+      _drawBubble(['SHIFT+CLICK on ORIJEN to ADD a STOP to your ROUTE'], {x:_sx,y:_sy-_sr+6}, r.alpha, {target:{x:_sx,y:_sy}});
     }
     return;
   }
@@ -18065,7 +18162,7 @@ function _drawTutorialChain(stage){
       if(_dp){
         const [_sx,_sy]=w2s(_dp.x,_dp.y);
         const _sr=Math.max(8,_dp.radius*cam.scale);
-        _drawBubble(['SHIFT+CLICK on the DESERT PLANET to ADD ANOTHER STOP'], {x:_sx,y:_sy-_sr+6}, r.alpha);
+        _drawBubble(['SHIFT+CLICK on the DESERT PLANET to ADD ANOTHER STOP'], {x:_sx,y:_sy-_sr+6}, r.alpha, {target:{x:_sx,y:_sy}});
       }
     }
     return;
@@ -18085,7 +18182,7 @@ function _drawTutorialChain(stage){
     if(_lp){
       const [_sx,_sy]=w2s(_lp.x,_lp.y);
       const _sr=Math.max(8,_lp.radius*cam.scale);
-      _drawBubble(['SHIFT+CLICK on the LAVA PLANET to CLOSE the LOOP'], {x:_sx,y:_sy-_sr+6}, r.alpha);
+      _drawBubble(['SHIFT+CLICK on the LAVA PLANET to CLOSE the LOOP'], {x:_sx,y:_sy-_sr+6}, r.alpha, {target:{x:_sx,y:_sy}});
     }
     return;
   }
@@ -18197,7 +18294,7 @@ function _drawTutorialChain(stage){
     if(_bfDesert){
       const [_sx,_sy]=w2s(_bfDesert.x,_bfDesert.y);
       const _sr=Math.max(8,_bfDesert.radius*cam.scale);
-      _drawBubble(['DOUBLE-CLICK the DESERT PLANET to view its details'], {x:_sx,y:_sy-_sr+6}, r.alpha);
+      _drawBubble(['DOUBLE-CLICK the DESERT PLANET to view its details'], {x:_sx,y:_sy-_sr+6}, r.alpha, {target:{x:_sx,y:_sy}});
     }
     return;
   }
@@ -18314,7 +18411,7 @@ function _drawTutorialChain(stage){
     if(_bfDesert){
       const [_sx,_sy]=w2s(_bfDesert.x,_bfDesert.y);
       const _sr=Math.max(8,_bfDesert.radius*cam.scale);
-      _drawBubble(['ROUTE your new TRAIN to LOAD IRON from the DESERT PLANET'], {x:_sx,y:_sy-_sr+6}, r.alpha);
+      _drawBubble(['ROUTE your new TRAIN to LOAD IRON from the DESERT PLANET'], {x:_sx,y:_sy-_sr+6}, r.alpha, {target:{x:_sx,y:_sy}});
     }
     return;
   }
@@ -18331,7 +18428,7 @@ function _drawTutorialChain(stage){
     if(_op){
       const [_sx,_sy]=w2s(_op.x,_op.y);
       const _sr=Math.max(8,_op.radius*cam.scale);
-      _drawBubble(['Deliver the IRON to ORIJEN'], {x:_sx,y:_sy-_sr+6}, r.alpha);
+      _drawBubble(['Deliver the IRON to ORIJEN'], {x:_sx,y:_sy-_sr+6}, r.alpha, {target:{x:_sx,y:_sy}});
     }
     return;
   }
@@ -22321,17 +22418,19 @@ function drawPlanetDetailPopup(){
   // Sprite + half-size ×N count overlaid on lower-right corner of sprite
   {const _bdSz=42,_bdRX=px+pw-14;let _bdY=ls+38;
   const _rdList=[
-    {k:'ironDelivered',     img:imgs['car_iron'],      c:'rgba(200,210,235,0.97)'},
-    {k:'steelDelivered',    img:imgs['car_steel'],     c:'rgba(210,220,235,0.97)'},
-    {k:'glassDelivered',    img:imgs['car_glass'],     c:'rgba(170,230,210,0.97)'},
-    {k:'machineryDelivered',img:imgs['car_machinery'], c:'rgba(200,200,170,0.97)'},
-    {k:'goldDelivered',     img:imgs['car_gold'],      c:'rgba(255,215,60,0.97)'},
-    {k:'diamondDelivered',  img:imgs['car_diamond'],   c:'rgba(80,220,255,0.97)'},
+    {k:'ironDelivered',     type:'car_iron',      img:imgs['car_iron'],      c:'rgba(200,210,235,0.97)'},
+    {k:'steelDelivered',    type:'car_steel',     img:imgs['car_steel'],     c:'rgba(210,220,235,0.97)'},
+    {k:'glassDelivered',    type:'car_glass',     img:imgs['car_glass'],     c:'rgba(170,230,210,0.97)'},
+    {k:'machineryDelivered',type:'car_machinery', img:imgs['car_machinery'], c:'rgba(200,200,170,0.97)'},
+    {k:'goldDelivered',     type:'car_gold',      img:imgs['car_gold'],      c:'rgba(255,215,60,0.97)'},
+    {k:'diamondDelivered',  type:'car_diamond',   img:imgs['car_diamond'],   c:'rgba(80,220,255,0.97)'},
   ];
   for(const _rde of _rdList){
     const _cnt=p[_rde.k]||0; if(_cnt<1) continue;
     const _spX=_bdRX-_bdSz,_spY=_bdY-_bdSz+2;
-    if(_rde.img) ctx.drawImage(_rde.img,_spX,_spY,_bdSz,_bdSz);
+    // De-stretched (galaxy-view proportions), contain-fit + bottom-aligned in
+    // the 42×42 inventory cell, instead of squishing the car into the square.
+    if(_rde.img) _drawFittedSprite(ctx, _rde.type, _spX+_bdSz/2, _spY+_bdSz, _bdSz, _bdSz, _rde.type);
     // ×N badge: 12px, centered on lower-right quadrant of sprite
     const _bdCx=_spX+Math.round(_bdSz*0.74),_bdCy=_spY+Math.round(_bdSz*0.76);
     ctx.font='bold 12px “Exo 2”,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
@@ -22426,16 +22525,20 @@ function drawPlanetDetailPopup(){
 
       function _drawCargoStrip(cx,cy,cargoType,amount,labelCol){
         const sprKey=CARGO_CAR_SPRITE[cargoType];
-        const img=sprKey?imgs[getCarSprite(sprKey,true)]:null;
+        const _dk=sprKey?getCarSprite(sprKey,true):null;
+        const img=_dk?imgs[_dk]:null;
         const full=Math.floor(amount), frac=amount-full;
         const overflow=full>=maxSpr;
         const n=overflow?maxSpr:full;
         let sx=cx;
+        // Each icon de-stretched (galaxy-view proportions), bottom-aligned in
+        // the row and tiled by the fixed sprW cell width.
+        const _icon=(ix)=>_drawFittedSprite(ctx, sprKey, ix+sprW/2, cy+sprH, sprW, sprH, _dk);
         if(img){
-          for(let i=0;i<n;i++){ctx.drawImage(img,sx,cy,sprW,sprH);sx+=sprW;}
+          for(let i=0;i<n;i++){ _icon(sx); sx+=sprW; }
           if(!overflow&&frac>=0.5){
             ctx.save();ctx.beginPath();ctx.rect(sx,cy,sprW/2,sprH);ctx.clip();
-            ctx.drawImage(img,sx,cy,sprW,sprH);ctx.restore();sx+=sprW/2;
+            _icon(sx);ctx.restore();sx+=sprW/2;
           }
           if(overflow){
             const fadeX=sx-sprW/2;
@@ -22757,13 +22860,17 @@ function _triggerEngineFailure(trainIdx){
 // Engine details slide-out panel (left of train builder popup).
 // Returns panel width so caller can offset the popup rightward.
 function _drawEngineDetailsPanel(mainPx,mainPy,eng){
-  if(!eng) return;
   const upW=140, upX=mainPx-upW+2;
   // Sprite at correct CAR_W:CAR_H aspect ratio (1.4:1) — not square
   const sprH=70, sprW=Math.round(sprH*(112/80)); // 98×70
   const sprY=mainPy+32, sprX=upX+Math.round((upW-sprW)/2);
   const statsStartY=sprY+sprH+28;
   const panelH=(statsStartY-mainPy)+6*15+10+14;
+  // Clear the HD text overlay under the panel so earlier-drawn overlay text
+  // (e.g. the mission-objectives callout sitting to the left) can't bleed
+  // THROUGH this opaque, self-painted background — same discipline as any
+  // custom-bg popup (see §1.1).
+  _clearTextOverlayRect(upX, mainPy, upW, panelH);
   // Panel background + border (drawn behind the popup — caller draws popup afterward)
   ctx.fillStyle='rgba(3,5,16,0.96)';
   ctx.strokeStyle='rgba(60,120,220,0.38)'; ctx.lineWidth=1;
@@ -22774,6 +22881,17 @@ function _drawEngineDetailsPanel(mainPx,mainPy,eng){
   ctx.fillText('ENGINE DETAILS',upX+upW/2,mainPy+18);
   ctx.strokeStyle='rgba(40,80,160,0.35)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(upX+1,mainPy+25); ctx.lineTo(upX+upW-3,mainPy+25); ctx.stroke();
+  // No engine selected yet → keep the panel (title + frame) but show a blank
+  // placeholder instead of the sprite/stats.
+  if(!eng){
+    ctx.font='italic 9px "Exo 2",sans-serif'; ctx.textAlign='center';
+    ctx.fillStyle='rgba(120,128,145,0.75)';
+    const _phcy=mainPy+panelH/2;
+    ctx.fillText('< Select an Engine',upX+upW/2,_phcy-6);
+    ctx.fillText('to see details >',upX+upW/2,_phcy+8);
+    ctx.textAlign='left';
+    return;
+  }
   // Engine sprite — de-stretched contain-fit (matches the Train Preview), not
   // the old stretch-into-box which rendered the engine body short. Width kept at
   // sprW; bottom kept at the old body baseline (sprY + sprH·(1-bp)).
@@ -23449,8 +23567,10 @@ function drawTrainBuilderPopup(){
   const s=trainBuilderState;
   const pw=620, ph=444;
   const upW=140; // engine details panel width
-  // Shift popup right when engine panel is showing so it stays on-screen
-  const px=s.engine ? Math.round((W-pw-upW+2)/2)+upW-2 : Math.round((W-pw)/2);
+  // Always reserve room for the engine-details panel on the left (it now shows
+  // even with no engine selected — blank with a placeholder), so the popup
+  // position is stable whether or not an engine is chosen.
+  const px=Math.round((W-pw-upW+2)/2)+upW-2;
   const py=Math.round((H-ph)/2);
   // Draw engine panel FIRST so the popup appears on top (panel slides from behind left edge)
   _drawEngineDetailsPanel(px,py,s.engine);
@@ -23874,17 +23994,10 @@ function drawTrainsPopup(){
     // sprites visually centre in the gap between the train-name row (baseline
     // at ry+20) and the orbit-location row (top at ry+73).
     const SY=ry+22, SH=50, SW=pw-20;
-    const sc=SH/CAR_H, cpw2=CAR_W*sc;
     ctx.save(); ctx.beginPath(); ctx.rect(px+10,SY,SW,SH); ctx.clip();
-    {let _scx2=px+10; for(let ci=0;ci<train.cars.length;ci++){
-      const _cw2=_carVizW(train.cars[ci],cpw2);
-      const _sn2=getCarSprite(train.cars[ci],train.carFull?.[ci]??false);
-      const _bp2=SPRITE_BOT[_sn2]||SPRITE_BOT[train.cars[ci]]||0;
-      const _dy2=~~(SY+SH*_bp2);
-      if(imgs[_sn2]) ctx.drawImage(_sprForSize(_sn2,_cw2,SH),_scx2,_dy2,_cw2,SH);
-      else{ ctx.fillStyle=ci===0?'#4af':ci===train.cars.length-1?'#f84':'#888'; ctx.fillRect(_scx2,SY,_cw2-1,SH); }
-      _scx2+=_cw2;
-    }}
+    // Galaxy-view metrics (de-stretched, area-consistent, tightly coupled,
+    // bottom-aligned) via the shared strip renderer.
+    _drawTrainCarStrip(ctx, train, px+10, SY, SW, SH, {});
     // Fade gradient — the gradient end color must match whatever's actually
     // behind the row (the popup bg rgba(3,6,20,0.97) + any per-row bg layered
     // on top). Hover rows get a brighter end so the train's rear doesn't
@@ -26036,8 +26149,15 @@ function drawGalaxy(ts,dt){
     const _tg=ctx.createLinearGradient(_cx-100,0,_cx+100,0);
     _tg.addColorStop(0,'#88ddff'); _tg.addColorStop(.5,'#ffffff'); _tg.addColorStop(1,'#88aaff');
     ctx.fillStyle=_tg;
-    ctx.fillText('SPACE TRAIN',_cx,_cy-_lineGap/2);
-    ctx.fillText('TYCOON',_cx,_cy+_lineGap/2);
+    // Shift the wordmark DOWN by the ring's vertical radius so the gap between
+    // the two lines centres on the VISIBLE (front-half) ring. The ring's back
+    // half is hidden behind the planet disc, so only the front arc shows over
+    // the text — and it sits at _cy + _ringRy (below centre), not at _cy. With
+    // the symmetric-around-_cy placement the front arc crossed THROUGH "TYCOON";
+    // shifting down puts it cleanly beneath "SPACE TRAIN" and above "TYCOON".
+    const _textCy=_cy+_ringRy;
+    ctx.fillText('SPACE TRAIN',_cx,_textCy-_lineGap/2);
+    ctx.fillText('TYCOON',_cx,_textCy+_lineGap/2);
     ctx.textBaseline='alphabetic';
     ctx.restore();
   } else if(sel.type==='star'){
@@ -26409,7 +26529,11 @@ function drawGalaxy(ts,dt){
           // line for colored rendering. (NBSP U+00A0 also matches \s+ in
           // JS so it can't be used as the placeholder.)
           const _safe=(_obj.text||'').replace(/\[([^\]]+)\]/g,(m2,inner)=>'['+inner.replace(/ /g,'\u0001')+']');
-          const _trkLines=_wrap('• '+_safe,_mtW,3);
+          // Protect two-word planet phrases (LAVA / DESERT PLANET) from being
+          // split across tracker lines (which would drop their colour). The
+          // protector char is the same one restored to a space below.
+          const _safeP=_safe.replace(/\b(lava|desert)\s+planet\b/ig,(m3)=>m3.replace(/\s+/,''));
+          const _trkLines=_wrap('• '+_safeP,_mtW,3);
           const _trkFontStr='8px "Exo 2",sans-serif';
           for(let li=0;li<_trkLines.length;li++){
             const _restored=_trkLines[li].replace(/\u0001/g,' ');
@@ -26620,6 +26744,7 @@ function drawGalaxy(ts,dt){
   if(gameSpeedIdx===0 && activePopup!=='quitconfirm') _drawPausedBanner(H/2,null,true);
   // Blue callout bubbles — drawn after all game-canvas UI so they appear above it,
   // and before popup windows so any open popup renders on top.
+  _maybeStartMissionTip(); // promote a queued [M] tip once other callouts clear
   _drawMissionTip();
   _drawBuyTrainHintCallout();
   _drawSpeedTip();
@@ -30337,7 +30462,7 @@ function _restoreFromSave(save){
   _buyTrainHintStartMs=0; _buyTrainHintFadeOutStartMs=0; _buyTrainHintSuppressed=true;
   // Loaded games have played before — treat speed-tip as permanently suppressed.
   _speedTipSuppressed=true; _speedTipStartMs=0; _speedTipNextRealMs=0; _speedTipFadeOutStartMs=0;
-  _missionTipFired=true; _missionTipStartMs=0;   // suppress M-tip on loaded games
+  _missionTipFired=true; _missionTipStartMs=0; _missionTipPending=false;   // suppress M-tip on loaded games
   // Re-arm the buy_second_train → upgrade_station 10 s gate if buy_second_train
   // is completed in the save but upgrade_station hasn't been introduced yet.
   {
@@ -30952,7 +31077,7 @@ function startGame(){
   // runs at title PLAY, BEFORE the player picks their corp name in corpsetup,
   // so corpName is still the default placeholder at this point. It fires at
   // the fadein → galaxy transition instead (same as the game_start GA event).
-  activePopup=null; popupState={}; gameSpeedIdx=SPEED_DEFAULT_IDX; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _foundryCompletedMs=0; _produceIronTimerMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _hasZoomed=false; _buyTrainTipStartMs=0; _buyTrainTipShown=false; _prevActivePopupForSfx=null; _missionTipFired=false; _visitPlanetCompletedMs=0; _tutorialDoneMs=0; _crTutorialDoneMs=0; _firstNonLowOrbitFired=false; _orbitHintStartMs=0; _orbitHintPlanetId=-1; _crTrainPreselected=false;
+  activePopup=null; popupState={}; gameSpeedIdx=SPEED_DEFAULT_IDX; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _missionTipPending=false; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _foundryCompletedMs=0; _produceIronTimerMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _hasZoomed=false; _buyTrainTipStartMs=0; _buyTrainTipShown=false; _prevActivePopupForSfx=null; _missionTipFired=false; _visitPlanetCompletedMs=0; _tutorialDoneMs=0; _crTutorialDoneMs=0; _firstNonLowOrbitFired=false; _orbitHintStartMs=0; _orbitHintPlanetId=-1; _crTrainPreselected=false;
   _newspaper=null; _newspaperLastSd=829; _newspaperPrevSpeed=0; _newspaperNextHover=false; _newspaperNextBounds=null; _newspaperPrevHover=false; _newspaperPrevBounds=null; _newspaperArchive=[]; _newspaperViewIdx=null; _paperMajorUsed=[]; _paperMinorUsed=[]; _paperLayout=0; _paperIssueNum=0; _paperIdx=randInt(0,_PAPER_NAMES.length-1); _newsEventLog=[]; _newsSnapshot=null;
   _speedLeftHover=false; _speedRightHover=false; _panelTabHover=null; _routeHereBtnHover=false; _assignBtnHover=false; _cancelRouteBtnHover=false; _planetStarNameHover=false; _starPanelPlanetHover=-1; _trainAddHover=false; _trainRowHover=-1; _pokedexSortHover=false; _pokedexRowHover=-1; _starRegistrySortHover=false; _starRegistryRowHover=-1; _goldOkHover=false; _diamondOkHover=false; _carUnlockOkHover=false; _quitYesHover=false; _quitNoHover=false; _saveGameBtnHover=false; _startBtnHover=false; _loadBtnHover=false; _htpBtnHover=false; _htpDotHover=-1; _htpSkipHover=false; pokedexRowBounds=[]; starRegistryRowBounds=[]; loadBtnBounds=null; saveGameBtnBounds=null;
   fogPoints=[]; fogGridSet=new Set(); fogCanvas=null;
