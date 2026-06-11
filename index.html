@@ -1181,7 +1181,12 @@ const MISSION_DEFS=[
    details:'Put your new foundry to work smelting raw ore into refined iron.',
    reward:10000, timeLimit:null,
    checkObj:(oid,m)=>{
-     if(oid==='produce_iron_obj') return _ironCarUnlocked&&!m.ironUnlockedSnapshot;
+     // Complete as soon as ANY foundry has ever produced ≥1 unit of iron
+     // (_ironCarUnlocked latches true on the first foundry smelt). Dropping the
+     // old !ironUnlockedSnapshot guard means that if the player had already
+     // produced iron BEFORE accepting this mission, it auto-completes the
+     // instant it's accepted (the pre-completed-objective path picks it up).
+     if(oid==='produce_iron_obj') return _ironCarUnlocked;
      return false;
    }},
   {id:'upgrade_station',
@@ -1475,6 +1480,48 @@ const MISSION_DEFS=[
    checkObj:(oid,m)=>{
      if(oid==='deliver_schematics') return !!m._schematicsDelivered;
      return false;
+   }},
+  {id:'another_dimension',
+   name:'Another Dimension?',
+   imageType:'planet_type', imageKey:'rocky',
+   // Single timed objective: a hidden 2.0-SD research countdown shown to the
+   // player only as a % progress bar (see _mObjProgress 'wait_research'). The
+   // timer starts when the mission is accepted (_researchStartSd stamped in
+   // _acceptNewMissionFromState). On completion this chains "More scientists
+   // needed!" (see the updateMissions completion sweep).
+   objectives:[
+     {id:'wait_research', text:'Wait for scientists to finish their research'},
+   ],
+   details:"Conclusive results have come back from the research you supported into the Black Hole... there's something on the other side! The only problem is, the gravitational forces of the Black Hole would absolutely crush any train that attempted to pass thru the event horizon... Wait for your scientists to investigate further.",
+   reward:null, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='wait_research') return m._researchStartSd!=null && (stardate-m._researchStartSd)>=2.0;
+     return false;
+   }},
+  {id:'more_scientists',
+   name:'More scientists needed!',
+   imageType:'car', imageKey:'car_passenger',
+   // Three-escort mission. scientistSourceIds = [urbanId, oilId, stormId] (the
+   // closest no-AI-station planet of each biome to Orijen), chosen when the
+   // mission is introduced and stored on the mission/intro entry. targetPlanetId
+   // = the Black Hole research outpost (the bh_research delivery target). Each
+   // source gets a forced 1+ passenger supply; the outpost gets a forced ≥1
+   // passenger demand floor for the mission's duration. The escort cars carrying
+   // these scientists glow gold and can ONLY unload at the outpost (see the
+   // _escortSpecs machinery). _scientistsDelivered = array of delivered source ids.
+   objectives:[
+     {id:'sci_urban', text:'Pick up a scientist (1 unit of [Passengers]) from {SCI1} and deliver them to the research outpost at {TARGET}'},
+     {id:'sci_oil',   text:'Pick up a scientist (1 unit of [Passengers]) from {SCI2} and deliver them to the research outpost at {TARGET}'},
+     {id:'sci_storm', text:'Pick up a scientist (1 unit of [Passengers]) from {SCI3} and deliver them to the research outpost at {TARGET}'},
+   ],
+   details:"To tunnel a stable WORMHOLE through the Black Hole and into the dimension beyond, your scientists need the galaxy's greatest minds working side by side. Gather three more brilliant scientists and bring them together at the research outpost.",
+   reward:250000, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(!Array.isArray(m._scientistsDelivered)||!Array.isArray(m.scientistSourceIds)) return false;
+     const _idx={sci_urban:0,sci_oil:1,sci_storm:2}[oid];
+     if(_idx==null) return false;
+     const _srcId=m.scientistSourceIds[_idx];
+     return _srcId!=null && m._scientistsDelivered.includes(_srcId);
    }},
 ];
 const MAINT_DECAY_PER_AU   = 0.00001; // maintenance fraction lost per SU in transit (constellation base)
@@ -2717,6 +2764,14 @@ let _buyTrainTipShown=false; // true once the buy-train callout has been trigger
 let _buyTrainHintStartMs=0;       // real-time ms when fade-in begins (0=inactive)
 let _buyTrainHintFadeOutStartMs=0;// when set, drives a forced 1-second linear fade-out
 let _buyTrainHintSuppressed=false;// true after first fire OR after the player opens the Trains window — never re-shown this game
+// Yellow educational callout pointing at the IRON FOUNDRY upgrade card in the
+// planet-detail upgrades panel. Fires the moment the player builds their FIRST
+// foundry. Renders a highlight box around the foundry card + a bubble to its
+// right (tail pointing left). Only drawn while that card is on-screen.
+let _foundryCalloutStartMs=0;       // real-time ms when fade-in begins (0=inactive)
+let _foundryCalloutFadeOutStartMs=0;// when set, drives a forced 1-second linear fade-out
+let _foundryCalloutShown=false;     // one-shot: true after the first foundry build (persisted)
+let _foundryCardScreenBounds=null;  // {x,y,w,h} of the iron_foundry card this frame, set in _drawUpgradesPanel (null when not visible)
 // Yellow "CLICK the + to purchase a NEW TRAIN" callout inside the Trains
 // popup. Auto-shows whenever the popup is open during the buy_second_train
 // mission. Persists indefinitely until the player clicks the + button (at
@@ -2823,6 +2878,7 @@ let _madScientistTimerMs=0;     // real-time ms when player PURCHASED their firs
 let _ancientSchematicsTimerMs=0; // real-time ms when the player FIRST visited an ancient planet (0=not armed). Fires the Ancient Schematics mission 5 s later. Transient.
 let _ancientSchematicsPlanetId=-1; // the ancient planet that triggered the schematics mission (the deliver-from source). Transient (mission stores it as sourcePlanetId).
 let _ancientSchematicsFired=false; // one-shot: true once the first ancient visit has armed/created the mission. Persisted.
+let _anotherDimTimerMs=0;       // real-time ms when bh_research-complete was first detected (0=not armed). Fires "Another Dimension?" 60 s later. Not persisted; re-arms on load while bh_research is complete and the mission hasn't started.
 let _csSelectedCeo=0;    // corpsetup: selected CEO index (0/1/2)
 let _csCeoOptions=[];    // corpsetup: array of 3 CEO candidate objects
 let _csNameHover=false;  // corpsetup: hovering corp name input field
@@ -2867,8 +2923,24 @@ function _recomputeMissionTargets(){
   _missionTargetStarIds.clear();
   for(const m of missions){
     if(m.status!=='active') continue;
+    // Mad Scientist: highlight the scientist's SOURCE planet until they're
+    // aboard (pickup objective done), then switch the highlight to ORIJEN (the
+    // delivery target). Recomputed whenever the pickup objective flips (see the
+    // updateMissions revertable-objective handling) so the highlight tracks the
+    // scientist's location live.
+    if(m.id==='mad_scientist'){
+      const _pick=Array.isArray(m.objectives)?m.objectives.find(o=>o.id==='pickup_scientist'):null;
+      const _hl=(_pick&&_pick.done)?m.targetPlanetId:m.sourcePlanetId;
+      if(_hl!=null) _missionTargetPlanetIds.add(_hl);
+      if(m.targetStarId!=null) _missionTargetStarIds.add(m.targetStarId);
+      continue;
+    }
     if(m.targetPlanetId!=null) _missionTargetPlanetIds.add(m.targetPlanetId);
     if(m.targetStarId!=null) _missionTargetStarIds.add(m.targetStarId);
+    // More Scientists Needed: also highlight the three scientist-pickup planets.
+    if(m.id==='more_scientists'&&Array.isArray(m.scientistSourceIds)){
+      for(const sid of m.scientistSourceIds) if(sid!=null) _missionTargetPlanetIds.add(sid);
+    }
   }
 }
 let pendingMissionIntros=[]; // {defId,readySd,targetPlanetId?,sourcePlanetId?} missions waiting to show new-mission intro popup
@@ -6103,6 +6175,11 @@ function computeSupplyRate(p){
   // Medical: jungle planets produce it; rate scales with planet size via the
   // same uniform _szSc table.
   if(bio==='jungle')   r.medical=2.0*_szSc;
+  // Fruit: jungle worlds bear fruit naturally (no orchard needed) at HALF the
+  // rate of an agri planet with an orchard (agri orchard = 7×_szSc, so 3.5×_szSc
+  // here). Dev-level scaling below multiplies both equally, so the 1/2 ratio
+  // holds at every size and development level.
+  if(bio==='jungle')   r.fruit=3.5*_szSc;
   // Livestock/Grain/Fruit: agri planets; output scales with planet size and the
   // unlock flags only. Population scaling was removed — an agri world is
   // primarily a farming surface, so its output is set by the available arable
@@ -6317,6 +6394,13 @@ function computeDemandRate(p){
   if(galaxy&&galaxy.origenId!=null&&p.id===galaxy.origenId&&typeof missions!=='undefined'&&missions.some(mx=>mx.id==='ancient_schematics'&&mx.status==='active')){
     r.cargo=Math.max(r.cargo||0, 1.0);
   }
+  // More Scientists Needed: while that mission is active, the research outpost
+  // (the delivery destination) always demands ≥1 passenger so each escorted
+  // scientist can be unloaded there (those escort cars are locked to it).
+  if(typeof missions!=='undefined'){
+    const _msnD=missions.find(mx=>mx.id==='more_scientists'&&mx.status==='active');
+    if(_msnD&&_msnD.targetPlanetId!=null&&p.id===_msnD.targetPlanetId){ r.passengers=Math.max(r.passengers||0, 1.0); }
+  }
   return r;
 }
 // Planet economic health: multiplier for revenue (0.3–1.5)
@@ -6388,6 +6472,48 @@ function _isEscortCar(t,i){
 function _anyEscortAboard(cargoType){
   return trains.some(t=>t.isPlayer&&t.carEscort&&t.cars.some((c,ci)=>t.carEscort[ci]&&t.carCargo?.[ci]===cargoType));
 }
+// ── Unified escort-mission specs ─────────────────────────────
+// Every active escort-style mission contributes one or more {srcId,dstId,cargoType}
+// specs. An escort car is the FIRST car to pick up `cargoType` at `srcId`; it
+// glows gold and may ONLY unload at `dstId`. This single source of truth lets
+// mad_scientist (1 passenger → Orijen), ancient_schematics (1 cargo → Orijen)
+// and more_scientists (3 passengers → research outpost) coexist, each car routed
+// to its own destination. Once a more_scientists source has been delivered it
+// drops out of the spec list (no re-tagging / re-locking of a fresh pickup).
+function _escortSpecs(){
+  const out=[];
+  if(typeof missions==='undefined'||!galaxy) return out;
+  for(const m of missions){
+    if(m.status!=='active') continue;
+    if(m.id==='mad_scientist'&&m.sourcePlanetId!=null&&galaxy.origenId!=null){
+      out.push({srcId:m.sourcePlanetId,dstId:galaxy.origenId,cargoType:'passengers'});
+    } else if(m.id==='ancient_schematics'&&m.sourcePlanetId!=null&&galaxy.origenId!=null){
+      out.push({srcId:m.sourcePlanetId,dstId:galaxy.origenId,cargoType:'cargo'});
+    } else if(m.id==='more_scientists'&&m.targetPlanetId!=null&&Array.isArray(m.scientistSourceIds)){
+      const _done=Array.isArray(m._scientistsDelivered)?m._scientistsDelivered:[];
+      for(const sid of m.scientistSourceIds){
+        if(_done.includes(sid)) continue;
+        out.push({srcId:sid,dstId:m.targetPlanetId,cargoType:'passengers'});
+      }
+    }
+  }
+  return out;
+}
+// The escort spec governing car i of train t (matched by its cargo source +
+// type). Returns null if the car isn't carrying a tracked escort cargo — in
+// which case it has no destination lock (so a tagged car whose mission ended
+// can unload anywhere and free itself).
+function _escortSpecForCar(t,i){
+  const src=t.carCargoSource?.[i], cargo=t.carCargo?.[i];
+  if(src==null||cargo==null) return null;
+  return _escortSpecs().find(s=>s.srcId===src&&s.cargoType===cargo)||null;
+}
+// True if some player car is already carrying a tagged escort cargo sourced from
+// `srcId`. Used so exactly ONE escort car per source is ever tagged, while still
+// self-healing if the tagged car was scrapped (a fresh pickup re-tags).
+function _escortAboardFromSource(srcId){
+  return trains.some(t=>t.isPlayer&&t.carEscort&&t.cars.some((c,ci)=>t.carEscort[ci]&&t.carCargoSource?.[ci]===srcId));
+}
 function _startCargoOps(t, p){
   // Build unload queue: full cars whose cargo type has demand ≥0.5
   const uq=[];
@@ -6404,10 +6530,11 @@ function _startCargoOps(t, p){
       // type — iron carried back through its foundry, water through its
       // ocean source, etc.)
       if(t.carCargoSource?.[i]===p.id) continue;
-      // Mission escort cars (Ancient Schematics cargo / Mad Scientist
-      // passenger) ONLY unload at Orijen — never anywhere else, even with local
-      // demand for that cargo type.
-      if(_isEscortCar(t,i)&&!(galaxy&&p.id===galaxy.origenId)) continue;
+      // Mission escort cars ONLY unload at their mission destination (Orijen for
+      // Ancient Schematics / Mad Scientist; the research outpost for More
+      // Scientists) — never anywhere else, even with local demand. If the car's
+      // mission has ended (no spec), it's free to unload anywhere.
+      { const _esp=_isEscortCar(t,i)?_escortSpecForCar(t,i):null; if(_esp&&p.id!==_esp.dstId) continue; }
       uq.push(i);
     }
   }
@@ -6465,8 +6592,9 @@ function _startUnloadPhase(t, p){
       // Same-planet unload guard (see _startCargoOps for the full comment) —
       // covers every cargo type, not just passengers.
       if(t.carCargoSource?.[i]===p.id) continue;
-      // Mission escort cars only unload at Orijen.
-      if(_isEscortCar(t,i)&&!(galaxy&&p.id===galaxy.origenId)) continue;
+      // Mission escort cars only unload at their mission destination (see
+      // _startCargoOps for the full comment).
+      { const _esp=_isEscortCar(t,i)?_escortSpecForCar(t,i):null; if(_esp&&p.id!==_esp.dstId) continue; }
       uq.push(i);
     }
   }
@@ -6566,6 +6694,24 @@ function _processCargoQueue(t, p){
         _bumpSupDem();
         if(!p.devLog) p.devLog=[];
         p.devLog.push({sd:stardate, value:DEV_CARGO_VALUES[cargo]||100, cargo});
+        // ── Mission escort delivery detection ──────────────────
+        // A tagged escort car marks its mission's delivery flag when it unloads
+        // at the mission destination. Placed OUTSIDE the passengers-only block
+        // below so 'cargo' escorts (Ancient Schematics) register too. The
+        // carCargo / carCargoSource are still set here (cleared later), so src
+        // and cargo are valid. Dropping an escort anywhere other than its
+        // destination is already prevented by the unload-restriction gate.
+        if(t.isPlayer&&_isEscortCar(t,i)&&src&&galaxy){
+          const _asMx=missions.find(mx=>mx.id==='ancient_schematics'&&mx.status==='active');
+          if(_asMx&&cargo==='cargo'&&galaxy.origenId!=null&&p.id===galaxy.origenId&&src.id===_asMx.sourcePlanetId) _asMx._schematicsDelivered=true;
+          const _msMx=missions.find(mx=>mx.id==='mad_scientist'&&mx.status==='active');
+          if(_msMx&&cargo==='passengers'&&galaxy.origenId!=null&&p.id===galaxy.origenId&&src.id===_msMx.sourcePlanetId) _msMx._scientistDelivered=true;
+          const _snMx=missions.find(mx=>mx.id==='more_scientists'&&mx.status==='active');
+          if(_snMx&&cargo==='passengers'&&_snMx.targetPlanetId!=null&&p.id===_snMx.targetPlanetId&&Array.isArray(_snMx.scientistSourceIds)&&_snMx.scientistSourceIds.includes(src.id)){
+            if(!Array.isArray(_snMx._scientistsDelivered)) _snMx._scientistsDelivered=[];
+            if(!_snMx._scientistsDelivered.includes(src.id)) _snMx._scientistsDelivered.push(src.id);
+          }
+        }
         if(cargo==='passengers'){ if(!p.passengerDeliveries) p.passengerDeliveries=[]; p.passengerDeliveries.push(stardate);
           // _totalPassengersDelivered tracks PLAYER passenger deliveries only —
           // used by the research_royal_car intro gate and as the mission's
@@ -6576,18 +6722,9 @@ function _processCargoQueue(t, p){
           // Seeking a Way Home: check if this delivery completes the mission objective
           const _shMx=missions.find(mx=>mx.id==='seeking_home'&&mx.status==='active');
           if(t.isPlayer&&_shMx&&p.id===_shMx.targetPlanetId&&src&&src.id===_shMx.sourcePlanetId) _shMx._rockyDelivered=true;
-          // A Mad Scientist: delivered when a passenger sourced from the
-          // mission's urban source planet is dropped at ORIJEN (the home
-          // planet). Dropping it anywhere else does NOT set this flag, so
-          // the revertable pickup objective rolls back (the scientist is no
-          // longer aboard and not yet home).
-          const _msMx=missions.find(mx=>mx.id==='mad_scientist'&&mx.status==='active');
-          if(t.isPlayer&&_msMx&&_isEscortCar(t,i)&&galaxy&&p.id===galaxy.origenId&&cargo==='passengers'&&src&&src.id===_msMx.sourcePlanetId) _msMx._scientistDelivered=true;
-          // Ancient Schematics: delivered when the schematics cargo ('cargo'
-          // sourced from the mission's ancient planet) is unloaded at Orijen.
-          // Clearing carCargo/carCargoSource below stops the gold glow.
-          const _asMx=missions.find(mx=>mx.id==='ancient_schematics'&&mx.status==='active');
-          if(t.isPlayer&&_asMx&&_isEscortCar(t,i)&&galaxy&&p.id===galaxy.origenId&&cargo==='cargo'&&src&&src.id===_asMx.sourcePlanetId) _asMx._schematicsDelivered=true;
+          // (Mission escort delivery detection — mad_scientist / ancient_schematics
+          // / more_scientists — lives in the unified block ABOVE this passengers-
+          // only branch, so 'cargo' escorts register too.)
           // Researching a better passenger car: count deliveries to the home planet
           const _rrMx=missions.find(mx=>mx.id==='research_royal_car'&&mx.status==='active');
           if(t.isPlayer&&_rrMx&&p.id===_rrMx.targetPlanetId){ _rrMx._origenPassengersCount=(_rrMx._origenPassengersCount||0)+1; }
@@ -6785,15 +6922,15 @@ function _processCargoQueue(t, p){
       if(t.carCargoSource) t.carCargoSource[i]=t.planetId;
       if(t.carUnitsLoaded) t.carUnitsLoaded[i]=(t.carUnitsLoaded[i]||0)+_cUL;
       // Mission escort tagging: the FIRST car to pick up a story-critical
-      // mission cargo from its source planet becomes the glowing, Orijen-locked
-      // escort car. _anyEscortAboard ensures only one is tagged even when the
-      // source supplies many units of that cargo type (and self-heals if the
-      // tagged car was scrapped).
+      // mission cargo from its source planet becomes the glowing, destination-
+      // locked escort car. Iterates the unified escort specs so mad_scientist,
+      // ancient_schematics and all three more_scientists pickups are handled
+      // uniformly; _escortAboardFromSource ensures exactly one car per SOURCE is
+      // tagged (and self-heals if the tagged car was scrapped).
       if(t.isPlayer&&t.carEscort&&!t.carEscort[i]){
-        const _msL=missions.find(mx=>mx.id==='mad_scientist'&&mx.status==='active');
-        if(_msL&&cargo==='passengers'&&t.planetId===_msL.sourcePlanetId&&!_anyEscortAboard('passengers')) t.carEscort[i]=true;
-        const _asL=missions.find(mx=>mx.id==='ancient_schematics'&&mx.status==='active');
-        if(_asL&&cargo==='cargo'&&t.planetId===_asL.sourcePlanetId&&!_anyEscortAboard('cargo')) t.carEscort[i]=true;
+        for(const _esp of _escortSpecs()){
+          if(_esp.cargoType===cargo&&_esp.srcId===t.planetId&&!_escortAboardFromSource(_esp.srcId)){ t.carEscort[i]=true; break; }
+        }
       }
     }
     t.cargoQueue.shift();
@@ -6843,16 +6980,17 @@ function _spawnCargoBeam(train, dt){
   const nx=dx/dist, ny=dy/dist;
   // Car-side endpoint: pulled inward by the full body height to the top edge.
   const carEndX=carWx - nx*_carRadialH, carEndY=carWy - ny*_carRadialH;
-  // Planet-side endpoint: a FIXED reach further inward from the car's top edge —
-  // NOT the planet surface. Anchoring to the surface made the beam span the
-  // orbit→surface gap, which scales with planet size (≈51 world at XS LOW orbit
-  // up to ≈148 at XXL), so the beam looked short on small planets and very long
-  // on big ones. Using a constant reach relative to the car makes BOTH endpoints
-  // sit at the same place relative to the target car on every size (XS–XXL).
-  // The reach (1.7× the car's radial height ≈ 43) stays below the smallest
-  // LOW-orbit gap, so the beam never dips below any planet's surface.
-  const _BEAM_REACH = _carRadialH * 1.7;
-  const planEndX=carEndX - nx*_BEAM_REACH, planEndY=carEndY - ny*_BEAM_REACH;
+  // Planet-side endpoint: the PLANET SURFACE point directly beneath the car
+  // (radially inward). This spans the real orbit→surface gap, so the beam always
+  // connects the car to the ground on EVERY planet size (XS–XXL) and orbit tier
+  // (LOW / MED / HIGH). A previous build used a fixed reach off the car to keep
+  // beam length uniform, but that left the beam detached/short on L+ planets,
+  // whose orbit→surface gap is far larger than the fixed reach (and overshoot
+  // into the body on small planets). The surface anchor self-scales: the gap is
+  // (orbitR − planet.radius), so the beam naturally lengthens on larger worlds
+  // and outer orbits and shortens on smaller worlds and LOW orbit.
+  const _surfR=Math.max(2, planet.radius||0);
+  const planEndX=planet.x + nx*_surfR, planEndY=planet.y + ny*_surfR;
   const srcX=isLoading?planEndX:carEndX, srcY=isLoading?planEndY:carEndY;
   const dstX=isLoading?carEndX:planEndX, dstY=isLoading?carEndY:planEndY;
   const beamLen=Math.hypot(dstX-srcX,dstY-srcY);
@@ -15270,6 +15408,51 @@ function drawDiamondDiscoveryPopup(){
 // stashed `_pendingNewMissionStash` when the safety-net path fires after a
 // forced close). Idempotent — bails if no def or the mission is already in
 // the active list, so calling it from both paths is safe.
+// Resolve mission text placeholders against a context object. ctx may carry
+// sourcePlanetId, targetPlanetId, scientistSourceIds (the More Scientists trio)
+// and corpName is read from the global. Used by every site that renders or
+// stores mission objective/details text so the {SCI1..3} tokens (and the
+// existing {SOURCE}/{TARGET}/{CORP}) resolve consistently.
+function _resolveMissionText(txt, ctx){
+  if(!txt) return txt;
+  ctx=ctx||{};
+  if(txt.includes('{SOURCE}')&&ctx.sourcePlanetId!=null){const _p=_gp(ctx.sourcePlanetId);if(_p)txt=txt.split('{SOURCE}').join(_p.name);}
+  if(txt.includes('{TARGET}')&&ctx.targetPlanetId!=null){const _p=_gp(ctx.targetPlanetId);if(_p)txt=txt.split('{TARGET}').join(_p.name);}
+  if(Array.isArray(ctx.scientistSourceIds)){
+    for(let _i=0;_i<ctx.scientistSourceIds.length;_i++){
+      const _tag='{SCI'+(_i+1)+'}';
+      if(txt.includes(_tag)){const _p=_gp(ctx.scientistSourceIds[_i]);if(_p)txt=txt.split(_tag).join(_p.name);}
+    }
+  }
+  if(txt.includes('{CORP}')) txt=txt.split('{CORP}').join(corpName||'your corporation');
+  return txt;
+}
+// Pick the three More-Scientists pickup planets: the closest planet of each of
+// urban / oil / storm biomes to Orijen that has NO rival/AI station. Returns
+// [urbanId, oilId, stormId], or null if any biome has no qualifying planet.
+function _selectScientistSources(){
+  if(!galaxy||galaxy.origenId==null) return null;
+  const _ori=galaxy.planets[galaxy.origenId]; if(!_ori) return null;
+  // Never reuse a planet that's already an active escort source (e.g. the
+  // mad_scientist passenger source) — a shared source+cargo would make the
+  // escort spec lookup ambiguous and could misroute / soft-lock a scientist.
+  const _taken=new Set(_escortSpecs().map(s=>s.srcId));
+  const _pick=(bio)=>{
+    let best=null,bd=Infinity;
+    for(const p of galaxy.planets){
+      if(!p||!p.type||p.type.id!==bio) continue;
+      if(p.aiHasStation) continue;          // no rival/AI station
+      if(p.id===galaxy.origenId) continue;
+      if(_taken.has(p.id)) continue;        // not already an escort source
+      const d=Math.hypot(p.x-_ori.x,p.y-_ori.y);
+      if(d<bd){ bd=d; best=p; }
+    }
+    return best;
+  };
+  const _u=_pick('urban'), _o=_pick('oil'), _s=_pick('storm');
+  if(!_u||!_o||!_s) return null;
+  return [_u.id,_o.id,_s.id];
+}
 function _acceptNewMissionFromState(state){
   if(!state) return;
   const def=state.newMissionDef;
@@ -15278,24 +15461,21 @@ function _acceptNewMissionFromState(state){
   // Pre-completion analysis carried over from the intro popup: objectives
   // it flagged as already-satisfied start in done:true state.
   const _preDone=state.preCompletedObjIds||new Set();
+  const _txtCtx={sourcePlanetId:state.sourcePlanetId,targetPlanetId:state.targetPlanetId,scientistSourceIds:state.scientistSourceIds};
   missions.push({id:def.id,name:def.name,imageType:def.imageType,imageKey:def.imageKey||null,
-    objectives:def.objectives.map(o=>{
-      let _txt=o.text;
-      if(_txt.includes('{SOURCE}')&&state.sourcePlanetId!=null){const _sp3=_gp(state.sourcePlanetId);if(_sp3)_txt=_txt.replace('{SOURCE}',_sp3.name);}
-      if(_txt.includes('{TARGET}')&&state.targetPlanetId!=null){const _tp3=_gp(state.targetPlanetId);if(_tp3)_txt=_txt.replace('{TARGET}',_tp3.name);}
-      return {id:o.id,text:_txt,done:_preDone.has(o.id)};
-    }),
-    details:(()=>{let _d=def.details||'';
-      if(_d.includes('{SOURCE}')&&state.sourcePlanetId!=null){const _sp5=_gp(state.sourcePlanetId);if(_sp5)_d=_d.replace(/\{SOURCE\}/g,_sp5.name);}
-      if(_d.includes('{TARGET}')&&state.targetPlanetId!=null){const _tp5=_gp(state.targetPlanetId);if(_tp5)_d=_d.replace(/\{TARGET\}/g,_tp5.name);}
-      if(_d.includes('{CORP}')) _d=_d.replace(/\{CORP\}/g,corpName||'your corporation');
-      return _d;})(),reward:def.reward||null,timeLimit:def.timeLimit||null,
+    objectives:def.objectives.map(o=>({id:o.id,text:_resolveMissionText(o.text,_txtCtx),done:_preDone.has(o.id)})),
+    details:_resolveMissionText(def.details||'',_txtCtx),reward:def.reward||null,timeLimit:def.timeLimit||null,
     deadline:def.timeLimit?stardate+def.timeLimit:null,
     status:'active',acceptedSd:stardate,completedSd:null,
     // build_foundry / stellar_cartography: empty snapshot so any previously visited matching planet immediately satisfies the visit objective
     visitedSnapshot:(def.id==='build_foundry'||def.id==='stellar_cartography')?new Set():new Set(visitedPlanetIds),ironUnlockedSnapshot:_ironCarUnlocked,
     sourcePlanetId:state.sourcePlanetId??null,
     targetPlanetId:state.targetPlanetId??null,
+    // More Scientists Needed carries its 3 pickup planet ids + delivered set;
+    // Another Dimension stamps its hidden research-countdown start stardate.
+    scientistSourceIds:Array.isArray(state.scientistSourceIds)?state.scientistSourceIds.slice():null,
+    _scientistsDelivered:def.id==='more_scientists'?[]:undefined,
+    _researchStartSd:def.id==='another_dimension'?stardate:undefined,
     hazmatIncineratedSnapshot:_totalHazmatIncinerated});
   _recomputeMissionTargets();
   _chatMsg('MISSION STARTED: '+def.name.toUpperCase(),'rgba(255,220,80,1)');
@@ -15313,6 +15493,23 @@ function _acceptNewMissionFromState(state){
       _asOri.demandRate=computeDemandRate(_asOri);   // picks up the active-mission cargo floor
       if(!_asOri.demand) _asOri.demand={};
       _asOri.demand.cargo=Math.max(_asOri.demand.cargo||0,1.0); // immediate, so delivery works right away
+    }
+  }
+  // more_scientists: force a 1+ passenger supply on each of the three scientist
+  // source planets (so a scientist is always available to pick up once the
+  // player builds a station there), and prime the research outpost's passenger
+  // demand so the escorted scientists can be unloaded immediately (the demand
+  // floor in computeDemandRate keeps it ≥1 for the mission's duration).
+  if(def.id==='more_scientists' && Array.isArray(state.scientistSourceIds)){
+    for(const _sid of state.scientistSourceIds){
+      const _sp=_gp(_sid);
+      if(_sp){ if(!_sp.supply) _sp.supply={}; _sp.supply.passengers=Math.max(_sp.supply.passengers||0,1.0); }
+    }
+    const _msnDst=state.targetPlanetId!=null?_gp(state.targetPlanetId):null;
+    if(_msnDst){
+      _msnDst.demandRate=computeDemandRate(_msnDst);   // picks up the active-mission passenger floor
+      if(!_msnDst.demand) _msnDst.demand={};
+      _msnDst.demand.passengers=Math.max(_msnDst.demand.passengers||0,1.0);
     }
   }
   // M-tip: gated on 3 simultaneously-active missions for the first time.
@@ -15388,11 +15585,8 @@ function drawNewMissionPopup(){
   if(def.details){
     const _dtLH=15;
     ctx.textAlign='left';
-    // Resolve {SOURCE}/{TARGET} placeholders before word-wrap.
-    let _dtTxt=def.details;
-    if(_dtTxt.includes('{SOURCE}')&&popupState.sourcePlanetId!=null){const _sp4=_gp(popupState.sourcePlanetId);if(_sp4)_dtTxt=_dtTxt.replace(/\{SOURCE\}/g,_sp4.name);}
-    if(_dtTxt.includes('{TARGET}')&&popupState.targetPlanetId!=null){const _tp4=_gp(popupState.targetPlanetId);if(_tp4)_dtTxt=_dtTxt.replace(/\{TARGET\}/g,_tp4.name);}
-    if(_dtTxt.includes('{CORP}')) _dtTxt=_dtTxt.replace(/\{CORP\}/g,corpName||'your corporation');
+    // Resolve {SOURCE}/{TARGET}/{CORP}/{SCI1..3} placeholders before word-wrap.
+    let _dtTxt=_resolveMissionText(def.details,{sourcePlanetId:popupState.sourcePlanetId,targetPlanetId:popupState.targetPlanetId,scientistSourceIds:popupState.scientistSourceIds});
     // Tokenise + word-wrap so ORIJEN / LAVA PLANET / DESERT PLANET get
     // uppercased + biome-coloured (same system the objectives use). Italic base
     // font; coloured planet tokens render bold-italic in their biome colour.
@@ -15423,10 +15617,8 @@ function drawNewMissionPopup(){
     const _isHov=popupState.hoveredObjIdx===_oi;
     // Pre-completed objectives render in green; others use normal blue-white
     const _baseCol=_isPreComp?'rgba(100,240,150,0.95)':(_isHov?'rgba(255,255,255,1.0)':'rgba(175,205,240,0.80)');
-    let _ot=obj.text;
-    // Resolve dynamic placeholders with actual planet names
-    if(_ot.includes('{SOURCE}')&&popupState.sourcePlanetId!=null){const _sp2=_gp(popupState.sourcePlanetId);if(_sp2)_ot=_ot.replace('{SOURCE}',_sp2.name);}
-    if(_ot.includes('{TARGET}')&&popupState.targetPlanetId!=null){const _tp2=_gp(popupState.targetPlanetId);if(_tp2)_ot=_ot.replace('{TARGET}',_tp2.name);}
+    // Resolve dynamic placeholders ({SOURCE}/{TARGET}/{SCI1..3}) with planet names
+    let _ot=_resolveMissionText(obj.text,{sourcePlanetId:popupState.sourcePlanetId,targetPlanetId:popupState.targetPlanetId,scientistSourceIds:popupState.scientistSourceIds});
     // Tokenize for colored [Name] segments, then word-wrap by tokens.
     const _objFontStr='10px "Exo 2",sans-serif';
     const _objTxtW=cMaxW-_cbW;
@@ -17260,6 +17452,83 @@ function _drawBuyTrainHintCallout(){
   ctx.restore();
 }
 
+// Yellow educational callout for the IRON FOUNDRY upgrade. Armed the moment the
+// player builds their first foundry (see the upgrade-purchase handler). Draws a
+// highlight box around the foundry card in the planet-detail upgrades panel and
+// a wrapped bubble to its RIGHT with the tail pointing LEFT at the card. Only
+// renders while that card is on-screen (planet popup open, upgrades tab, card
+// not scrolled away); otherwise it just keeps counting down its lifetime. Must
+// be called AFTER drawPlanetDetailPopup so it sits on top of the popup, and
+// _foundryCardScreenBounds must be reset to null each frame before that popup.
+function _drawFoundryCallout(){
+  if(!_foundryCalloutStartMs && !_foundryCalloutFadeOutStartMs) return;
+  const _now=Date.now();
+  // Resolve alpha: forced fade-out wins over the natural lifecycle.
+  let _a;
+  if(_foundryCalloutFadeOutStartMs>0){
+    _a=1-(_now-_foundryCalloutFadeOutStartMs)/1000;
+    if(_a<=0){ _foundryCalloutStartMs=0; _foundryCalloutFadeOutStartMs=0; return; }
+  } else {
+    const _elpMs=_now-_foundryCalloutStartMs;
+    const TOTAL=16000, FADE_IN=1000, FADE_OUT=2000;
+    if(_elpMs>=TOTAL){ _foundryCalloutStartMs=0; return; }
+    if(_elpMs<FADE_IN) _a=_elpMs/FADE_IN;
+    else if(_elpMs>TOTAL-FADE_OUT) _a=(TOTAL-_elpMs)/FADE_OUT;
+    else _a=1;
+  }
+  if(_a<=0) return;
+  // Only render while the foundry card is actually visible on-screen.
+  const _cb=_foundryCardScreenBounds;
+  if(!_cb || activePopup!=='planet') return;
+  // Wrapped bubble text — kept literal-bracketed like the tutorial bubbles.
+  const _txt='This upgrade allows this planet to combine delivered [Molten Ore] + [Water] into units of [Iron], a valuable resource';
+  ctx.save();
+  ctx.font='10px "Exo 2",sans-serif';
+  const _maxTextW=170;
+  const _words=_txt.split(' ');
+  const _lines=[]; let _cur='';
+  for(const _w of _words){
+    const _t=_cur?_cur+' '+_w:_w;
+    if(ctx.measureText(_t).width<=_maxTextW) _cur=_t;
+    else { if(_cur) _lines.push(_cur); _cur=_w; }
+  }
+  if(_cur) _lines.push(_cur);
+  let _tw=0; for(const _ln of _lines){ const _w=ctx.measureText(_ln).width; if(_w>_tw) _tw=_w; }
+  const _pad=12, _lh=15, _bR=7, _tailW=11;
+  const _bW=_tw+_pad*2;
+  const _bH=Math.max(28,_lines.length*_lh+10);
+  // Box around the whole foundry card.
+  ctx.globalAlpha=_a;
+  ctx.shadowColor='rgba(255,210,40,0.75)'; ctx.shadowBlur=14;
+  ctx.strokeStyle='rgba(255,220,60,0.95)'; ctx.lineWidth=2.5;
+  ctx.beginPath(); ctx.roundRect(_cb.x-4,_cb.y-4,_cb.w+8,_cb.h+8,5); ctx.stroke();
+  ctx.shadowBlur=0;
+  // Bubble sits to the RIGHT of the card, vertically centred on it, tail left.
+  const _cardRight=_cb.x+_cb.w;
+  const _tipX=_cardRight+2, _tipY=_cb.y+_cb.h/2;
+  let _bx=_tipX+_tailW;
+  let _by=_tipY-_bH/2;
+  // Keep the bubble inside the canvas vertically.
+  if(_by<TOP_H+6) _by=TOP_H+6;
+  if(_by+_bH>GH-6) _by=GH-6-_bH;
+  if(_bx+_bW>W-6) _bx=W-6-_bW;
+  // Wipe HD-overlay text under the bubble body so popup text can't bleed through.
+  _clearTextOverlayRect(_bx-2,_by-2,_bW+4,_bH+4);
+  ctx.globalAlpha=_a;
+  ctx.shadowColor='rgba(180,140,0,0.55)'; ctx.shadowBlur=8;
+  ctx.fillStyle='rgba(245,200,40,0.97)';
+  ctx.beginPath(); ctx.roundRect(_bx,_by,_bW,_bH,_bR); ctx.fill();
+  // Left-pointing tail from the bubble's left edge to the card's right edge.
+  const _tb=Math.max(_by+_bR+8,Math.min(_tipY,_by+_bH-_bR-8));
+  ctx.beginPath(); ctx.moveTo(_bx,_tb-7); ctx.lineTo(_bx,_tb+7); ctx.lineTo(_tipX,_tipY); ctx.closePath(); ctx.fill();
+  ctx.shadowBlur=0;
+  ctx.fillStyle='#1a1308';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  for(let _i=0;_i<_lines.length;_i++) ctx.fillText(_lines[_i],_bx+_bW/2,_by+_pad/2+_lh/2+_i*_lh);
+  ctx.textBaseline='alphabetic';
+  ctx.restore();
+}
+
 // True if a mission is already active, queued in pendingMissionIntros, OR currently being shown in the
 // new-mission popup (which was spliced from pendingMissionIntros before the player could accept it).
 // Use this everywhere instead of the two-guard pattern to prevent per-frame re-queueing.
@@ -19011,6 +19280,17 @@ function updateMissions(dtSd){
       // empty pool (no eligible urban planet) → leave armed; re-checks next tick
     }
   }
+  // another_dimension: fires 60 real-time seconds after Black Hole Research
+  // completes. The timer arms when bh_research is first seen completed (so it
+  // also re-arms on load) and fires once 60 s have elapsed. Not persisted.
+  if(!_missionPending('another_dimension')&&!missions.some(mx=>mx.id==='another_dimension')&&
+     missions.some(mx=>mx.id==='bh_research'&&mx.status==='completed')){
+    if(_anotherDimTimerMs===0) _anotherDimTimerMs=Date.now();
+    else if(Date.now()-_anotherDimTimerMs>=60000){
+      pendingMissionIntros.push({defId:'another_dimension',readySd:stardate});
+      _anotherDimTimerMs=0;
+    }
+  }
   } // end of throttled intro-gate block — active-mission sweep below runs every frame
   if(!missions.length) return;
   for(const m of missions){
@@ -19035,8 +19315,13 @@ function updateMissions(dtSd){
         if(_nowDone&&!obj.done){
           obj.done=true;
           if(m.objectives.length>1) _chatMsg(m.name+': objective done — '+((obj.text||'').replace(/\[([^\]]+)\]/g,'$1')),'rgba(160,230,200,1)');
+          // Mad Scientist: the highlight follows the scientist — refresh the
+          // mission-target set so it switches from the source planet to Orijen
+          // the moment the scientist is loaded (and back if they're dropped).
+          if(m.id==='mad_scientist'&&obj.id==='pickup_scientist') _recomputeMissionTargets();
         } else if(!_nowDone&&obj.done){
           obj.done=false; // rolled back — transient condition no longer holds
+          if(m.id==='mad_scientist'&&obj.id==='pickup_scientist') _recomputeMissionTargets();
         }
       } else if(!obj.done&&def.checkObj(obj.id,m)){
         obj.done=true;
@@ -19135,6 +19420,21 @@ function updateMissions(dtSd){
         _stationCostDiscount=0.10;
         _chatMsg('STATION BUILD COST PERMANENTLY REDUCED BY −10%','rgba(100,220,160,1)');
       }
+      // Another Dimension? complete → introduce "More Scientists Needed!".
+      // Select the three scientist-pickup planets (closest no-AI-station urban /
+      // oil / storm to Orijen) and the research outpost destination (the Black
+      // Hole research target the player delivered chemicals to), then queue the
+      // intro with all of it baked onto the entry so save/restore keeps it.
+      if(m.id==='another_dimension'&&!_missionPending('more_scientists')&&!missions.some(mx=>mx.id==='more_scientists')){
+        const _sci=_selectScientistSources();
+        const _bhM2=missions.find(mx=>mx.id==='bh_research');
+        let _outpost=_bhM2&&_bhM2.targetPlanetId!=null?_bhM2.targetPlanetId
+                    :(galaxy&&galaxy.bhResearchPlanetIds&&galaxy.bhResearchPlanetIds.length?galaxy.bhResearchPlanetIds[0]
+                    :(galaxy&&galaxy.bhResearchPlanetId!=null?galaxy.bhResearchPlanetId:null));
+        if(_sci&&_outpost!=null){
+          pendingMissionIntros.push({defId:'more_scientists',readySd:stardate,targetPlanetId:_outpost,scientistSourceIds:_sci});
+        }
+      }
       // Unlock any missions whose prerequisite was this mission
       for(const _pd of MISSION_DEFS){
         if(_pd.prerequisite===m.id&&!_missionPending(_pd.id)){
@@ -19221,6 +19521,13 @@ function drawMissionsPopup(){
       return {cur:Math.min(_pn,5), max:5, label:'Profitable trains'};
     }
     if(objId==='deliver_5_chemical')   return {cur:Math.min(m._chemicalDeliveries||0,5), max:5, label:'Chemical delivered'};
+    if(objId==='wait_research'){
+      // Hidden 2.0-SD research countdown shown only as a % bar (the exact
+      // duration is deliberately not surfaced to the player).
+      const _sd0=m._researchStartSd!=null?m._researchStartSd:stardate;
+      const _frac=Math.max(0,Math.min(1,(stardate-_sd0)/2.0));
+      return {cur:Math.floor(_frac*100), max:100, label:'Research progress', pct:true};
+    }
     if(objId==='deliver_10_steel_home')   return {cur:Math.min(m._homeSteelDelivered  ||0,20), max:20, label:'Steel delivered'};
     if(objId==='deliver_10_battery_home') return {cur:Math.min(m._homeBatteryDelivered||0,20), max:20, label:'Batteries delivered'};
     if(objId==='deliver_10_oil_home')     return {cur:Math.min(m._homeOilDelivered    ||0,20), max:20, label:'Oil delivered'};
@@ -19403,7 +19710,7 @@ function drawMissionsPopup(){
         // Label: "Planets seeded: 2 / 10"
         ctx.font='9px "Exo 2",sans-serif'; ctx.textAlign='left';
         ctx.fillStyle=isDone?'rgba(72,76,88,0.55)':obj.done?'rgba(100,210,125,0.60)':'rgba(140,170,210,0.65)';
-        ctx.fillText(_prog.label+':  '+_prog.cur+' / '+_prog.max,_pBarX,_pLabelY);
+        ctx.fillText(_prog.pct?(_prog.label+':  '+_prog.cur+'%'):(_prog.label+':  '+_prog.cur+' / '+_prog.max),_pBarX,_pLabelY);
         // Bar background — neutral dark grey for completed, green-tinted dark for active.
         const _pBarY=_pLabelY+4;
         ctx.fillStyle=isDone?'rgba(20,22,28,0.55)':'rgba(18,30,22,0.60)';
@@ -21403,6 +21710,13 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
     // out PURCHASE button.
     const _noStn=!u.isStation&&!p.hasStation&&!p.aiHasStation;
     const itemY=_cumItemY; _cumItemY+=itemH;
+    // Capture the IRON FOUNDRY card's on-screen rect for the educational
+    // foundry callout (only when its body is at least partly inside the clipped
+    // list viewport — otherwise the callout treats it as off-screen and hides).
+    if(u.id==='iron_foundry'){
+      const _fcY=itemY+3, _fcH=itemH-6;
+      _foundryCardScreenBounds=(_fcY+_fcH>listY && _fcY<listY+listH)?{x:upX+6,y:_fcY,w:upW-12,h:_fcH}:null;
+    }
     if(_noStn||(_aiUpgradeRow&&!_aiUpgradeBuilt)){
       ctx.fillStyle='rgba(8,8,20,0.50)';
       ctx.strokeStyle='rgba(25,30,50,0.22)';
@@ -26946,7 +27260,13 @@ function drawGalaxy(ts,dt){
   drawCheatsPopup();
   drawSaveManagerPopup();
   drawTrainDetailPopup();
+  // Reset the foundry-card bounds each frame BEFORE the planet popup draws;
+  // _drawUpgradesPanel repopulates it only when the iron-foundry card is on
+  // screen. _drawFoundryCallout (after the popup) reads it so the callout sits
+  // on top of the popup and never uses a stale rect from a prior frame.
+  _foundryCardScreenBounds=null;
   drawPlanetDetailPopup();
+  _drawFoundryCallout();
   drawStarDetailPopup();
   drawTrainsPopup();
   // drawRoutesPopup moved AFTER drawTopBar (see below) so the popup paints
@@ -28771,7 +29091,17 @@ canvas.addEventListener('mouseup',e=>{
         for(const _mob of popupState.missionObjBounds){
           if(cp.x>=_mob.x&&cp.x<=_mob.x+_mob.w&&cp.y>=_mob.y&&cp.y<=_mob.y+_mob.h){
             const _cm=missions.find(mx=>mx.id===_mob.missionId);
-            const _focusPid=_cm?(_cm.targetPlanetId!=null?_cm.targetPlanetId:_cm.sourcePlanetId):null;
+            // Mad Scientist: objective 1 (pick up) frames the scientist's source
+            // planet; objective 2 (deliver) frames Orijen (the target). All other
+            // missions prefer targetPlanetId, falling back to sourcePlanetId.
+            let _focusPid=null;
+            if(_cm){
+              if(_cm.id==='mad_scientist'){
+                _focusPid=_mob.objIdx===0?(_cm.sourcePlanetId??_cm.targetPlanetId):(_cm.targetPlanetId??_cm.sourcePlanetId);
+              } else {
+                _focusPid=_cm.targetPlanetId!=null?_cm.targetPlanetId:_cm.sourcePlanetId;
+              }
+            }
             if(_focusPid!=null){
               const _ctp=_gp(_focusPid);
               if(_ctp){
@@ -28802,6 +29132,19 @@ canvas.addEventListener('mouseup',e=>{
               tracking=true; trackingOffset={x:cam.x-_rtp2.x,y:cam.y-_rtp2.y};
             }
             return;
+          }
+        }
+        // Mad Scientist intro: clicking objective 1 frames the scientist's
+        // source planet, objective 2 frames Orijen (destination). Popup stays
+        // open (it's modal — only Accept closes it).
+        if(popupState.newMissionDef&&popupState.newMissionDef.id==='mad_scientist'&&popupState.objBounds){
+          for(let _oi=0;_oi<popupState.objBounds.length;_oi++){
+            const _ob=popupState.objBounds[_oi];
+            if(_ob&&cp.x>=_ob.x&&cp.x<=_ob.x+_ob.w&&cp.y>=_ob.y&&cp.y<=_ob.y+_ob.h){
+              const _fp=_oi===0?(popupState.sourcePlanetId??popupState.targetPlanetId):(popupState.targetPlanetId??popupState.sourcePlanetId);
+              if(_fp!=null){ const _fpp=_gp(_fp); if(_fpp){ sel={type:'planet',data:_fpp}; cam.scale=MIN_SC; cam.x=_fpp.x+(PANEL_W)/(2*cam.scale); cam.y=_fpp.y; clampCamera(); tracking=true; trackingOffset={x:cam.x-_fpp.x,y:cam.y-_fpp.y}; } }
+              return;
+            }
           }
         }
         if(_newMissionAcceptBounds){const b=_newMissionAcceptBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
@@ -29386,6 +29729,9 @@ canvas.addEventListener('mouseup',e=>{
                 if(!p.upgradeData) p.upgradeData={};
                 p.upgradeData.iron_foundry={ore:0,water:0,progress:0};
                 p.foundryAngle=(p.stationAngle||0)+Math.PI+0.4;
+                // First foundry ever built → arm the yellow foundry explainer
+                // callout (one-shot). It points at this just-built foundry card.
+                if(!_foundryCalloutShown){ _foundryCalloutStartMs=Date.now(); _foundryCalloutFadeOutStartMs=0; _foundryCalloutShown=true; }
               }
               if(u.id==='blast_furnace'){
                 if(!p.upgradeData) p.upgradeData={};
@@ -30489,7 +30835,7 @@ function _buildSaveObject(){
     _cheatUnlockAllCars,
     _classJEngineUnlocked, _classREngineUnlocked, _N700EngineUnlocked,
     _steelProdLog,
-    _sensorUpgradeActive, _stationCostDiscount, _sandstormCheckSd, _playerDeliveryCount,
+    _sensorUpgradeActive, _stationCostDiscount, _sandstormCheckSd, _playerDeliveryCount, _foundryCalloutShown,
     _totalPassengersDelivered, _totalHazmatIncinerated, _anyCargoProduced,
     trainyard, financeLedger:_trimmedFinance, _ledgerSummary:_builtLedgerSummary, purchaseLedger, corpValueHistory, corpStatsHistory, aiCorpStatsHistory, _corp, _ceoHireCandidates,
     creditSnapshots, lastCreditSnapshotSd,
@@ -30636,6 +30982,10 @@ function _restoreFromSave(save){
   // Suppress the [T] trains yellow hint on loaded games — the player has
   // played before, no need to nudge them toward the Trains window.
   _buyTrainHintStartMs=0; _buyTrainHintFadeOutStartMs=0; _buyTrainHintSuppressed=true;
+  // Foundry callout: persisted one-shot (so it CAN still fire after loading an
+  // early save where the player hasn't built a foundry yet). Restore the shown
+  // flag; never resume an in-flight fade.
+  _foundryCalloutShown=!!save._foundryCalloutShown; _foundryCalloutStartMs=0; _foundryCalloutFadeOutStartMs=0; _foundryCardScreenBounds=null;
   // Loaded games have played before — treat speed-tip as permanently suppressed.
   _speedTipSuppressed=true; _speedTipStartMs=0; _speedTipNextRealMs=0; _speedTipFadeOutStartMs=0;
   _missionTipFired=true; _missionTipStartMs=0; _missionTipPending=false;   // suppress M-tip on loaded games
@@ -30680,7 +31030,7 @@ function _restoreFromSave(save){
   _paperLayout=save._paperLayout||0;
   _newsEventLog=save._newsEventLog||[]; _newsSnapshot=save._newsSnapshot||null;
   _newspaperArchive=save._newspaperArchive||[]; _newspaperViewIdx=null;
-  _sandstormCheckSd=save._sandstormCheckSd||0; _bhResearchTimerMs=0; _madScientistTimerMs=0; // real-time timers: re-arm fresh on load
+  _sandstormCheckSd=save._sandstormCheckSd||0; _bhResearchTimerMs=0; _madScientistTimerMs=0; _anotherDimTimerMs=0; // real-time timers: re-arm fresh on load
   _totalPassengersDelivered=save._totalPassengersDelivered||0; _totalHazmatIncinerated=save._totalHazmatIncinerated||0;
   _anyCargoProduced=!!save._anyCargoProduced;
   trainyard=save.trainyard||{}; financeLedger=save.financeLedger||[]; _ledgerSummary=save._ledgerSummary||{totalRevenue:0,totalCost:0,totalInterest:0}; purchaseLedger=save.purchaseLedger||[]; corpValueHistory=save.corpValueHistory||{};
@@ -30719,16 +31069,8 @@ function _restoreFromSave(save){
       rest.objectives=rest.objectives.map(o=>{
         const _defObj=_def.objectives.find(x=>x.id===o.id);
         if(!_defObj) return o;
-        let _newText=_defObj.text;
-        // Re-resolve {SOURCE}/{TARGET} placeholders using saved planet ids.
-        if(_newText.includes('{SOURCE}') && rest.sourcePlanetId!=null){
-          const _sp=galaxy&&galaxy.planets[rest.sourcePlanetId];
-          if(_sp) _newText=_newText.replace('{SOURCE}',_sp.name);
-        }
-        if(_newText.includes('{TARGET}') && rest.targetPlanetId!=null){
-          const _tp=galaxy&&galaxy.planets[rest.targetPlanetId];
-          if(_tp) _newText=_newText.replace('{TARGET}',_tp.name);
-        }
+        // Re-resolve {SOURCE}/{TARGET}/{SCI1..3} placeholders using saved planet ids.
+        const _newText=_resolveMissionText(_defObj.text,{sourcePlanetId:rest.sourcePlanetId,targetPlanetId:rest.targetPlanetId,scientistSourceIds:rest.scientistSourceIds});
         return {...o, text:_newText};
       });
     }
@@ -31254,7 +31596,7 @@ function startGame(){
   // runs at title PLAY, BEFORE the player picks their corp name in corpsetup,
   // so corpName is still the default placeholder at this point. It fires at
   // the fadein → galaxy transition instead (same as the game_start GA event).
-  activePopup=null; popupState={}; gameSpeedIdx=SPEED_DEFAULT_IDX; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _missionTipPending=false; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _foundryCompletedMs=0; _produceIronTimerMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _ancientSchematicsTimerMs=0; _ancientSchematicsPlanetId=-1; _ancientSchematicsFired=false; _hasZoomed=false; _buyTrainTipStartMs=0; _buyTrainTipShown=false; _prevActivePopupForSfx=null; _missionTipFired=false; _visitPlanetCompletedMs=0; _tutorialDoneMs=0; _crTutorialDoneMs=0; _firstNonLowOrbitFired=false; _orbitHintStartMs=0; _orbitHintPlanetId=-1; _crTrainPreselected=false;
+  activePopup=null; popupState={}; gameSpeedIdx=SPEED_DEFAULT_IDX; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _missionTipPending=false; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _foundryCompletedMs=0; _produceIronTimerMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _ancientSchematicsTimerMs=0; _ancientSchematicsPlanetId=-1; _ancientSchematicsFired=false; _hasZoomed=false; _buyTrainTipStartMs=0; _buyTrainTipShown=false; _prevActivePopupForSfx=null; _missionTipFired=false; _visitPlanetCompletedMs=0; _tutorialDoneMs=0; _crTutorialDoneMs=0; _firstNonLowOrbitFired=false; _orbitHintStartMs=0; _orbitHintPlanetId=-1; _crTrainPreselected=false; _foundryCalloutShown=false; _foundryCalloutStartMs=0; _foundryCalloutFadeOutStartMs=0; _foundryCardScreenBounds=null;
   _newspaper=null; _newspaperLastSd=829; _newspaperPrevSpeed=0; _newspaperNextHover=false; _newspaperNextBounds=null; _newspaperPrevHover=false; _newspaperPrevBounds=null; _newspaperArchive=[]; _newspaperViewIdx=null; _paperMajorUsed=[]; _paperMinorUsed=[]; _paperLayout=0; _paperIssueNum=0; _paperIdx=randInt(0,_PAPER_NAMES.length-1); _newsEventLog=[]; _newsSnapshot=null;
   _speedLeftHover=false; _speedRightHover=false; _panelTabHover=null; _routeHereBtnHover=false; _assignBtnHover=false; _cancelRouteBtnHover=false; _planetStarNameHover=false; _starPanelPlanetHover=-1; _trainAddHover=false; _trainRowHover=-1; _pokedexSortHover=false; _pokedexRowHover=-1; _starRegistrySortHover=false; _starRegistryRowHover=-1; _goldOkHover=false; _diamondOkHover=false; _carUnlockOkHover=false; _quitYesHover=false; _quitNoHover=false; _saveGameBtnHover=false; _startBtnHover=false; _loadBtnHover=false; _htpBtnHover=false; _htpDotHover=-1; _htpSkipHover=false; pokedexRowBounds=[]; starRegistryRowBounds=[]; loadBtnBounds=null; saveGameBtnBounds=null;
   fogPoints=[]; fogGridSet=new Set(); fogCanvas=null;
@@ -31280,11 +31622,11 @@ function startGame(){
   _ironCarUnlocked=false; _steelCarUnlocked=false; _glassCarUnlocked=false; _machineryCarUnlocked=false; _hazmatCarUnlocked=false; _royalCarUnlocked=false; _flowersCarUnlocked=false; _medicalCarUnlocked=false; _grainCarUnlocked=false; _livestockCarUnlocked=false; _fruitCarUnlocked=false; _cargoCarUnlocked=false; _cheatUnlockAllCars=false; _totalPassengersDelivered=0; _totalHazmatIncinerated=0; _anyCargoProduced=false;
   _classJEngineUnlocked=false; _classREngineUnlocked=false; _N700EngineUnlocked=false;
   _steelProdLog=[]; _steelMissionTimerMs=0;
-  _sensorUpgradeActive=false; _stationCostDiscount=0; _galaxyCensusTimerMs=0; _sandstormCheckSd=0; _bhResearchTimerMs=0; _madScientistTimerMs=0;
+  _sensorUpgradeActive=false; _stationCostDiscount=0; _galaxyCensusTimerMs=0; _sandstormCheckSd=0; _bhResearchTimerMs=0; _madScientistTimerMs=0; _anotherDimTimerMs=0;
   _playerDeliveryCount=0; // new game starts with zero successful deliveries logged
   missions=[]; _recomputeMissionTargets();
   _gameStartSd=stardate;
-  pendingMissionIntros=MISSION_DEFS.filter(def=>!def.prerequisite&&def.id!=='visit_planet'&&def.id!=='build_foundry'&&def.id!=='dispose_hazmat'&&def.id!=='lost_colony'&&def.id!=='seeking_home'&&def.id!=='create_route'&&def.id!=='research_royal_car'&&def.id!=='colony_train'&&def.id!=='spread_the_seed'&&def.id!=='famine'&&def.id!=='outbreak'&&def.id!=='stellar_cartography'&&def.id!=='galaxy_census'&&def.id!=='sandstorm_relief'&&def.id!=='bh_research'&&def.id!=='design_better_train'&&def.id!=='buy_second_train'&&def.id!=='galactic_distance'&&def.id!=='corporate_expansion'&&def.id!=='ancient_schematics').map(def=>({defId:def.id,readySd:_gameStartSd+(def.startsAfter||0)}));
+  pendingMissionIntros=MISSION_DEFS.filter(def=>!def.prerequisite&&def.id!=='visit_planet'&&def.id!=='build_foundry'&&def.id!=='dispose_hazmat'&&def.id!=='lost_colony'&&def.id!=='seeking_home'&&def.id!=='create_route'&&def.id!=='research_royal_car'&&def.id!=='colony_train'&&def.id!=='spread_the_seed'&&def.id!=='famine'&&def.id!=='outbreak'&&def.id!=='stellar_cartography'&&def.id!=='galaxy_census'&&def.id!=='sandstorm_relief'&&def.id!=='bh_research'&&def.id!=='design_better_train'&&def.id!=='buy_second_train'&&def.id!=='galactic_distance'&&def.id!=='corporate_expansion'&&def.id!=='ancient_schematics'&&def.id!=='another_dimension'&&def.id!=='more_scientists').map(def=>({defId:def.id,readySd:_gameStartSd+(def.startsAfter||0)}));
   financeLedger=[]; _ledgerSummary={totalRevenue:0,totalCost:0,totalInterest:0}; purchaseLedger=[]; corpValueHistory={}; corpStatsHistory={}; aiCorpStatsHistory={}; _financeScrollY=0; _financeBreakdown='stardate'; _financeDropdownOpen=false; _versusMetric='value'; _versusDropdownOpen=false;
   loans=[]; _loanCounter=0; _financeTab='financials'; _financeLoanSelected='small'; _financeLoanHover=null; _financeTakeLoanHover=false;
   // Fresh pool of issuer names per game; assign one to each loan tier
@@ -32411,6 +32753,8 @@ function loop(ts){
             hazmatIncineratedSnapshot:_totalHazmatIncinerated,
             sourcePlanetId:_nmiE.sourcePlanetId??null,
             targetPlanetId:_nmiE.targetPlanetId??null,
+            scientistSourceIds:Array.isArray(_nmiE.scientistSourceIds)?_nmiE.scientistSourceIds:null,
+            _scientistsDelivered:[],_researchStartSd:undefined,
             _famineDeliveries:0,_medicalDeliveries:0,_sandDeliveries:0,_longHaulDone:false,_chemicalDeliveries:0,
             _homeSteelDelivered:0,_homeBatteryDelivered:0,_homeOilDelivered:0,
             _rockyDelivered:false,_colonistsLoaded:false,
@@ -32419,28 +32763,22 @@ function loop(ts){
           };
           const _preCompObjIds=new Set(_nmDef.objectives.filter(o=>_nmDef.checkObj(o.id,_tmpM)).map(o=>o.id));
           const _allPreDone=_preCompObjIds.size===_nmDef.objectives.length;
-          // Helper: resolve {SOURCE}/{TARGET} placeholders in objective text
-          const _resolveObjTxt=o=>{
-            let _t=o.text;
-            if(_t.includes('{SOURCE}')&&_nmiE.sourcePlanetId!=null){const _sp=_gp(_nmiE.sourcePlanetId);if(_sp)_t=_t.replace('{SOURCE}',_sp.name);}
-            if(_t.includes('{TARGET}')&&_nmiE.targetPlanetId!=null){const _tp=_gp(_nmiE.targetPlanetId);if(_tp)_t=_t.replace('{TARGET}',_tp.name);}
-            return _t;
-          };
+          // Helper: resolve {SOURCE}/{TARGET}/{SCI1..3} placeholders in objective text
+          const _resolveObjTxt=o=>_resolveMissionText(o.text,{sourcePlanetId:_nmiE.sourcePlanetId,targetPlanetId:_nmiE.targetPlanetId,scientistSourceIds:_nmiE.scientistSourceIds});
           if(_allPreDone){
             // Every objective already satisfied — silently accept and skip the popup entirely
             if(!missions.some(mx=>mx.id===_nmDef.id)){
               missions.push({id:_nmDef.id,name:_nmDef.name,imageType:_nmDef.imageType,imageKey:_nmDef.imageKey||null,
                 objectives:_nmDef.objectives.map(o=>({id:o.id,text:_resolveObjTxt(o),done:true})),
-                details:(()=>{let _d=_nmDef.details||'';
-                  if(_d.includes('{SOURCE}')&&_nmiE.sourcePlanetId!=null){const _sp6=_gp(_nmiE.sourcePlanetId);if(_sp6)_d=_d.replace(/\{SOURCE\}/g,_sp6.name);}
-                  if(_d.includes('{TARGET}')&&_nmiE.targetPlanetId!=null){const _tp6=_gp(_nmiE.targetPlanetId);if(_tp6)_d=_d.replace(/\{TARGET\}/g,_tp6.name);}
-                  if(_d.includes('{CORP}')) _d=_d.replace(/\{CORP\}/g,corpName||'your corporation');
-                  return _d;})(),reward:_nmDef.reward||null,timeLimit:_nmDef.timeLimit||null,
+                details:_resolveMissionText(_nmDef.details||'',{sourcePlanetId:_nmiE.sourcePlanetId,targetPlanetId:_nmiE.targetPlanetId,scientistSourceIds:_nmiE.scientistSourceIds}),reward:_nmDef.reward||null,timeLimit:_nmDef.timeLimit||null,
                 deadline:_nmDef.timeLimit?stardate+_nmDef.timeLimit:null,
                 status:'active',acceptedSd:stardate,completedSd:null,
                 visitedSnapshot:(_nmDef.id==='build_foundry'||_nmDef.id==='stellar_cartography')?new Set():new Set(visitedPlanetIds),
                 ironUnlockedSnapshot:_ironCarUnlocked,
                 sourcePlanetId:_nmiE.sourcePlanetId??null,targetPlanetId:_nmiE.targetPlanetId??null,
+                scientistSourceIds:Array.isArray(_nmiE.scientistSourceIds)?_nmiE.scientistSourceIds.slice():null,
+                _scientistsDelivered:_nmDef.id==='more_scientists'?[]:undefined,
+                _researchStartSd:_nmDef.id==='another_dimension'?stardate:undefined,
                 hazmatIncineratedSnapshot:_totalHazmatIncinerated});
               _recomputeMissionTargets();
               _chatMsg('MISSION STARTED: '+_nmDef.name.toUpperCase(),'rgba(255,220,80,1)');
@@ -32460,16 +32798,24 @@ function loop(ts){
             // Some (or no) objectives are pre-completed — show the intro popup and pass
             // which objective IDs are already done so the renderer can highlight them.
             gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='new_mission';
-            popupState={newMissionDef:_nmDef,targetPlanetId:_nmiE.targetPlanetId??null,sourcePlanetId:_nmiE.sourcePlanetId??null,preCompletedObjIds:_preCompObjIds};
+            popupState={newMissionDef:_nmDef,targetPlanetId:_nmiE.targetPlanetId??null,sourcePlanetId:_nmiE.sourcePlanetId??null,scientistSourceIds:_nmiE.scientistSourceIds??null,preCompletedObjIds:_preCompObjIds};
             // Stash the popup state so the main-loop safety-net can force-
             // accept the mission if the popup is ever closed without the
             // player explicitly clicking Accept.
-            _pendingNewMissionStash={newMissionDef:_nmDef,targetPlanetId:_nmiE.targetPlanetId??null,sourcePlanetId:_nmiE.sourcePlanetId??null,preCompletedObjIds:_preCompObjIds};
+            _pendingNewMissionStash={newMissionDef:_nmDef,targetPlanetId:_nmiE.targetPlanetId??null,sourcePlanetId:_nmiE.sourcePlanetId??null,scientistSourceIds:_nmiE.scientistSourceIds??null,preCompletedObjIds:_preCompObjIds};
             // ancient_schematics: auto-center + fully ZOOM IN on the ancient
             // planet that was just visited (the schematics source), tracking it.
             if(_nmDef.id==='ancient_schematics' && _nmiE.sourcePlanetId!=null){
               const _asCamP=_gp(_nmiE.sourcePlanetId);
               if(_asCamP){ cam.scale=MAX_SC; cam.x=_asCamP.x+(PANEL_W)/(2*cam.scale); cam.y=_asCamP.y; clampCamera(); tracking=true; trackingOffset={x:cam.x-_asCamP.x,y:cam.y-_asCamP.y}; }
+            }
+            // mad_scientist: frame the SCIENTIST'S planet (the source), not the
+            // Orijen destination — that's where the player needs to go first.
+            // (_recomputeMissionTargets highlights the source until the scientist
+            // is aboard, then switches the highlight to Orijen.)
+            else if(_nmDef.id==='mad_scientist' && _nmiE.sourcePlanetId!=null){
+              const _msCamP=_gp(_nmiE.sourcePlanetId);
+              if(_msCamP){ tracking=false; cam.scale=MIN_SC; cam.x=_msCamP.x+(PANEL_W)/(2*cam.scale); cam.y=_msCamP.y; clampCamera(); }
             }
             // Any mission with a target planet: auto-center camera on it, zoomed fully out
             else if(_nmiE.targetPlanetId!=null){
