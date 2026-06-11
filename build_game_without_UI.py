@@ -775,10 +775,20 @@ const T_PALS = [
 ];
 
 // ── galaxy constants ─────────────────────────────────────────
-const BAR_H    = 72;
-const TOP_H    = 28;
+// NO-UI BUILD: this variant of the game hides all galaxy-view HUD chrome
+// (top bar, right panel, bottom info bar, mission tracker, chat log, hint bar,
+// speed/zoom indicators, selection rings, educational callouts/tutorial
+// bubbles). Zeroing the three layout constants below makes the galaxy viewport
+// fill the entire canvas — every cull check, clip rect, fog canvas, and the
+// world<->screen mapping derive from these, so the galaxy content now spans the
+// full screen. Popups are centred on full W/H (see drawPopupBase) so they are
+// unaffected and still render exactly as usual. Chrome DRAW calls are
+// additionally guarded with `if(!_NO_UI)` in drawGalaxy.
+const _NO_UI   = true;
+const BAR_H    = _NO_UI ? 0 : 72;
+const TOP_H    = _NO_UI ? 0 : 28;
 const GH       = H - BAR_H;
-const PANEL_W  = 185;
+const PANEL_W  = _NO_UI ? 0 : 185;
 const AI_CORP_COLOR='#e89320';
 const AI_CORP_RGB=[232,147,32];
 const AI_TICK_INTERVALS={very_easy:22,easy:13,normal:7,hard:3.5,very_hard:1.8};
@@ -4657,19 +4667,6 @@ function _introToCorpSetup(){
   // armed or the mission queued/active as we leave the intro.
   _madScientistTimerMs=0;
   pendingMissionIntros=pendingMissionIntros.filter(_e=>_e&&_e.defId!=='mad_scientist');
-  // Defensive: the Ancient Schematics mission must come ONLY from the player's
-  // FIRST in-gameplay ancient visit. The cutscene shows an ancient-planet
-  // portrait, so make sure nothing left its timer armed, the mission queued,
-  // or an ancient planet marked visited as we leave the intro. (Clearing any
-  // ancient from visitedPlanetIds guarantees the first real visit re-arms it.)
-  _ancientSchematicsTimerMs=0; _ancientSchematicsPlanetId=-1; _ancientSchematicsFired=false;
-  pendingMissionIntros=pendingMissionIntros.filter(_e=>_e&&_e.defId!=='ancient_schematics');
-  if(galaxy&&galaxy.planets){
-    for(const _vp of [...visitedPlanetIds]){
-      const _vpl=galaxy.planets[_vp];
-      if(_vpl&&_vpl.type&&_vpl.type.id==='ancient') visitedPlanetIds.delete(_vp);
-    }
-  }
   // Reset Orijen + the tutorial lava planet back to their AT-GENERATION
   // orbit positions. updatePlanetOrbits has been running every cutscene
   // frame so these two planets can drift far apart if the player lingers
@@ -6434,21 +6431,14 @@ function computeCargoRevenue(carType, cargoType, destPlanet, srcPlanet){
 }
 
 // ── Cargo ops helpers ────────────────────────────────────────
-// True if car i of train t is a MISSION ESCORT car — the single car that picked
-// up a special, story-critical mission cargo (the Ancient Schematics, or the
-// Mad Scientist passenger) from its source planet. Tagged once at load time via
-// t.carEscort (see _processCargoQueue) so only the FIRST such car is marked even
-// when the source supplies many units of that cargo type. Drives the gold glow
-// and the Orijen-only unload lock; cleared when the car unloads.
-function _isEscortCar(t,i){
-  return !!(t.carEscort&&t.carEscort[i]);
-}
-// True if some player car is ALREADY carrying a tagged mission-escort cargo of
-// the given type. Used so only ONE car per mission is ever tagged, while still
-// self-healing if the tagged car was scrapped / edited away (a fresh pickup
-// then re-tags).
-function _anyEscortAboard(cargoType){
-  return trains.some(t=>t.isPlayer&&t.carEscort&&t.cars.some((c,ci)=>t.carEscort[ci]&&t.carCargo?.[ci]===cargoType));
+// True if car i of train t carries the one-off Ancient Schematics cargo — i.e.
+// a loaded 'cargo' car whose source is the active ancient_schematics mission's
+// source (ancient) planet. Used for the gold glow, the Orijen-only unload lock,
+// and the delivery check.
+function _isSchematicsCar(t,i){
+  if(!t.carFull?.[i]||t.carCargo?.[i]!=='cargo'||t.carCargoSource?.[i]==null) return false;
+  const _asMx=(typeof missions!=='undefined')?missions.find(mx=>mx.id==='ancient_schematics'&&mx.status==='active'):null;
+  return !!(_asMx&&t.carCargoSource[i]===_asMx.sourcePlanetId);
 }
 function _startCargoOps(t, p){
   // Build unload queue: full cars whose cargo type has demand ≥0.5
@@ -6466,10 +6456,10 @@ function _startCargoOps(t, p){
       // type — iron carried back through its foundry, water through its
       // ocean source, etc.)
       if(t.carCargoSource?.[i]===p.id) continue;
-      // Mission escort cars (Ancient Schematics cargo / Mad Scientist
-      // passenger) ONLY unload at Orijen — never anywhere else, even with local
-      // demand for that cargo type.
-      if(_isEscortCar(t,i)&&!(galaxy&&p.id===galaxy.origenId)) continue;
+      // Ancient Schematics: the car carrying the one-off schematics cargo
+      // (cargo sourced from the mission's ancient planet) ONLY unloads at
+      // Orijen — never at any other cargo-demanding planet.
+      if(cargo==='cargo'&&_isSchematicsCar(t,i)&&!(galaxy&&p.id===galaxy.origenId)) continue;
       uq.push(i);
     }
   }
@@ -6527,8 +6517,8 @@ function _startUnloadPhase(t, p){
       // Same-planet unload guard (see _startCargoOps for the full comment) —
       // covers every cargo type, not just passengers.
       if(t.carCargoSource?.[i]===p.id) continue;
-      // Mission escort cars only unload at Orijen.
-      if(_isEscortCar(t,i)&&!(galaxy&&p.id===galaxy.origenId)) continue;
+      // Ancient Schematics: the schematics car only unloads at Orijen.
+      if(cargo==='cargo'&&_isSchematicsCar(t,i)&&!(galaxy&&p.id===galaxy.origenId)) continue;
       uq.push(i);
     }
   }
@@ -6581,7 +6571,6 @@ function _processCargoQueue(t, p){
         {const _hzStar=galaxy.stars[p.starId]; if(_hzStar) _hzStar.hazmatIncinerated=(_hzStar.hazmatIncinerated||0)+1;}
         t.carFull[i]=false; if(t.carCargo) t.carCargo[i]=null;
         if(t.carCargoSource) t.carCargoSource[i]=null;
-        if(t.carEscort) t.carEscort[i]=false; // clear the mission-escort tag (stops the gold glow) when the car unloads
       } else {
         // ── Normal planet unload ───────────────────────────────
         const src=t.carCargoSource?.[i]!=null?galaxy.planets[t.carCargoSource[i]]:null;
@@ -6644,12 +6633,12 @@ function _processCargoQueue(t, p){
           // the revertable pickup objective rolls back (the scientist is no
           // longer aboard and not yet home).
           const _msMx=missions.find(mx=>mx.id==='mad_scientist'&&mx.status==='active');
-          if(t.isPlayer&&_msMx&&_isEscortCar(t,i)&&galaxy&&p.id===galaxy.origenId&&cargo==='passengers'&&src&&src.id===_msMx.sourcePlanetId) _msMx._scientistDelivered=true;
+          if(t.isPlayer&&_msMx&&galaxy&&p.id===galaxy.origenId&&src&&src.id===_msMx.sourcePlanetId) _msMx._scientistDelivered=true;
           // Ancient Schematics: delivered when the schematics cargo ('cargo'
           // sourced from the mission's ancient planet) is unloaded at Orijen.
           // Clearing carCargo/carCargoSource below stops the gold glow.
           const _asMx=missions.find(mx=>mx.id==='ancient_schematics'&&mx.status==='active');
-          if(t.isPlayer&&_asMx&&_isEscortCar(t,i)&&galaxy&&p.id===galaxy.origenId&&cargo==='cargo'&&src&&src.id===_asMx.sourcePlanetId) _asMx._schematicsDelivered=true;
+          if(t.isPlayer&&_asMx&&galaxy&&p.id===galaxy.origenId&&cargo==='cargo'&&src&&src.id===_asMx.sourcePlanetId) _asMx._schematicsDelivered=true;
           // Researching a better passenger car: count deliveries to the home planet
           const _rrMx=missions.find(mx=>mx.id==='research_royal_car'&&mx.status==='active');
           if(t.isPlayer&&_rrMx&&p.id===_rrMx.targetPlanetId){ _rrMx._origenPassengersCount=(_rrMx._origenPassengersCount||0)+1; }
@@ -6792,7 +6781,6 @@ function _processCargoQueue(t, p){
         }
         t.carFull[i]=false; if(t.carCargo) t.carCargo[i]=null;
         if(t.carCargoSource) t.carCargoSource[i]=null;
-        if(t.carEscort) t.carEscort[i]=false; // clear the mission-escort tag (stops the gold glow) when the car unloads
       }
     }
     t.cargoQueue.shift();
@@ -6846,17 +6834,6 @@ function _processCargoQueue(t, p){
       t.carFull[i]=true; if(t.carCargo) t.carCargo[i]=cargo;
       if(t.carCargoSource) t.carCargoSource[i]=t.planetId;
       if(t.carUnitsLoaded) t.carUnitsLoaded[i]=(t.carUnitsLoaded[i]||0)+_cUL;
-      // Mission escort tagging: the FIRST car to pick up a story-critical
-      // mission cargo from its source planet becomes the glowing, Orijen-locked
-      // escort car. _anyEscortAboard ensures only one is tagged even when the
-      // source supplies many units of that cargo type (and self-heals if the
-      // tagged car was scrapped).
-      if(t.isPlayer&&t.carEscort&&!t.carEscort[i]){
-        const _msL=missions.find(mx=>mx.id==='mad_scientist'&&mx.status==='active');
-        if(_msL&&cargo==='passengers'&&t.planetId===_msL.sourcePlanetId&&!_anyEscortAboard('passengers')) t.carEscort[i]=true;
-        const _asL=missions.find(mx=>mx.id==='ancient_schematics'&&mx.status==='active');
-        if(_asL&&cargo==='cargo'&&t.planetId===_asL.sourcePlanetId&&!_anyEscortAboard('cargo')) t.carEscort[i]=true;
-      }
     }
     t.cargoQueue.shift();
     if(!t.cargoQueue.length) t.cargoPhase=null;
@@ -7940,7 +7917,6 @@ function makeGalaxyTrain(name, planetId, orbitTier, cars, isPlayer){
           carFull: new Array(cars.length).fill(false),
           carCargo: new Array(cars.length).fill(null),
           carCargoSource: new Array(cars.length).fill(null),
-          carEscort: new Array(cars.length).fill(false), // per-car: is this the glowing, Orijen-locked mission escort car?
           carPurchaseSd: new Array(cars.length).fill(stardate),
           carRevenue: new Array(cars.length).fill(0),
           carSegments: new Array(cars.length).fill(0),
@@ -10405,7 +10381,6 @@ function _aiDoSwapCars(trainIdx,newCars,cost){
   t.carFull=_carryArr(t.carFull,false);
   t.carCargo=_carryArr(t.carCargo,null);
   t.carCargoSource=_carryArr(t.carCargoSource,null);
-  t.carEscort=_carryArr(t.carEscort,false);
   t.carPurchaseSd=_carryArr(t.carPurchaseSd,stardate);
   t.carRevenue=_carryArr(t.carRevenue,0);
   t.carSegments=_carryArr(t.carSegments,0);
@@ -10733,7 +10708,6 @@ function _aiApplyCarRefit(trainIdx, newCars){
   t.carFull=_carryArr(t.carFull,false);
   t.carCargo=_carryArr(t.carCargo,null);
   t.carCargoSource=_carryArr(t.carCargoSource,null);
-  t.carEscort=_carryArr(t.carEscort,false);
   t.carPurchaseSd=_carryArr(t.carPurchaseSd,stardate);
   t.carRevenue=_carryArr(t.carRevenue,0);
   t.carSegments=_carryArr(t.carSegments,0);
@@ -14875,7 +14849,7 @@ function trackVisit(pid){
       // Ancient Schematics mission: arm a 5 s real-time timer on the FIRST
       // ancient planet the player visits (one-shot). updateMissions fires the
       // intro after the delay, sourced from this planet.
-      if(gs==='galaxy' && !_ancientSchematicsFired && !missions.some(mx=>mx.id==='ancient_schematics') && !_missionPending('ancient_schematics')){
+      if(!_ancientSchematicsFired && !missions.some(mx=>mx.id==='ancient_schematics') && !_missionPending('ancient_schematics')){
         _ancientSchematicsTimerMs=Date.now(); _ancientSchematicsPlanetId=pid; _ancientSchematicsFired=true;
       }
     }
@@ -26061,22 +26035,6 @@ function drawGalaxy(ts,dt){
         ctx.beginPath(); ctx.arc(_lx,_ly,_lr*0.42,0,Math.PI*2); ctx.fill();
         ctx.restore();
       }
-      // Mission escort car (Ancient Schematics cargo / Mad Scientist
-      // passenger): pulsing gold outline around the car until it's unloaded at
-      // Orijen. Outlines the visible solid body (x∈[-bw/2,bw/2], y∈[-_visH,0]
-      // in the rotated car frame).
-      if(_wcw>8 && _isEscortCar(train,i)){
-        const _gpls=Math.pow(Math.max(0,Math.sin(Date.now()*0.006)),0.6); // 0..1 pulse
-        const _sbw=((_ssD&&_ssD[1])?_ssD[1]:148)/160*_wcw; // visible body width (screen px)
-        const _spad=Math.max(2,2.2*cam.scale);
-        ctx.save();
-        ctx.translate(sx,sy); ctx.rotate(rot); ctx.scale(-1,1);
-        ctx.globalAlpha=0.55+0.45*_gpls;
-        ctx.shadowColor='#ffcf3a'; ctx.shadowBlur=8+16*_gpls;
-        ctx.strokeStyle='#ffd24a'; ctx.lineWidth=Math.max(1.5,2.2*cam.scale*(0.7+0.6*_gpls));
-        ctx.beginPath(); ctx.roundRect(-_sbw/2-_spad, -_visH-_spad, _sbw+2*_spad, _visH+2*_spad, Math.max(2,3*cam.scale)); ctx.stroke();
-        ctx.restore();
-      }
     }
   }
   _drawCargoParticles();
@@ -26093,8 +26051,9 @@ function drawGalaxy(ts,dt){
     drawPlanetRing(sx,sy,sr,p.ring,true);
   }
 
-  // Selection ring
-  if(sel){
+  // Selection ring (NO-UI BUILD: suppressed — trains/planets/stars can still be
+  // selected, but no ring/orbit-tier indicator is drawn for the selection).
+  if(sel&&!_NO_UI){
     ctx.save(); ctx.lineWidth=2; ctx.shadowBlur=12;
     if(sel.type==='planet'){
       const p=sel.data,[sx,sy]=w2s(p.x,p.y),sr=p.radius*cam.scale;
@@ -26217,6 +26176,8 @@ function drawGalaxy(ts,dt){
 
   ctx.restore(); // end galaxy-viewport clip
 
+  if(!_NO_UI){ // NO-UI BUILD: skip ALL HUD chrome below (right panel, bottom
+               // info bar, mission tracker, chat log, hint bar).
   // ── trains panel ─────────────────────────────────────────────
   // Drawn AFTER the galaxy clip restore so its draws aren't restricted by
   // the viewport-only clip set above. The panel sits at (W-PANEL_W..W,
@@ -26974,15 +26935,20 @@ function drawGalaxy(ts,dt){
       _hx+=ctx.measureText(sep).width;
     }
   }
+  } // NO-UI BUILD: end of skipped HUD-chrome block
 
-  drawSpeedIndicator();
+  if(!_NO_UI) drawSpeedIndicator();
   // Player-paused banner: when gameSpeedIdx is the literal-zero "P" tier (and
   // we're not already showing the quit-confirm popup, which draws its own
   // banner above the popup window), render the [GAME PAUSED] watermark in
-  // the centre of the canvas.
-  if(gameSpeedIdx===0 && activePopup!=='quitconfirm') _drawPausedBanner(H/2,null,true);
+  // the centre of the canvas. (NO-UI BUILD: suppressed — it's a speed indicator.)
+  if(!_NO_UI && gameSpeedIdx===0 && activePopup!=='quitconfirm') _drawPausedBanner(H/2,null,true);
   // Blue callout bubbles — drawn after all game-canvas UI so they appear above it,
   // and before popup windows so any open popup renders on top.
+  // NO-UI BUILD: all educational callouts + the tutorial-chain bubbles are
+  // suppressed (they are floating UI text over the galaxy, and several point at
+  // now-removed HUD chrome).
+  if(!_NO_UI){
   _maybeStartMissionTip(); // promote a queued [M] tip once other callouts clear
   _drawMissionTip();
   _drawBuyTrainHintCallout();
@@ -26999,6 +26965,7 @@ function drawGalaxy(ts,dt){
   // at planets / trains / right-panel UI sit UNDER any popup the player
   // opens (T / M / O / R / P). Advance + transition logic runs here.
   _drawTutorialChain('galaxy');
+  }
 
   // Popups render over everything
   drawPokedex();
@@ -27018,7 +26985,7 @@ function drawGalaxy(ts,dt){
   // the yellow `_drawBuyTrainPlusHintCallout` (mission-gated) covers this
   // need now. `_drawBuyTrainCallout` definition kept dormant in case it's
   // ever wanted again.
-  _drawBuyTrainPlusHintCallout();
+  if(!_NO_UI) _drawBuyTrainPlusHintCallout(); // NO-UI BUILD: educational callout suppressed
   drawTrainBuilderPopup();
   drawTechTreePopup();
   // Color picker renders on top of all popups
@@ -27039,8 +27006,9 @@ function drawGalaxy(ts,dt){
   // the popup chain in the section above, so any open popup paints over
   // them rather than the other way around.)
   // Top bar always on top; panel folder tabs drawn over top bar in panel area
-  drawTopBar();
-  drawPanelTabs();
+  // NO-UI BUILD: top bar + right-panel folder tabs suppressed.
+  if(!_NO_UI) drawTopBar();
+  if(!_NO_UI) drawPanelTabs();
   // Tutorial chain — popup stage. Moved to between drawPanelTabs and the
   // special "above-tabs" popups (car detail / routes / finances) so the
   // select_train highlight + bubble always renders ABOVE the right UI panel
@@ -27049,7 +27017,7 @@ function drawGalaxy(ts,dt){
   // popups that draw earlier (line ~21150), so they still visually sit on
   // top of those popups — only the special above-tabs popups now overlay
   // tutorial bubbles, matching the user's request.
-  _drawTutorialChain('popup');
+  if(!_NO_UI) _drawTutorialChain('popup'); // NO-UI BUILD: tutorial bubbles suppressed
   // Car-detail popup explicitly drawn AFTER drawTopBar so it paints over the
   // bar in any vertical overlap region (the rest of the popups are intentionally
   // beneath the top bar — this one is the exception per user request).
@@ -27059,7 +27027,7 @@ function drawGalaxy(ts,dt){
   drawRoutesPopup();
   // Finance popup drawn last so its dropdown renders above the top stats bar
   drawFinancesPopup();
-  _drawVisitHint();
+  if(!_NO_UI) _drawVisitHint(); // NO-UI BUILD: educational visit hint suppressed
   // (_drawOrbitHintCallout moved to the pre-popup callout block above so it
   // renders BEHIND any open popup window.)
   // Supply/Demand hover tooltip drawn LAST so it floats on top of any
@@ -30464,7 +30432,7 @@ function _buildSaveObject(){
     orbitCounts:t.orbitCounts, routeCounts:t.routeCounts, totalDist:_r5(t.totalDist),
     _angleAcc:_r5(t._angleAcc), color:t.color, maintenance:t.maintenance,
     distSinceMaint:_r5(t.distSinceMaint), totalRevenue:t.totalRevenue, totalCosts:t.totalCosts,
-    carFull:t.carFull, carCargo:t.carCargo, carCargoSource:t.carCargoSource, carEscort:t.carEscort||null,
+    carFull:t.carFull, carCargo:t.carCargo, carCargoSource:t.carCargoSource,
     carPurchaseSd:t.carPurchaseSd||null, carRevenue:t.carRevenue||null,
     carSegments:t.carSegments||null, carFullSegments:t.carFullSegments||null,
     carUnitsLoaded:t.carUnitsLoaded||null, carUnitsUnloaded:t.carUnitsUnloaded||null,
@@ -30687,10 +30655,6 @@ function _restoreFromSave(save){
   _sensorUpgradeActive=!!save._sensorUpgradeActive; _stationCostDiscount=save._stationCostDiscount||0;
   _playerDeliveryCount=typeof save._playerDeliveryCount==='number'?save._playerDeliveryCount:0;
   _galaxyCensusTimerMs=0; // timer resets on load; updateMissions() will re-arm if needed
-  // Ancient Schematics trigger is transient — the saved missions array (gated
-  // via missions.some in trackVisit/updateMissions) and the persisted
-  // visitedPlanetIds prevent any re-fire, so just clear the arm state.
-  _ancientSchematicsTimerMs=0; _ancientSchematicsPlanetId=-1; _ancientSchematicsFired=false;
   _hasZoomed=true; // loaded games have played before — suppress the zoom callout hint
   _buyTrainTipStartMs=0; _buyTrainTipShown=true; // suppress buy-train callout on loaded games
   // Suppress the yellow "CLICK the +" hint on loaded games.
@@ -30821,7 +30785,6 @@ function _restoreFromSave(save){
     carFull:t.carFull||new Array(t.cars.length).fill(false),
     carCargo:t.carCargo||new Array(t.cars.length).fill(null),
     carCargoSource:t.carCargoSource||new Array(t.cars.length).fill(null),
-    carEscort:t.carEscort||new Array(t.cars.length).fill(false),
     carPurchaseSd:t.carPurchaseSd||(t.cars||[]).map(()=>save.stardate||829),
     carRevenue:t.carRevenue||(t.cars||[]).map(()=>0),
     carSegments:t.carSegments||(t.cars||[]).map(()=>0),
@@ -31316,7 +31279,7 @@ function startGame(){
   // runs at title PLAY, BEFORE the player picks their corp name in corpsetup,
   // so corpName is still the default placeholder at this point. It fires at
   // the fadein → galaxy transition instead (same as the game_start GA event).
-  activePopup=null; popupState={}; gameSpeedIdx=SPEED_DEFAULT_IDX; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _missionTipPending=false; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _foundryCompletedMs=0; _produceIronTimerMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _ancientSchematicsTimerMs=0; _ancientSchematicsPlanetId=-1; _ancientSchematicsFired=false; _hasZoomed=false; _buyTrainTipStartMs=0; _buyTrainTipShown=false; _prevActivePopupForSfx=null; _missionTipFired=false; _visitPlanetCompletedMs=0; _tutorialDoneMs=0; _crTutorialDoneMs=0; _firstNonLowOrbitFired=false; _orbitHintStartMs=0; _orbitHintPlanetId=-1; _crTrainPreselected=false;
+  activePopup=null; popupState={}; gameSpeedIdx=SPEED_DEFAULT_IDX; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _missionTipPending=false; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _foundryCompletedMs=0; _produceIronTimerMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _hasZoomed=false; _buyTrainTipStartMs=0; _buyTrainTipShown=false; _prevActivePopupForSfx=null; _missionTipFired=false; _visitPlanetCompletedMs=0; _tutorialDoneMs=0; _crTutorialDoneMs=0; _firstNonLowOrbitFired=false; _orbitHintStartMs=0; _orbitHintPlanetId=-1; _crTrainPreselected=false;
   _newspaper=null; _newspaperLastSd=829; _newspaperPrevSpeed=0; _newspaperNextHover=false; _newspaperNextBounds=null; _newspaperPrevHover=false; _newspaperPrevBounds=null; _newspaperArchive=[]; _newspaperViewIdx=null; _paperMajorUsed=[]; _paperMinorUsed=[]; _paperLayout=0; _paperIssueNum=0; _paperIdx=randInt(0,_PAPER_NAMES.length-1); _newsEventLog=[]; _newsSnapshot=null;
   _speedLeftHover=false; _speedRightHover=false; _panelTabHover=null; _routeHereBtnHover=false; _assignBtnHover=false; _cancelRouteBtnHover=false; _planetStarNameHover=false; _starPanelPlanetHover=-1; _trainAddHover=false; _trainRowHover=-1; _pokedexSortHover=false; _pokedexRowHover=-1; _starRegistrySortHover=false; _starRegistryRowHover=-1; _goldOkHover=false; _diamondOkHover=false; _carUnlockOkHover=false; _quitYesHover=false; _quitNoHover=false; _saveGameBtnHover=false; _startBtnHover=false; _loadBtnHover=false; _htpBtnHover=false; _htpDotHover=-1; _htpSkipHover=false; pokedexRowBounds=[]; starRegistryRowBounds=[]; loadBtnBounds=null; saveGameBtnBounds=null;
   fogPoints=[]; fogGridSet=new Set(); fogCanvas=null;
@@ -31346,7 +31309,7 @@ function startGame(){
   _playerDeliveryCount=0; // new game starts with zero successful deliveries logged
   missions=[]; _recomputeMissionTargets();
   _gameStartSd=stardate;
-  pendingMissionIntros=MISSION_DEFS.filter(def=>!def.prerequisite&&def.id!=='visit_planet'&&def.id!=='build_foundry'&&def.id!=='dispose_hazmat'&&def.id!=='lost_colony'&&def.id!=='seeking_home'&&def.id!=='create_route'&&def.id!=='research_royal_car'&&def.id!=='colony_train'&&def.id!=='spread_the_seed'&&def.id!=='famine'&&def.id!=='outbreak'&&def.id!=='stellar_cartography'&&def.id!=='galaxy_census'&&def.id!=='sandstorm_relief'&&def.id!=='bh_research'&&def.id!=='design_better_train'&&def.id!=='buy_second_train'&&def.id!=='galactic_distance'&&def.id!=='corporate_expansion'&&def.id!=='ancient_schematics').map(def=>({defId:def.id,readySd:_gameStartSd+(def.startsAfter||0)}));
+  pendingMissionIntros=MISSION_DEFS.filter(def=>!def.prerequisite&&def.id!=='visit_planet'&&def.id!=='build_foundry'&&def.id!=='dispose_hazmat'&&def.id!=='lost_colony'&&def.id!=='seeking_home'&&def.id!=='create_route'&&def.id!=='research_royal_car'&&def.id!=='colony_train'&&def.id!=='spread_the_seed'&&def.id!=='famine'&&def.id!=='outbreak'&&def.id!=='stellar_cartography'&&def.id!=='galaxy_census'&&def.id!=='sandstorm_relief'&&def.id!=='bh_research'&&def.id!=='design_better_train'&&def.id!=='buy_second_train'&&def.id!=='galactic_distance'&&def.id!=='corporate_expansion').map(def=>({defId:def.id,readySd:_gameStartSd+(def.startsAfter||0)}));
   financeLedger=[]; _ledgerSummary={totalRevenue:0,totalCost:0,totalInterest:0}; purchaseLedger=[]; corpValueHistory={}; corpStatsHistory={}; aiCorpStatsHistory={}; _financeScrollY=0; _financeBreakdown='stardate'; _financeDropdownOpen=false; _versusMetric='value'; _versusDropdownOpen=false;
   loans=[]; _loanCounter=0; _financeTab='financials'; _financeLoanSelected='small'; _financeLoanHover=null; _financeTakeLoanHover=false;
   // Fresh pool of issuer names per game; assign one to each loan tier
@@ -32362,19 +32325,6 @@ function loop(ts){
       _madScientistTimerMs=0;
       pendingMissionIntros=pendingMissionIntros.filter(_e=>_e&&_e.defId!=='mad_scientist');
       for(let _mi=missions.length-1;_mi>=0;_mi--){ if(missions[_mi]&&missions[_mi].id==='mad_scientist') missions.splice(_mi,1); }
-      // Same bulletproofing for Ancient Schematics: it may ONLY arm from the
-      // player's first in-gameplay ancient visit. Wipe its timer/one-shot flag,
-      // drop any queued/active instance, and ensure no ancient planet is left
-      // marked visited so the first real visit re-arms the 5s timer cleanly.
-      _ancientSchematicsTimerMs=0; _ancientSchematicsPlanetId=-1; _ancientSchematicsFired=false;
-      pendingMissionIntros=pendingMissionIntros.filter(_e=>_e&&_e.defId!=='ancient_schematics');
-      for(let _mi=missions.length-1;_mi>=0;_mi--){ if(missions[_mi]&&missions[_mi].id==='ancient_schematics') missions.splice(_mi,1); }
-      if(galaxy&&galaxy.planets){
-        for(const _vp of [...visitedPlanetIds]){
-          const _vpl=galaxy.planets[_vp];
-          if(_vpl&&_vpl.type&&_vpl.type.id==='ancient') visitedPlanetIds.delete(_vp);
-        }
-      }
       // Arm the new-game tutorial bubble chain. The first bubble fades in
       // 2s after the galaxy view first appears (see _drawTutorialChain).
       if(_tutorialPhase==='inactive'&&_tutorialLavaPlanetId>=0){
@@ -32688,7 +32638,7 @@ html = f"""<!DOCTYPE html>
 </body>
 </html>"""
 
-with open("index.html", "w", encoding="utf-8") as f:
+with open("index_without_UI.html", "w", encoding="utf-8") as f:
     f.write(html)
 
-print("Built index.html,", len(html)//1024, "KB")
+print("Built index_without_UI.html,", len(html)//1024, "KB")

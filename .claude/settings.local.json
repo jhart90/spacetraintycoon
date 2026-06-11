@@ -187,7 +187,13 @@
       "mcp__mcp-registry__search_mcp_registry",
       "mcp__mcp-registry__list_connectors",
       "WebSearch",
-      "WebFetch(domain:developers.google.com)"
+      "WebFetch(domain:developers.google.com)",
+      "Bash(awk -F: '$1>=30000')",
+      "Bash(awk -F: '$1>=6260 && $1<=6300')",
+      "PowerShell(Copy-Item \"C:\\\\Users\\\\jackh\\\\Desktop\\\\Claude\\\\Train Game\\\\build_game.py\" \"C:\\\\Users\\\\jackh\\\\Desktop\\\\Claude\\\\Train Game\\\\build_game_without_UI.py\")",
+      "Bash(find .claude -maxdepth 3 -type d)",
+      "Bash(find .claude/skills -maxdepth 2 -type f)",
+      "Bash(awk '{print int\\($5/1024\\)\" KB\"}')"
     ]
   },
   "hooks": {
