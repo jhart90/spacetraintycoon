@@ -28,8 +28,13 @@ sprite_bottoms = assets.get("sprite_bottoms", {})
 # (a) bringing oversized sources (~1300x1100) down to the standard bundle size
 # and (b) refreshing the bundled image when the source PNG has been updated.
 OVERSIZED = [
-    "car_medical", "car_medical_empty",
+    "car_ore", "car_ore_empty",
 ]
+# (car_ore / car_ore_empty were bundled at 183×160 / 184×160 instead of the
+# standard 160×160 every other sprite uses, which broke the galaxy-view
+# size/spacing/centring math that assumes a 160-wide bundle. Re-bundling to
+# 160×160 brings them in line — like car_oil/car_water_tank, the squish is
+# undone at render time via the source file aspect.)
 
 def process_sprite(name):
     path = os.path.join(SPRITES_DIR, f"{name}.png")
