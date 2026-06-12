@@ -197,7 +197,8 @@
       "Bash(grep -n \"_scientistDelivered=true;\\\\|_schematicsDelivered=true;\\\\|if\\(cargo==='passengers'\\){ if\\(!p.passengerDeliveries\\)\\\\|p.devLog.push\\({sd:stardate, value:DEV_CARGO_VALUES\\\\[cargo\\\\]||100, cargo}\\);\" build_game.py)",
       "Bash(grep -n \"const _resolveObjTxt=o=>{\\\\|sourcePlanetId:_nmiE.sourcePlanetId??null,\\\\|popupState={newMissionDef:_nmDef\\\\|_pendingNewMissionStash={newMissionDef:_nmDef\\\\|_origenPassengersCount:_totalPassengersDelivered\" build_game.py)",
       "Bash(grep -n \"const _mObjProgress=\\(m,objId\\)=>{\\\\|if\\(objId==='deliver_5_chemical'\\)\\\\|ctx.fillText\\(_prog.label+':  '+_prog.cur+' / '+_prog.max,_pBarX,_pLabelY\\);\" build_game.py)",
-      "Bash(node -e ' *)"
+      "Bash(node -e ' *)",
+      "Bash(awk '{print $5\" bytes \\(\"int\\($5/1024\\)\" KB\\)\"}')"
     ]
   },
   "hooks": {

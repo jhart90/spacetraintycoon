@@ -2829,6 +2829,23 @@ let pendingGoldDiscoveries=[]; // planetIds queued to show gold discovery popup
 let pendingDiamondDiscoveries=[]; // planetIds queued to show diamond discovery popup
 let pendingCarUnlocks=[]; // {sprite,displayName} queued to show car-unlock popup
 let pendingEngineUnlocks=[]; // {sprite,displayName} queued to show engine-unlock popup
+// ── Planet-upgrade unlock gating ─────────────────────────────
+// Certain upgrade types stay HIDDEN from the planet upgrades pane until the
+// player triggers their unlock event; unlocking pops an explainer window (like
+// the car-unlock popup). All four flags are persisted (and derived from game
+// state on load for backward-compat).
+let _foundryUnlocked=false;       // IRON FOUNDRY card — unlocked by COMPLETING the "Create a repeating train route" mission
+let _largeStationUnlocked=false;  // LARGE STATION upgrade button — unlocked by COMPLETING the "Produce Iron" mission
+let _terminalUnlocked=false;      // TERMINAL upgrade button — unlocked by producing the FIRST steel unit
+let _bakeryUnlocked=false;        // BAKERY card — unlocked by VISITING the first agricultural planet
+let pendingUpgradeUnlocks=[]; // {key} queued to show the upgrade-unlock popup (key ∈ iron_foundry, bakery, __large_station__, __terminal__)
+// An upgrade CARD is visible only when unlocked (or already built). Station-tier
+// buttons (Large Station / Terminal) are gated separately at their render sites.
+function _isUpgradeUnlocked(uId){
+  if(uId==='iron_foundry') return _foundryUnlocked;
+  if(uId==='bakery')       return _bakeryUnlocked;
+  return true; // every other upgrade is always visible (existing grey-lock gates still apply)
+}
 // Ancient-world broadcast popup. Triggered on first visit to each ANCIENT
 // biome planet. Each visit also "translates" 3 more random untranslated
 // words from the mystery sentence (gibberish placeholder is permanently
@@ -13310,6 +13327,11 @@ function updateFoundries(dtG){
           // Sliding-window log of steel production (per-tick units), used for the
           // N700 unlock check (200 units in any 20-stardate window).
           _steelProdLog.push({sd:stardate,units:1});
+          // Producing the FIRST steel unit UNLOCKS the TERMINAL upgrade.
+          if(!_terminalUnlocked){
+            _terminalUnlocked=true; pendingUpgradeUnlocks.push({key:'__terminal__'});
+            _chatMsg('TERMINAL UPGRADE UNLOCKED','rgba(255,210,120,1)');
+          }
           if(!_steelCarUnlocked){
             _steelCarUnlocked=true;
             pendingCarUnlocks.push({sprite:'car_steel',displayName:'Steel Car'});
@@ -15049,6 +15071,11 @@ function trackVisit(pid){
     }
     // Agri planet visit: unlock the food car specific to this planet's pre-built upgrade
     if(_bio==='agri'){
+      // Visiting the FIRST agricultural planet UNLOCKS the BAKERY upgrade.
+      if(!_bakeryUnlocked){
+        _bakeryUnlocked=true; pendingUpgradeUnlocks.push({key:'bakery'});
+        _chatMsg('BAKERY UPGRADE UNLOCKED','rgba(255,210,120,1)');
+      }
       const _ups=_tp.upgrades||[];
       if(_ups.includes('granary')&&!_grainCarUnlocked){
         _grainCarUnlocked=true;
@@ -15826,6 +15853,114 @@ function drawCarUnlockPopup(){
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
   ctx.fillStyle='rgba(180,255,215,0.95)'; ctx.fillText('OKAY!',_bx+_bw/2,_by+17);
   _carUnlockOkBounds={x:_bx,y:_by,w:_bw,h:_bh};
+  ctx.restore();
+}
+
+// Per-upgrade copy for the "NEW UPGRADE UNLOCKED" popup: the title, the visual
+// to draw, and the body lines (input→output formula + processing time where one
+// exists, or the benefit the upgrade provides).
+const _UPGRADE_UNLOCK_INFO={
+  iron_foundry:{ name:'IRON FOUNDRY', kind:'iron_foundry', biome:'#c9a55a',
+    lines:['Smelts cargo delivered to this planet into',
+           'refined Iron — a valuable resource.',
+           '',
+           '1 Molten Ore  +  1 Water   →   1 Iron',
+           'Processing time: ~40 seconds'] },
+  bakery:{ name:'BAKERY', kind:'bakery', biome:'#3a9fc2',
+    lines:['Bakes Grain delivered to this planet into',
+           'units of Cargo.',
+           '',
+           '1 Grain   →   1 Cargo',
+           'Processing time: ~40 seconds'] },
+  __large_station__:{ name:'LARGE STATION', kind:'station', rings:2, biome:'#8893a3',
+    lines:['Upgrade a STATION into a LARGE STATION.',
+           '',
+           'Trains can now load and unload from LOW',
+           'AND MEDIUM orbit — far more throughput.'] },
+  __terminal__:{ name:'TERMINAL', kind:'station', rings:3, biome:'#8893a3',
+    lines:['Upgrade a station into a TERMINAL.',
+           '',
+           'Trains can load and unload from ANY',
+           'orbit — LOW, MEDIUM, and HIGH.'] },
+};
+// Draw the upgrade's visual (a small planet + building, or a station with orbit
+// rings) centred at (cx,cy).
+function _drawUpgradeUnlockVisual(cx,cy,info){
+  const R=46;
+  ctx.save();
+  if(info.kind==='station'){
+    // Concentric orbit rings convey how many orbit tiers the station services.
+    const _ringR=[R*1.55,R*2.15,R*2.75];
+    for(let _i=0;_i<(info.rings||2);_i++){
+      ctx.strokeStyle=`rgba(120,180,255,${0.5-_i*0.12})`; ctx.lineWidth=1.5;
+      ctx.beginPath(); ctx.arc(cx,cy,_ringR[_i],0,Math.PI*2); ctx.stroke();
+    }
+    // Planet body.
+    const _g=ctx.createRadialGradient(cx-R*0.3,cy-R*0.3,R*0.2,cx,cy,R);
+    _g.addColorStop(0,'#aab4c4'); _g.addColorStop(1,'#5d6675');
+    ctx.fillStyle=_g; ctx.beginPath(); ctx.arc(cx,cy,R,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle='rgba(255,255,255,0.12)'; ctx.lineWidth=1; ctx.beginPath(); ctx.arc(cx,cy,R,0,Math.PI*2); ctx.stroke();
+    // Simple station module sitting on the surface (top of the planet).
+    const _mx=cx, _my=cy-R;
+    ctx.fillStyle='rgba(90,150,230,0.95)';
+    ctx.fillRect(_mx-7,_my-5,14,6);
+    ctx.fillStyle='rgba(150,200,255,0.95)';
+    ctx.fillRect(_mx-2.5,_my-10,5,5);
+    ctx.strokeStyle='rgba(190,220,255,0.7)'; ctx.lineWidth=1; ctx.strokeRect(_mx-7,_my-5,14,6);
+  } else {
+    // Planet body, biome-tinted, with the upgrade's building on top.
+    const _g=ctx.createRadialGradient(cx-R*0.3,cy-R*0.3,R*0.2,cx,cy,R);
+    _g.addColorStop(0,info.biome||'#9a9a9a'); _g.addColorStop(1,'rgba(20,22,28,0.95)');
+    ctx.fillStyle=_g; ctx.beginPath(); ctx.arc(cx,cy,R,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle='rgba(255,255,255,0.12)'; ctx.lineWidth=1; ctx.beginPath(); ctx.arc(cx,cy,R,0,Math.PI*2); ctx.stroke();
+    drawFoundryBuilding(cx,cy,R,-Math.PI/2,R*1.6,true,info.kind);
+  }
+  ctx.restore();
+}
+
+let _upgradeUnlockOkHover=false;
+let _upgradeUnlockOkBounds=null;
+function drawUpgradeUnlockPopup(){
+  if(activePopup!=='upgrade_unlock') return;
+  const _key=(popupState.upgradeUnlock||{}).key;
+  const info=_UPGRADE_UNLOCK_INFO[_key];
+  if(!info) return;
+  const pw=340, ph=378;
+  const [px,py]=drawPopupBase(pw,ph,'rgba(245,200,40,0.7)');
+  ctx.save();
+  // Label line
+  ctx.font='bold 10px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='rgba(255,225,130,0.78)';
+  ctx.fillText('NEW UPGRADE UNLOCKED',px+pw/2,py+22);
+  // Name — big glowing title
+  ctx.font='bold 15px Orbitron,sans-serif';
+  ctx.fillStyle='#ffe080'; ctx.shadowColor='#ffaa20'; ctx.shadowBlur=12;
+  ctx.fillText(info.name,px+pw/2,py+42);
+  ctx.shadowBlur=0;
+  // Visual.
+  _drawUpgradeUnlockVisual(px+pw/2,py+118,info);
+  // Body lines.
+  ctx.font='10px "Exo 2",sans-serif'; ctx.textAlign='center';
+  let _ly=py+196;
+  for(const _ln of info.lines){
+    if(_ln===''){ _ly+=7; continue; }
+    // The formula line renders a touch bolder/brighter to stand out.
+    const _isFormula=_ln.indexOf('→')>=0;
+    ctx.font=_isFormula?'bold 11px "Exo 2",sans-serif':'10px "Exo 2",sans-serif';
+    ctx.fillStyle=_isFormula?'rgba(255,235,160,0.97)':'rgba(225,225,230,0.82)';
+    ctx.fillText(_ln,px+pw/2,_ly);
+    _ly+=16;
+  }
+  // Footer: where the upgrade appears.
+  ctx.font='italic 9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(180,185,195,0.6)';
+  ctx.fillText('Available in the planet UPGRADES panel.',px+pw/2,py+ph-52);
+  // OKAY button
+  const _bw=100,_bh=26,_bx=px+(pw-_bw)/2,_by=py+ph-40;
+  ctx.fillStyle=_upgradeUnlockOkHover?'rgba(210,165,30,0.97)':'rgba(150,115,20,0.90)'; ctx.fillRect(_bx,_by,_bw,_bh);
+  ctx.strokeStyle=_upgradeUnlockOkHover?'rgba(255,230,120,0.95)':'rgba(235,200,90,0.85)'; ctx.lineWidth=1.5; ctx.strokeRect(_bx,_by,_bw,_bh);
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='rgba(255,245,210,0.97)'; ctx.fillText('OKAY!',_bx+_bw/2,_by+17);
+  _upgradeUnlockOkBounds={x:_bx,y:_by,w:_bw,h:_bh};
   ctx.restore();
 }
 
@@ -19341,6 +19476,11 @@ function updateMissions(dtSd){
       // Start build_foundry countdown when create_route completes
       // (var name _findOreTimerMs is legacy from the removed Find Molten Ore mission)
       if(m.id==='create_route'&&_findOreTimerMs===0) _findOreTimerMs=Date.now();
+      // Completing the repeating-route mission UNLOCKS the IRON FOUNDRY upgrade.
+      if(m.id==='create_route'&&!_foundryUnlocked){
+        _foundryUnlocked=true; pendingUpgradeUnlocks.push({key:'iron_foundry'});
+        _chatMsg('IRON FOUNDRY UPGRADE UNLOCKED','rgba(255,210,120,1)');
+      }
       // Stamp build_foundry completion — arms the 10 s buy_second_train intro.
       if(m.id==='build_foundry'&&_foundryCompletedMs===0) _foundryCompletedMs=Date.now();
       // Legacy stamp (no longer gates anything — kept so any saved scripts /
@@ -19350,6 +19490,11 @@ function updateMissions(dtSd){
       if(m.id==='visit_planet'&&_visitPlanetCompletedMs===0) _visitPlanetCompletedMs=Date.now();
       // Start upgrade_station countdown when produce_iron completes
       if(m.id==='produce_iron'&&_produceIronTimerMs===0) _produceIronTimerMs=Date.now();
+      // Completing Produce Iron UNLOCKS the LARGE STATION upgrade.
+      if(m.id==='produce_iron'&&!_largeStationUnlocked){
+        _largeStationUnlocked=true; pendingUpgradeUnlocks.push({key:'__large_station__'});
+        _chatMsg('LARGE STATION UPGRADE UNLOCKED','rgba(255,210,120,1)');
+      }
       // Colony Train complete: populate the destination planet
       if(m.id==='colony_train'){
         const _ctDest=m.targetPlanetId!=null?_gp(m.targetPlanetId):null;
@@ -21611,7 +21756,10 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
   // TERMINAL after the Terminal upgrade is built (all three orbits open).
   const _stLabel=p.hasTerminal?'TERMINAL':(p.hasLargeStation?'LARGE STATION':'STATION');
   const _stEnt={id:'__station__',label:_stLabel,desc:'Enables cargo loading and unloading on this planet.',cost:_stationBuildCost(),isStation:true};
-  const _candidates=UPGRADES.filter(u=>builtSet.has(u.id)||u.eligibleBiomes.includes(bio)||u.universal);
+  const _candidates=UPGRADES.filter(u=>(builtSet.has(u.id)||u.eligibleBiomes.includes(bio)||u.universal)
+    // Hide locked upgrade cards entirely until their unlock event fires (a card
+    // that's somehow already built always stays visible).
+    && (builtSet.has(u.id)||_isUpgradeUnlocked(u.id)));
   const _sortTier=(u)=>{
     if(builtSet.has(u.id)) return 0;          // built first
     if(_isUpgradeGateLocked(u.id)) return 2;   // locked last
@@ -21852,6 +22000,10 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
           }
           if(_lsDescCur) ctx.fillText(_lsDescCur,upX+12,_lsDescY);
           // ── UPGRADE → Terminal button ────────────────────────
+          // Hidden until the player produces their first STEEL unit
+          // (_terminalUnlocked). Until then the Large Station's description
+          // shows but no upgrade button / hit-target exists.
+          if(_terminalUnlocked){
           // Cost 75,000 cr + 6 steel. Uses the same visual treatment as the
           // Large-Station UPGRADE button (red cost pill + "+" + sprite ×N).
           const _tLvlOk=(p.devLevel||0)>=5; // require dev level 5 (one above Large Station's 4)
@@ -21901,6 +22053,7 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
           // the tooltip differently in the draw block).
           popupState.buildTerminalBtnBounds={x:_tBtnX,y:_tBtnY,w:_tBtnW,h:_tBtnH};
           if(_tHov) popupState._terminalTooltip={bx:_tBtnX,by:_tBtnY,bw:_tBtnW,upX,upW,lvlOk:_tLvlOk,steelOk:_tSteelOk,credOk:_tCredOk,dl:p.devLevel||0,steel:p.steelDelivered||0};
+          } // end if(_terminalUnlocked)
         } else {
           // Description bullet (same word-wrap style as unbuilt items)
           ctx.font='9px "Exo 2",sans-serif';
@@ -21913,6 +22066,10 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
             else{if(_stDescCur)ctx.fillText(_stDescCur,upX+12,_stDescY); _stDescCur=_stDW; _stDescY+=11;}
           }
           if(_stDescCur) ctx.fillText(_stDescCur,upX+12,_stDescY);
+          // UPGRADE → Large Station button. Hidden until the player COMPLETES
+          // the "Produce Iron" mission (_largeStationUnlocked). Until then the
+          // STATION description shows but no upgrade button / hit-target exists.
+          if(_largeStationUnlocked){
           // UPGRADE button — same size/style as BUILD buttons
           const _lvlOk=(p.devLevel||0)>=4,_ironOk=(p.ironDelivered||0)>=4,_credOk=credits>=50000;
           const _lsCanBuild=_lvlOk&&_ironOk&&_credOk;
@@ -21964,6 +22121,7 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
           // Register bounds and queue tooltip
           popupState.buildLargeStationBtnBounds={x:btnX,y:btnY,w:btnW,h:btnH};
           if(_lsHov) popupState._lsTooltip={bx:btnX,by:btnY,bw:btnW,upX,upW,lvlOk:_lvlOk,ironOk:_ironOk,credOk:_credOk,dl:p.devLevel||0,iron:p.ironDelivered||0};
+          } // end if(_largeStationUnlocked)
         }
       } else {
         const _stC=_stationBuildCost(); const canAfford=credits>=_stC;
@@ -27286,6 +27444,7 @@ function drawGalaxy(ts,dt){
   drawDiamondDiscoveryPopup();
   drawCarUnlockPopup();
   drawEngineUnlockPopup();
+  drawUpgradeUnlockPopup();
   drawRivalFoundedPopup();
   drawAncientMessagePopup();
   drawMissionsPopup();
@@ -28445,6 +28604,7 @@ canvas.addEventListener('mousemove',e=>{
   _diamondOkHover=!!(activePopup==='diamond_discovery'&&_diamondDiscoveryOkBounds&&cp.x>=_diamondDiscoveryOkBounds.x&&cp.x<=_diamondDiscoveryOkBounds.x+_diamondDiscoveryOkBounds.w&&cp.y>=_diamondDiscoveryOkBounds.y&&cp.y<=_diamondDiscoveryOkBounds.y+_diamondDiscoveryOkBounds.h);
   _carUnlockOkHover=!!(activePopup==='car_unlock'&&_carUnlockOkBounds&&cp.x>=_carUnlockOkBounds.x&&cp.x<=_carUnlockOkBounds.x+_carUnlockOkBounds.w&&cp.y>=_carUnlockOkBounds.y&&cp.y<=_carUnlockOkBounds.y+_carUnlockOkBounds.h);
   _engineUnlockOkHover=!!(activePopup==='engine_unlock'&&_engineUnlockOkBounds&&cp.x>=_engineUnlockOkBounds.x&&cp.x<=_engineUnlockOkBounds.x+_engineUnlockOkBounds.w&&cp.y>=_engineUnlockOkBounds.y&&cp.y<=_engineUnlockOkBounds.y+_engineUnlockOkBounds.h);
+  _upgradeUnlockOkHover=!!(activePopup==='upgrade_unlock'&&_upgradeUnlockOkBounds&&cp.x>=_upgradeUnlockOkBounds.x&&cp.x<=_upgradeUnlockOkBounds.x+_upgradeUnlockOkBounds.w&&cp.y>=_upgradeUnlockOkBounds.y&&cp.y<=_upgradeUnlockOkBounds.y+_upgradeUnlockOkBounds.h);
   if(activePopup==='rival_founded'&&_rivalFoundedOkBounds){const b=_rivalFoundedOkBounds; popupState.rivalOkHover=cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h; if(popupState.rivalOkHover) canvas.style.cursor='pointer';}
   if(activePopup==='ancient_message'&&_ancientPopupOkBounds){const b=_ancientPopupOkBounds; popupState.ancientOkHover=cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h; if(popupState.ancientOkHover) canvas.style.cursor='pointer';}
   _quitYesHover=!!(activePopup==='quitconfirm'&&quitConfirmYesBounds&&cp.x>=quitConfirmYesBounds.x&&cp.x<=quitConfirmYesBounds.x+quitConfirmYesBounds.w&&cp.y>=quitConfirmYesBounds.y&&cp.y<=quitConfirmYesBounds.y+quitConfirmYesBounds.h);
@@ -29226,6 +29386,14 @@ canvas.addEventListener('mouseup',e=>{
         }}
         return;
       }
+      // Upgrade unlock popup — mirrors car_unlock behaviour
+      if(activePopup==='upgrade_unlock'){
+        if(_upgradeUnlockOkBounds){const b=_upgradeUnlockOkBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+          pendingUpgradeUnlocks.shift();
+          activePopup=null; popupState={}; return;
+        }}
+        return;
+      }
       // [ESC] text click in any popup
       if(activePopup&&popupState.escBounds){
         const eb=popupState.escBounds;
@@ -29306,6 +29474,8 @@ canvas.addEventListener('mouseup',e=>{
           // ice) gate on planet visits/discoveries, not flags — this catch-all
           // unlocks them too.
           _cheatUnlockAllCars=true;
+          // Also reveal the event-locked planet upgrades (no popups for the cheat).
+          _foundryUnlocked=true; _largeStationUnlocked=true; _terminalUnlocked=true; _bakeryUnlocked=true;
           _chatMsg('ALL ENGINES & TRAIN CARS UNLOCKED','rgba(180,235,255,1)');
           return;
         }
@@ -30836,6 +31006,7 @@ function _buildSaveObject(){
     _classJEngineUnlocked, _classREngineUnlocked, _N700EngineUnlocked,
     _steelProdLog,
     _sensorUpgradeActive, _stationCostDiscount, _sandstormCheckSd, _playerDeliveryCount, _foundryCalloutShown,
+    _foundryUnlocked, _largeStationUnlocked, _terminalUnlocked, _bakeryUnlocked,
     _totalPassengersDelivered, _totalHazmatIncinerated, _anyCargoProduced,
     trainyard, financeLedger:_trimmedFinance, _ledgerSummary:_builtLedgerSummary, purchaseLedger, corpValueHistory, corpStatsHistory, aiCorpStatsHistory, _corp, _ceoHireCandidates,
     creditSnapshots, lastCreditSnapshotSd,
@@ -30986,6 +31157,7 @@ function _restoreFromSave(save){
   // early save where the player hasn't built a foundry yet). Restore the shown
   // flag; never resume an in-flight fade.
   _foundryCalloutShown=!!save._foundryCalloutShown; _foundryCalloutStartMs=0; _foundryCalloutFadeOutStartMs=0; _foundryCardScreenBounds=null;
+  pendingUpgradeUnlocks=[];
   // Loaded games have played before — treat speed-tip as permanently suppressed.
   _speedTipSuppressed=true; _speedTipStartMs=0; _speedTipNextRealMs=0; _speedTipFadeOutStartMs=0;
   _missionTipFired=true; _missionTipStartMs=0; _missionTipPending=false;   // suppress M-tip on loaded games
@@ -31077,6 +31249,21 @@ function _restoreFromSave(save){
     return {...rest, visitedSnapshot:new Set(visitedSnapshot||[])};
   });
   _recomputeMissionTargets();
+  // Upgrade-unlock gates. Use the saved flag when present; otherwise DERIVE from
+  // game state so saves made before this feature (or whose unlock event already
+  // happened) don't lock the player out of upgrades they should already have.
+  // (Placed AFTER galaxy / missions / visitedPlanetIds / car flags are all
+  // restored so the derivation reads live state.)
+  {
+    const _saveHasUpg=(uid)=>!!(galaxy&&galaxy.planets&&galaxy.planets.some(q=>(q.upgrades||[]).includes(uid)));
+    const _missDone=(id)=>missions.some(m=>m.id===id&&m.status==='completed');
+    const _anyPlanet=(pred)=>!!(galaxy&&galaxy.planets&&galaxy.planets.some(pred));
+    _foundryUnlocked      = !!save._foundryUnlocked      || _missDone('create_route') || _saveHasUpg('iron_foundry') || !!_ironCarUnlocked;
+    _largeStationUnlocked = !!save._largeStationUnlocked || _missDone('produce_iron')  || !!_ironCarUnlocked || _anyPlanet(q=>q.hasLargeStation||q.hasTerminal);
+    _terminalUnlocked     = !!save._terminalUnlocked     || !!_steelCarUnlocked || _anyPlanet(q=>q.hasTerminal);
+    _bakeryUnlocked       = !!save._bakeryUnlocked       || _saveHasUpg('bakery') || _anyPlanet(q=>q.type&&q.type.id==='agri'&&visitedPlanetIds.has(q.id));
+  }
+  pendingUpgradeUnlocks=[];
   pendingMissionIntros=save.pendingMissionIntros||[];
   pendingGoldDiscoveries=save.pendingGoldDiscoveries||[];
   pendingDiamondDiscoveries=save.pendingDiamondDiscoveries||[];
@@ -31596,7 +31783,7 @@ function startGame(){
   // runs at title PLAY, BEFORE the player picks their corp name in corpsetup,
   // so corpName is still the default placeholder at this point. It fires at
   // the fadein → galaxy transition instead (same as the game_start GA event).
-  activePopup=null; popupState={}; gameSpeedIdx=SPEED_DEFAULT_IDX; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _missionTipPending=false; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _foundryCompletedMs=0; _produceIronTimerMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _ancientSchematicsTimerMs=0; _ancientSchematicsPlanetId=-1; _ancientSchematicsFired=false; _hasZoomed=false; _buyTrainTipStartMs=0; _buyTrainTipShown=false; _prevActivePopupForSfx=null; _missionTipFired=false; _visitPlanetCompletedMs=0; _tutorialDoneMs=0; _crTutorialDoneMs=0; _firstNonLowOrbitFired=false; _orbitHintStartMs=0; _orbitHintPlanetId=-1; _crTrainPreselected=false; _foundryCalloutShown=false; _foundryCalloutStartMs=0; _foundryCalloutFadeOutStartMs=0; _foundryCardScreenBounds=null;
+  activePopup=null; popupState={}; gameSpeedIdx=SPEED_DEFAULT_IDX; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _missionTipPending=false; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _foundryCompletedMs=0; _produceIronTimerMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _ancientSchematicsTimerMs=0; _ancientSchematicsPlanetId=-1; _ancientSchematicsFired=false; _hasZoomed=false; _buyTrainTipStartMs=0; _buyTrainTipShown=false; _prevActivePopupForSfx=null; _missionTipFired=false; _visitPlanetCompletedMs=0; _tutorialDoneMs=0; _crTutorialDoneMs=0; _firstNonLowOrbitFired=false; _orbitHintStartMs=0; _orbitHintPlanetId=-1; _crTrainPreselected=false; _foundryCalloutShown=false; _foundryCalloutStartMs=0; _foundryCalloutFadeOutStartMs=0; _foundryCardScreenBounds=null; _foundryUnlocked=false; _largeStationUnlocked=false; _terminalUnlocked=false; _bakeryUnlocked=false; pendingUpgradeUnlocks=[];
   _newspaper=null; _newspaperLastSd=829; _newspaperPrevSpeed=0; _newspaperNextHover=false; _newspaperNextBounds=null; _newspaperPrevHover=false; _newspaperPrevBounds=null; _newspaperArchive=[]; _newspaperViewIdx=null; _paperMajorUsed=[]; _paperMinorUsed=[]; _paperLayout=0; _paperIssueNum=0; _paperIdx=randInt(0,_PAPER_NAMES.length-1); _newsEventLog=[]; _newsSnapshot=null;
   _speedLeftHover=false; _speedRightHover=false; _panelTabHover=null; _routeHereBtnHover=false; _assignBtnHover=false; _cancelRouteBtnHover=false; _planetStarNameHover=false; _starPanelPlanetHover=-1; _trainAddHover=false; _trainRowHover=-1; _pokedexSortHover=false; _pokedexRowHover=-1; _starRegistrySortHover=false; _starRegistryRowHover=-1; _goldOkHover=false; _diamondOkHover=false; _carUnlockOkHover=false; _quitYesHover=false; _quitNoHover=false; _saveGameBtnHover=false; _startBtnHover=false; _loadBtnHover=false; _htpBtnHover=false; _htpDotHover=-1; _htpSkipHover=false; pokedexRowBounds=[]; starRegistryRowBounds=[]; loadBtnBounds=null; saveGameBtnBounds=null;
   fogPoints=[]; fogGridSet=new Set(); fogCanvas=null;
@@ -32863,6 +33050,10 @@ function loop(ts){
     if(pendingEngineUnlocks.length>0&&!activePopup){
       gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='engine_unlock';
       popupState={engineUnlock:pendingEngineUnlocks[0]};
+    }
+    if(pendingUpgradeUnlocks.length>0&&!activePopup){
+      gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='upgrade_unlock';
+      popupState={upgradeUnlock:pendingUpgradeUnlocks[0]};
     }
     if(pendingDiamondDiscoveries.length>0&&!activePopup){
       playSound('discovery');
