@@ -13187,7 +13187,7 @@ function drawTrainsPanel(){
     const ROW_H=82, STRIP_H=17, STRIP_W=PANEL_W-16;
     const carScale=STRIP_H/CAR_H;
     const carPW=CAR_W*carScale; // base width; engine types may be wider
-    const playerTrains=trains.reduce((a,t,i)=>(t.isPlayer&&a.push({t,i}),a),[]);
+    const playerTrains=_playerTrainList();
     // +1 row at the end for the "Add new train" pseudo-slot
     const panelContentH=(playerTrains.length+1)*ROW_H;
     const panelMaxScroll=Math.max(0,panelContentH-panelViewH);
@@ -14638,7 +14638,10 @@ function updateTrain(t, dt){
         if(_firstAvail){
           // Build the hop chain — same infrastructure the blocked phase uses.
           const _isPermRoute=!r.isTempRoute&&!t._detourPermanentRoute;
-          const _hops=_buildHopChain(_newPath,t.orbitR,t,_finalDestId,_isPermRoute);
+          // noCancel must stay true whenever a detour is in flight (a permanent
+          // route is stashed in _detourPermanentRoute) so the final rebuilt hop
+          // resumes that route instead of firing cancelAfterArrival and parking.
+          const _hops=_buildHopChain(_newPath,t.orbitR,t,_finalDestId,_isPermRoute||!!t._detourPermanentRoute);
           if(_hops&&_hops.length>0){
             const _fh=_hops[0]; _fh.phase='orbit'; _fh.orbitSpun=0; _fh.minOrbitDone=true;
             if(_isPermRoute) t._detourPermanentRoute=r;
@@ -14741,7 +14744,7 @@ function updateTrain(t, dt){
             // Fall back to general multi-hop BFS if the direct proxy bypass failed
             if(!_newPath) _newPath=findMultiHopPath(t.planetId,_destId,t);
             if(_newPath&&_newPath.length>1){
-              const _hops=_buildHopChain(_newPath,t.orbitR,t,_destId,_isPermRoute);
+              const _hops=_buildHopChain(_newPath,t.orbitR,t,_destId,_isPermRoute||!!t._detourPermanentRoute);
               const _fh=_hops[0]; _fh.phase='orbit'; _fh.orbitSpun=0; _fh.minOrbitDone=true;
               if(_isPermRoute) t._detourPermanentRoute=r;
               t.route=_fh; t.queuedRoute=_hops.length>1?_hops[1]:null;
@@ -14923,7 +14926,7 @@ function updateTrain(t, dt){
             const _destId=r._multiHopDest;
             const _newPath=findMultiHopPath(t.planetId,_destId,t);
             if(_newPath && _newPath.length>1 && _newPath[1]!==r.stops[r.toIdx]){
-              const _hops=_buildHopChain(_newPath,t.orbitR,t,_destId,false);
+              const _hops=_buildHopChain(_newPath,t.orbitR,t,_destId,!!t._detourPermanentRoute);
               if(_hops && _hops.length>0){
                 const _fh=_hops[0]; _fh.phase='orbit'; _fh.orbitSpun=0; _fh.minOrbitDone=true;
                 t.route=_fh; t.queuedRoute=_hops.length>1?_hops[1]:null;
@@ -15039,8 +15042,27 @@ function updateTrain(t, dt){
   } else { // transit
     const fromP2=_gp(r.stops[r.fromIdx]);
     const toP2=_gp(r.stops[r.toIdx]);
-    const lt2=computeLiveTangent(fromP2,toP2,t.orbitR,r.arrivalOrbitR);
-    if(!lt2) return;
+    let lt2=computeLiveTangent(fromP2,toP2,t.orbitR,r.arrivalOrbitR);
+    // ── Degenerate-segment guard ─────────────────────────────────
+    // A same-planet transit (stops[from]===stops[to]) — or a segment whose
+    // tangent can't be computed (e.g. fully overlapping orbits) — has no path
+    // to traverse. The old `if(!lt2) return` froze the train HERE FOREVER: the
+    // "completely stuck" failure mode (a [X,X] temp stub left the train in
+    // transit-to-itself with its real route stranded in queuedRoute, and the
+    // null-tangent early-return meant it never advanced and never completed).
+    // Instead, synthesize a zero-length tangent at the current angle and force
+    // the arrival threshold so the normal, tested arrival/route-advance code
+    // below runs THIS frame — activating the queued route, advancing a
+    // repeating route, handling cancelAfterArrival, etc., exactly as a real
+    // arrival would. This makes any degenerate segment self-heal.
+    if(!lt2 || r.stops[r.fromIdx]===r.stops[r.toIdx] || !(lt2.tanLen>1e-6)){
+      const _aa=t.angle, _aR=r.arrivalOrbitR||t.orbitR;
+      lt2={tanLen:0, tanAngle:_aa,
+           ax:fromP2.x+t.orbitR*Math.cos(_aa), ay:fromP2.y+t.orbitR*Math.sin(_aa),
+           bx:toP2.x+_aR*Math.cos(_aa),        by:toP2.y+_aR*Math.sin(_aa)};
+      r._departExtLen=null; r._lockedTanLen=null; r._lockedTanAngle=null;
+      r.transitDist=_trainTailLen(t)+1; // ≥ _eTanLen(0)+tail → arrival fires this frame
+    }
     // Speed floor = arrival orbit speed; never decelerate below what the train will do in orbit
     const vBase=ORB_SPD*(r.arrivalOrbitR||t.orbitR);
     const vNow=r.transitSpeed||ORB_SPD*t.orbitR;
@@ -15278,7 +15300,46 @@ function updateTrain(t, dt){
           t.route=null; t.queuedRoute=null; return;
         }
         const newPath=findMultiHopPath(curId,destId,t);
-        if(!newPath||newPath.length<=1){ t.route=null; t.queuedRoute=null; t._detourPermanentRoute=null; return; }
+        if(!newPath||newPath.length<=1){
+          if(t._detourPermanentRoute){
+            // (1) Transient "no path" while a REPEATING route is detouring around
+            // a blocked segment. The null is almost always momentary (BFS hit its
+            // expansion cap; every candidate first hop briefly star-crossed; an
+            // edge-of-range arrival orbit at this waypoint). Do NOT destroy the
+            // player's repeating route — re-arm a BLOCKED retry toward its next
+            // stop (destId) from the current waypoint, keeping _detourPermanentRoute
+            // intact. The blocked phase re-attempts the multi-hop every orbit (plus
+            // 30/60s lookahead) and resumes the permanent route once a path opens.
+            t.route={
+              stops:[curId,destId], isLoop:false, fromIdx:0, toIdx:1, dir:1,
+              phase:'blocked', orbitSpun:0, minOrbitDone:true, _blockedTime:0,
+              arrivalOrbitR:t.orbitR, stopOrbitR:[t.orbitR,t.orbitR], _recomputeTimer:0,
+              isTempRoute:true, cancelAfterArrival:false, _multiHopDest:destId
+            };
+            t.queuedRoute=null;
+            return;
+          }
+          // (3) Genuine one-way dead end — no permanent route to fall back on.
+          // Surface it to the player instead of silently parking: select the
+          // train, frame it at 50% zoom, and post a red chat warning.
+          if(t.isPlayer){
+            const _ti=trains.indexOf(t);
+            if(_ti>=0){
+              sel={type:'car',data:{trainIdx:_ti,carIdx:0,car:t.cars[0]}};
+              routeStops=[]; assignPending=false; routeHerePending=false;
+              _focusTrainInPanel(_ti);
+              cam.scale=Math.sqrt(MIN_SC*MAX_SC); // 50% of log zoom range
+              const _tp=getSelWorldPos();
+              if(_tp){
+                trackingOffset={x:PANEL_W/(2*cam.scale),y:0};
+                cam.x=_tp[0]+trackingOffset.x; cam.y=_tp[1];
+                clampCamera(); tracking=true;
+              }
+            }
+            _chatMsg("This TRAIN couldn't find a viable ROUTE!", 'rgba(255,100,100,1)', 5000, true);
+          }
+          t.route=null; t.queuedRoute=null; t._detourPermanentRoute=null; return;
+        }
         // Preserve noCancel across recalculations so the last rebuilt hop doesn't fire
         // cancelAfterArrival:true and bypass the permanent-route resume code.
         const hops=_buildHopChain(newPath,t.orbitR,t,destId,!!t._detourPermanentRoute);
@@ -18902,35 +18963,22 @@ function _drawTutorialChain(stage){
   }
   // ── Phase: train_detail_post_confirm ──────────────────────
   // After CONFIRM the train detail popup reopens with the player's updated
-  // train. Two bubbles below the relevant text:
-  //   • Yellow (immediate): points UP at the "-X% max speed" portion of the
-  //     cars-count line, telling the player that towing a lot of CARGO
-  //     limits an ENGINE's acceleration + max speed. Only renders if the
-  //     train is heavy enough to actually incur the penalty.
-  //   • Blue companion (delayed 10 s): points UP at the [ESC] close hint,
-  //     reminding the player how to close the popup.
-  // Both follow the popup-close fade-out (multiply by 1 - elapsed_since_close/1000).
+  // train. A single blue bubble fades in IMMEDIATELY, pointing UP at the [ESC]
+  // close hint to remind the player how to close the popup. It follows the
+  // popup-close fade-out (multiply by 1 - elapsed_since_close/1000).
   if(_tutorialPhase==='train_detail_post_confirm'){
     if(_tutorialFadeOutStartMs===0 && activePopup!=='train') _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
     if(r.advanced){ _advanceTo('post_builder_wait'); return; }
-    // Yellow bubble — anchored at the midpoint of the "-X% max speed" text
-    // when it exists (i.e. the train has > 2 mid cars worth of cargo). The
-    // helper renders the tail tip at anchor.y + 4 in below-placement mode,
-    // which lands just below the text descender.
-    const _msB=popupState.maxSpeedTextBounds;
-    if(_msB){
-      _drawBubble(["Towing a lot of CARGO can limit an ENGINE's acceleration and max speed"],
-                  {x:_msB.x+_msB.w/2, y:_msB.y+_msB.h}, r.alpha, {below:true});
-    }
-    // Blue bubble — appears at t=10s, fades in over 1s, then follows the
-    // shared popup-close fade-out. _refT is the elapsed time used for the
-    // blue fade-in calculation: while the popup is still open it tracks
-    // real time, but once the popup closes it freezes at the moment of
-    // close so the blue bubble's pre-close fade-in level snapshots cleanly.
+    // Blue bubble (upper-right [ESC] hint) — now fades in IMMEDIATELY on
+    // entering this phase (over ~1 s), then follows the shared popup-close
+    // fade-out. It replaces a previously-shown yellow "Towing a lot of
+    // CARGO..." bubble, which has been removed. _refT is the elapsed time used
+    // for the fade-in: while the popup is still open it tracks real time, but
+    // once the popup closes it freezes at the moment of close so the fade-in
+    // level snapshots cleanly.
     const _refT=_tutorialFadeOutStartMs>0 ? (_tutorialFadeOutStartMs-_tutorialPhaseStartMs) : _elapsed;
-    let _wouldBeBlue=0;
-    if(_refT>=10000) _wouldBeBlue=Math.min(1,(_refT-10000)/1000);
+    const _wouldBeBlue=Math.min(1, _refT/1000);
     const _fadeOutMult=_tutorialFadeOutStartMs>0 ? Math.max(0,1-(_now-_tutorialFadeOutStartMs)/1000) : 1;
     const _blueAlpha=_wouldBeBlue*_fadeOutMult;
     if(_blueAlpha>0 && popupState.escBounds){
@@ -23912,6 +23960,7 @@ function drawPlanetDetailPopup(){
 
 let trainsPopupAddBounds=null;
 let trainsPopupRowBounds=[]; // [{x,y,w,h, trainIdx}] for dbl-click name edit
+let trainsPopupReorderBounds=[]; // [{x,y,w,h, trainObj, dir, ri}] hover up/down reorder arrows
 let routesPopupRowBounds=[]; // [{x,y,w,h, trainIdx}] for ROUTES popup click hit-tests
 let routesPopupStopBounds=[]; // [{x,y,w,h, planetId, trainIdx}] per-stop planet panel hit-tests in ROUTES popup
 let routesPopupVizBounds=[]; // [{x,y,w,h, trainIdx}] per-train viz strip hit-tests (drives the cargo tooltip)
@@ -25104,6 +25153,37 @@ function drawTrainBuilderPopup(){
   ctx.restore();
 }
 
+// Player trains in their user-defined DISPLAY order. Every train UI (right
+// panel, [T] window, [R] routes, _focusTrainInPanel) iterates this so they all
+// stay in the SAME order; the [T]-window reorder arrows swap adjacent t._ord
+// values. Returns [{t,i}] where i is the index into the global trains[] array —
+// reordering never moves array elements, so _aiCorp.trainIndices / sel.trainIdx
+// stay valid. _ord is densely renumbered to the visible position on every call,
+// which also lazily assigns an order to newly-built trains (sorted to the end).
+function _playerTrainList(){
+  const a=[];
+  for(let i=0;i<trains.length;i++){ const t=trains[i]; if(t&&t.isPlayer) a.push({t,i}); }
+  a.sort((x,y)=>{
+    const ox=typeof x.t._ord==='number'?x.t._ord:1e9+x.i;
+    const oy=typeof y.t._ord==='number'?y.t._ord:1e9+y.i;
+    return ox-oy;
+  });
+  for(let k=0;k<a.length;k++) a[k].t._ord=k;
+  return a;
+}
+// Move a player train one slot up (dir=-1) or down (dir=+1) in the shared
+// display order by swapping _ord with its neighbour. No-op at the ends.
+function _reorderPlayerTrain(trainObj, dir){
+  const list=_playerTrainList(); // densely renumbers _ord first
+  const idx=list.findIndex(x=>x.t===trainObj);
+  if(idx<0) return false;
+  const j=idx+dir;
+  if(j<0||j>=list.length) return false;
+  const a=list[idx].t, b=list[j].t;
+  const _tmp=a._ord; a._ord=b._ord; b._ord=_tmp;
+  return true;
+}
+
 function drawTrainsPopup(){
   if(activePopup!=='trains'||!galaxy) return;
   const pw=580, ph=430;
@@ -25127,14 +25207,18 @@ function drawTrainsPopup(){
 
   const listY=py+34, listH=ph-44, ROW=162;
   const scroll=popupState.scroll||0;
-  const playerTrains=trains.reduce((a,t,i)=>(t.isPlayer&&a.push({t,i}),a),[]);
+  const playerTrains=_playerTrainList();
   trainsPopupRowBounds=[];
+  trainsPopupReorderBounds=[];
   ctx.save(); ctx.beginPath(); ctx.rect(px+1,listY,pw-2,listH); ctx.clip();
   for(let ri=0;ri<playerTrains.length;ri++){
     const {t:train,i:ti}=playerTrains[ri];
     const ry=listY+ri*ROW-scroll;
     if(ry+ROW<listY||ry>listY+listH) continue;
-    trainsPopupRowBounds.push({x:px+2,y:ry,w:pw-4,h:ROW,trainIdx:ti});
+    // Store ri (the playerTrains index) — NOT the bounds-array position — so the
+    // hover handler can report it directly. When the list is scrolled, leading
+    // rows are culled from this array, so its index no longer matches ri.
+    trainsPopupRowBounds.push({x:px+2,y:ry,w:pw-4,h:ROW,trainIdx:ti,ri});
     if(_trainRowHover===ri){ ctx.fillStyle='rgba(30,50,110,0.40)'; ctx.fillRect(px+2,ry,pw-4,ROW); }
     else if(ri%2===0){ ctx.fillStyle='rgba(15,22,50,0.35)'; ctx.fillRect(px+2,ry,pw-4,ROW); }
     // Train name
@@ -25212,6 +25296,34 @@ function drawTrainsPopup(){
     ctx.save();
     drawRouteStrip(train, px+10, ry+148, pw-20);
     ctx.restore();
+    // ── Reorder arrows (hover-only, right edge, stacked) ─────────
+    // Up moves the train one slot earlier, down one slot later, in the shared
+    // display order used by this window, the right panel, and the Routes popup.
+    // Greyed + non-clickable at the list ends.
+    if(_trainRowHover===ri){
+      // Bare triangle arrow-heads (no button box): up = apex-up, down = apex-down.
+      // Pushed further down than the old buttons to leave a clear buffer below
+      // the train sprite (car strip ends ~ry+72).
+      const _axc=px+pw-28;            // triangle centre x (left of scrollbar)
+      const _tw=7,_th=8,_gap=8;       // half-width, height, vertical gap between the two
+      const _cyMid=ry+ROW/2+26;       // pair centre — well below the car strip
+      const _upMidY=_cyMid-_gap/2-_th/2, _dnMidY=_cyMid+_gap/2+_th/2;
+      const _mkArrow=(midY,dir,enabled)=>{
+        const _hovA=enabled&&popupState._trainReorderHover&&popupState._trainReorderHover.ri===ri&&popupState._trainReorderHover.dir===dir;
+        ctx.beginPath();
+        if(dir<0){ ctx.moveTo(_axc,midY-_th/2); ctx.lineTo(_axc-_tw,midY+_th/2); ctx.lineTo(_axc+_tw,midY+_th/2); }
+        else     { ctx.moveTo(_axc,midY+_th/2); ctx.lineTo(_axc-_tw,midY-_th/2); ctx.lineTo(_axc+_tw,midY-_th/2); }
+        ctx.closePath();
+        ctx.fillStyle=enabled?(_hovA?'rgba(150,215,255,0.99)':'rgba(150,190,240,0.85)'):'rgba(80,86,104,0.5)';
+        ctx.fill();
+        ctx.strokeStyle=enabled?(_hovA?'rgba(210,238,255,0.95)':'rgba(90,150,230,0.55)'):'rgba(70,76,92,0.4)';
+        ctx.lineWidth=1; ctx.stroke();
+        // Clickable/hover bounds — a padded box around the triangle.
+        if(enabled) trainsPopupReorderBounds.push({x:_axc-_tw-4,y:midY-_th/2-4,w:(_tw+4)*2,h:_th+8,trainObj:train,dir,ri});
+      };
+      _mkArrow(_upMidY,-1,ri>0);
+      _mkArrow(_dnMidY,+1,ri<playerTrains.length-1);
+    }
     if(ri<playerTrains.length-1){
       ctx.strokeStyle='rgba(80,50,20,0.3)'; ctx.lineWidth=1;
       ctx.beginPath(); ctx.moveTo(px+10,ry+ROW-2); ctx.lineTo(px+pw-10,ry+ROW-2); ctx.stroke();
@@ -25262,8 +25374,8 @@ function drawRoutesPopup(){
   // .route or .queuedRoute. For display, prefer the live .route; fall back
   // to the queued real route when the train is mid-temp-leg.
   const _routed=[];
-  for(let i=0;i<trains.length;i++){
-    const t=trains[i]; if(!t||!t.isPlayer) continue;
+  for(const {t,i} of _playerTrainList()){
+    if(!t) continue;
     let r=null;
     if(t.route && !t.route.isTempRoute && (t.route.stops||[]).length>=2) r=t.route;
     else if(t.queuedRoute && !t.queuedRoute.isTempRoute && (t.queuedRoute.stops||[]).length>=2) r=t.queuedRoute;
@@ -28094,9 +28206,10 @@ function drawGalaxy(ts,dt){
 function _focusTrainInPanel(trainIdx){
   if(!trains[trainIdx]||!trains[trainIdx].isPlayer) return;
   panelTab='trains';
-  // Build the same playerTrains projection drawTrainsPanel uses.
-  const _pt=trains.reduce((a,t,i)=>(t.isPlayer&&a.push(i),a),[]);
-  const _ri=_pt.indexOf(trainIdx);
+  // Use the same ordered projection every train UI uses, so the scroll target
+  // matches the on-screen row order after any reorder.
+  const _pt=_playerTrainList();
+  const _ri=_pt.findIndex(x=>x.i===trainIdx);
   if(_ri<0) return;
   const _ROW_H=82;
   const _viewH=GH-TOP_H;
@@ -28317,7 +28430,7 @@ function panelClick(sx,sy,shiftKey){
   }
   if(!trains.length) return;
   const ROW_H=82;
-  const playerTrains=trains.reduce((a,t,i)=>(t.isPlayer&&a.push({t,i}),a),[]);
+  const playerTrains=_playerTrainList();
   const ri=Math.floor((sy-TOP_H+panelScroll)/ROW_H);
   // "Add new train" pseudo-slot at index playerTrains.length — opens builder.
   if(ri===playerTrains.length){ openTrainBuilder(); return; }
@@ -28354,7 +28467,7 @@ function panelClick(sx,sy,shiftKey){
 function panelDblClick(sx,sy){
   if(!galaxy) return;
   if(panelTab==='trains'){
-    const playerTrains=trains.reduce((a,t,i)=>(t.isPlayer&&a.push({t,i}),a),[]);
+    const playerTrains=_playerTrainList();
     const ROW_H=82;
     const ri=Math.floor((sy-TOP_H+panelScroll)/ROW_H);
     // "Add new train" pseudo-slot — open builder on dblclick too.
@@ -28405,7 +28518,11 @@ function assignRouteToTrain(train){
   const realRoute={stops,isLoop,fromIdx:0,toIdx:1,phase:'orbit',orbitSpun:0,dir:1,
                    minOrbitDone:true,stopOrbitR,_recomputeTimer:0};
   const r=train.route;
-  if(r && r.phase==='transit'){
+  // NOTE: a transit whose from===to is NOT really mid-flight (it's a degenerate
+  // zero-length segment — see the transit-phase guard in updateTrain). Excluding
+  // it here means the train is treated as parked at its planet and the new route
+  // is assigned directly, instead of freezing ANOTHER [X,X] stub in front of it.
+  if(r && r.phase==='transit' && r.stops[r.fromIdx]!==r.stops[r.toIdx]){
     // Train is mid-flight — freeze the current segment and queue the new route behind it
     const fromPlanetId=r.stops[r.fromIdx];
     const destPlanetId=r.stops[r.toIdx];
@@ -28516,6 +28633,17 @@ function findMultiHopPath(sourcePlanetId, destPlanetId, train){
   };
   // Orbit radius for pathfinding — star proxies use their actual starOrbitR
   const _pOrbitR=(p)=>p.isStarProxy?p.starOrbitR:(ORBIT_TIERS[p.size]?.['LOW']??0);
+  // Departure-orbit radius for an edge. For the FIRST hop — leaving the SOURCE
+  // planet, where the train physically is right now — use the train's ACTUAL
+  // current orbit radius instead of the LOW approximation. A train parked at a
+  // MED/HIGH orbit departs on a LONGER tangent than LOW assumes; validating the
+  // first hop at LOW underestimates that tangent and lets BFS propose a first
+  // hop that is range-blocked at the train's real orbit. The train then can't
+  // depart, re-plans, gets handed the same blocked hop, and oscillates
+  // orbit↔blocked forever (the classic "stuck on multi-hop" symptom). Every
+  // intermediate hop still uses LOW (the train always descends to LOW to
+  // pass through a waypoint), so only the source edge changes.
+  const _depOrbitR=(fromId,fp)=>(fromId===sourcePlanetId&&train&&train.orbitR)?train.orbitR:_pOrbitR(fp);
   // Estimate transit time (game-frames) from predicted planet positions using LOW-orbit tangent
   const _hopETA=(fpP,tpP)=>{
     const fr=_pOrbitR(fpP), tr2=_pOrbitR(tpP);
@@ -28529,7 +28657,7 @@ function findMultiHopPath(sourcePlanetId, destPlanetId, train){
     const fp=_gp(fromId), tp=_gp(toId);
     if(!fp||!tp) return false;
     const fpP=_atTime(fp,eta), tpP=_atTime(tp,eta);
-    const fr=_pOrbitR(fp), tr2=_pOrbitR(tp);
+    const fr=_depOrbitR(fromId,fp), tr2=_pOrbitR(tp);
     return !transitPathBlocked(fpP,tpP,fr,tr2,train);
   };
   // Helper to memoize before returning. LRU-trim when the cache grows beyond
@@ -28552,7 +28680,7 @@ function findMultiHopPath(sourcePlanetId, destPlanetId, train){
     if(!_edgeOk(fromId,toId,eta)) return false;
     const fp=_gp(fromId), tp=_gp(toId);
     if(!fp||!tp) return false;
-    const lt=computeLiveTangent(_atTime(fp,eta),_atTime(tp,eta),_pOrbitR(fp),_pOrbitR(tp));
+    const lt=computeLiveTangent(_atTime(fp,eta),_atTime(tp,eta),_depOrbitR(fromId,fp),_pOrbitR(tp));
     return !lt || lt.tanLen<=_engMaxRange(train)*_RANGE_MARGIN;
   };
   // Reuse a cached path ONLY if its FIRST hop still validates against CURRENT
@@ -28620,7 +28748,14 @@ function findMultiHopPath(sourcePlanetId, destPlanetId, train){
       queue.push([nb.i,newPath,nb.arrEta]);
     }
   }
-  return _store(null); // no path found — cache the negative result too
+  // No path found — do NOT cache the negative result. findMultiHopPath returns
+  // null only transiently (BFS hit its _MAX_EXPANSIONS cap, or every candidate
+  // first hop was briefly star-crossed / out-of-range at the train's current
+  // orbit). Caching that null would lock the failure in for the whole
+  // _MULTIHOP_CACHE_TTL_SD window — long enough to make a detouring train give
+  // up and park. Re-running the (≤250-expansion) BFS next call is cheap and
+  // recovers the instant a path reopens.
+  return null;
 }
 
 // Build an array of single-segment temp route objects linked via _nextQueuedRoute.
@@ -28746,8 +28881,11 @@ canvas.addEventListener('wheel',e=>{
   }
   if(activePopup==='trains'){
     const playerCount=trains.filter(t=>t.isPlayer).length;
-    const listH=430-60;
-    const maxScroll=Math.max(0,playerCount*145-listH);
+    // Must match drawTrainsPopup's geometry exactly (ph=430 → listH=ph-44=386,
+    // ROW=162). Using stale values (370 / 145) made the wheel's max-scroll fall
+    // short of the scrollbar-drag max, clipping the last row at the bottom.
+    const listH=430-44, ROW=162;
+    const maxScroll=Math.max(0,playerCount*ROW-listH);
     popupState.scroll=Math.max(0,Math.min(maxScroll,(popupState.scroll||0)+e.deltaY*0.6));
     return;
   }
@@ -29153,9 +29291,12 @@ canvas.addEventListener('mousemove',e=>{
   if(activePopup==='trains'){
     _trainAddHover=!!(trainsPopupAddBounds&&cp.x>=trainsPopupAddBounds.x&&cp.x<=trainsPopupAddBounds.x+trainsPopupAddBounds.w&&cp.y>=trainsPopupAddBounds.y&&cp.y<=trainsPopupAddBounds.y+trainsPopupAddBounds.h);
     _trainRowHover=-1;
-    for(let _ri=0;_ri<trainsPopupRowBounds.length;_ri++){const _rb=trainsPopupRowBounds[_ri];if(cp.x>=_rb.x&&cp.x<=_rb.x+_rb.w&&cp.y>=_rb.y&&cp.y<=_rb.y+_rb.h){_trainRowHover=_ri;break;}}
-    if(_trainAddHover||_trainRowHover>=0) canvas.style.cursor='pointer';
-  } else { _trainAddHover=false; _trainRowHover=-1; }
+    for(let _ri=0;_ri<trainsPopupRowBounds.length;_ri++){const _rb=trainsPopupRowBounds[_ri];if(cp.x>=_rb.x&&cp.x<=_rb.x+_rb.w&&cp.y>=_rb.y&&cp.y<=_rb.y+_rb.h){_trainRowHover=_rb.ri;break;}}
+    // Reorder up/down arrows (only present for the currently hovered row).
+    popupState._trainReorderHover=null;
+    for(const _rb of trainsPopupReorderBounds){if(cp.x>=_rb.x&&cp.x<=_rb.x+_rb.w&&cp.y>=_rb.y&&cp.y<=_rb.y+_rb.h){popupState._trainReorderHover={ri:_rb.ri,dir:_rb.dir};break;}}
+    if(_trainAddHover||_trainRowHover>=0||popupState._trainReorderHover) canvas.style.cursor='pointer';
+  } else { _trainAddHover=false; _trainRowHover=-1; popupState._trainReorderHover=null; }
   // Hover tracking for ROUTES popup rows + per-stop panes + [ESC] close label
   if(activePopup==='routes'){
     _routesRowHover=-1;
@@ -30673,6 +30814,14 @@ canvas.addEventListener('mouseup',e=>{
       }
       // Trains popup interactions
       if(activePopup==='trains'){
+        // Reorder up/down arrows (single click) — checked before the row
+        // double-click so a click on an arrow reorders instead of opening detail.
+        for(const b of trainsPopupReorderBounds){
+          if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+            _reorderPlayerTrain(b.trainObj,b.dir);
+            return;
+          }
+        }
         // + button
         if(trainsPopupAddBounds){
           const b=trainsPopupAddBounds;
@@ -31340,7 +31489,7 @@ document.addEventListener('keydown',e=>{
       const _isCarDetail=(_ck==='arrowright');
       if(_isPrev||_isNextTrain){
         // Build the same {t, i} list the right-panel Trains tab iterates.
-        const _pt=trains.reduce((a,t,i)=>(t.isPlayer&&a.push({t,i}),a),[]);
+        const _pt=_playerTrainList();
         if(_pt.length>1){
           const _curIdx=_pt.findIndex(o=>o.i===popupState.trainIdx);
           if(_curIdx>=0){
@@ -31626,6 +31775,7 @@ function _buildSaveObject(){
     queuedRoute:t.queuedRoute||null,
     _detourPermanentRoute:t._detourPermanentRoute||null,
     preDepartureRules:t.preDepartureRules||null,
+    _ord:(typeof t._ord==='number'?t._ord:null), // user-defined display order
   }));
   // ── Ledger + newspaper trimming ─────────────────────────────
   // financeLedger and _newspaperArchive both grow linearly with stardates
