@@ -16421,12 +16421,13 @@ function _drawUpgradeUnlockVisual(cx,cy,info){
     ctx.fillRect(_mx-2.5,_my-10,5,5);
     ctx.strokeStyle='rgba(190,220,255,0.7)'; ctx.lineWidth=1; ctx.strokeRect(_mx-7,_my-5,14,6);
   } else {
-    // Planet body, biome-tinted, with the upgrade's building on top.
-    const _g=ctx.createRadialGradient(cx-R*0.3,cy-R*0.3,R*0.2,cx,cy,R);
+    // Planet body (SMALLER) with a LARGER upgrade building seated on its surface.
+    const _pr=R*0.6; // shrunk planet so the building reads as the focal element
+    const _g=ctx.createRadialGradient(cx-_pr*0.3,cy-_pr*0.3,_pr*0.2,cx,cy,_pr);
     _g.addColorStop(0,info.biome||'#9a9a9a'); _g.addColorStop(1,'rgba(20,22,28,0.95)');
-    ctx.fillStyle=_g; ctx.beginPath(); ctx.arc(cx,cy,R,0,Math.PI*2); ctx.fill();
-    ctx.strokeStyle='rgba(255,255,255,0.12)'; ctx.lineWidth=1; ctx.beginPath(); ctx.arc(cx,cy,R,0,Math.PI*2); ctx.stroke();
-    drawFoundryBuilding(cx,cy,R,-Math.PI/2,R*1.6,true,info.kind);
+    ctx.fillStyle=_g; ctx.beginPath(); ctx.arc(cx,cy,_pr,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle='rgba(255,255,255,0.12)'; ctx.lineWidth=1; ctx.beginPath(); ctx.arc(cx,cy,_pr,0,Math.PI*2); ctx.stroke();
+    drawFoundryBuilding(cx,cy,_pr,-Math.PI/2,R*2.4,true,info.kind); // sr=_pr → sits on the smaller planet; ssz=R*2.4 → bigger building
   }
   ctx.restore();
 }
@@ -16467,8 +16468,9 @@ function drawUpgradeUnlockPopup(){
   ctx.fillStyle='#ffe080'; ctx.shadowColor='#ffaa20'; ctx.shadowBlur=12;
   ctx.fillText(info.name,px+pw/2,py+42);
   ctx.shadowBlur=0;
-  // Visual.
-  _drawUpgradeUnlockVisual(px+pw/2,py+108,info);
+  // Visual. Building-kind upgrades sit a bit lower so the taller building never
+  // touches the title; station-kind (orbit rings) keeps its higher centre.
+  _drawUpgradeUnlockVisual(px+pw/2,py+(info.kind==='station'?108:125),info);
   // Centred word-wrap helper — draws `text` in `font`/`col`, returns the y of
   // the line AFTER the block.
   const _wrapC=(text,font,col,startY,lh)=>{
@@ -16518,23 +16520,28 @@ function drawRivalFoundedPopup(){
   const pw=460,ph=420;
   const [px,py]=drawPopupBase(pw,ph,'rgba(232,147,32,0.75)');
   ctx.save();
-  // Alert label
-  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
-  ctx.fillStyle='rgba(255,175,45,0.85)';
-  ctx.fillText('RIVAL CORPORATION ESTABLISHED',px+pw/2,py+18);
+  // Alert title — large headline
+  ctx.font='bold 16px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='rgba(255,178,48,0.95)'; ctx.shadowColor='#cc6600'; ctx.shadowBlur=10;
+  ctx.fillText('RIVAL CORPORATION ESTABLISHED',px+pw/2,py+32);
+  ctx.shadowBlur=0;
   // Corp name + location title
   ctx.font='bold 13px Orbitron,sans-serif';
   ctx.fillStyle='#ffcc50'; ctx.shadowColor='#cc6600'; ctx.shadowBlur=12;
-  ctx.fillText(_rf.name,px+pw/2,py+38);
+  ctx.fillText(_rf.name,px+pw/2,py+54);
   ctx.shadowBlur=0;
   ctx.font='11px "Exo 2",sans-serif';
   ctx.fillStyle='rgba(255,210,120,0.85)';
-  ctx.fillText('has been established at '+(_hp?_hp.name:'an undisclosed location'),px+pw/2,py+54);
+  ctx.fillText('has been established at '+(_hp?_hp.name:'an undisclosed location'),px+pw/2,py+70);
   // Divider
   ctx.strokeStyle='rgba(200,120,20,0.35)'; ctx.lineWidth=0.7;
-  ctx.beginPath(); ctx.moveTo(px+20,py+64); ctx.lineTo(px+pw-20,py+64); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(px+20,py+80); ctx.lineTo(px+pw-20,py+80); ctx.stroke();
+  // "CEO" section label above the portrait
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='rgba(228,162,58,0.82)';
+  ctx.fillText('CEO',px+pw/2,py+96);
   // CEO portrait
-  const _pW=88,_pH=88,_pX=Math.round(px+pw/2-44),_pY=py+72;
+  const _pW=88,_pH=88,_pX=Math.round(px+pw/2-44),_pY=py+102;
   const _cImg=imgs[_rCeo.ceoSprite];
   if(_cImg){
     ctx.save(); ctx.beginPath(); ctx.roundRect(_pX,_pY,_pW,_pH,8); ctx.clip();
@@ -26654,6 +26661,17 @@ function drawGalaxy(ts,dt){
   const _vMaxX=cam.x+_rcHwView;
   const _vMinY=cam.y-_rcHhView;
   const _vMaxY=cam.y+_rcHhView;
+  // Orbit-ring cull AABB from the ACTUAL galaxy-viewport corners (s2w of the
+  // visible rect [0..W-PANEL_W]×[TOP_H..GH]). The cam-centred _vMin/_vMax above
+  // is centred on the SCREEN centre (W/2,GH/2), NOT the visible-region centre —
+  // so it misses the left ~PANEL_W/2 / top ~TOP_H/2 strip and was culling orbit
+  // rings near those edges (e.g. a planet in the upper-left). These corners are
+  // exact; +140 screen-px margin so a ring is never culled while any part of it
+  // could be on screen. Used for BOTH the route orbit rings and the per-train
+  // orbit dashes below.
+  const _orbCullM=140/cam.scale;
+  const [_orbVMinX,_orbVMinY]=s2w(0,TOP_H);
+  const [_orbVMaxX,_orbVMaxY]=s2w(W-PANEL_W,GH);
 
   // Route lines — live external tangent lines, one per route segment direction
   for(const train of trains){
@@ -26857,8 +26875,8 @@ function drawGalaxy(ts,dt){
         // Bounding box for the ring = (sp ± orbitR_world). Skip if it
         // doesn't intersect the viewport. Most off-screen stops on a long
         // multi-hop route hit this path.
-        if(sp.x+_orRWorld+_segCullMargin<_vMinX||sp.x-_orRWorld-_segCullMargin>_vMaxX||
-           sp.y+_orRWorld+_segCullMargin<_vMinY||sp.y-_orRWorld-_segCullMargin>_vMaxY) continue;
+        if(sp.x+_orRWorld+_orbCullM<_orbVMinX||sp.x-_orRWorld-_orbCullM>_orbVMaxX||
+           sp.y+_orRWorld+_orbCullM<_orbVMinY||sp.y-_orRWorld-_orbCullM>_orbVMaxY) continue;
         const orR=_orRWorld*cam.scale;
         const [sx,sy]=w2s(sp.x,sp.y);
         const _isCurStopRing=train.planetId===r.stops[si];
@@ -26898,16 +26916,8 @@ function drawGalaxy(ts,dt){
   // Train orbit dashes + cars for every train
   trainGalaxyBounds=[];
   const cw=Math.max(4,56*cam.scale), ch=Math.max(2,28*cam.scale);
-  // Orbit-ring cull AABB derived from the ACTUAL galaxy-viewport corners
-  // (s2w of the visible rect). The cam-centred _vMin/_vMax AABB used elsewhere
-  // is centred on screen (W/2, GH/2), but the visible galaxy region is
-  // [0..W-PANEL_W] × [TOP_H..GH] — offset by the right panel + top bar — so its
-  // bottom/left edges fell INSIDE the true viewport and clipped orbit rings near
-  // those edges. These corners are exact; plus a generous 140-screen-px margin
-  // so a ring is never culled while any part of it could be on screen.
-  const _orbCullM=140/cam.scale;
-  const [_orbVMinX,_orbVMinY]=s2w(0,TOP_H);
-  const [_orbVMaxX,_orbVMaxY]=s2w(W-PANEL_W,GH);
+  // _orbCullM / _orbVMin* / _orbVMax* are computed once near the top of this
+  // function (the correct viewport-corner AABB) and reused here.
   for(const train of trains){
     // Show departure-planet orbit dash (always visible; trailing cars may still orbit it during transit)
     const showOrbitDash=!train.route||train.route.phase==='orbit'||train.route.phase==='waiting'||train.route.phase==='transit';
@@ -27973,7 +27983,7 @@ function drawGalaxy(ts,dt){
     {label:'[R] routes',   popup:'routes',     initState:()=>({scroll:0})},
     {label:'[I] tech tree',popup:'techtree',   initState:()=>({})},
     {label:'[M] missions', popup:'missions',   initState:()=>({mScroll:0})},
-    {label:'[L] ranks',    popup:'leaderboard',initState:()=>({})},
+    {label:'[L] leaderboard',popup:'leaderboard',initState:()=>({})},
     {label:'[O] options',  popup:'options',    initState:()=>({})},
   ];
   _hintBounds=[];
