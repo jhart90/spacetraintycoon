@@ -1289,7 +1289,7 @@ const MISSION_DEFS=[
    imageType:'foundry', imageKey:null,
    objectives:[
      {id:'station_foundry_planet',text:'Construct a STATION on a DESERT PLANET'},
-     {id:'construct_foundry',    text:'Construct a FOUNDRY'},
+     {id:'construct_foundry',    text:'Construct a FOUNDRY on a DESERT PLANET'},
    ],
    details:'Establish a foundry to smelt molten ore into refined iron.',
    reward:10000, timeLimit:null,
@@ -2900,13 +2900,23 @@ let _foundryUnlocked=false;       // IRON FOUNDRY card — unlocked by COMPLETIN
 let _largeStationUnlocked=false;  // LARGE STATION upgrade button — unlocked by COMPLETING the "Produce Iron" mission
 let _terminalUnlocked=false;      // TERMINAL upgrade button — unlocked by producing the FIRST steel unit
 let _bakeryUnlocked=false;        // BAKERY card — unlocked by VISITING the first agricultural planet
-let pendingUpgradeUnlocks=[]; // {key} queued to show the upgrade-unlock popup (key ∈ iron_foundry, bakery, __large_station__, __terminal__)
+let _glassworksUnlocked=false;    // GLASSWORKS card — unlocked once BOTH the Sand car and Chemical car are discovered (desert + chemical planet visited)
+let pendingUpgradeUnlocks=[]; // {key} queued to show the upgrade-unlock popup (key ∈ iron_foundry, bakery, glassworks, __large_station__, __terminal__)
 // An upgrade CARD is visible only when unlocked (or already built). Station-tier
 // buttons (Large Station / Terminal) are gated separately at their render sites.
 function _isUpgradeUnlocked(uId){
   if(uId==='iron_foundry') return _foundryUnlocked;
   if(uId==='bakery')       return _bakeryUnlocked;
+  if(uId==='glassworks')   return _glassworksUnlocked;
   return true; // every other upgrade is always visible (existing grey-lock gates still apply)
+}
+// True once BOTH the Sand car (a desert planet visited) and the Chemical car (a
+// chemical planet visited) have been discovered — the Glassworks unlock gate.
+function _sandAndChemicalCarsDiscovered(){
+  if(!galaxy||!galaxy.planets) return false;
+  const _sand=galaxy.planets.some(p=>p.type&&p.type.id==='desert'&&visitedPlanetIds.has(p.id));
+  const _chem=galaxy.planets.some(p=>p.type&&p.type.id==='chemical'&&visitedPlanetIds.has(p.id));
+  return _sand&&_chem;
 }
 // Ancient-world broadcast popup. Triggered on first visit to each ANCIENT
 // biome planet. Each visit also "translates" 3 more random untranslated
@@ -5875,6 +5885,26 @@ function generateMoons(p){
   }
   return moons;
 }
+// Tiny deterministic PRNG (mulberry32) used to REGENERATE a moon's cosmetic
+// crater "pocks" on load instead of persisting them (they were the single
+// largest chunk of save files). Seeded from the moon's stable orbital fields so
+// the same save always reproduces the same craters.
+function _mulberry32(a){
+  return function(){
+    a|=0; a=a+0x6D2B79F5|0;
+    let t=Math.imul(a^a>>>15,1|a);
+    t=t+Math.imul(t^t>>>7,61|t)^t;
+    return ((t^t>>>14)>>>0)/4294967296;
+  };
+}
+function _regenMoonPocks(m){
+  const _seed=((Math.round((m.orbitR||0)*131.1)^Math.round((m.angle||0)*977.3)^Math.round((m.speed||0)*1e7)^Math.round((m.r||0)*523))>>>0)||1;
+  const rnd=_mulberry32(_seed);
+  const n=2+Math.floor(rnd()*4); // 2..5, matching generateMoons
+  const pk=[];
+  for(let i=0;i<n;i++) pk.push({dx:rnd()*1.2-0.6, dy:rnd()*1.2-0.6, r:0.15+rnd()*0.25});
+  return pk;
+}
 
 // Mulberry32 seeded RNG factory. If seed is null/undefined, returns Math.random
 // itself so callers that don't care about determinism still work.
@@ -6743,7 +6773,7 @@ function _processCargoQueue(t, p){
         if(rev>0&&!t.isPlayer&&_aiCorp&&(stardate-(_aiCorp._lastCargoLogSd||0))>0.3){
           _aiCorp._lastCargoLogSd=stardate;
           const _cNm={passengers:'Passengers',mail:'Mail',molten_ore:'Molten Ore',iron:'Iron',gold:'Gold',diamond:'Diamond',hazmat:'Hazardous Materials',oil:'Oil',crystal:'Crystals',flowers:'Flowers',livestock:'Livestock',medical:'Medical Supplies',water:'Water',ice:'Ice',sand:'Sand',battery:'Batteries',chemical:'Chemicals',royal:'Royal Cargo'};
-          _newsLog('ai_cargo_delivered',{pln:p.name,_pln:p,crgName:_cNm[cargo]||cargo});
+          _newsLog('ai_cargo_delivered',{pln:p.name,plnId:p.id,crgName:_cNm[cargo]||cargo});
         }
         t._unloadRevenue=(t._unloadRevenue||0)+rev; t._unloadCount=(t._unloadCount||0)+1;
         if(t.carRevenue) t.carRevenue[i]=(t.carRevenue[i]||0)+rev;
@@ -7026,18 +7056,17 @@ function _spawnCargoBeam(train, dt){
   const carIdx=train.cargoQueue[0];
   const isLoading=train.cargoPhase==='loading';
   const lifetime=30;           // ~0.5 s at 60 fps; independent of game speed
-  // Lead the car's orbital motion: particles spawn now but arrive `lifetime`
-  // GAME-time units later (the particle integrator now advances with dtG, the
-  // same game-speed-scaled delta the train orbits with — see
-  // _updateCargoParticles). Because both the particle flight AND the car's
-  // orbit advance in game-time, the car moves exactly ORB_SPD*lifetime
-  // (angular) during the flight REGARDLESS of game speed, so the lead is a
-  // fixed ORB_SPD*lifetime and the beam stays locked on the car at 0.5×, 1×,
-  // 2×, 5× and 10×. For loading, aim at the *future* car position so
-  // particles meet the car on arrival; for unloading, use the *current*
-  // position (particles depart from where the car is now and trail behind).
-  const _leadAng = isLoading ? -ORB_SPD*lifetime : 0;
-  const _ang = train.angle + _leadAng + _carOffset(train,carIdx)/train.orbitR;
+  // Anchor BOTH beam endpoints to the car's CURRENT orbital position (no lead).
+  // The loading path used to aim a fixed ORB_SPD*lifetime ANGULAR lead ahead of
+  // the car so particles "met" it on arrival — but that angular lead becomes a
+  // LINEAR offset of orbitR*ORB_SPD*lifetime, which grows with orbit size (~20
+  // world units at an M planet's LOW orbit, ~34 at L, ~49 at XL). On big planets
+  // that pushed the whole radial beam tangentially off the visible car, so it
+  // read as "not reaching the car". Dropping the lead keeps the beam line locked
+  // under the current car at every size, matching the (already-correct) unload
+  // beam; particles are short-lived enough that the tiny in-flight drift is
+  // imperceptible.
+  const _ang = train.angle + _carOffset(train,carIdx)/train.orbitR;
   const carWx = planet.x + train.orbitR*Math.cos(_ang);
   const carWy = planet.y + train.orbitR*Math.sin(_ang);
   // Radial attachment point on the car. carWx,carWy sits at the car's OUTER
@@ -9064,7 +9093,7 @@ function _aiExecuteAction(action){
     if(!p||p.aiHasStation) return;
     const cost=_stationBuildCost();
     if(_aiCorp.credits<cost) return;
-    p.aiHasStation=true;_newsLog('ai_station_built',{pln:p.name,_pln:p});
+    p.aiHasStation=true;_newsLog('ai_station_built',{pln:p.name,plnId:p.id});
     _aiCorp.ownedPlanetIds.add(action.planetId);
     _aiCorp.credits-=cost;_aiCorp.totalCosts+=cost;_aiCorp.stationsBuilt++;
     _aiCorp.lastStationBuildSd=stardate;
@@ -10649,7 +10678,7 @@ function _aiDoAssignRoute(trainIdx,planetIds){
   if(stops.length<2) return;
   // Log route establishment for newspaper (destination = stops[1])
   {const _rnFrom=galaxy.planets[stops[0]],_rnTo=galaxy.planets[stops[1]];
-   if(_rnFrom&&_rnTo) _newsLog('ai_route_established',{pln:_rnTo.name,_pln:_rnTo,fromPln:_rnFrom.name});}
+   if(_rnFrom&&_rnTo) _newsLog('ai_route_established',{pln:_rnTo.name,plnId:_rnTo.id,fromPln:_rnFrom.name});}
   const fp=_gp(stops[0]);
   // Helper: default orbit radius for a stop (mirrors assignRouteToTrain)
   const _defOrbitR=(id)=>{const _p=_gp(id);return _p?.isStarProxy?_p.starOrbitR:(ORBIT_TIERS[_p?.size||'M']['LOW']??ORBIT_TIERS.M.LOW);};
@@ -14549,6 +14578,24 @@ function updateTrain(t, dt){
         const toP=_gp(r.stops[r.toIdx]);
         const lt=computeLiveTangent(fromP, toP, t.orbitR, r.arrivalOrbitR);
         if(transitPathBlocked(fromP,toP,t.orbitR,r.arrivalOrbitR,t)){
+          // First-hop re-validation at the moment of departure. If this is a
+          // multi-hop temp route and the first segment has become OUT OF RANGE
+          // (the intermediate drifted away since the path was planned), re-plan
+          // immediately to a reachable first hop instead of entering a blocked
+          // spin-wait — a range-blocked segment can't clear by orbiting in place.
+          if(r.isTempRoute && r._multiHopDest!=null && _segmentRangeBlocked(fromP,toP,t.orbitR,r.arrivalOrbitR,t)){
+            const _destId=r._multiHopDest;
+            const _newPath=findMultiHopPath(t.planetId,_destId,t);
+            if(_newPath && _newPath.length>1 && _newPath[1]!==r.stops[r.toIdx]){
+              const _hops=_buildHopChain(_newPath,t.orbitR,t,_destId,false);
+              if(_hops && _hops.length>0){
+                const _fh=_hops[0]; _fh.phase='orbit'; _fh.orbitSpun=0; _fh.minOrbitDone=true;
+                t.route=_fh; t.queuedRoute=_hops.length>1?_hops[1]:null;
+                _invalidateOccOrbit();
+                return;
+              }
+            }
+          }
           if(t.isPlayer&&!r._blockedSoundFired){ playSound('breakdown'); r._blockedSoundFired=true; }
           r.phase='blocked'; r.orbitSpun=0; r._blockedTime=0; return;
         }
@@ -15000,7 +15047,7 @@ function trackVisit(pid){
       chemical:'CHEMICAL CAR UNLOCKED',
     }[_bio];
     visitedPlanetIds.add(pid);
-    _newsLog('planet_first_visit',{pln:_tp.name,_pln:_tp});
+    _newsLog('planet_first_visit',{pln:_tp.name,plnId:_tp.id});
     // Galaxy Census: arm 10s real-time timer when 15th unique planet is visited
     if(visitedPlanetIds.size>=15&&_galaxyCensusTimerMs===0) _galaxyCensusTimerMs=Date.now();
     // stellar_cartography fallback timer: armed on first visit to any
@@ -15091,7 +15138,7 @@ function trackVisit(pid){
         _flowersCarUnlocked=true;
         pendingCarUnlocks.push({sprite:'car_flowers',displayName:'Flowers Car'});
         _chatMsg('FLOWERS CAR UNLOCKED!','rgba(255,160,210,1)');
-        _newsLog('flowers_discovered',{pln:_tp.name,_pln:_tp});
+        _newsLog('flowers_discovered',{pln:_tp.name,plnId:_tp.id});
         _ga('car_unlocked',{car_type:'flowers', cargo:'flowers', sd:Math.floor(stardate)});
       }
       if(!_missionPending('spread_the_seed')){
@@ -15157,6 +15204,12 @@ function trackVisit(pid){
         _chatMsg('FRUIT CAR UNLOCKED','rgba(80,230,130,1)');
         _ga('car_unlocked',{car_type:'fruit', cargo:'fruit', sd:Math.floor(stardate)});
       }
+    }
+    // Discovering BOTH the Sand car (a desert planet visited) and the Chemical
+    // car (a chemical planet visited) UNLOCKS the GLASSWORKS upgrade.
+    if(!_glassworksUnlocked && _sandAndChemicalCarsDiscovered()){
+      _glassworksUnlocked=true; pendingUpgradeUnlocks.push({key:'glassworks'});
+      _chatMsg('GLASSWORKS UPGRADE UNLOCKED','rgba(255,210,120,1)');
     }
     const _origen=galaxy.planets[galaxy.origenId];
     const _pdist=Math.hypot(_tp.x-_origen.x,_tp.y-_origen.y);
@@ -15918,41 +15971,41 @@ function drawCarUnlockPopup(){
   ctx.restore();
 }
 
-// Per-upgrade copy for the "NEW UPGRADE UNLOCKED" popup: the title, the visual
-// to draw, and the body lines (input→output formula + processing time where one
-// exists, or the benefit the upgrade provides).
+// Per-upgrade copy for the "NEW PLANET UPGRADE UNLOCKED" popup. Each entry
+// supplies: cost, buildOn (eligible biomes OR the prerequisite that must be met),
+// enables (a one-sentence "Enables …" benefit) and, for processing upgrades, the
+// input→output formula + processing time. NOTE: costs mirror the UPGRADES table
+// and the station-upgrade buttons — keep them in sync if those constants change.
 const _UPGRADE_UNLOCK_INFO={
   iron_foundry:{ name:'IRON FOUNDRY', kind:'iron_foundry', biome:'#c9a55a',
-    lines:['Smelts cargo delivered to this planet into',
-           'refined Iron — a valuable resource.',
-           '',
-           '1 Molten Ore  +  1 Water   →   1 Iron',
-           'Processing time: ~40 seconds'] },
+    cost:'10,000 cr', buildOn:'DESERT planets',
+    enables:'Enables this planet to smelt delivered MOLTEN ORE + WATER into IRON.',
+    formula:'1 Molten Ore  +  1 Water   →   1 Iron', time:'~40 seconds' },
   bakery:{ name:'BAKERY', kind:'bakery', biome:'#3a9fc2',
-    lines:['Bakes Grain delivered to this planet into',
-           'units of Cargo.',
-           '',
-           '1 Grain   →   1 Cargo',
-           'Processing time: ~40 seconds'] },
+    cost:'15,000 cr', buildOn:'RESORT planets',
+    enables:'Enables this planet to bake delivered GRAIN into CARGO.',
+    formula:'1 Grain   →   1 Cargo', time:'~40 seconds' },
+  glassworks:{ name:'GLASSWORKS', kind:'glassworks', biome:'#3a9fc2',
+    cost:'25,000 cr', buildOn:'RESORT planets',
+    enables:'Enables this planet to melt delivered SAND + CHEMICALS into GLASS.',
+    formula:'1 Sand  +  1 Chemical   →   1 Glass', time:'~40 seconds' },
   __large_station__:{ name:'LARGE STATION', kind:'station', rings:2, biome:'#8893a3',
-    lines:['Upgrade a STATION into a LARGE STATION.',
-           '',
-           'Trains can now load and unload from LOW',
-           'AND MEDIUM orbit — far more throughput.'] },
+    cost:'50,000 cr  +  4 Iron',
+    buildOn:'any planet where a STATION has already been built',
+    enables:'Enables TRAINS in both LOW and MEDIUM orbits to LOAD/UNLOAD simultaneously.' },
   __terminal__:{ name:'TERMINAL', kind:'station', rings:3, biome:'#8893a3',
-    lines:['Upgrade a station into a TERMINAL.',
-           '',
-           'Trains can load and unload from ANY',
-           'orbit — LOW, MEDIUM, and HIGH.'] },
+    cost:'75,000 cr  +  6 Steel',
+    buildOn:'any planet where a LARGE STATION has already been built',
+    enables:'Enables TRAINS in LOW, MEDIUM, and HIGH orbits to LOAD/UNLOAD simultaneously.' },
 };
 // Draw the upgrade's visual (a small planet + building, or a station with orbit
 // rings) centred at (cx,cy).
 function _drawUpgradeUnlockVisual(cx,cy,info){
-  const R=46;
+  const R=42;
   ctx.save();
   if(info.kind==='station'){
     // Concentric orbit rings convey how many orbit tiers the station services.
-    const _ringR=[R*1.55,R*2.15,R*2.75];
+    const _ringR=[R*1.3,R*1.7,R*2.1];
     for(let _i=0;_i<(info.rings||2);_i++){
       ctx.strokeStyle=`rgba(120,180,255,${0.5-_i*0.12})`; ctx.lineWidth=1.5;
       ctx.beginPath(); ctx.arc(cx,cy,_ringR[_i],0,Math.PI*2); ctx.stroke();
@@ -15987,31 +16040,47 @@ function drawUpgradeUnlockPopup(){
   const _key=(popupState.upgradeUnlock||{}).key;
   const info=_UPGRADE_UNLOCK_INFO[_key];
   if(!info) return;
-  const pw=340, ph=378;
+  const pw=340, ph=446;
   const [px,py]=drawPopupBase(pw,ph,'rgba(245,200,40,0.7)');
   ctx.save();
+  ctx.textAlign='center';
   // Label line
-  ctx.font='bold 10px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.font='bold 10px Orbitron,sans-serif';
   ctx.fillStyle='rgba(255,225,130,0.78)';
-  ctx.fillText('NEW UPGRADE UNLOCKED',px+pw/2,py+22);
+  ctx.fillText('NEW PLANET UPGRADE UNLOCKED',px+pw/2,py+22);
   // Name — big glowing title
   ctx.font='bold 15px Orbitron,sans-serif';
   ctx.fillStyle='#ffe080'; ctx.shadowColor='#ffaa20'; ctx.shadowBlur=12;
   ctx.fillText(info.name,px+pw/2,py+42);
   ctx.shadowBlur=0;
   // Visual.
-  _drawUpgradeUnlockVisual(px+pw/2,py+118,info);
-  // Body lines.
-  ctx.font='10px "Exo 2",sans-serif'; ctx.textAlign='center';
+  _drawUpgradeUnlockVisual(px+pw/2,py+108,info);
+  // Centred word-wrap helper — draws `text` in `font`/`col`, returns the y of
+  // the line AFTER the block.
+  const _wrapC=(text,font,col,startY,lh)=>{
+    ctx.font=font; ctx.fillStyle=col;
+    const _ws=(text||'').split(' '); let _line='', _y=startY;
+    for(const _w of _ws){ const _t=_line?_line+' '+_w:_w; if(ctx.measureText(_t).width<=pw-36){_line=_t;} else {ctx.fillText(_line,px+pw/2,_y); _y+=lh; _line=_w;} }
+    if(_line){ ctx.fillText(_line,px+pw/2,_y); _y+=lh; }
+    return _y;
+  };
+  // Small caption helper for the COST / BUILDABLE ON / ENABLES section headers.
+  const _cap=(txt,y)=>{ ctx.font='9px Orbitron,sans-serif'; ctx.fillStyle='rgba(150,200,255,0.65)'; ctx.fillText(txt,px+pw/2,y); };
   let _ly=py+196;
-  for(const _ln of info.lines){
-    if(_ln===''){ _ly+=7; continue; }
-    // The formula line renders a touch bolder/brighter to stand out.
-    const _isFormula=_ln.indexOf('→')>=0;
-    ctx.font=_isFormula?'bold 11px "Exo 2",sans-serif':'10px "Exo 2",sans-serif';
-    ctx.fillStyle=_isFormula?'rgba(255,235,160,0.97)':'rgba(225,225,230,0.82)';
-    ctx.fillText(_ln,px+pw/2,_ly);
-    _ly+=16;
+  // (1) COST
+  _cap('COST',_ly); _ly+=15;
+  _ly=_wrapC(info.cost||'—','bold 12px "Exo 2",sans-serif','rgba(255,220,120,0.97)',_ly,15)+9;
+  // (2) BUILDABLE ON — eligible biomes, or the prerequisite that must be met.
+  _cap('BUILDABLE ON',_ly); _ly+=15;
+  _ly=_wrapC(info.buildOn||'—','bold 11px "Exo 2",sans-serif','rgba(190,225,255,0.95)',_ly,14)+9;
+  // (3) ENABLES — one-sentence benefit.
+  _cap('ENABLES',_ly); _ly+=15;
+  _ly=_wrapC(info.enables||'','10px "Exo 2",sans-serif','rgba(228,228,233,0.9)',_ly,14);
+  // Processing formula + time (production upgrades only).
+  if(info.formula){
+    _ly+=8;
+    _ly=_wrapC(info.formula,'bold 11px "Exo 2",sans-serif','rgba(255,235,160,0.97)',_ly,15);
+    if(info.time) _ly=_wrapC('Processing time: '+info.time,'9px "Exo 2",sans-serif','rgba(200,205,215,0.78)',_ly,13);
   }
   // Footer: where the upgrade appears.
   ctx.font='italic 9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(180,185,195,0.6)';
@@ -27966,7 +28035,10 @@ function findMultiHopPath(sourcePlanetId, destPlanetId, train){
   const _engT=train?.cars?.[0]||'engine_constellation';
   const _ck=sourcePlanetId+'|'+destPlanetId+'|'+_engT;
   const _cached=_multiHopCache.get(_ck);
-  if(_cached && (stardate-_cached.sd)<_MULTIHOP_CACHE_TTL_SD) return _cached.path;
+  // NOTE: cached paths are validated against CURRENT geometry below (after
+  // _edgeOk is defined) — a path planned earlier can have an intermediate that
+  // has since orbited out of range, so we can't blindly trust the cache.
+  const _cachedFresh=_cached && (stardate-_cached.sd)<_MULTIHOP_CACHE_TTL_SD;
   const planets=galaxy.planets;
   const dp=_gp(destPlanetId);
   if(!dp) return null;
@@ -28006,6 +28078,29 @@ function findMultiHopPath(sourcePlanetId, destPlanetId, train){
     _multiHopCache.set(_ck,{path, sd:stardate});
     return path;
   };
+  // Range safety margin for INTERMEDIATE hops: reject any edge whose tangent
+  // exceeds 90% of engine range, so a fragile edge-of-range waypoint (one that
+  // drifts OUT of range as planets keep orbiting between planning and arrival)
+  // is never chosen as a stepping stone. The final →destination edge is still
+  // allowed at full range — we must be able to reach the actual target.
+  const _RANGE_MARGIN=0.9;
+  const _edgeOkBFS=(fromId,toId,eta)=>{
+    if(!_edgeOk(fromId,toId,eta)) return false;
+    const fp=_gp(fromId), tp=_gp(toId);
+    if(!fp||!tp) return false;
+    const lt=computeLiveTangent(_atTime(fp,eta),_atTime(tp,eta),_pOrbitR(fp),_pOrbitR(tp));
+    return !lt || lt.tanLen<=_engMaxRange(train)*_RANGE_MARGIN;
+  };
+  // Reuse a cached path ONLY if its FIRST hop still validates against CURRENT
+  // geometry — otherwise it's stale (intermediate drifted out of range) and we
+  // recompute a fresh path. This is the core fix for the train getting stuck on
+  // a first segment that has become out of range since the path was planned.
+  if(_cachedFresh){
+    const _cp=_cached.path;
+    if(!_cp || _cp.length<2) return _cp;        // null / single-node — trust as-is
+    if(_edgeOk(_cp[0],_cp[1],0)) return _cp;     // first hop still traversable → reuse
+    // else: stale first hop — fall through and recompute
+  }
   // Direct hop at time 0
   if(_edgeOk(sourcePlanetId,destPlanetId,0)) return _store([sourcePlanetId,destPlanetId]);
   // BFS: each queue entry = [curPlanetId, pathSoFar[], accETA_frames]
@@ -28027,7 +28122,8 @@ function findMultiHopPath(sourcePlanetId, destPlanetId, train){
     // Real planets as candidate waypoints
     for(let i=0;i<planets.length;i++){
       if(i===curId||visited.has(i)) continue;
-      if(!_edgeOk(curId,i,eta)) continue;
+      // Margin on intermediates; full range only on the final →destination edge.
+      if(!(i===destPlanetId ? _edgeOk(curId,i,eta) : _edgeOkBFS(curId,i,eta))) continue;
       const tp=_gp(i);
       if(!tp) continue;
       const tpPred=_atTime(tp,eta);
@@ -28044,7 +28140,8 @@ function findMultiHopPath(sourcePlanetId, destPlanetId, train){
     for(const [pid,proxy] of Object.entries(galaxy.starProxyMap||{})){
       const proxyId=parseInt(pid);
       if(proxyId===curId||visited.has(proxyId)) continue;
-      if(!_edgeOk(curId,proxyId,eta)) continue;
+      // Proxies are always intermediate waypoints → apply the range margin.
+      if(!_edgeOkBFS(curId,proxyId,eta)) continue;
       // Proxies are stationary — no orbit wait needed
       const arrEta=eta+_hopETA(curPred,proxy);
       const dpAtArr=_atTime(dp,arrEta);
@@ -29537,7 +29634,7 @@ canvas.addEventListener('mouseup',e=>{
           // unlocks them too.
           _cheatUnlockAllCars=true;
           // Also reveal the event-locked planet upgrades (no popups for the cheat).
-          _foundryUnlocked=true; _largeStationUnlocked=true; _terminalUnlocked=true; _bakeryUnlocked=true;
+          _foundryUnlocked=true; _largeStationUnlocked=true; _terminalUnlocked=true; _bakeryUnlocked=true; _glassworksUnlocked=true;
           _chatMsg('ALL ENGINES & TRAIN CARS UNLOCKED','rgba(180,235,255,1)');
           return;
         }
@@ -29847,7 +29944,7 @@ canvas.addEventListener('mouseup',e=>{
               spawnCreditFloatScreen(b.x+b.w/2,b.y,-_scCost);
               purchaseLedger.push({sd:stardate,amount:_scCost,type:'station'});
               p.hasStation=true;
-              _newsLog('station_built',{pln:p.name,_pln:p});
+              _newsLog('station_built',{pln:p.name,plnId:p.id});
               p.playerBuiltStation=true;
               _ga('station_built',{biome:p.type.id, planet:p.name, sd:Math.floor(stardate), credits});
               p.stationAngle=Math.random()*Math.PI*2;
@@ -29954,7 +30051,7 @@ canvas.addEventListener('mouseup',e=>{
               if(_uPurchaseCost>0){ credits-=_uPurchaseCost; creditDelta-=_uPurchaseCost; spawnCreditFloatScreen(b.x+b.w/2,b.y,-_uPurchaseCost); purchaseLedger.push({sd:stardate,amount:_uPurchaseCost,type:'upgrade'}); }
               if(!p.upgrades) p.upgrades=[];
               p.upgrades.push(u.id); _invalidateUpgradePlanetCache();
-              _newsLog('upgrade_built',{pln:p.name,_pln:p,upgrade:u.id});
+              _newsLog('upgrade_built',{pln:p.name,plnId:p.id,upgrade:u.id});
               if(!p.playerBuiltUpgrades) p.playerBuiltUpgrades=[];
               p.playerBuiltUpgrades.push(u.id);
               if(u.id==='iron_foundry'){
@@ -30408,7 +30505,7 @@ canvas.addEventListener('mouseup',e=>{
                     nt.carEngineHistory[_i]=_hist;
                   }
                   trains.push(nt);
-                  _newsLog('fleet_expanded',{pln:_sp.name,_pln:_sp});
+                  _newsLog('fleet_expanded',{pln:_sp.name,plnId:_sp.id});
                   _ga('train_built',{engine:nt.cars[0]||'unknown', car_count:nt.cars.length, total_cost:s.computedCost||0, sd:Math.floor(stardate)});
                   playSound('construction_complete');
                 }
@@ -30969,6 +31066,22 @@ function _buildSaveObject(){
     // drive accumulation going forward.
     if(out.supply){ const _s={}; for(const k in out.supply) _s[k]=Math.round(out.supply[k]*1e4)/1e4; out.supply=_s; }
     if(out.demand){ const _d={}; for(const k in out.demand) _d[k]=Math.round(out.demand[k]*1e4)/1e4; out.demand=_d; }
+    // _initialOrbitAngle was stored at full double precision — round to 4dp.
+    if(out._initialOrbitAngle!=null) out._initialOrbitAngle=Math.round(out._initialOrbitAngle*1e4)/1e4;
+    // Moons: DROP the cosmetic `pocks` (regenerated from a seed on load — see
+    // _regenMoonPocks) and round the remaining float fields. Builds NEW objects
+    // so the live in-memory moons keep their full data for continued rendering.
+    if(Array.isArray(out.moons)&&out.moons.length){
+      out.moons=out.moons.map(m=>{
+        const {pocks,..._mr}=m;
+        if(_mr.orbitR!=null) _mr.orbitR=_r5(_mr.orbitR);
+        if(_mr.angle!=null)  _mr.angle=_r5(_mr.angle);
+        if(_mr.incl!=null)   _mr.incl=Math.round(_mr.incl*1e4)/1e4;
+        if(_mr.tilt!=null)   _mr.tilt=Math.round(_mr.tilt*1e4)/1e4;
+        if(_mr.speed!=null)  _mr.speed=Math.round(_mr.speed*1e7)/1e7;
+        return _mr;
+      });
+    }
     return out;
   });
   // Trains: save all fields including full route objects.
@@ -31034,7 +31147,21 @@ function _buildSaveObject(){
   }
   let _trimmedNewspaper=_newspaperArchive;
   if(Array.isArray(_newspaperArchive)){
-    _trimmedNewspaper=_newspaperArchive.filter(_iss=>_iss&&(_iss.sd==null||_iss.sd>=_trimCutoffSd));
+    // Replace embedded full-planet / full-star objects in archived articles with
+    // minimal {id} stubs. The image renderer only ever reads `_pln.id` / `_str.id`
+    // (the article already carries a resolved `img` descriptor), so a stub is
+    // sufficient and we stop persisting an entire planet (moons, pocks,
+    // catchphrase…) inside every archived newspaper issue.
+    const _stubArt=(a)=>{
+      if(!a||typeof a!=='object') return a;
+      const _o={...a};
+      if(_o._pln&&typeof _o._pln==='object') _o._pln=(_o._pln.id!=null?{id:_o._pln.id}:null);
+      if(_o._str&&typeof _o._str==='object') _o._str=(_o._str.id!=null?{id:_o._str.id}:null);
+      return _o;
+    };
+    _trimmedNewspaper=_newspaperArchive
+      .filter(_iss=>_iss&&(_iss.sd==null||_iss.sd>=_trimCutoffSd))
+      .map(_iss=>({..._iss, major:_stubArt(_iss.major), minor1:_stubArt(_iss.minor1), minor2:_stubArt(_iss.minor2)}));
   }
   // Round fog stamp x/y to 5 decimals.
   const _trimmedFog=Array.isArray(fogPoints)?fogPoints.map(f=>({...f,x:_r5(f.x),y:_r5(f.y)})):fogPoints;
@@ -31068,7 +31195,7 @@ function _buildSaveObject(){
     _classJEngineUnlocked, _classREngineUnlocked, _N700EngineUnlocked,
     _steelProdLog,
     _sensorUpgradeActive, _stationCostDiscount, _sandstormCheckSd, _playerDeliveryCount, _foundryCalloutShown,
-    _foundryUnlocked, _largeStationUnlocked, _terminalUnlocked, _bakeryUnlocked,
+    _foundryUnlocked, _largeStationUnlocked, _terminalUnlocked, _bakeryUnlocked, _glassworksUnlocked,
     _totalPassengersDelivered, _totalHazmatIncinerated, _anyCargoProduced,
     trainyard, financeLedger:_trimmedFinance, _ledgerSummary:_builtLedgerSummary, purchaseLedger, corpValueHistory, corpStatsHistory, aiCorpStatsHistory, _corp, _ceoHireCandidates,
     creditSnapshots, lastCreditSnapshotSd,
@@ -31125,6 +31252,12 @@ function _restoreFromSave(save){
     // Without this, resort planets render as featureless ocean (no continents).
     _attachBiome(rp);
     rp.clouds=generatePlanetClouds(rp);
+    // Moon craters (pocks) are stripped from saves to shrink them — regenerate
+    // a deterministic cosmetic pattern for any moon that's missing them. (Old
+    // saves that still carry pocks keep theirs.)
+    if(Array.isArray(rp.moons)){
+      for(const _m of rp.moons){ if(_m && !Array.isArray(_m.pocks)) _m.pocks=_regenMoonPocks(_m); }
+    }
     // Derived rate/health tables — recompute from scratch.
     rp.supplyRate=computeSupplyRate(rp);
     rp.demandRate=computeDemandRate(rp);
@@ -31324,6 +31457,7 @@ function _restoreFromSave(save){
     _largeStationUnlocked = !!save._largeStationUnlocked || _missDone('produce_iron')  || !!_ironCarUnlocked || _anyPlanet(q=>q.hasLargeStation||q.hasTerminal);
     _terminalUnlocked     = !!save._terminalUnlocked     || !!_steelCarUnlocked || _anyPlanet(q=>q.hasTerminal);
     _bakeryUnlocked       = !!save._bakeryUnlocked       || _saveHasUpg('bakery') || _anyPlanet(q=>q.type&&q.type.id==='agri'&&visitedPlanetIds.has(q.id));
+    _glassworksUnlocked   = !!save._glassworksUnlocked   || _saveHasUpg('glassworks') || _sandAndChemicalCarsDiscovered();
   }
   pendingUpgradeUnlocks=[];
   pendingMissionIntros=save.pendingMissionIntros||[];
@@ -31845,7 +31979,7 @@ function startGame(){
   // runs at title PLAY, BEFORE the player picks their corp name in corpsetup,
   // so corpName is still the default placeholder at this point. It fires at
   // the fadein → galaxy transition instead (same as the game_start GA event).
-  activePopup=null; popupState={}; gameSpeedIdx=SPEED_DEFAULT_IDX; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _missionTipPending=false; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _foundryCompletedMs=0; _produceIronTimerMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _ancientSchematicsTimerMs=0; _ancientSchematicsPlanetId=-1; _ancientSchematicsFired=false; _hasZoomed=false; _buyTrainTipStartMs=0; _buyTrainTipShown=false; _prevActivePopupForSfx=null; _missionTipFired=false; _visitPlanetCompletedMs=0; _tutorialDoneMs=0; _crTutorialDoneMs=0; _firstNonLowOrbitFired=false; _orbitHintStartMs=0; _orbitHintPlanetId=-1; _crTrainPreselected=false; _foundryCalloutShown=false; _foundryCalloutStartMs=0; _foundryCalloutFadeOutStartMs=0; _foundryCardScreenBounds=null; _foundryUnlocked=false; _largeStationUnlocked=false; _terminalUnlocked=false; _bakeryUnlocked=false; pendingUpgradeUnlocks=[];
+  activePopup=null; popupState={}; gameSpeedIdx=SPEED_DEFAULT_IDX; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _missionTipPending=false; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _foundryCompletedMs=0; _produceIronTimerMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _ancientSchematicsTimerMs=0; _ancientSchematicsPlanetId=-1; _ancientSchematicsFired=false; _hasZoomed=false; _buyTrainTipStartMs=0; _buyTrainTipShown=false; _prevActivePopupForSfx=null; _missionTipFired=false; _visitPlanetCompletedMs=0; _tutorialDoneMs=0; _crTutorialDoneMs=0; _firstNonLowOrbitFired=false; _orbitHintStartMs=0; _orbitHintPlanetId=-1; _crTrainPreselected=false; _foundryCalloutShown=false; _foundryCalloutStartMs=0; _foundryCalloutFadeOutStartMs=0; _foundryCardScreenBounds=null; _foundryUnlocked=false; _largeStationUnlocked=false; _terminalUnlocked=false; _bakeryUnlocked=false; _glassworksUnlocked=false; pendingUpgradeUnlocks=[];
   _newspaper=null; _newspaperLastSd=829; _newspaperPrevSpeed=0; _newspaperNextHover=false; _newspaperNextBounds=null; _newspaperPrevHover=false; _newspaperPrevBounds=null; _newspaperArchive=[]; _newspaperViewIdx=null; _paperMajorUsed=[]; _paperMinorUsed=[]; _paperLayout=0; _paperIssueNum=0; _paperIdx=randInt(0,_PAPER_NAMES.length-1); _newsEventLog=[]; _newsSnapshot=null;
   _speedLeftHover=false; _speedRightHover=false; _panelTabHover=null; _routeHereBtnHover=false; _assignBtnHover=false; _cancelRouteBtnHover=false; _planetStarNameHover=false; _starPanelPlanetHover=-1; _trainAddHover=false; _trainRowHover=-1; _pokedexSortHover=false; _pokedexRowHover=-1; _starRegistrySortHover=false; _starRegistryRowHover=-1; _goldOkHover=false; _diamondOkHover=false; _carUnlockOkHover=false; _quitYesHover=false; _quitNoHover=false; _saveGameBtnHover=false; _startBtnHover=false; _loadBtnHover=false; _htpBtnHover=false; _htpDotHover=-1; _htpSkipHover=false; pokedexRowBounds=[]; starRegistryRowBounds=[]; loadBtnBounds=null; saveGameBtnBounds=null;
   fogPoints=[]; fogGridSet=new Set(); fogCanvas=null;
@@ -31973,7 +32107,11 @@ function _newsGetSubsWithEvent(evt){
   const s=_newsGetSubs();
   if(!evt) return s;
   if(evt.pln) s.PLN=evt.pln;
-  if(evt._pln) s._pln=evt._pln;
+  // Resolve the live planet from its id (events store plnId, not a full planet
+  // snapshot — see _newsLog). Falls back to the legacy embedded _pln for old
+  // saves, re-resolving it live by id so we never render stale planet data.
+  if(evt.plnId!=null){ const _lp=_gp(evt.plnId); if(_lp) s._pln=_lp; }
+  else if(evt._pln){ s._pln=(evt._pln.id!=null?_gp(evt._pln.id):null)||evt._pln; }
   if(evt.starName) s.STR=evt.starName;
   if(evt._str) s._str=evt._str;
   if(evt.fromPln) s.FROMPLN=evt.fromPln; else s.FROMPLN=s.PLN;
