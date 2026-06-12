@@ -585,19 +585,61 @@ function _sprForSize(name, destW, destH){
 }
 
 // ── sound system ─────────────────────────────────────────────
-const _sfx={};
-for(const [k,v] of Object.entries(SOUNDS)){
-  const a=new Audio(v); a.volume=0.45; _sfx[k]=a;
+// SFX play through the Web Audio API rather than HTMLAudioElement. On several
+// devices/browsers (notably iOS Safari and some mobile/embedded webviews) all
+// HTMLMediaElements share a single, often-exclusive audio session, so firing a
+// SFX <audio> would pause/duck the streaming music — and because the music is
+// streamed (non-seekable on some hosts) it could restart from the top. Web
+// Audio mixes alongside the music element and doesn't seize that session.
+// A lazily-created HTMLAudio fallback covers environments without AudioContext.
+let _audioCtx=null;            // null = not tried; false = unavailable; else the AudioContext
+const _sfxBuf={};             // id -> decoded AudioBuffer
+const _sfxFallback={};        // id -> lazily-created HTMLAudio (fallback only)
+function _initAudioCtx(){
+  if(_audioCtx!==null) return _audioCtx;
+  try{
+    const AC=window.AudioContext||window.webkitAudioContext;
+    if(!AC){ _audioCtx=false; return false; }
+    _audioCtx=new AC();
+    for(const [k,v] of Object.entries(SOUNDS)){
+      try{
+        const _b64=(v.split(',')[1])||''; const _bin=atob(_b64);
+        const _arr=new Uint8Array(_bin.length);
+        for(let i=0;i<_bin.length;i++) _arr[i]=_bin.charCodeAt(i);
+        _audioCtx.decodeAudioData(_arr.buffer, b=>{ _sfxBuf[k]=b; }, ()=>{});
+      }catch(e){}
+    }
+    return _audioCtx;
+  }catch(e){ _audioCtx=false; return false; }
 }
 function playSound(id){
-  const a=_sfx[id]; if(!a) return;
-  a.currentTime=0; a.play().catch(()=>{});
+  const _ctx=(_audioCtx===null)?_initAudioCtx():_audioCtx;
+  if(_ctx){
+    if(_ctx.state==='suspended') _ctx.resume().catch(()=>{});
+    const _buf=_sfxBuf[id];
+    if(_buf){
+      try{
+        const _s=_ctx.createBufferSource(); _s.buffer=_buf;
+        const _g=_ctx.createGain(); _g.gain.value=0.45;
+        _s.connect(_g); _g.connect(_ctx.destination); _s.start(0);
+        return;
+      }catch(e){}
+    }
+    // Buffer not decoded yet → fall through to the HTMLAudio fallback this once.
+  }
+  let a=_sfxFallback[id];
+  if(!a){ const v=SOUNDS[id]; if(!v) return; a=new Audio(v); a.volume=0.45; _sfxFallback[id]=a; }
+  try{ a.currentTime=0; a.play().catch(()=>{}); }catch(e){}
 }
 // ── soundtrack ───────────────────────────────────────────────
 // Fixed-order playlist of seven tracks loaded from the GitHub assets folder.
 // The Options popup exposes Prev/Next/mute controls + a progress bar; the
 // 'ended' event advances to the next track and wraps to 0 at the end.
-const _MUSIC_BASE='https://raw.githubusercontent.com/jhart90/spacetraintycoon/localstorage-saves/assets/';
+// Music is served from a relative `assets/` folder that ships INSIDE the itch
+// upload zip (alongside index.html). Self-hosting on the same origin means the
+// browser can seek/resume the stream (so it no longer restarts from the top on
+// any interruption) and avoids GitHub raw's rate-limits / missing Range support.
+const _MUSIC_BASE='assets/';
 const _MUSIC_TRACKS=[
   {file:'01_last_train_home.mp3',      title:'Last Train Home'},
   {file:'02_interstellar_segment.mp3', title:'Interstellar Segment'},
@@ -624,9 +666,15 @@ _soundtrack.addEventListener('ended',()=>{
   if(!_musicMuted) _soundtrack.play().catch(()=>{});
 });
 function _tryPlaySoundtrack(){
+  // The first user gesture is also the right moment to spin up / resume the Web
+  // Audio context that SFX use (browser autoplay policy).
+  const _c=_initAudioCtx(); if(_c&&_c.state==='suspended') _c.resume().catch(()=>{});
   if(_musicMuted) return;
   _musicEnsureStarted();
-  _soundtrack.play().catch(()=>{});
+  // Only (re)start the music element when it isn't ALREADY playing. Re-calling
+  // play() on every click could restart a mid-buffer streamed element on some
+  // browsers (the "audio resets every click" report) — the guard avoids it.
+  if(_soundtrack.paused) _soundtrack.play().catch(()=>{});
 }
 function _toggleMusicMute(){
   _musicMuted=!_musicMuted;
@@ -2266,6 +2314,325 @@ let _missionTrackerBounds=[]; // [{x,y,w,h,missionIdx}]
 let _missionTrackerHover=-1;  // index into _missionTrackerBounds, or -1
 function _chatMsg(text,color='rgba(255,100,100,1)',ms=5000,_noSnd=false){ _chatLog.push({text,color,ts:Date.now(),ms,sd:stardate}); if(_chatLog.length>60) _chatLog.shift(); if(!_noSnd) playSound('notification'); }
 function _chatMsgSegs(segments,ms=5000){ _chatLog.push({segments,text:segments.map(s=>s.text).join(''),color:segments[0]?.color||'rgba(255,255,255,1)',ts:Date.now(),ms,sd:stardate}); if(_chatLog.length>60) _chatLog.shift(); }
+// Rainbow chat message: rendered char-by-char with a time-rotating rainbow hue
+// (see the _chatLog renderer's msg.rainbow branch). Used for the leaderboard
+// submission announcement.
+function _chatMsgRainbow(text,ms=9000){ _chatLog.push({text,color:'rgba(255,255,255,1)',rainbow:true,ts:Date.now(),ms,sd:stardate}); if(_chatLog.length>60) _chatLog.shift(); playSound('notification'); }
+
+// ── Public leaderboard (Cloudflare Worker + D1 backend) ──────────────────────
+const _LB_URL='https://stt-leaderboard.spacetraintycoon.workers.dev';
+// The 7 ranked metrics in display order: {key (submit JSON), col (server id), label}.
+const _LB_METRICS=[
+  {key:'corpValue',         col:'corp_value',         label:'CORP VALUE'},
+  {key:'numTrains',         col:'num_trains',         label:'TRAINS'},
+  {key:'numRoutes',         col:'num_routes',         label:'ROUTES'},
+  {key:'numStations',       col:'num_stations',       label:'STATIONS'},
+  {key:'latestSd',          col:'latest_sd',          label:'STARDATE'},
+  {key:'discoveredPlanets', col:'discovered_planets', label:'PLANETS'},
+  {key:'discoveredStars',   col:'discovered_stars',   label:'STARS'},
+];
+let _corpId=null;                 // stable per-corp UUID (persisted) = leaderboard identity
+let _lbRows=[];                   // fetched rows (<=100) for the current sort metric
+let _lbMetric='corp_value';       // current sort column id
+let _lbPage=0;                    // 0-based page; 10 rows/page, up to page 9 (ranks 91-100)
+let _lbStatus='';                 // '' | 'loading' | 'ok' | 'empty' | 'error'
+let _lbBackHover=false,_lbPrevHover=false,_lbNextHover=false;
+let _lbBackBounds=null,_lbPrevBounds=null,_lbNextBounds=null;
+let _lbHeaderBounds=[];           // [{col,x,y,w,h}] clickable metric headers
+let _lbColHover=-1;
+let _lbLastSubmitMs=0;            // throttle: real-time ms of the last /submit POST
+const _LB_SUBMIT_THROTTLE_MS=30000; // at most one submission per 30 s of real time
+let _lbBestRanks={};              // {col: best(lowest) rank ever achieved} — persisted; drives the rainbow announcement (only on a new qualify / rank improvement)
+
+function _ensureCorpId(){
+  if(_corpId) return _corpId;
+  _corpId=(typeof crypto!=='undefined'&&crypto.randomUUID)?crypto.randomUUID()
+         :(Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,12));
+  return _corpId;
+}
+// Current player stats for the 7 leaderboard metrics (+ identity).
+function _lbStats(){
+  const _cv=_corpAssets();
+  const corpValue=Math.round((_cv.liquid!=null?_cv.liquid:credits||0)+(_cv.trainVal||0)+(_cv.stationVal||0)+(_cv.upgradeVal||0));
+  const _pt=trains.filter(t=>t.isPlayer);
+  const numRoutes=_pt.filter(t=>(t.route&&!t.route.isTempRoute&&(t.route.stops||[]).length>=2)||(t.queuedRoute&&!t.queuedRoute.isTempRoute&&(t.queuedRoute.stops||[]).length>=2)).length;
+  return {
+    corpId:_ensureCorpId(), corpName:(corpName||'Unnamed Corp'),
+    corpValue, numTrains:_pt.length, numRoutes,
+    numStations:galaxy?galaxy.planets.filter(p=>p.playerBuiltStation||p.isStarter).length:0,
+    latestSd:Math.round(stardate*100)/100,
+    discoveredPlanets:discoveredPlanetIds.size, discoveredStars:revealedStarIds.size,
+  };
+}
+// HMAC-SHA256 sign the submit body so the backend can reject forged POSTs. The
+// key is embedded (so it's not truly secret — this only blocks CASUAL devtools
+// spoofing, which is the goal). Requires a secure context (https / localhost);
+// returns '' otherwise, in which case the server rejects the unsigned POST.
+const _LB_SIG_KEY='4c984c6229e81b59fef9a6e53ff0db0d25a66be94387b3b1137e8506a55b3c0d';
+async function _lbSign(bodyStr){
+  try{
+    if(typeof crypto==='undefined'||!crypto.subtle) return '';
+    const _enc=new TextEncoder();
+    const _k=await crypto.subtle.importKey('raw',_enc.encode(_LB_SIG_KEY),{name:'HMAC',hash:'SHA-256'},false,['sign']);
+    const _s=await crypto.subtle.sign('HMAC',_k,_enc.encode(bodyStr));
+    return Array.from(new Uint8Array(_s)).map(b=>b.toString(16).padStart(2,'0')).join('');
+  }catch(e){ return ''; }
+}
+// Fire-and-forget submit (HMAC-signed). On success, if the corp landed in the
+// top 100 of ANY metric, announce it in the chat log with rainbow text. Network
+// failures are swallowed so they can never affect the game / save.
+function _lbSubmit(){
+  if(!galaxy||typeof fetch==='undefined') return;
+  // Throttle: save + autosave can fire close together (and autosave runs once
+  // per stardate, which is seconds apart at high game speed). Coalesce to at
+  // most one POST per 30 s so we never hammer the backend.
+  const _now=Date.now();
+  if(_now-_lbLastSubmitMs<_LB_SUBMIT_THROTTLE_MS) return;
+  let stats; try{ stats=_lbStats(); }catch(e){ return; }
+  _lbLastSubmitMs=_now;
+  const _body=JSON.stringify(stats);
+  try{
+    _lbSign(_body).then(_sig=>{
+      const _h={'Content-Type':'application/json'};
+      if(_sig) _h['X-LB-Sig']=_sig;
+      return fetch(_LB_URL+'/submit',{method:'POST',headers:_h,body:_body});
+    })
+    .then(r=>r&&r.ok?r.json():null)
+    .then(d=>{
+      if(d&&d.ok&&d.ranks){
+        // Announce ONLY when the corp newly qualifies for the top 100 of a
+        // metric, OR improves its best rank on one. _lbBestRanks tracks the
+        // best (lowest) rank ever achieved per metric, so a save that merely
+        // re-confirms an existing standing stays silent.
+        let _improved=false;
+        for(const _mk in d.ranks){
+          const _rk=d.ranks[_mk];
+          if(typeof _rk==='number' && _rk<=100 && (_lbBestRanks[_mk]==null || _rk<_lbBestRanks[_mk])){
+            _lbBestRanks[_mk]=_rk; _improved=true;
+          }
+        }
+        if(_improved) _chatMsgRainbow(stats.corpName+' has been submitted to the Space Train Tycoon All-Time High Score Leaderboard!');
+      }
+    })
+    .catch(()=>{});
+  }catch(e){}
+}
+// Fetch the top-100 by `metric` for the leaderboard screen.
+function _lbFetchTop(metric){
+  _lbMetric=metric; _lbPage=0; _lbStatus='loading'; _lbRows=[];
+  if(typeof fetch==='undefined'){ _lbStatus='error'; return; }
+  fetch(_LB_URL+'/top?metric='+encodeURIComponent(metric)+'&limit=100')
+    .then(r=>r&&r.ok?r.json():null)
+    .then(d=>{ if(d&&Array.isArray(d.rows)){ _lbRows=d.rows; _lbStatus=_lbRows.length?'ok':'empty'; } else { _lbStatus='error'; } })
+    .catch(()=>{ _lbStatus='error'; });
+}
+// Full-screen leaderboard view (gs==='leaderboard'). 10 rows/page, up to rank
+// 100; clicking any of the 7 metric headers re-sorts (refetches) by that column.
+function _lbColumns(){
+  // Column weights: rank, name, then the 7 metrics. Returns x edges + helpers.
+  const margin=Math.max(40,W*0.035);
+  const tableX=margin, tableW=W-2*margin;
+  const _weights=[0.8,2.8,1.35,1.0,1.0,1.15,1.15,1.1,1.0];
+  const _wsum=_weights.reduce((a,b)=>a+b,0);
+  const _colX=[]; let _cx=tableX;
+  for(const w of _weights){ _colX.push(_cx); _cx+=w/_wsum*tableW; }
+  _colX.push(tableX+tableW);
+  return {tableX,tableW,_colX};
+}
+function drawLeaderboardScreen(){
+  ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+  // Background.
+  const _bg=ctx.createLinearGradient(0,0,0,H);
+  _bg.addColorStop(0,'#0a0820'); _bg.addColorStop(1,'#04060e');
+  ctx.fillStyle=_bg; ctx.fillRect(0,0,W,H);
+  // Title.
+  ctx.save();
+  ctx.font='bold 26px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='#cdbcff'; ctx.shadowColor='#7a4fff'; ctx.shadowBlur=16;
+  ctx.fillText('ALL-TIME HIGH SCORES',W/2,62);
+  ctx.shadowBlur=0;
+  ctx.font='11px "Exo 2",sans-serif'; ctx.fillStyle='rgba(180,170,210,0.7)';
+  ctx.fillText('Space Train Tycoon — Top 100 Corporations',W/2,82);
+  ctx.restore();
+
+  const {tableX,tableW,_colX}=_lbColumns();
+  const _cc=(i)=>(_colX[i]+_colX[i+1])/2;
+  const headY=126, tableTop=headY+30;
+  const rowH=Math.max(28,Math.min(46,(H-tableTop-110)/10));
+
+  // ── Header row ──
+  _lbHeaderBounds=[];
+  ctx.textBaseline='middle';
+  ctx.font='bold 10px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='rgba(150,160,185,0.85)'; ctx.fillText('#',_cc(0),headY+8);
+  ctx.textAlign='left'; ctx.fillText('CORPORATION',_colX[1]+6,headY+8); ctx.textAlign='center';
+  for(let m=0;m<_LB_METRICS.length;m++){
+    const _ci=2+m, _l=_colX[_ci], _r=_colX[_ci+1];
+    const _active=_lbMetric===_LB_METRICS[m].col, _hover=_lbColHover===m;
+    _lbHeaderBounds.push({col:_LB_METRICS[m].col,x:_l,y:headY-12,w:_r-_l,h:30});
+    if(_active){ ctx.fillStyle='rgba(120,90,200,0.32)'; ctx.fillRect(_l,headY-12,_r-_l,30); }
+    ctx.fillStyle=_active?'#e6cfff':(_hover?'#d8d0f0':'rgba(155,165,190,0.88)');
+    ctx.fillText(_LB_METRICS[m].label+(_active?' ▼':''),(_l+_r)/2,headY+8);
+  }
+  ctx.strokeStyle='rgba(120,110,170,0.5)'; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.moveTo(tableX,headY+22); ctx.lineTo(tableX+tableW,headY+22); ctx.stroke();
+
+  // ── Body ──
+  if(_lbStatus==='loading'||_lbStatus==='error'||_lbStatus==='empty'){
+    ctx.font='14px "Exo 2",sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillStyle=_lbStatus==='error'?'rgba(255,140,140,0.9)':'rgba(200,200,220,0.85)';
+    const _msg=_lbStatus==='loading'?'Loading leaderboard…'
+             :_lbStatus==='error'?'Could not reach the leaderboard — check your connection and try again.'
+             :'No entries yet — be the first to make the board!';
+    ctx.fillText(_msg,W/2,tableTop+90);
+  } else {
+    const _start=_lbPage*10;
+    const _fmt=(row,col)=> col==='corp_value'?_fmtCr(row[col])
+                         : col==='latest_sd'?(Math.round(row[col]*10)/10).toFixed(1)
+                         : String(row[col]);
+    for(let r=0;r<10;r++){
+      const _idx=_start+r; if(_idx>=_lbRows.length) break;
+      const row=_lbRows[_idx], ry=tableTop+r*rowH, _ty=ry+rowH/2;
+      const _mine=_corpId&&row.corp_id===_corpId;
+      ctx.fillStyle=_mine?'rgba(95,70,170,0.38)':(r%2===0?'rgba(255,255,255,0.025)':'rgba(255,255,255,0.06)');
+      ctx.fillRect(tableX,ry,tableW,rowH);
+      ctx.textBaseline='middle';
+      ctx.font='bold 13px Orbitron,sans-serif'; ctx.textAlign='center';
+      ctx.fillStyle=(_idx<3)?['#ffd54a','#cfd8e6','#d8a06a'][_idx]:'rgba(190,195,215,0.9)';
+      ctx.fillText('#'+(_idx+1),_cc(0),_ty);
+      ctx.font='bold 13px "Exo 2",sans-serif'; ctx.textAlign='left';
+      ctx.fillStyle=_mine?'#ffffff':'rgba(228,228,242,0.95)';
+      let _nm=row.corp_name||'?'; const _nMaxW=_colX[2]-_colX[1]-12;
+      while(_nm.length>3&&ctx.measureText(_nm).width>_nMaxW) _nm=_nm.slice(0,-1);
+      if(_nm.length<(row.corp_name||'').length) _nm+='…';
+      ctx.fillText(_nm,_colX[1]+6,_ty);
+      ctx.textAlign='center';
+      for(let m=0;m<_LB_METRICS.length;m++){
+        const _col=_LB_METRICS[m].col, _ci=2+m, _active=_lbMetric===_col;
+        ctx.font=(_active?'bold ':'')+'12px "Exo 2",sans-serif';
+        ctx.fillStyle=_active?'#ead8ff':'rgba(202,207,227,0.85)';
+        ctx.fillText(_fmt(row,_col),(_colX[_ci]+_colX[_ci+1])/2,_ty);
+      }
+    }
+  }
+
+  // ── Footer: page label + prev/next + back ──
+  ctx.textBaseline='alphabetic';
+  const _maxPage=Math.max(0,Math.min(9,Math.ceil(_lbRows.length/10)-1));
+  if(_lbStatus==='ok'){
+    const _r0=_lbPage*10+1, _r1=Math.min(_lbRows.length,_lbPage*10+10);
+    ctx.font='12px "Exo 2",sans-serif'; ctx.textAlign='center'; ctx.fillStyle='rgba(190,195,220,0.82)';
+    ctx.fillText('Ranks '+_r0+'–'+_r1+' of '+_lbRows.length,W/2,H-86);
+  }
+  const _btnY=H-66, _btnH=34, _btnW=126;
+  const _mkBtn=(label,x,enabled,hover)=>{
+    ctx.fillStyle=!enabled?'rgba(28,28,42,0.5)':(hover?'rgba(72,52,124,0.96)':'rgba(45,35,80,0.85)');
+    ctx.fillRect(x,_btnY,_btnW,_btnH);
+    ctx.strokeStyle=!enabled?'rgba(60,60,80,0.4)':(hover?'rgba(185,155,255,0.9)':'rgba(120,100,190,0.6)'); ctx.lineWidth=1.5; ctx.strokeRect(x,_btnY,_btnW,_btnH);
+    ctx.font='bold 12px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillStyle=enabled?'rgba(222,212,255,0.96)':'rgba(110,110,130,0.6)'; ctx.fillText(label,x+_btnW/2,_btnY+_btnH/2);
+    ctx.textBaseline='alphabetic';
+    return {x,y:_btnY,w:_btnW,h:_btnH};
+  };
+  _lbBackBounds=_mkBtn('◀ BACK',tableX,true,_lbBackHover);
+  _lbPrevBounds=_mkBtn('◀ PREV',W/2-_btnW-12,_lbPage>0,_lbPrevHover);
+  _lbNextBounds=_mkBtn('NEXT ▶',W/2+12,_lbPage<_maxPage,_lbNextHover);
+}
+// Short column labels for the compact in-game popup (narrow columns).
+const _LB_HDR_SHORT={corp_value:'VALUE',num_trains:'TRAINS',num_routes:'ROUTES',num_stations:'STAT.',latest_sd:'S.D.',discovered_planets:'PLNTS',discovered_stars:'STARS'};
+// In-game leaderboard popup (activePopup==='leaderboard'), opened with [L].
+// Shares the _lbRows/_lbMetric/_lbPage/_lbFetchTop state with the title screen
+// version (they're never open at once); its clickable bounds live in popupState
+// so the popup-click dispatch can read them.
+function drawLeaderboardPopup(){
+  if(activePopup!=='leaderboard') return;
+  const pw=624, ph=414;
+  const [px,py]=drawPopupBase(pw,ph,'rgba(170,120,255,0.7)');
+  ctx.save();
+  ctx.font='bold 12px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='rgba(212,192,255,0.97)'; ctx.shadowColor='rgba(140,90,240,1)'; ctx.shadowBlur=10;
+  ctx.fillText('ALL-TIME HIGH SCORES',px+pw/2,py+22); ctx.shadowBlur=0;
+  ctx.textAlign='left'; ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(170,160,205,0.7)';
+  ctx.fillText('sorted by '+(_LB_METRICS.find(m=>m.col===_lbMetric)?.label||''),px+12,py+22);
+  ctx.textAlign='right'; ctx.font='10px "Exo 2",sans-serif';
+  ctx.fillStyle=popupState.escHover?'rgba(255,255,255,0.92)':'rgba(150,120,200,0.55)';
+  ctx.fillText('[ESC] close',px+pw-10,py+22);
+  popupState.escBounds={x:px+pw-86,y:py+12,w:76,h:14};
+
+  const tableX=px+12, tableW=pw-24;
+  const _weights=[0.7,2.35,1.4,0.98,0.98,1.05,0.85,1.0,0.95];
+  const _wsum=_weights.reduce((a,b)=>a+b,0);
+  const _colX=[]; let _cx=tableX; for(const w of _weights){_colX.push(_cx); _cx+=w/_wsum*tableW;} _colX.push(tableX+tableW);
+  const _cc=(i)=>(_colX[i]+_colX[i+1])/2;
+  const headY=py+44, tableTop=headY+20, rowH=Math.min(26,(ph-100-(headY-py))/10);
+
+  popupState.lbHdr=[];
+  ctx.textBaseline='middle'; ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='rgba(160,165,195,0.85)'; ctx.fillText('#',_cc(0),headY+7);
+  ctx.textAlign='left'; ctx.fillText('CORPORATION',_colX[1]+4,headY+7); ctx.textAlign='center';
+  for(let m=0;m<_LB_METRICS.length;m++){
+    const _ci=2+m,_l=_colX[_ci],_r=_colX[_ci+1];
+    const _active=_lbMetric===_LB_METRICS[m].col, _hover=popupState.lbColHover===m;
+    popupState.lbHdr.push({col:_LB_METRICS[m].col,x:_l,y:headY-10,w:_r-_l,h:24});
+    if(_active){ ctx.fillStyle='rgba(130,95,210,0.34)'; ctx.fillRect(_l,headY-10,_r-_l,24); }
+    ctx.fillStyle=_active?'#e6cfff':(_hover?'#dcd4f4':'rgba(160,165,195,0.85)');
+    ctx.fillText(_LB_HDR_SHORT[_LB_METRICS[m].col]+(_active?' ▼':''),(_l+_r)/2,headY+7);
+  }
+  ctx.strokeStyle='rgba(130,110,190,0.5)'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(tableX,headY+18); ctx.lineTo(tableX+tableW,headY+18); ctx.stroke();
+
+  if(_lbStatus!=='ok'){
+    ctx.font='12px "Exo 2",sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillStyle=_lbStatus==='error'?'rgba(255,150,150,0.9)':'rgba(205,205,225,0.85)';
+    const _m=_lbStatus==='loading'?'Loading leaderboard…':_lbStatus==='error'?'Could not reach the leaderboard.':'No entries yet — be the first!';
+    ctx.fillText(_m,px+pw/2,tableTop+70);
+  } else {
+    const _start=_lbPage*10;
+    const _fmt=(row,col)=> col==='corp_value'?_fmtCr(row[col]):col==='latest_sd'?(Math.round(row[col]*10)/10).toFixed(1):String(row[col]);
+    for(let r=0;r<10;r++){
+      const _idx=_start+r; if(_idx>=_lbRows.length) break;
+      const row=_lbRows[_idx], ry=tableTop+r*rowH, _ty=ry+rowH/2;
+      const _mine=_corpId&&row.corp_id===_corpId;
+      ctx.fillStyle=_mine?'rgba(100,72,180,0.42)':(r%2===0?'rgba(255,255,255,0.025)':'rgba(255,255,255,0.06)');
+      ctx.fillRect(tableX,ry,tableW,rowH);
+      ctx.textBaseline='middle';
+      ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
+      ctx.fillStyle=(_idx<3)?['#ffd54a','#cfd8e6','#d8a06a'][_idx]:'rgba(190,195,215,0.9)';
+      ctx.fillText('#'+(_idx+1),_cc(0),_ty);
+      ctx.font='bold 11px "Exo 2",sans-serif'; ctx.textAlign='left';
+      ctx.fillStyle=_mine?'#ffffff':'rgba(228,228,242,0.95)';
+      let _nm=row.corp_name||'?'; const _nMaxW=_colX[2]-_colX[1]-8;
+      while(_nm.length>3&&ctx.measureText(_nm).width>_nMaxW) _nm=_nm.slice(0,-1);
+      if(_nm.length<(row.corp_name||'').length) _nm+='…';
+      ctx.fillText(_nm,_colX[1]+4,_ty);
+      ctx.textAlign='center';
+      for(let m=0;m<_LB_METRICS.length;m++){
+        const _col=_LB_METRICS[m].col,_ci=2+m,_active=_lbMetric===_col;
+        ctx.font=(_active?'bold ':'')+'10px "Exo 2",sans-serif';
+        ctx.fillStyle=_active?'#ead8ff':'rgba(202,207,227,0.85)';
+        ctx.fillText(_fmt(row,_col),(_colX[_ci]+_colX[_ci+1])/2,_ty);
+      }
+    }
+  }
+
+  ctx.textBaseline='alphabetic';
+  const _maxPage=Math.max(0,Math.min(9,Math.ceil(_lbRows.length/10)-1));
+  if(_lbStatus==='ok'){
+    ctx.font='11px "Exo 2",sans-serif'; ctx.textAlign='center'; ctx.fillStyle='rgba(190,195,220,0.82)';
+    ctx.fillText('Ranks '+(_lbPage*10+1)+'–'+Math.min(_lbRows.length,_lbPage*10+10)+' of '+_lbRows.length,px+pw/2,py+ph-30);
+  }
+  const _bw=104,_bh=26,_by=py+ph-46;
+  const _mk=(label,x,enabled,hover)=>{
+    ctx.fillStyle=!enabled?'rgba(30,28,46,0.5)':(hover?'rgba(74,54,128,0.96)':'rgba(48,38,86,0.85)');
+    ctx.fillRect(x,_by,_bw,_bh);
+    ctx.strokeStyle=!enabled?'rgba(60,60,82,0.4)':(hover?'rgba(188,158,255,0.9)':'rgba(122,102,192,0.6)'); ctx.lineWidth=1.3; ctx.strokeRect(x,_by,_bw,_bh);
+    ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillStyle=enabled?'rgba(224,214,255,0.96)':'rgba(110,110,132,0.6)'; ctx.fillText(label,x+_bw/2,_by+_bh/2);
+    ctx.textBaseline='alphabetic'; return {x,y:_by,w:_bw,h:_bh};
+  };
+  popupState.lbPrev=_mk('◀ PREV',px+pw/2-_bw-10,_lbPage>0,popupState.lbPrevHover);
+  popupState.lbNext=_mk('NEXT ▶',px+pw/2+10,_lbPage<_maxPage,popupState.lbNextHover);
+  ctx.restore();
+}
 let tracking=false, trackingOffset={x:0,y:0};
 let relockAfterDrag=false;
 let trains=[];
@@ -2970,6 +3337,23 @@ function _recomputeMissionTargets(){
     }
   }
 }
+// For a highlighted mission planet, classify the cargo flow at that planet:
+//   {mode:'deliver', other} → the mission DELIVERS cargo TO this planet; `other`
+//      is the planet the cargo originates from (or null → Gigi Prime fallback).
+//   {mode:'pickup',  other} → the mission PICKS UP cargo FROM this planet;
+//      `other` is the delivery destination (or null → Gigi Prime fallback).
+// Returns null if no active mission delivers-to / picks-up at this planet.
+function _missionArrowFor(pid){
+  if(typeof missions==='undefined'||!galaxy) return null;
+  for(const m of missions){
+    if(m.status!=='active') continue;
+    const _isSource=(m.sourcePlanetId===pid)||(Array.isArray(m.scientistSourceIds)&&m.scientistSourceIds.includes(pid));
+    const _isTarget=(m.targetPlanetId===pid);
+    if(_isTarget&&!_isSource) return {mode:'deliver', other:(m.sourcePlanetId!=null?_gp(m.sourcePlanetId):null)};
+    if(_isSource&&!_isTarget) return {mode:'pickup',  other:(m.targetPlanetId!=null?_gp(m.targetPlanetId):null)};
+  }
+  return null;
+}
 let pendingMissionIntros=[]; // {defId,readySd,targetPlanetId?,sourcePlanetId?} missions waiting to show new-mission intro popup
 let _gameStartSd=0;           // stardate at game init (used for startsAfter delays)
 let _newMissionAcceptBounds=null;
@@ -3173,6 +3557,7 @@ let _goldOkHover=false, _diamondOkHover=false, _carUnlockOkHover=false;
 let _quitYesHover=false, _quitNoHover=false, _saveGameBtnHover=false;
 let _startBtnHover=false, _loadBtnHover=false;
 let loadBtnBounds=null, saveGameBtnBounds=null;
+let leaderboardBtnBounds=null, _leaderboardBtnHover=false;
 let _htpBtnHover=false, _htpDotHover=-1, _htpSkipHover=false;
 let pokedexRowBounds=[], starRegistryRowBounds=[];
 let cargoParticles=[];
@@ -3526,6 +3911,19 @@ function drawTitleScreen(ts,dt){
   ctx.shadowBlur=_loadBtnHover?12:6; ctx.font='bold 14px Orbitron,sans-serif';
   ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillStyle=_loadBtnHover?'rgba(255,225,120,1.0)':'rgba(210,170,80,0.95)';
   ctx.fillText('LOAD GAME',W/2,lby+lbh/2);
+  ctx.restore();
+  // LEADERBOARD button (below LOAD GAME) — opens the public high-score board.
+  const _lbBx=W/2-95, _lbBy=lby+lbh+14, _lbBw=190, _lbBh=46;
+  leaderboardBtnBounds={x:_lbBx,y:_lbBy,w:_lbBw,h:_lbBh};
+  ctx.save();
+  ctx.shadowColor='#a76cff'; ctx.shadowBlur=_leaderboardBtnHover?22:12;
+  ctx.strokeStyle=_leaderboardBtnHover?'rgba(205,160,255,0.95)':'rgba(150,100,210,0.6)'; ctx.lineWidth=_leaderboardBtnHover?2:1.5;
+  ctx.strokeRect(_lbBx,_lbBy,_lbBw,_lbBh);
+  ctx.fillStyle=_leaderboardBtnHover?'rgba(40,22,62,0.96)':'rgba(26,14,42,0.82)';
+  ctx.fillRect(_lbBx+1,_lbBy+1,_lbBw-2,_lbBh-2);
+  ctx.shadowBlur=_leaderboardBtnHover?12:6; ctx.font='bold 14px Orbitron,sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillStyle=_leaderboardBtnHover?'rgba(228,205,255,1)':'rgba(190,160,230,0.95)';
+  ctx.fillText('LEADERBOARD',W/2,_lbBy+_lbBh/2);
   ctx.restore();
   // Version number — dark grey, bottom-left corner.
   ctx.save();
@@ -15978,8 +16376,24 @@ function drawUpgradeUnlockPopup(){
   const _key=(popupState.upgradeUnlock||{}).key;
   const info=_UPGRADE_UNLOCK_INFO[_key];
   if(!info) return;
-  const pw=340, ph=446;
-  const [px,py]=drawPopupBase(pw,ph,'rgba(245,200,40,0.7)');
+  const pw=340;
+  // ── Size the popup to its content (no fixed height / blank tail) ──
+  // Count wrapped lines per section (mirrors the _wrapC wrapping below: split on
+  // spaces, max width pw-36) so the height is exactly what the copy needs.
+  const _lc=(text,font)=>{ ctx.font=font; const _ws=(text||'').split(' '); let _l='',_n=0; for(const _w of _ws){ const _t=_l?_l+' '+_w:_w; if(ctx.measureText(_t).width<=pw-36)_l=_t; else { if(_l)_n++; _l=_w; } } if(_l)_n++; return Math.max(1,_n); };
+  const _F_COST='bold 12px "Exo 2",sans-serif',_F_BUILD='bold 11px "Exo 2",sans-serif',_F_EN='10px "Exo 2",sans-serif',_F_FORM='bold 11px "Exo 2",sans-serif';
+  const _nCost=_lc(info.cost||'—',_F_COST), _nBuild=_lc(info.buildOn||'—',_F_BUILD), _nEn=_lc(info.enables||'',_F_EN), _nForm=info.formula?_lc(info.formula,_F_FORM):0;
+  let _be=196;                       // body cursor start (clears the visual)
+  _be+=15+15*_nCost+9;               // COST: caption + value + gap
+  _be+=15+14*_nBuild+9;              // BUILDABLE ON
+  _be+=15+14*_nEn;                   // ENABLES
+  if(info.formula){ _be+=8+15*_nForm; if(info.time) _be+=13; }
+  const ph=_be+64;                   // body + footer + OKAY button + bottom margin
+  // Frame — centred, but never tucked under the top bar (clamp top below TOP_H).
+  const px=(W-pw)/2; let py=(H-ph)/2; if(py<TOP_H+4) py=TOP_H+4;
+  _clearTextOverlayRect(px,py,pw,ph);
+  ctx.fillStyle='rgba(3,6,20,0.97)'; ctx.fillRect(px,py,pw,ph);
+  ctx.strokeStyle='rgba(245,200,40,0.7)'; ctx.lineWidth=2; ctx.strokeRect(px,py,pw,ph);
   ctx.save();
   ctx.textAlign='center';
   // Label line
@@ -16007,24 +16421,23 @@ function drawUpgradeUnlockPopup(){
   let _ly=py+196;
   // (1) COST
   _cap('COST',_ly); _ly+=15;
-  _ly=_wrapC(info.cost||'—','bold 12px "Exo 2",sans-serif','rgba(255,220,120,0.97)',_ly,15)+9;
+  _ly=_wrapC(info.cost||'—',_F_COST,'rgba(255,220,120,0.97)',_ly,15)+9;
   // (2) BUILDABLE ON — eligible biomes, or the prerequisite that must be met.
   _cap('BUILDABLE ON',_ly); _ly+=15;
-  _ly=_wrapC(info.buildOn||'—','bold 11px "Exo 2",sans-serif','rgba(190,225,255,0.95)',_ly,14)+9;
+  _ly=_wrapC(info.buildOn||'—',_F_BUILD,'rgba(190,225,255,0.95)',_ly,14)+9;
   // (3) ENABLES — one-sentence benefit.
   _cap('ENABLES',_ly); _ly+=15;
-  _ly=_wrapC(info.enables||'','10px "Exo 2",sans-serif','rgba(228,228,233,0.9)',_ly,14);
+  _ly=_wrapC(info.enables||'',_F_EN,'rgba(228,228,233,0.9)',_ly,14);
   // Processing formula + time (production upgrades only).
   if(info.formula){
     _ly+=8;
-    _ly=_wrapC(info.formula,'bold 11px "Exo 2",sans-serif','rgba(255,235,160,0.97)',_ly,15);
+    _ly=_wrapC(info.formula,_F_FORM,'rgba(255,235,160,0.97)',_ly,15);
     if(info.time) _ly=_wrapC('Processing time: '+info.time,'9px "Exo 2",sans-serif','rgba(200,205,215,0.78)',_ly,13);
   }
-  // Footer: where the upgrade appears.
-  ctx.font='italic 9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(180,185,195,0.6)';
-  ctx.fillText('Available in the planet UPGRADES panel.',px+pw/2,py+ph-52);
-  // OKAY button
-  const _bw=100,_bh=26,_bx=px+(pw-_bw)/2,_by=py+ph-40;
+  // Footer + OKAY — placed right after the body (no blank tail).
+  ctx.font='italic 9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(180,185,195,0.6)'; ctx.textAlign='center';
+  ctx.fillText('Available in the planet UPGRADES panel.',px+pw/2,_ly+14);
+  const _bw=100,_bh=26,_bx=px+(pw-_bw)/2,_by=_ly+24;
   ctx.fillStyle=_upgradeUnlockOkHover?'rgba(210,165,30,0.97)':'rgba(150,115,20,0.90)'; ctx.fillRect(_bx,_by,_bw,_bh);
   ctx.strokeStyle=_upgradeUnlockOkHover?'rgba(255,230,120,0.95)':'rgba(235,200,90,0.85)'; ctx.lineWidth=1.5; ctx.strokeRect(_bx,_by,_bw,_bh);
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
@@ -20845,6 +21258,7 @@ function _smHandleClick(cp){
             if(res.ok){
               popupState.smSelected=_slotId;
               _chatMsg('GAME SAVED!','rgba(80,220,130,1)');
+              _lbSubmit(); // also log to the public leaderboard on manual save
             } else if(res.err==='quota'){
               alert('Browser storage is full. Delete an existing save first.');
             } else if(res.err==='unavailable'){
@@ -20872,7 +21286,7 @@ function _smHandleClick(cp){
           if(!galaxy){ _chatMsg('Nothing to save.','rgba(255,100,100,1)'); return true; }
           const saveObj=_buildSaveObject(); if(!saveObj) return true;
           const res=_lsWriteSlot(id,saveObj,_meta.label||null);
-          if(res.ok) _chatMsg('GAME SAVED!','rgba(80,220,130,1)');
+          if(res.ok){ _chatMsg('GAME SAVED!','rgba(80,220,130,1)'); _lbSubmit(); }
           else if(res.err==='quota') alert('Browser storage is full. Delete an existing save first.');
           else alert('Save failed: '+res.err);
         } else if(a==='export'){
@@ -26670,6 +27084,54 @@ function drawGalaxy(ts,dt){
         ctx.shadowBlur=4; ctx.lineWidth=1;
         ctx.beginPath(); ctx.arc(_moSx,_moSy,_moR+5,0,Math.PI*2); ctx.stroke();
         ctx.restore();
+        // ── Mission direction arrow (only for planets OUTSIDE the home/Origen
+        // system). Deliver → arrow points AT the circle from the cargo origin;
+        // Pickup → arrow points AWAY from the circle toward the destination.
+        // Fallback origin/destination is Gigi Prime (the home star). Arrow
+        // length = one circle diameter (2·_moR).
+        const _origP=galaxy.planets[galaxy.origenId];
+        const _origStar=_origP?_origP.starId:galaxy.homeStarId;
+        if(_moP.starId!==_origStar){
+          const _ar=_missionArrowFor(pid);
+          if(_ar){
+            let _oWx=null,_oWy=null;
+            if(_ar.other){ _oWx=_ar.other.x; _oWy=_ar.other.y; }
+            else { const _gpS=galaxy.stars[galaxy.homeStarId]; if(_gpS){ _oWx=_gpS.x; _oWy=_gpS.y; } }
+            if(_oWx!=null){
+              const [_oSx,_oSy]=w2s(_oWx,_oWy);
+              let _ddx=_oSx-_moSx, _ddy=_oSy-_moSy; const _dl=Math.hypot(_ddx,_ddy);
+              if(_dl>0.5){
+                _ddx/=_dl; _ddy/=_dl; // unit vector from this planet toward the other endpoint
+                const _diam=2*_moR;
+                let _tipX,_tipY,_baseX,_baseY;
+                if(_ar.mode==='deliver'){
+                  // tip ON the circle (origin side), base one diameter further out → points inward
+                  _tipX=_moSx+_ddx*_moR;        _tipY=_moSy+_ddy*_moR;
+                  _baseX=_moSx+_ddx*(_moR+_diam); _baseY=_moSy+_ddy*(_moR+_diam);
+                } else {
+                  // base ON the circle (dest side), tip one diameter further out → points outward
+                  _baseX=_moSx+_ddx*_moR;        _baseY=_moSy+_ddy*_moR;
+                  _tipX=_moSx+_ddx*(_moR+_diam); _tipY=_moSy+_ddy*(_moR+_diam);
+                }
+                const _aux=_tipX-_baseX, _auy=_tipY-_baseY, _aul=Math.hypot(_aux,_auy)||1;
+                const _ux=_aux/_aul, _uy=_auy/_aul, _px=-_uy, _py=_ux;
+                const _hl=Math.max(7,_aul*0.4), _hw=_hl*0.62;
+                ctx.save();
+                ctx.strokeStyle=`rgba(40,235,110,${0.80+0.18*_moPulse})`;
+                ctx.fillStyle=`rgba(40,235,110,${0.80+0.18*_moPulse})`;
+                ctx.shadowColor='rgba(40,255,110,0.85)'; ctx.shadowBlur=8;
+                ctx.lineWidth=Math.max(2,2.4+_moPulse*0.8); ctx.lineCap='round';
+                ctx.beginPath(); ctx.moveTo(_baseX,_baseY); ctx.lineTo(_tipX-_ux*_hl*0.6,_tipY-_uy*_hl*0.6); ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(_tipX,_tipY);
+                ctx.lineTo(_tipX-_ux*_hl+_px*_hw,_tipY-_uy*_hl+_py*_hw);
+                ctx.lineTo(_tipX-_ux*_hl-_px*_hw,_tipY-_uy*_hl-_py*_hw);
+                ctx.closePath(); ctx.fill();
+                ctx.restore();
+              }
+            }
+          }
+        }
       }
     }
   });
@@ -27359,7 +27821,7 @@ function drawGalaxy(ts,dt){
         lns[lns.length-1]=_last.slice(0,_ls);
         lns.push(_last.slice(_ls+1));
       }
-      return _markLast(lns.map((l,i)=>({type:'text',text:l,isFirst:i===0})));
+      { let _ci0=0; return _markLast(lns.map((l,i)=>{const _e={type:'text',text:l,isFirst:i===0,ci0:_ci0}; _ci0+=l.length+1; return _e;})); }
     };
     // Build visible message set (newest first) until we have enough lines
     const _visMsgs=[];
@@ -27406,6 +27868,16 @@ function drawGalaxy(ts,dt){
           if(_st.length<_seg.text.length&&_st.length>0) _st+='…';
           ctx.fillText(_st,_sx,ty); _sx+=ctx.measureText(_seg.text).width;
         }
+      } else if(msg.rainbow){
+        // Animated rainbow: each character a rotating rainbow hue.
+        let _rx=_clX+5; const _b=vl.ci0||0;
+        for(let _ci=0;_ci<vl.text.length;_ci++){
+          const _h=((Date.now()*0.10)+(_b+_ci)*24)%360;
+          const _rc='hsl('+_h.toFixed(0)+',95%,62%)';
+          ctx.fillStyle=_rc; ctx.shadowColor=_rc;
+          ctx.fillText(vl.text[_ci],_rx,ty);
+          _rx+=ctx.measureText(vl.text[_ci]).width;
+        }
       } else {
         ctx.fillStyle=msg.color; ctx.shadowColor=msg.color;
         ctx.fillText(vl.text,_clX+5,ty);
@@ -27434,6 +27906,7 @@ function drawGalaxy(ts,dt){
     {label:'[R] routes',   popup:'routes',     initState:()=>({scroll:0})},
     {label:'[I] tech tree',popup:'techtree',   initState:()=>({})},
     {label:'[M] missions', popup:'missions',   initState:()=>({mScroll:0})},
+    {label:'[L] ranks',    popup:'leaderboard',initState:()=>({})},
     {label:'[O] options',  popup:'options',    initState:()=>({})},
   ];
   _hintBounds=[];
@@ -27517,6 +27990,7 @@ function drawGalaxy(ts,dt){
   drawRivalFoundedPopup();
   drawAncientMessagePopup();
   drawMissionsPopup();
+  drawLeaderboardPopup();
   drawCorpPopup();
   drawCeoHirePopup();
   drawQuitConfirmPopup();
@@ -28417,6 +28891,15 @@ canvas.addEventListener('mousemove',e=>{
       }
     } else { _stationHoverInfo=null; }
   }
+  // Leaderboard popup hover (metric headers + pagination buttons).
+  if(activePopup==='leaderboard'){
+    popupState.lbColHover=-1;
+    if(popupState.lbHdr){ for(let _i=0;_i<popupState.lbHdr.length;_i++){ const _h=popupState.lbHdr[_i]; if(cp.x>=_h.x&&cp.x<=_h.x+_h.w&&cp.y>=_h.y&&cp.y<=_h.y+_h.h){ popupState.lbColHover=_i; break; } } }
+    const _lbin=(b)=>b&&cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h;
+    popupState.lbPrevHover=_lbin(popupState.lbPrev);
+    popupState.lbNextHover=_lbin(popupState.lbNext);
+    if(popupState.lbColHover>=0||popupState.lbPrevHover||popupState.lbNextHover) canvas.style.cursor='pointer';
+  }
   // Hover tracking for [ESC] text in popups
   if(activePopup&&popupState.escBounds){
     const eb=popupState.escBounds;
@@ -28792,8 +29275,19 @@ canvas.addEventListener('mousemove',e=>{
     _startBtnHover=!!(startBtnBounds&&cp.x>=startBtnBounds.x&&cp.x<=startBtnBounds.x+startBtnBounds.w&&cp.y>=startBtnBounds.y&&cp.y<=startBtnBounds.y+startBtnBounds.h);
     _loadBtnHover=!!(loadBtnBounds&&cp.x>=loadBtnBounds.x&&cp.x<=loadBtnBounds.x+loadBtnBounds.w&&cp.y>=loadBtnBounds.y&&cp.y<=loadBtnBounds.y+loadBtnBounds.h);
     _muteBtnHover=!!(_muteBtnBounds&&cp.x>=_muteBtnBounds.x&&cp.x<=_muteBtnBounds.x+_muteBtnBounds.w&&cp.y>=_muteBtnBounds.y&&cp.y<=_muteBtnBounds.y+_muteBtnBounds.h);
-    canvas.style.cursor=(_startBtnHover||_loadBtnHover||_muteBtnHover)?'pointer':'default';
-  } else { _startBtnHover=false; _loadBtnHover=false; }
+    _leaderboardBtnHover=!!(leaderboardBtnBounds&&cp.x>=leaderboardBtnBounds.x&&cp.x<=leaderboardBtnBounds.x+leaderboardBtnBounds.w&&cp.y>=leaderboardBtnBounds.y&&cp.y<=leaderboardBtnBounds.y+leaderboardBtnBounds.h);
+    canvas.style.cursor=(_startBtnHover||_loadBtnHover||_muteBtnHover||_leaderboardBtnHover)?'pointer':'default';
+  } else { _startBtnHover=false; _loadBtnHover=false; _leaderboardBtnHover=false; }
+  if(gs==='leaderboard'){
+    const _in=(b)=>b&&cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h;
+    _lbBackHover=_in(_lbBackBounds);
+    const _maxPage=Math.max(0,Math.min(9,Math.ceil(_lbRows.length/10)-1));
+    _lbPrevHover=_in(_lbPrevBounds)&&_lbPage>0;
+    _lbNextHover=_in(_lbNextBounds)&&_lbPage<_maxPage;
+    _lbColHover=-1;
+    for(let _hi=0;_hi<_lbHeaderBounds.length;_hi++){ const h=_lbHeaderBounds[_hi]; if(cp.x>=h.x&&cp.x<=h.x+h.w&&cp.y>=h.y&&cp.y<=h.y+h.h){ _lbColHover=_hi; break; } }
+    canvas.style.cursor=(_lbBackHover||_lbPrevHover||_lbNextHover||_lbColHover>=0)?'pointer':'default';
+  }
   if(gs==='howtoplay'){
     // Intro cutscene hover: only the new SKIP button has a hover state.
     // Legacy htp/dot hovers are kept at default values so other code
@@ -28994,6 +29488,18 @@ canvas.addEventListener('mouseup',e=>{
     if(b&&cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h) startGame();
     const lb=loadBtnBounds;
     if(lb&&cp.x>=lb.x&&cp.x<=lb.x+lb.w&&cp.y>=lb.y&&cp.y<=lb.y+lb.h) loadGame();
+    const _lbb=leaderboardBtnBounds;
+    if(_lbb&&cp.x>=_lbb.x&&cp.x<=_lbb.x+_lbb.w&&cp.y>=_lbb.y&&cp.y<=_lbb.y+_lbb.h){ gs='leaderboard'; _lbFetchTop('corp_value'); return; }
+  } else if(gs==='leaderboard'){
+    const _hit=(b)=>b&&cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h;
+    if(_hit(_lbBackBounds)){ gs='title'; return; }
+    const _maxPage=Math.max(0,Math.min(9,Math.ceil(_lbRows.length/10)-1));
+    if(_hit(_lbPrevBounds)&&_lbPage>0){ _lbPage--; return; }
+    if(_hit(_lbNextBounds)&&_lbPage<_maxPage){ _lbPage++; return; }
+    for(const h of _lbHeaderBounds){
+      if(cp.x>=h.x&&cp.x<=h.x+h.w&&cp.y>=h.y&&cp.y<=h.y+h.h){ if(h.col!==_lbMetric) _lbFetchTop(h.col); return; }
+    }
+    return;
   } else if(gs==='howtoplay'){
     // Intro cutscene clicks (mouse-click is treated as "press any key"):
     //   • SKIP button → jump straight to corpsetup
@@ -29124,6 +29630,7 @@ canvas.addEventListener('mouseup',e=>{
       if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
         activePopup=activePopup===b.popup?null:b.popup;
         popupState=activePopup?b.initState():{};
+        if(activePopup==='leaderboard') _lbFetchTop(_lbMetric||'corp_value');
         // Clicking the [T] trains hint dismisses the post-mission yellow
         // "Press T / click below" callout — the player took the action.
         if(b.popup==='trains' && _buyTrainHintStartMs && !_buyTrainHintFadeOutStartMs){
@@ -29134,6 +29641,14 @@ canvas.addEventListener('mouseup',e=>{
     }
     // ── popup interactions ────────────────────────────────────
     if(activePopup){
+      // Leaderboard popup: click a metric header to re-sort, or paginate.
+      if(activePopup==='leaderboard'){
+        if(popupState.lbHdr){ for(const h of popupState.lbHdr){ if(cp.x>=h.x&&cp.x<=h.x+h.w&&cp.y>=h.y&&cp.y<=h.y+h.h){ if(h.col!==_lbMetric) _lbFetchTop(h.col); return; } } }
+        const _lbMax=Math.max(0,Math.min(9,Math.ceil(_lbRows.length/10)-1));
+        const _pb=popupState.lbPrev,_nb=popupState.lbNext;
+        if(_pb&&cp.x>=_pb.x&&cp.x<=_pb.x+_pb.w&&cp.y>=_pb.y&&cp.y<=_pb.y+_pb.h){ if(_lbPage>0)_lbPage--; return; }
+        if(_nb&&cp.x>=_nb.x&&cp.x<=_nb.x+_nb.w&&cp.y>=_nb.y&&cp.y<=_nb.y+_nb.h){ if(_lbPage<_lbMax)_lbPage++; return; }
+      }
       // Pokedex sort click
       if(activePopup==='pokedex'&&pokedexSortBounds){
         const b=pokedexSortBounds;
@@ -30940,6 +31455,11 @@ document.addEventListener('keydown',e=>{
       if(activePopup==='missions') popupState={mScroll:0};
       return;
     }
+    if(e.key==='l'||e.key==='L'){
+      activePopup=activePopup==='leaderboard'?null:'leaderboard';
+      if(activePopup==='leaderboard'){ popupState={}; _lbFetchTop(_lbMetric||'corp_value'); }
+      return;
+    }
     if(e.key==='i'||e.key==='I'){
       // Tech Tree screen — full-canvas view of every ENGINE + CAR, with
       // greyscale locked items + a blacked-out mystery bottom row.
@@ -30956,6 +31476,10 @@ document.addEventListener('keydown',e=>{
 // ── Save / Load ──────────────────────────────────────────────
 function _buildSaveObject(){
   if(!galaxy) return null;
+  // Make sure the leaderboard identity exists BEFORE it's serialized, so the
+  // saved `_corpId` always matches the one used for /submit (keeps a corp's
+  // leaderboard entry stable across reloads instead of spawning a new id).
+  _ensureCorpId();
   // ── Float-precision rounding helper ─────────────────────────
   // Several save fields (planet/train angles, fog point coords, x/y) carry
   // full ~15-digit precision but only ~5 digits matter visually. Rounding
@@ -31122,7 +31646,7 @@ function _buildSaveObject(){
     // version 2 introduces the expanded SPEED_OPTS [0,0.5,1,2,5,10] (was [1,2,5,10]).
     // Loader accepts both v1 and v2 and migrates gameSpeedIdx accordingly.
     version:2,
-    stardate, credits, corpName, gameSpeedIdx, _rivalCorpWarnTenth,
+    stardate, credits, corpName, _corpId, _lbBestRanks, gameSpeedIdx, _rivalCorpWarnTenth,
     cam:{x:cam.x,y:cam.y,scale:cam.scale},
     sel:_savedSel, tracking, trackingOffset:{x:trackingOffset.x,y:trackingOffset.y},
     fogEnabled, panelTab, panelScroll, stationPanelScroll,
@@ -31242,6 +31766,8 @@ function _restoreFromSave(save){
   // Restore flat state
   _invalidateUpgradePlanetCache();
   stardate=save.stardate; credits=save.credits; corpName=save.corpName||'Space Tycoon Corporation';
+  _corpId=save._corpId||null; // leaderboard identity (lazily regenerated on first submit if absent)
+  _lbBestRanks=(save._lbBestRanks&&typeof save._lbBestRanks==='object')?save._lbBestRanks:{}; // best leaderboard ranks per metric
   // Restore the rival-corp countdown watermark. Saves from before this
   // feature shipped don't carry the field — in that case, infer the
   // tenth from the current stardate so we don't re-emit warnings for
@@ -31660,6 +32186,10 @@ function _autosaveToLocalStorage(){
   if(!res.ok&&res.err==='quota'){
     _chatMsg('AUTOSAVE FAILED — STORAGE FULL','rgba(255,100,100,1)');
   }
+  // Submit the corp's stats to the public leaderboard (fire-and-forget). If it
+  // qualifies for the top 100 of any metric, _lbSubmit posts the rainbow chat
+  // announcement. Network failures are swallowed and never block the save.
+  _lbSubmit();
 }
 // Build a single-planet export blob — same JSON schema discussed with the
 // player earlier. Groups every per-planet attribute into logical sections so
@@ -31948,7 +32478,7 @@ function startGame(){
   missions=[]; _recomputeMissionTargets();
   _gameStartSd=stardate;
   pendingMissionIntros=MISSION_DEFS.filter(def=>!def.prerequisite&&def.id!=='visit_planet'&&def.id!=='build_foundry'&&def.id!=='dispose_hazmat'&&def.id!=='lost_colony'&&def.id!=='seeking_home'&&def.id!=='create_route'&&def.id!=='research_royal_car'&&def.id!=='colony_train'&&def.id!=='spread_the_seed'&&def.id!=='famine'&&def.id!=='outbreak'&&def.id!=='stellar_cartography'&&def.id!=='galaxy_census'&&def.id!=='sandstorm_relief'&&def.id!=='bh_research'&&def.id!=='design_better_train'&&def.id!=='buy_second_train'&&def.id!=='galactic_distance'&&def.id!=='corporate_expansion'&&def.id!=='ancient_schematics'&&def.id!=='another_dimension'&&def.id!=='more_scientists').map(def=>({defId:def.id,readySd:_gameStartSd+(def.startsAfter||0)}));
-  financeLedger=[]; _ledgerSummary={totalRevenue:0,totalCost:0,totalInterest:0}; purchaseLedger=[]; corpValueHistory={}; corpStatsHistory={}; aiCorpStatsHistory={}; _financeScrollY=0; _financeBreakdown='stardate'; _financeDropdownOpen=false; _versusMetric='value'; _versusDropdownOpen=false;
+  financeLedger=[]; _ledgerSummary={totalRevenue:0,totalCost:0,totalInterest:0}; purchaseLedger=[]; corpValueHistory={}; corpStatsHistory={}; aiCorpStatsHistory={}; _financeScrollY=0; _financeBreakdown='stardate'; _financeDropdownOpen=false; _versusMetric='value'; _versusDropdownOpen=false; _corpId=null; _lbBestRanks={};
   loans=[]; _loanCounter=0; _financeTab='financials'; _financeLoanSelected='small'; _financeLoanHover=null; _financeTakeLoanHover=false;
   // Fresh pool of issuer names per game; assign one to each loan tier
   _bankNames=_generateBankNames();
@@ -32926,6 +33456,8 @@ function loop(ts){
     // Render it on top of the title art when active so the player can pick
     // a slot without leaving the title.
     if(activePopup==='savemanager'){ _sbBounds=[]; drawSaveManagerPopup(); }
+  } else if(gs==='leaderboard'){
+    drawLeaderboardScreen();
   } else if(gs==='fadeout'){
     drawTitleScreen(ts,0);
     fadeA=Math.min(1,fadeA+dt*.028);

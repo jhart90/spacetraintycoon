@@ -200,7 +200,10 @@
       "Bash(node -e ' *)",
       "Bash(awk '{print $5\" bytes \\(\"int\\($5/1024\\)\" KB\\)\"}')",
       "Bash(grep -n \"if\\(transitPathBlocked\\(fromP,toP,t.orbitR,r.arrivalOrbitR,t\\)\\){\" build_game.py)",
-      "PowerShell(winget install -e --id OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements --silent)"
+      "PowerShell(winget install -e --id OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements --silent)",
+      "Bash(grep -n \"return _markLast\\(lns.map\\(\\(l,i\\)=>\\({type:'text',text:l,isFirst:i===0}\\)\\)\\);\\\\|ctx.fillStyle=msg.color; ctx.shadowColor=msg.color;\" build_game.py)",
+      "Bash(grep -n \"financeLedger=\\\\[\\\\]; _ledgerSummary={totalRevenue:0,totalCost:0,totalInterest:0}; purchaseLedger=\\\\[\\\\]; corpValueHistory={}\" build_game.py)",
+      "Bash(awk '{print \"index.html: \"int\\($5/1024\\)\" KB\"}')"
     ]
   },
   "hooks": {
