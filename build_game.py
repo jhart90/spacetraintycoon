@@ -20913,6 +20913,11 @@ function drawOptionsPopup(){
     ctx.font='9px "Exo 2",sans-serif'; ctx.textAlign='center';
     ctx.fillStyle='#fa4';
     ctx.fillText(_title,_titleCx,_titleY);
+    // Artist credit — centered beneath the track title, small yellow lowercase.
+    // Sits close under the title (gap tightened ~2/3 vs the original +10 offset).
+    ctx.font='7px "Exo 2",sans-serif'; ctx.textAlign='center';
+    ctx.fillStyle='rgba(255,214,70,0.9)';
+    ctx.fillText('a.o.huge',_titleCx,_titleY+7);
   }
   // Clear cheat-button bounds — they belong to the (separate) cheats popup now.
   popupState.addCreditsBtnBounds=null;

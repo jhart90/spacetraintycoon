@@ -641,13 +641,13 @@ function playSound(id){
 // any interruption) and avoids GitHub raw's rate-limits / missing Range support.
 const _MUSIC_BASE='assets/';
 const _MUSIC_TRACKS=[
-  {file:'01_last_train_home.mp3',      title:'Last Train Home'},
-  {file:'02_interstellar_segment.mp3', title:'Interstellar Segment'},
-  {file:'03_star_depot_groove.mp3',    title:'Star Depot Groove'},
-  {file:'04_neon_katsu_sandwich.mp3',  title:'Neon Katsu Sandwich'},
-  {file:'05_lunar_save_point.mp3',     title:'Lunar Save Point'},
-  {file:'06_nebulosa_amistosa.mp3',    title:'Nebulosa Amistosa'},
-  {file:'07_midnight_cargo_run.mp3',   title:'Midnight Cargo Run'},
+  {file:'a.o.huge_01_last_train_home.mp3',      title:'Last Train Home'},
+  {file:'a.o.huge_02_interstellar_segment.mp3', title:'Interstellar Segment'},
+  {file:'a.o.huge_03_star_depot_groove.mp3',    title:'Star Depot Groove'},
+  {file:'a.o.huge_04_neon_katsu_sandwich.mp3',  title:'Neon Katsu Sandwich'},
+  {file:'a.o.huge_05_lunar_save_point.mp3',     title:'Lunar Save Point'},
+  {file:'a.o.huge_06_nebulosa_amistosa.mp3',    title:'Nebulosa Amistosa'},
+  {file:'a.o.huge_07_midnight_cargo_run.mp3',   title:'Midnight Cargo Run'},
 ];
 const _soundtrack=new Audio();
 _soundtrack.volume=0.35;
@@ -20602,7 +20602,7 @@ function drawOptionsPopup(){
   // (Add Credits, Flower Planet, Colony Planet, Rival) AND the Fog of War
   // toggle all live in the hidden Cheats popup accessed by pressing 'C' while
   // Options is open.
-  const pw=300, ph=320;
+  const pw=300, ph=332; // +12 vs prior 320 to fit the 'a.o.huge' artist credit under the track title
   const [px,py]=drawPopupBase(pw,ph,'rgba(80,160,255,0.7)');
   ctx.save();
   ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
@@ -20851,6 +20851,11 @@ function drawOptionsPopup(){
     ctx.font='9px "Exo 2",sans-serif'; ctx.textAlign='center';
     ctx.fillStyle='#fa4';
     ctx.fillText(_title,_titleCx,_titleY);
+    // Artist credit — centered beneath the track title, small yellow lowercase.
+    // Sits close under the title (gap tightened ~2/3 vs the original +10 offset).
+    ctx.font='7px "Exo 2",sans-serif'; ctx.textAlign='center';
+    ctx.fillStyle='rgba(255,214,70,0.9)';
+    ctx.fillText('a.o.huge',_titleCx,_titleY+7);
   }
   // Clear cheat-button bounds — they belong to the (separate) cheats popup now.
   popupState.addCreditsBtnBounds=null;
