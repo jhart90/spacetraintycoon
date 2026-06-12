@@ -22301,11 +22301,13 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
     if(uId==='factory') return !_ironCarUnlocked || !(p.hasLargeStation||p.hasTerminal);
     if(uId==='bakery')  return !_grainCarUnlocked;
     if(uId==='juicery') return !_fruitCarUnlocked;
-    if(uId==='glassworks'){
-      const _sd=!!(galaxy&&galaxy.planets.some(q=>q.type.id==='desert'&&visitedPlanetIds.has(q.id)));
-      const _cd=!!(galaxy&&galaxy.planets.some(q=>q.type.id==='chemical'&&visitedPlanetIds.has(q.id)));
-      return !(_sd&&_cd);
-    }
+    // GLASSWORKS card is only ever VISIBLE once _glassworksUnlocked is set
+    // (sand+chemical discovered, OR the Unlock-All cheat, OR a loaded save).
+    // Gate the PURCHASE button off that SAME canonical flag so the two can
+    // never disagree — previously this re-derived the sand/chem visits live,
+    // which the cheat path doesn't satisfy, leaving a permanently greyed
+    // button on a visible card.
+    if(uId==='glassworks') return !_glassworksUnlocked;
     return false;
   };
   // Station card title reflects the planet's current tier — STATION while
@@ -22369,6 +22371,7 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
   popupState._terminalTooltip=null;
   popupState._upgradeLockedTooltip=null;
   popupState._upUnlockTooltip=null;
+  popupState._upCostTooltip=null;
   popupState._upgradeBtnLockedBounds=[];
   // Resolve which prerequisites a given gated upgrade still has outstanding.
   // Used by the locked-button hover tooltip below to render the same
@@ -22390,6 +22393,15 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
       return [{ok:_sd,txt:'Sand planet discovered'},{ok:_cd,txt:'Chemical planet discovered'}];
     }
     return null;
+  };
+  // Register a hover target + "insufficient credits" tooltip for an upgrade
+  // PURCHASE button that is UNLOCKED (gate met) but unaffordable — these draw
+  // greyed but otherwise gave no hover feedback. Gate-locked buttons (LOCKED)
+  // and no-station buttons already have their own tooltips above.
+  const _regUnaffordableBtn=(uId,btnX,btnY,btnW,btnH,cost)=>{
+    const _hid='__cost_'+uId+'__';
+    popupState._upgradeBtnLockedBounds.push({x:btnX,y:btnY,w:btnW,h:btnH,hoverId:_hid});
+    if(popupState.upgradeBtnHover===_hid) popupState._upCostTooltip={by:btnY,upX,upW,cost};
   };
   ctx.save();
   ctx.beginPath(); ctx.rect(upX+1,listY,upW-4,listH); ctx.clip();
@@ -22845,7 +22857,7 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
         if(!_bfUnlocked){
           popupState._upgradeBtnLockedBounds.push({x:btnX,y:btnY,w:btnW,h:btnH,hoverId:'__locked_blast_furnace__'});
           if(popupState.upgradeBtnHover==='__locked_blast_furnace__') popupState._upUnlockTooltip={by:btnY,upX,upW,label:'BLAST FURNACE',reqs:_upLockReqs('blast_furnace')};
-        }
+        } else if(!canAffordBf) _regUnaffordableBtn(u.id,btnX,btnY,btnW,btnH,_uCostBf);
       }
     } else if(u.id==='glassworks'){
       // Glassworks — mirrors the blast-furnace card: storage bars for sand
@@ -22901,9 +22913,10 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
         // Lock the BUILD button until BOTH a Sand (desert) and a Chemical
         // planet have been visited. Mirrors how the train builder tracks
         // sand/chemical "discovery" (any visited planet of that biome type).
-        const _sandSeen=galaxy&&galaxy.planets.some(q=>q.type.id==='desert'&&visitedPlanetIds.has(q.id));
-        const _chemSeen=galaxy&&galaxy.planets.some(q=>q.type.id==='chemical'&&visitedPlanetIds.has(q.id));
-        const _gwUnlocked=!!(_sandSeen&&_chemSeen);
+        // Build gate keyed off the same canonical unlock flag that controls
+        // card visibility (see _isUpgradeGateLocked) — so a cheat/save-revealed
+        // card is always buildable, never a permanently greyed button.
+        const _gwUnlocked=!!_glassworksUnlocked;
         const _uCostGw=_upgradeBuildCost(u); const canAffordGw=credits>=_uCostGw;
         const _gwHov=_gwUnlocked&&canAffordGw&&popupState.upgradeBtnHover===u.id;
         const btnW=86, btnH=20, btnX=upX+(upW-btnW)/2, btnY=itemY+ITEM_H-btnH-8;
@@ -22926,7 +22939,7 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
         if(!_gwUnlocked){
           popupState._upgradeBtnLockedBounds.push({x:btnX,y:btnY,w:btnW,h:btnH,hoverId:'__locked_glassworks__'});
           if(popupState.upgradeBtnHover==='__locked_glassworks__') popupState._upUnlockTooltip={by:btnY,upX,upW,label:'GLASSWORKS',reqs:_upLockReqs('glassworks')};
-        }
+        } else if(!canAffordGw) _regUnaffordableBtn(u.id,btnX,btnY,btnW,btnH,_uCostGw);
       }
     } else if(u.id==='factory'){
       // Factory — mirrors the blast furnace card: storage bars for iron and
@@ -23003,7 +23016,7 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
         if(!_ftUnlocked){
           popupState._upgradeBtnLockedBounds.push({x:btnX,y:btnY,w:btnW,h:btnH,hoverId:'__locked_factory__'});
           if(popupState.upgradeBtnHover==='__locked_factory__') popupState._upUnlockTooltip={by:btnY,upX,upW,label:'FACTORY',reqs:_upLockReqs('factory')};
-        }
+        } else if(!canAffordFt) _regUnaffordableBtn(u.id,btnX,btnY,btnW,btnH,_uCostFt);
       }
     } else if(u.id==='bakery'||u.id==='juicery'){
       // Bakery / Juicery — single-input refinery card. Same layout as the
@@ -23084,7 +23097,7 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
           const _hid=_isBakery?'__locked_bakery__':'__locked_juicery__';
           popupState._upgradeBtnLockedBounds.push({x:btnX,y:btnY,w:btnW,h:btnH,hoverId:_hid});
           if(popupState.upgradeBtnHover===_hid) popupState._upUnlockTooltip={by:btnY,upX,upW,label:_isBakery?'BAKERY':'JUICERY',reqs:_upLockReqs(_isBakery?'bakery':'juicery')};
-        }
+        } else if(!canAffordBj) _regUnaffordableBtn(u.id,btnX,btnY,btnW,btnH,_uCostBj);
       }
     } else if(u.id==='granary'){
       // Mini granary visualization — compact Y for compressed card
@@ -23120,6 +23133,7 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
         ctx.fillStyle='rgba(255,255,255,0.97)'; ctx.textAlign='center'; ctx.textBaseline='middle';
         ctx.fillText(_cTxt,_cPX+_cPW/2,_cPY+_cPH/2); ctx.textBaseline='alphabetic';}
         if(canAffordGr) popupState.upgradeBuildBounds.push({x:btnX,y:btnY,w:btnW,h:btnH,upgradeId:u.id});
+        else _regUnaffordableBtn(u.id,btnX,btnY,btnW,btnH,_uCostGr);
       }
     } else if(u.id==='farm'){
       // Mini farm/barn visualization — compact Y for compressed card
@@ -23155,6 +23169,7 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
         ctx.fillStyle='rgba(255,255,255,0.97)'; ctx.textAlign='center'; ctx.textBaseline='middle';
         ctx.fillText(_cTxt,_cPX+_cPW/2,_cPY+_cPH/2); ctx.textBaseline='alphabetic';}
         if(canAffordFm) popupState.upgradeBuildBounds.push({x:btnX,y:btnY,w:btnW,h:btnH,upgradeId:u.id});
+        else _regUnaffordableBtn(u.id,btnX,btnY,btnW,btnH,_uCostFm);
       }
     } else if(u.id==='orchard'){
       // Mini orchard visualization — compact Y for compressed card
@@ -23190,6 +23205,7 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
         ctx.fillStyle='rgba(255,255,255,0.97)'; ctx.textAlign='center'; ctx.textBaseline='middle';
         ctx.fillText(_cTxt,_cPX+_cPW/2,_cPY+_cPH/2); ctx.textBaseline='alphabetic';}
         if(canAffordOr) popupState.upgradeBuildBounds.push({x:btnX,y:btnY,w:btnW,h:btnH,upgradeId:u.id});
+        else _regUnaffordableBtn(u.id,btnX,btnY,btnW,btnH,_uCostOr);
       }
     } else if(u.id==='repair_drones'){
       // Mini repair-drones visualization — compact Y for compressed card.
@@ -23237,6 +23253,7 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
         ctx.fillStyle='rgba(255,255,255,0.97)'; ctx.textAlign='center'; ctx.textBaseline='middle';
         ctx.fillText(_cTxt,_cPX+_cPW/2,_cPY+_cPH/2); ctx.textBaseline='alphabetic';}
         if(canAffordRd) popupState.upgradeBuildBounds.push({x:btnX,y:btnY,w:btnW,h:btnH,upgradeId:u.id});
+        else _regUnaffordableBtn(u.id,btnX,btnY,btnW,btnH,_uCostRd);
       }
     } else {
       // Generic upgrade -- built or unbuilt
@@ -23262,6 +23279,7 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
         ctx.fillStyle='rgba(255,255,255,0.97)'; ctx.textAlign='center'; ctx.textBaseline='middle';
         ctx.fillText(_cTxt,_cPX+_cPW/2,_cPY+_cPH/2); ctx.textBaseline='alphabetic';}
         if(canAfford) popupState.upgradeBuildBounds.push({x:btnX,y:btnY,w:btnW,h:btnH,upgradeId:u.id});
+        else _regUnaffordableBtn(u.id,btnX,btnY,btnW,btnH,_uCost);
       }
     }
   }
@@ -23317,6 +23335,25 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
       ctx.fillText((_r.ok?'✓  ':'✗  ')+_r.txt,_utX+8,_utRy);
       _utRy+=10;
     }
+  }
+  // ── Insufficient-credits tooltip ──────────────────────────────
+  // Shown when hovering a PURCHASE button whose unlock gate IS met but the
+  // player can't yet afford it (the button draws greyed with no other hint).
+  if(popupState._upCostTooltip){
+    const _ct=popupState._upCostTooltip;
+    const _ctW=_ct.upW-8, _ctH=32;
+    const _ctX=Math.max(4,_ct.upX+4);
+    const _ctY=_ct.by-_ctH-4;
+    _clearTextOverlayRect(_ctX, _ctY, _ctW, _ctH);
+    ctx.fillStyle='rgba(6,10,28,0.97)';
+    ctx.strokeStyle='rgba(210,130,60,0.60)'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.roundRect(_ctX,_ctY,_ctW,_ctH,4); ctx.fill(); ctx.stroke();
+    ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='left';
+    ctx.fillStyle='rgba(255,170,90,0.92)';
+    ctx.fillText('INSUFFICIENT CREDITS',_ctX+8,_ctY+13);
+    ctx.font='7px "Exo 2",sans-serif';
+    ctx.fillStyle='rgba(210,100,100,0.82)';
+    ctx.fillText('✗  Costs '+_fmtCr(_ct.cost)+' cr  (you have '+_fmtCr(Math.floor(credits))+')',_ctX+8,_ctY+25);
   }
   // ── Large Station hover tooltip (drawn outside clip region) ──
   if(popupState._lsTooltip){
@@ -29011,8 +29048,9 @@ canvas.addEventListener('mousemove',e=>{
     // Locked (station-not-built) buttons — detectable for tooltip but not clickable
     if(!_upHov&&popupState._upgradeBtnLockedBounds){for(const _lb of popupState._upgradeBtnLockedBounds){if(cp.x>=_lb.x&&cp.x<=_lb.x+_lb.w&&cp.y>=_lb.y&&cp.y<=_lb.y+_lb.h){_upHov=_lb.hoverId;break;}}}
     popupState.upgradeBtnHover=_upHov;
-    // Only show pointer cursor for clickable buttons (not locked ones)
-    if(_upHov&&!_upHov.startsWith('__locked__')) canvas.style.cursor='pointer';
+    // Only show pointer cursor for clickable buttons — not locked (gate or
+    // no-station) ones, and not unaffordable (__cost_) ones.
+    if(_upHov&&!_upHov.startsWith('__locked')&&!_upHov.startsWith('__cost')) canvas.style.cursor='pointer';
   }
   // Hover tracking for new mission accept button + relic image + objective rows
   if(activePopup==='new_mission'&&_newMissionAcceptBounds){
