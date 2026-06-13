@@ -810,7 +810,7 @@ function getCP(e){
 }
 
 // ── title constants ──────────────────────────────────────────
-const GAME_VERSION = 'v0.4.3'; // shown bottom-left of the title screen
+const GAME_VERSION = 'v0.4.4'; // shown bottom-left of the title screen
 const CAR_MID = ['car_passenger','car_royal','car_water_tank','car_cargo','car_livestock','car_mail','car_ice','car_sand','car_ore','car_iron','car_hazmat','car_oil','car_battery','car_chemical'];
 const CAR_W=112, CAR_H=80, RAIL_Y=H*0.68;
 const T_PALS = [
@@ -1108,6 +1108,26 @@ function _objDrawLine(line,x,y,fontStr,baseColor){
     cx+=ctx.measureText(tok.text).width;
   }
   return cx-x;
+}
+// Total rendered width of a tokenised line — coloured tokens measured BOLD so it
+// matches _objDrawLine exactly. fontStr is the base (non-bold) font.
+function _objLineWidth(line,fontStr){
+  ctx.font=fontStr; const spaceW=ctx.measureText(' ').width;
+  let w=0;
+  for(let i=0;i<line.length;i++){
+    const tok=line[i];
+    if(i>0) w+=spaceW;
+    ctx.font = tok.color ? ('bold '+fontStr) : fontStr;
+    w+=ctx.measureText(tok.text).width;
+  }
+  return w;
+}
+// Draw a tokenised line CENTRED horizontally at cx (same colour/bold rules as
+// _objDrawLine). Forces textAlign='left' since the token advance math needs it;
+// leave textBaseline to the caller.
+function _objDrawLineCentered(line,cx,y,fontStr,baseColor){
+  ctx.textAlign='left';
+  _objDrawLine(line, cx-_objLineWidth(line,fontStr)/2, y, fontStr, baseColor);
 }
 const CARGO_MAX_SUPPLY = 20;
 const CARGO_MAX_DEMAND = 30;
@@ -3417,6 +3437,12 @@ function _missionArrowFor(pid){
   return null;
 }
 let pendingMissionIntros=[]; // {defId,readySd,targetPlanetId?,sourcePlanetId?} missions waiting to show new-mission intro popup
+// Cap on simultaneously-ACTIVE missions. When at the cap, ready intros stay
+// queued in pendingMissionIntros (FIFO order). A completion that frees a capped
+// slot arms a 10-second hold (_missionReleaseAtMs) before the next-in-line
+// queued mission may be introduced — see the intro-gate in the main loop.
+const _MAX_ACTIVE_MISSIONS=3;
+let _missionReleaseAtMs=0;    // real-time ms; the intro-gate waits until Date.now()>=this
 let _gameStartSd=0;           // stardate at game init (used for startsAfter delays)
 let _newMissionAcceptBounds=null;
 // Snapshot of the new-mission popup's def + intro state, captured the
@@ -3477,6 +3503,8 @@ let colorPickerState=null; // {trainIdx} when color picker sub-popup is open
 let cancelRouteBtnBounds=null;
 let routeHereBtnBounds=null;
 let routeHerePending=false; // true when player clicked "Route Train Here" on a planet
+let _routeHereResultMs=0;    // Date.now() when a route-here result callout was armed (0 = none)
+let _routeHereResultOk=false;// true = green "ROUTE confirmed", false = red "Failed to find a viable ROUTE"
 let planetStarNameBounds=null;
 let starPanelPlanetBounds=[];
 let panelScroll=0;
@@ -14639,6 +14667,21 @@ function updateTrain(t, dt){
   if(!t.route){
     t.angle-=ORB_SPD*dt;
     if(t.isPlayer){ t._angleAcc+=ORB_SPD*dt; trackOrbit(t); }
+    // A route can be cleared (cancelled, dead-ended, parked) WHILE a cargo op
+    // is mid-flight. The cargo pump normally lives in the orbit-phase block,
+    // which this early-return skips — so without this, a parked train freezes
+    // FOREVER in 'unloading'/'loading' with a never-draining queue (cargoTimer
+    // never ticks). Finish the in-progress op here so the train completes its
+    // delivery and goes cleanly idle. For an UNLOAD, _processCargoQueue auto-
+    // starts a LOAD when the queue empties — cancel that, since a routeless
+    // train has nowhere to carry newly-loaded cargo.
+    if(t.cargoPhase==='unloading'||t.cargoPhase==='loading'){
+      const _wasUnloading=(t.cargoPhase==='unloading');
+      t.cargoTimer=(t.cargoTimer||0)-dt;
+      if(t.cargoTimer<=0) _processCargoQueue(t,_gp(t.planetId));
+      if(_wasUnloading && t.cargoPhase==='loading'){ t.cargoPhase=null; t.cargoQueue=[]; }
+      if(t.cargoPhase) _spawnCargoBeam(t,dt);
+    }
     return;
   }
   const r=t.route;
@@ -18140,6 +18183,55 @@ function _drawMissionTip(){
   ctx.restore();
 }
 
+// Route-Train-Here result callout: a small pill centred above the [O] options
+// hint in the bottom bar. Green "ROUTE confirmed" on success, red "Failed to
+// find a viable ROUTE" on failure. Armed in the trains-panel click handler when
+// the player clicks a train while ROUTE TRAIN HERE is pending. Fades in/out.
+function _drawRouteHereResult(){
+  if(!_routeHereResultMs) return;
+  const _elpMs=Date.now()-_routeHereResultMs;
+  const TOTAL=3000, FADE_IN=300, FADE_OUT=600;
+  if(_elpMs>=TOTAL){ _routeHereResultMs=0; return; }
+  let _a;
+  if(_elpMs<FADE_IN) _a=_elpMs/FADE_IN;
+  else if(_elpMs>TOTAL-FADE_OUT) _a=(TOTAL-_elpMs)/FADE_OUT;
+  else _a=1;
+  if(_a<=0) return;
+  // Anchor above the [O] options text; fall back to the galaxy-viewport centre.
+  const _ob=_hintBounds.find(b=>b.popup==='options');
+  const _tipX=_ob?(_ob.x+_ob.w/2):((W-PANEL_W)/2);
+  const _tipY=_ob?(_ob.y-3):(GH-11);
+  const _ok=_routeHereResultOk;
+  const _txt=_ok?'ROUTE confirmed':'Failed to find a viable ROUTE';
+  ctx.font='bold 9px "Exo 2",sans-serif';
+  const _tw=ctx.measureText(_txt).width;
+  const _pad=11, _bH=24, _bR=6, _tailH=8;
+  const _bW=_tw+_pad*2;
+  let _bx=_tipX-_bW/2;
+  if(_bx<6) _bx=6;
+  if(_bx+_bW>W-6) _bx=W-6-_bW;
+  const _by=_tipY-_tailH-_bH;
+  const _tailX=Math.max(_bx+_bR+6,Math.min(_tipX,_bx+_bW-_bR-6));
+  const _bg=_ok?'rgba(38,170,90,0.97)':'rgba(212,62,56,0.97)';
+  const _sh=_ok?'rgba(0,120,50,0.55)':'rgba(150,20,20,0.55)';
+  // Wipe any HD-overlay text (chat log / hint bar) behind the pill so it can't
+  // bleed through the opaque background (HD overlay is composited last).
+  _clearTextOverlayRect(_bx-2,_by-2,_bW+4,_bH+_tailH+4);
+  ctx.save();
+  ctx.globalAlpha=_a;
+  ctx.shadowColor=_sh; ctx.shadowBlur=8;
+  ctx.fillStyle=_bg;
+  ctx.beginPath(); ctx.roundRect(_bx,_by,_bW,_bH,_bR); ctx.fill();
+  // Downward tail toward the bottom bar.
+  ctx.beginPath(); ctx.moveTo(_tailX-6,_by+_bH); ctx.lineTo(_tailX+6,_by+_bH); ctx.lineTo(_tailX,_tipY); ctx.closePath(); ctx.fill();
+  ctx.shadowBlur=0;
+  ctx.fillStyle='#ffffff';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(_txt,_bx+_bW/2,_by+_bH/2);
+  ctx.textBaseline='alphabetic';
+  ctx.restore();
+}
+
 // Yellow callout over the "[T] trains" chat-log hint. Fired the moment the
 // player accepts the buy_second_train mission (mission-accept handler sets
 // _buyTrainHintStartMs = Date.now()). 1 s fade-in, ~12 s plateau, 2 s natural
@@ -18598,9 +18690,15 @@ function _drawTutorialChain(stage){
     if(!_renderHere) return; // wrong stage for this phase's category
     if(alpha<=0) return;
     ctx.save();
-    ctx.font='10px "Exo 2",sans-serif';
+    const _bubbleFont='10px "Exo 2",sans-serif';
+    ctx.font=_bubbleFont;
+    // Tokenise each line so [Cargo] brackets + planet/biome phrases (DESERT
+    // PLANET / LAVA PLANET / ORIJEN) get the SAME colour+bold treatment as
+    // mission objective/details text. Measure with that styling so the bubble
+    // sizes correctly around the (wider) bold tokens.
+    const _lineToks=lines.map(_ln=>_objTokenize(_ln));
     let _maxW=0;
-    for(const _ln of lines){ const _w=ctx.measureText(_ln).width; if(_w>_maxW) _maxW=_w; }
+    for(const _tk of _lineToks){ const _w=_objLineWidth(_tk,_bubbleFont); if(_w>_maxW) _maxW=_w; }
     const _pad=12, _lh=15, _bH=Math.max(28,lines.length*_lh+10), _bR=7, _tailH=10;
     const _bW=_maxW+_pad*2;
     const _visW=W-PANEL_W;
@@ -18717,16 +18815,18 @@ function _drawTutorialChain(stage){
       }
       ctx.closePath(); ctx.fill();
     }
-    ctx.shadowBlur=0; ctx.fillStyle=_textCol;
-    ctx.font='10px "Exo 2",sans-serif';
-    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.shadowBlur=0;
+    ctx.textBaseline='middle';
     // Callout bubbles can track an orbiting planet (anchorScreen) → use the
     // smooth bitmap text path so the body text glides with the bubble.
     // Centred, screen-anchored bubbles (no anchor) are stationary, but the
     // smooth path is positionally exact either way, so enable it for all
-    // bubble text uniformly.
+    // bubble text uniformly. Each line is drawn token-by-token so [Cargo] and
+    // planet/biome phrases carry their mission-style colour + bold.
     _smoothTextMode=true;
-    for(let _i=0;_i<lines.length;_i++) ctx.fillText(lines[_i],_bx+_bW/2,_by+_pad/2+_lh/2+_i*_lh);
+    for(let _i=0;_i<_lineToks.length;_i++){
+      _objDrawLineCentered(_lineToks[_i],_bx+_bW/2,_by+_pad/2+_lh/2+_i*_lh,_bubbleFont,_textCol);
+    }
     _smoothTextMode=false;
     ctx.textBaseline='alphabetic';
     ctx.restore();
@@ -20067,6 +20167,10 @@ function updateMissions(dtSd){
       if(!obj.done) allDone=false;
     }
     if(allDone){
+      // If we were at the active-mission cap, this completion frees a slot —
+      // hold 10 s before the next-in-line queued mission is introduced. (m is
+      // still 'active' at this point, so the count includes it.)
+      if(missions.filter(mx=>mx.status==='active').length>=_MAX_ACTIVE_MISSIONS) _missionReleaseAtMs=Date.now()+10000;
       m.status='completed'; m.completedSd=stardate; _recomputeMissionTargets();
       _ga('mission_complete',{mission_id:m.id, mission_name:m.name, sd:Math.floor(stardate)});
       _newsLog('mission_complete',{missionId:m.id,missionName:m.name});
@@ -28165,6 +28269,7 @@ function drawGalaxy(ts,dt){
   _drawMissionTip();
   _drawBuyTrainHintCallout();
   _drawSpeedTip();
+  _drawRouteHereResult();
   // Red MED/HIGH orbit hint — drawn HERE (pre-popup stage) so it points at a
   // train on the galaxy view but sits UNDER any popup window the player
   // happens to open. Previously rendered post-popup, which left it floating
@@ -28506,7 +28611,8 @@ function panelClick(sx,sy,shiftKey){
       const _rhs=sel.data;
       _rhDest=_rhs.proxyPlanetId!=null?galaxy.starProxyMap?.[_rhs.proxyPlanetId]:null;
     }
-    routeTrainHere(train, _rhDest);
+    const _rhOk=routeTrainHere(train, _rhDest);
+    _routeHereResultMs=Date.now(); _routeHereResultOk=!!_rhOk;
     return;
   }
   if(assignPending){
@@ -28849,9 +28955,12 @@ function _buildHopChain(path, firstOrbitR, train, destId=null, noCancel=false){
   return hops;
 }
 
+// Returns true if a route toward destPlanet was confirmed/assigned (or the
+// train is already heading there / already there), false if no viable route
+// could be found. The caller uses this to show the green/red result callout.
 function routeTrainHere(train, destPlanet){
   routeHerePending=false;
-  if(!train||!destPlanet) return;
+  if(!train||!destPlanet) return false;
   // Flag active visit_planet mission objective
   {const _vpM=missions.find(mx=>mx.id==='visit_planet'&&mx.status==='active'); if(_vpM) _vpM._trainRouted=true;}
   // (The speed-up callout is now driven by a periodic timer scheduled at
@@ -28881,21 +28990,21 @@ function routeTrainHere(train, destPlanet){
       stopOrbitR:[train.orbitR,safArrR], _recomputeTimer:0, isTempRoute:true, cancelAfterArrival:false
     };
     train.route=stub;
-    if(fromPlanetId===destPlanet.id){ stub.cancelAfterArrival=true; train.queuedRoute=null; return; }
+    if(fromPlanetId===destPlanet.id){ stub.cancelAfterArrival=true; train.queuedRoute=null; return true; }
     // Star proxy: route directly (not via BFS — proxy isn't in planet graph)
     if(destPlanet.isStarProxy){
       const hops=_buildHopChain([fromPlanetId,destPlanet.id],safArrR,train,destPlanet.id);
-      train.queuedRoute=hops[0]; return;
+      train.queuedRoute=hops[0]; return true;
     }
     const path=findMultiHopPath(fromPlanetId,destPlanet.id,train);
-    if(!path){ stub.cancelAfterArrival=true; train.queuedRoute=null; return; }
+    if(!path){ stub.cancelAfterArrival=true; train.queuedRoute=null; return false; }
     const hops=_buildHopChain(path,safArrR,train,destPlanet.id);
     train.queuedRoute=hops[0];
   } else {
     // Orbiting/waiting/blocked — route directly from current planet
     const fromPlanetId=train.planetId;
     train.route=null; train.queuedRoute=null;
-    if(fromPlanetId===destPlanet.id) return;
+    if(fromPlanetId===destPlanet.id) return true; // already at the destination
     const fp=_gp(fromPlanetId);
     const orbitR=fp?(fp.isStarProxy?(train.orbitTier==='MED'?fp.starOrbitROuter:fp.starOrbitR):ORBIT_TIERS[fp.size][train.orbitTier]||train.orbitR):train.orbitR;
     // Star proxy: direct single-hop (BFS doesn't include proxies in planet graph)
@@ -28903,10 +29012,10 @@ function routeTrainHere(train, destPlanet){
       const hops=_buildHopChain([fromPlanetId,destPlanet.id],orbitR,train,destPlanet.id);
       if(hops.length>0) hops[0]._routeHereOrigin=true;
       train.route=hops[0]; train.queuedRoute=hops.length>1?hops[1]:null;
-      train._cargoCheckedThisStop=false; return;
+      train._cargoCheckedThisStop=false; return true;
     }
     const path=findMultiHopPath(fromPlanetId,destPlanet.id,train);
-    if(!path) return;
+    if(!path) return false;
     const hops=_buildHopChain(path,orbitR,train,destPlanet.id);
     // Mark the origin hop so cargo ops fire before departure (loading phase).
     // Intermediate rebuilt hops won't have this flag, keeping them pass-through.
@@ -28916,6 +29025,7 @@ function routeTrainHere(train, destPlanet){
     // Reset cargo check so the loading phase fires even if the train was already orbiting.
     train._cargoCheckedThisStop=false;
   }
+  return true; // a route was found and assigned
 }
 
 // ── input ────────────────────────────────────────────────────
@@ -33860,8 +33970,12 @@ function loop(ts){
       _acceptNewMissionFromState(_pendingNewMissionStash);
       _pendingNewMissionStash=null;
     }
-    // Show new-mission intro popup (timed or prerequisite-unlocked)
-    if(!activePopup&&pendingMissionIntros.length>0&&Date.now()>=_popupCooldownUntil){
+    // Show new-mission intro popup (timed or prerequisite-unlocked).
+    // Hold while at the active-mission cap, or during the 10 s post-completion
+    // release delay — the ready intro just stays queued in pendingMissionIntros.
+    if(!activePopup&&pendingMissionIntros.length>0&&Date.now()>=_popupCooldownUntil
+       && Date.now()>=_missionReleaseAtMs
+       && missions.filter(m=>m.status==='active').length<_MAX_ACTIVE_MISSIONS){
       const _nmiIdx=pendingMissionIntros.findIndex(e=>stardate>=e.readySd);
       if(_nmiIdx>=0){
         const _nmiE=pendingMissionIntros.splice(_nmiIdx,1)[0];
