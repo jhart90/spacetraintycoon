@@ -207,7 +207,9 @@
       "Bash(node --check _synccheck.js)",
       "Bash(rm _synccheck.js)",
       "Bash(sed -n '20176,20192p' build_game.py)",
-      "Bash(sed -n '20350,20365p' build_game.py)"
+      "Bash(sed -n '20350,20365p' build_game.py)",
+      "Bash(node --check _mkt_check.js)",
+      "Bash(rm -f _mkt_check.js)"
     ]
   },
   "hooks": {

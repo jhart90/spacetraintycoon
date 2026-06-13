@@ -7482,6 +7482,42 @@ function _processCargoQueue(t, p){
 }
 
 // ── Cargo beam particles ───────────────────────────────────────
+// Compute the LIVE beam endpoints for a loading/unloading car, recomputed from
+// the car's CURRENT orbital position. Returns null if the train/planet/car is no
+// longer valid or the beam would be degenerate. Both _spawnCargoBeam (initial
+// placement) and _updateCargoParticles (per-frame homing) call this so a particle
+// always converges onto the car's moving TOP-CENTRE, never the spot it occupied
+// when it spawned.
+//   • car end  = the car's top edge (closest to the planet surface), tangentially
+//                centred on the car (no along-length offset).
+//   • planet end = the planet-surface point directly beneath that car, so the beam
+//                  spans the real orbit→surface gap at every planet size/orbit.
+function _cargoBeamEnds(train, carIdx, isLoading){
+  if(!train||!train.cars||carIdx==null) return null;
+  const planet=_gp(train.planetId);
+  if(!planet) return null;
+  const _styp=train.cars[carIdx];
+  if(_styp===undefined) return null;
+  const _ang = train.angle + _carOffset(train,carIdx)/train.orbitR;
+  const carWx = planet.x + train.orbitR*Math.cos(_ang);
+  const carWy = planet.y + train.orbitR*Math.sin(_ang);
+  const _vfCar = (_styp==='caboose' ? 0.66
+              : (_styp&&_styp.indexOf('engine_')===0) ? 0.66*(ENGINE_GALAXY_H_TIER[_styp]||1.0)
+              : 0.60) * _GAL_SCALE;
+  const _carRadialH = _vfCar * CAR_ORB_H; // car's visible radial extent (world units)
+  const dx=carWx-planet.x, dy=carWy-planet.y;
+  const dist=Math.hypot(dx,dy)||1;
+  const nx=dx/dist, ny=dy/dist;        // outward radial unit (planet centre → car)
+  const carEndX=carWx - nx*_carRadialH, carEndY=carWy - ny*_carRadialH; // top edge
+  const _surfR=Math.max(2, planet.radius||0);
+  const planEndX=planet.x + nx*_surfR, planEndY=planet.y + ny*_surfR;   // surface beneath car
+  const srcX=isLoading?planEndX:carEndX, srcY=isLoading?planEndY:carEndY;
+  const dstX=isLoading?carEndX:planEndX, dstY=isLoading?carEndY:planEndY;
+  const beamLen=Math.hypot(dstX-srcX,dstY-srcY);
+  if(beamLen<2) return null;
+  const bdx=(dstX-srcX)/beamLen, bdy=(dstY-srcY)/beamLen;
+  return {srcX,srcY,dstX,dstY,bdx,bdy,perpX:-bdy,perpY:bdx,beamLen};
+}
 function _spawnCargoBeam(train, dt){
   if(!train.cargoPhase||!train.cargoQueue?.length) return;
   const planet=_gp(train.planetId);
@@ -7489,55 +7525,15 @@ function _spawnCargoBeam(train, dt){
   const carIdx=train.cargoQueue[0];
   const isLoading=train.cargoPhase==='loading';
   const lifetime=30;           // ~0.5 s at 60 fps; independent of game speed
-  // Anchor BOTH beam endpoints to the car's CURRENT orbital position (no lead).
-  // The loading path used to aim a fixed ORB_SPD*lifetime ANGULAR lead ahead of
-  // the car so particles "met" it on arrival — but that angular lead becomes a
-  // LINEAR offset of orbitR*ORB_SPD*lifetime, which grows with orbit size (~20
-  // world units at an M planet's LOW orbit, ~34 at L, ~49 at XL). On big planets
-  // that pushed the whole radial beam tangentially off the visible car, so it
-  // read as "not reaching the car". Dropping the lead keeps the beam line locked
-  // under the current car at every size, matching the (already-correct) unload
-  // beam; particles are short-lived enough that the tiny in-flight drift is
-  // imperceptible.
-  const _ang = train.angle + _carOffset(train,carIdx)/train.orbitR;
-  const carWx = planet.x + train.orbitR*Math.cos(_ang);
-  const carWy = planet.y + train.orbitR*Math.sin(_ang);
-  // Radial attachment point on the car. carWx,carWy sits at the car's OUTER
-  // edge — the part FURTHEST from the planet — because the car sprite is
-  // bottom-aligned so its body extends radially INWARD (toward the planet)
-  // from that point. Aiming there made the beam run all the way to the far
-  // side of the car. Instead, move the car-side endpoint INWARD (toward the
-  // planet) by the car's visible radial height, so the beam meets the car's
-  // TOP — the edge closest to the planet's surface — and is correspondingly
-  // a touch shorter. Tangentially centred (no along-length offset).
-  const _styp = train.cars[carIdx];
-  const _vfCar = (_styp==='caboose' ? 0.66
-              : (_styp&&_styp.indexOf('engine_')===0) ? 0.66*(ENGINE_GALAXY_H_TIER[_styp]||1.0)
-              : 0.60) * _GAL_SCALE;
-  const _carRadialH = _vfCar * CAR_ORB_H; // car's visible radial extent (world units)
-  // Outward radial unit vector at the car's angle (planet centre → car).
-  const dx=carWx-planet.x, dy=carWy-planet.y;
-  const dist=Math.hypot(dx,dy)||1;
-  const nx=dx/dist, ny=dy/dist;
-  // Car-side endpoint: pulled inward by the full body height to the top edge.
-  const carEndX=carWx - nx*_carRadialH, carEndY=carWy - ny*_carRadialH;
-  // Planet-side endpoint: the PLANET SURFACE point directly beneath the car
-  // (radially inward). This spans the real orbit→surface gap, so the beam always
-  // connects the car to the ground on EVERY planet size (XS–XXL) and orbit tier
-  // (LOW / MED / HIGH). A previous build used a fixed reach off the car to keep
-  // beam length uniform, but that left the beam detached/short on L+ planets,
-  // whose orbit→surface gap is far larger than the fixed reach (and overshoot
-  // into the body on small planets). The surface anchor self-scales: the gap is
-  // (orbitR − planet.radius), so the beam naturally lengthens on larger worlds
-  // and outer orbits and shortens on smaller worlds and LOW orbit.
-  const _surfR=Math.max(2, planet.radius||0);
-  const planEndX=planet.x + nx*_surfR, planEndY=planet.y + ny*_surfR;
-  const srcX=isLoading?planEndX:carEndX, srcY=isLoading?planEndY:carEndY;
-  const dstX=isLoading?carEndX:planEndX, dstY=isLoading?carEndY:planEndY;
-  const beamLen=Math.hypot(dstX-srcX,dstY-srcY);
-  if(beamLen<2) return;
-  const bdx=(dstX-srcX)/beamLen, bdy=(dstY-srcY)/beamLen;
-  const perpX=-bdy, perpY=bdx;
+  // LIVE-TRACKED beam: endpoints are recomputed every frame (see _cargoBeamEnds +
+  // _updateCargoParticles) so each particle homes onto the car's moving TOP-CENTRE
+  // rather than the spot the car occupied at spawn. Free-flight particles with a
+  // fixed destination always arrived where the car USED to be — i.e. its rear —
+  // because the car orbits forward during the ~0.5 s flight; the lag grew with
+  // orbit size and game speed. Tracking the live car removes it entirely.
+  const ends=_cargoBeamEnds(train,carIdx,isLoading);
+  if(!ends) return;
+  const {srcX,srcY,bdx,bdy,perpX,perpY,beamLen}=ends;
   const spread=beamLen*0.22; // funnel width at source (converges to zero at destination)
   const speed=beamLen/lifetime;
   const spawnN=Math.ceil(dt*3);
@@ -7556,13 +7552,19 @@ function _spawnCargoBeam(train, dt){
   ];
   const _isOil=(_ctype==='oil');
   for(let k=0;k<spawnN;k++){
-    const spr=(Math.random()-0.5)*2*spread;
+    const f=(Math.random()-0.5)*2;     // signed lateral fraction of the funnel spread
+    const spr=f*spread;
     let pcK=pcol, pgK=pglow;
     if(_isOil && Math.random()<0.18){
       const _rb=_OIL_RAINBOW[Math.floor(Math.random()*_OIL_RAINBOW.length)];
       pcK=_rb.col; pgK=_rb.glow;
     }
     cargoParticles.push({
+      // Live-tracking fields: each frame the particle is repositioned along the
+      // CURRENT beam (src→dst at progress `prog`, lateral funnel `f` converging to
+      // 0 at the car). train/carIdx/isLoading identify the live geometry.
+      beam:true, train, carIdx, isLoading, prog:0, f, lifetime,
+      // Fallback free-flight (used only if the live geometry goes invalid mid-flight):
       x:srcX+perpX*spr, y:srcY+perpY*spr,
       vx:bdx*speed - perpX*spr/lifetime,
       vy:bdy*speed - perpY*spr/lifetime,
@@ -7578,7 +7580,24 @@ function _spawnCargoBeam(train, dt){
 function _updateCargoParticles(dtG){
   for(let i=cargoParticles.length-1;i>=0;i--){
     const p=cargoParticles[i];
-    p.x+=p.vx*dtG; p.y+=p.vy*dtG; p.life-=dtG;
+    p.life-=dtG;
+    if(p.beam && p.train){
+      // Home onto the LIVE car: advance progress 0→1 and reposition on the
+      // current beam, so the particle converges on the car's moving top-centre
+      // even as it orbits. Lateral funnel offset shrinks to 0 at the car.
+      p.prog += dtG/(p.lifetime||30);
+      const ends=_cargoBeamEnds(p.train,p.carIdx,p.isLoading);
+      if(ends){
+        const pr=p.prog<0?0:(p.prog>1?1:p.prog);
+        const lat=p.f*(ends.beamLen*0.22)*(1-pr);
+        p.x=ends.srcX+(ends.dstX-ends.srcX)*pr + ends.perpX*lat;
+        p.y=ends.srcY+(ends.dstY-ends.srcY)*pr + ends.perpY*lat;
+      } else {
+        p.x+=p.vx*dtG; p.y+=p.vy*dtG; // geometry gone — fall back to free flight
+      }
+    } else {
+      p.x+=p.vx*dtG; p.y+=p.vy*dtG;
+    }
     if(p.life<=0) cargoParticles.splice(i,1);
   }
 }
