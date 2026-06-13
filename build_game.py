@@ -760,6 +760,23 @@ function _musicPrev(){
   if(!_musicMuted) _soundtrack.play().catch(()=>{});
 }
 let _muteBtnBounds=null, _muteBtnHover=false;
+// Title-screen fullscreen toggle (left of the mute button).
+let _fsBtnBounds=null, _fsBtnHover=false;
+function _isFullscreen(){
+  return !!(document.fullscreenElement||document.webkitFullscreenElement||document.mozFullScreenElement||document.msFullscreenElement);
+}
+function _toggleFullscreen(){
+  try{
+    if(_isFullscreen()){
+      const _ex=document.exitFullscreen||document.webkitExitFullscreen||document.mozCancelFullScreen||document.msExitFullscreen;
+      if(_ex) _ex.call(document);
+    } else {
+      const _el=document.documentElement;
+      const _rq=_el.requestFullscreen||_el.webkitRequestFullscreen||_el.mozRequestFullScreen||_el.msRequestFullscreen;
+      if(_rq) _rq.call(_el);
+    }
+  }catch(_e){}
+}
 let _optsMuteBtnBounds=null, _optsMuteBtnHover=false;
 let _optsPrevBtnBounds=null, _optsPrevBtnHover=false;
 let _optsNextBtnBounds=null, _optsNextBtnHover=false;
@@ -1305,18 +1322,32 @@ const MISSION_DEFS=[
    name:'Produce Iron',
    imageType:'car', imageKey:'car_iron',
    prerequisite:'build_foundry',
+   // Two real objectives drive the [M] tracker + Missions window (the NEW MISSION
+   // popup still shows ONE summarised line — see _SUMMARY_OBJS). Obj 2's seconds
+   // count down LIVE — see _objDisplayText / _smeltSecondsRemaining.
    objectives:[
-     {id:'produce_iron_obj', text:'Produce [Iron] by delivering both [Molten Ore] and [Water] to a FOUNDRY'},
+     {id:'deliver_ore_water', text:'Deliver both [Molten Ore] and [Water] to a DESERT PLANET with a FOUNDRY'},
+     {id:'wait_smelt',        text:'Wait 40 seconds for the FOUNDRY to SMELT IRON'},
    ],
    details:'Put your new foundry to work smelting raw ore into refined iron.',
    reward:10000, timeLimit:null,
    checkObj:(oid,m)=>{
-     // Complete as soon as ANY foundry has ever produced ≥1 unit of iron
-     // (_ironCarUnlocked latches true on the first foundry smelt). Dropping the
-     // old !ironUnlockedSnapshot guard means that if the player had already
-     // produced iron BEFORE accepting this mission, it auto-completes the
-     // instant it's accepted (the pre-completed-objective path picks it up).
-     if(oid==='produce_iron_obj') return _ironCarUnlocked;
+     // Obj 1: both inputs have reached a player foundry (smelting in progress, or
+     //        both inputs stocked and about to start, or iron already produced).
+     if(oid==='deliver_ore_water'){
+       if(_ironCarUnlocked) return true;
+       return !!(galaxy&&galaxy.planets.some(p=>{
+         if(p.aiHasStation) return false;
+         if(!(p.upgrades||[]).includes('iron_foundry')) return false;
+         const _fd=p.upgradeData&&p.upgradeData.iron_foundry;
+         return !!_fd&&((_fd.progress||0)>0||((_fd.ore||0)>=1&&(_fd.water||0)>=1));
+       }));
+     }
+     // Obj 2: the foundry has finished smelting ≥1 unit of iron. _ironCarUnlocked
+     // latches true on the first smelt — so overall completion timing is unchanged
+     // from the old single-objective version (and a pre-smelted foundry auto-
+     // completes the mission the instant it's accepted).
+     if(oid==='wait_smelt') return _ironCarUnlocked;
      return false;
    }},
   {id:'upgrade_station',
@@ -3296,7 +3327,22 @@ let _largeStationUnlocked=false;  // LARGE STATION upgrade button — unlocked b
 let _terminalUnlocked=false;      // TERMINAL upgrade button — unlocked by producing the FIRST steel unit
 let _bakeryUnlocked=false;        // BAKERY card — unlocked by VISITING the first agricultural planet
 let _glassworksUnlocked=false;    // GLASSWORKS card — unlocked once BOTH the Sand car and Chemical car are discovered (desert + chemical planet visited)
-let pendingUpgradeUnlocks=[]; // {key} queued to show the upgrade-unlock popup (key ∈ iron_foundry, bakery, glassworks, __large_station__, __terminal__)
+let pendingUpgradeUnlocks=[]; // {key,constructed?} queued to show the upgrade-unlock popup (key ∈ iron_foundry, bakery, glassworks, __large_station__, __terminal__)
+let pendingMissionRewards=[]; // {name,reward} → green "Mission Completed" reward popup (one per +credit mission completion)
+let pendingFirstDeliveries=[]; // {planetId,cargo,carType,sd} → "First Delivery" popup (first ever player cargo unloaded at a planet)
+// True for the three Gigi-Prime tutorial planets — ORIJEN, the home-system LAVA
+// PLANET (_tutorialLavaPlanetId) and the home-system DESERT PLANET — where the
+// First-Delivery popup is suppressed so it never interrupts the guided intro.
+function _isHomeTutorialPlanet(p){
+  if(!p||!galaxy) return false;
+  if(galaxy.origenId!=null && p.id===galaxy.origenId) return true;
+  if(_tutorialLavaPlanetId>=0 && p.id===_tutorialLavaPlanetId) return true;
+  const _ori=galaxy.origenId!=null?galaxy.planets[galaxy.origenId]:null;
+  if(_ori && p.starId===_ori.starId && p.type && p.type.id==='desert') return true;
+  return false;
+}
+let _foundryConstructedPopupPending=false; // defer the iron-foundry upgrade popup until the foundry is BUILT and its planet window is closed
+let _foundryConstructedPopupShown=false;   // one-shot latch so the "constructed" popup shows at most once (persisted)
 // An upgrade CARD is visible only when unlocked (or already built). Station-tier
 // buttons (Large Station / Terminal) are gated separately at their render sites.
 function _isUpgradeUnlocked(uId){
@@ -3884,7 +3930,7 @@ function drawTitleScreen(ts,dt){
     p.x-=p.sp*dt;
     // Off-screen recycle. Buffer factor accounts for rings/moons that extend
     // well past the body radius. When recycled, re-roll the template so the
-    // refresh feels alive even before the next refresh-btn click.
+    // title-screen planet parade keeps varying over time.
     if(p.x+p.R*2.4<0){
       const _newR=randInt(55,115);
       const _newY=rand(_newR+25,RAIL_Y-_newR-30);
@@ -4041,6 +4087,37 @@ function drawTitleScreen(ts,dt){
   ctx.fillStyle=_musicMuted?'#f88':'#8cf';
   ctx.font='bold 17px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
   ctx.fillText(_musicMuted?'🔇':'🔊',_mbX+_mbSz/2,_mbY+_mbSz/2+1);
+  ctx.restore();
+  // Fullscreen toggle button — square, left of the mute button. Corner-bracket
+  // icon: EXPAND (corners at the outer edges) when windowed, COMPRESS (corners
+  // pulled toward the centre) when already fullscreen.
+  const _fsSz=_mbSz, _fsX=_mbX-_mbSz-10, _fsY=_mbY;
+  _fsBtnBounds={x:_fsX,y:_fsY,w:_fsSz,h:_fsSz};
+  ctx.save();
+  ctx.globalAlpha=_fsBtnHover?0.92:0.60;
+  ctx.fillStyle='rgba(20,40,80,0.85)';
+  ctx.strokeStyle=_fsBtnHover?'rgba(120,200,255,0.9)':'rgba(60,120,200,0.55)';
+  ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.roundRect(_fsX,_fsY,_fsSz,_fsSz,5); ctx.fill(); ctx.stroke();
+  ctx.globalAlpha=_fsBtnHover?1.0:0.78;
+  ctx.strokeStyle=_fsBtnHover?'#cfeaff':'#8cf';
+  ctx.lineWidth=2; ctx.lineCap='round'; ctx.lineJoin='round';
+  const _fcx=_fsX+_fsSz/2, _fcy=_fsY+_fsSz/2, _hh=8, _L=_hh*0.62;
+  ctx.beginPath();
+  if(!_isFullscreen()){
+    // EXPAND — brackets hug the four outer corners, arms point inward.
+    ctx.moveTo(_fcx-_hh,_fcy-_hh+_L); ctx.lineTo(_fcx-_hh,_fcy-_hh); ctx.lineTo(_fcx-_hh+_L,_fcy-_hh);
+    ctx.moveTo(_fcx+_hh-_L,_fcy-_hh); ctx.lineTo(_fcx+_hh,_fcy-_hh); ctx.lineTo(_fcx+_hh,_fcy-_hh+_L);
+    ctx.moveTo(_fcx-_hh,_fcy+_hh-_L); ctx.lineTo(_fcx-_hh,_fcy+_hh); ctx.lineTo(_fcx-_hh+_L,_fcy+_hh);
+    ctx.moveTo(_fcx+_hh-_L,_fcy+_hh); ctx.lineTo(_fcx+_hh,_fcy+_hh); ctx.lineTo(_fcx+_hh,_fcy+_hh-_L);
+  } else {
+    // COMPRESS — brackets pulled toward the centre, vertices face the corners.
+    ctx.moveTo(_fcx-_hh,_fcy-_hh+_L); ctx.lineTo(_fcx-_hh+_L,_fcy-_hh+_L); ctx.lineTo(_fcx-_hh+_L,_fcy-_hh);
+    ctx.moveTo(_fcx+_hh,_fcy-_hh+_L); ctx.lineTo(_fcx+_hh-_L,_fcy-_hh+_L); ctx.lineTo(_fcx+_hh-_L,_fcy-_hh);
+    ctx.moveTo(_fcx-_hh,_fcy+_hh-_L); ctx.lineTo(_fcx-_hh+_L,_fcy+_hh-_L); ctx.lineTo(_fcx-_hh+_L,_fcy+_hh);
+    ctx.moveTo(_fcx+_hh,_fcy+_hh-_L); ctx.lineTo(_fcx+_hh-_L,_fcy+_hh-_L); ctx.lineTo(_fcx+_hh-_L,_fcy+_hh);
+  }
+  ctx.stroke();
   ctx.restore();
 }
 
@@ -7193,6 +7270,15 @@ function _processCargoQueue(t, p){
       } else {
         // ── Normal planet unload ───────────────────────────────
         const src=t.carCargoSource?.[i]!=null?galaxy.planets[t.carCargoSource[i]]:null;
+        // First-ever player cargo unloaded at this planet → queue the
+        // "First Delivery" popup (captures the car type + cargo + S.D.).
+        // Suppressed for the three Gigi-Prime tutorial planets (ORIJEN, the home
+        // LAVA PLANET and DESERT PLANET) — those deliveries are part of the guided
+        // intro and a popup there would interrupt the tutorial flow.
+        if(t.isPlayer && !p._firstPlayerDelivery){
+          p._firstPlayerDelivery=true;
+          if(!_isHomeTutorialPlanet(p)) pendingFirstDeliveries.push({planetId:p.id, cargo, carType:t.cars[i], sd:stardate});
+        }
         const rev=computeCargoRevenue(t.cars[i],cargo,p,src);
         if(t.isPlayer) credits+=rev; else if(_aiCorp){_aiCorp.credits+=rev;_aiCorp.totalRevenue+=rev;}
         if(rev>0&&t.isPlayer){const[_cfx,_cfy]=getTrainCarPos(t,i);spawnCreditFloat(_cfx,_cfy,rev);pendingCreditDeltas.push({timer:30,amount:rev});t.totalRevenue=(t.totalRevenue||0)+rev;financeLedger.push({sd:stardate,revenue:rev,cost:0,cargoType:cargo,trainName:t.name,planetId:p.id,starId:p.starId});if(!t._revLog)t._revLog=[];t._revLog.push({sd:stardate,rev});while(t._revLog.length&&stardate-t._revLog[0].sd>1.0)t._revLog.shift();}
@@ -16097,6 +16183,36 @@ function _resolveMissionText(txt, ctx){
   if(txt.includes('{CORP}')) txt=txt.split('{CORP}').join(corpName||'your corporation');
   return txt;
 }
+// Live seconds remaining on the nearest-to-done PLAYER foundry smelt (40 s nominal
+// at 1× = FOUNDRY_PROD_TIME/60). Returns null when no player foundry is smelting
+// or about to start (no inputs yet). Used by the produce_iron obj-2 countdown.
+function _smeltSecondsRemaining(){
+  if(!galaxy) return null;
+  let _best=null;
+  for(const p of galaxy.planets){
+    if(p.aiHasStation) continue;                                   // player-relevant foundries only
+    if(!(p.upgrades||[]).includes('iron_foundry')) continue;
+    const _fd=p.upgradeData&&p.upgradeData.iron_foundry;
+    if(!_fd) continue;
+    let _rem;
+    if((_fd.progress||0)>0) _rem=_fd.progress;                     // actively smelting
+    else if((_fd.ore||0)>=1&&(_fd.water||0)>=1) _rem=FOUNDRY_PROD_TIME; // inputs stocked, about to start
+    else continue;
+    if(_best==null||_rem<_best) _best=_rem;
+  }
+  return _best==null?null:Math.max(0,Math.ceil(_best/60));
+}
+// Display text for a tracked mission objective — identical to obj.text except the
+// produce_iron "wait_smelt" objective, whose second-count updates LIVE each frame.
+function _objDisplayText(m,obj){
+  if(!obj) return '';
+  if(m&&m.id==='produce_iron'&&obj.id==='wait_smelt'){
+    const _s=_smeltSecondsRemaining();
+    if(_s==null) return 'Wait for the FOUNDRY to SMELT IRON';
+    return 'Wait '+_s+(_s===1?' second':' seconds')+' for the FOUNDRY to SMELT IRON';
+  }
+  return obj.text||'';
+}
 // Pick the three More-Scientists pickup planets: the closest planet of each of
 // urban / oil / storm biomes to Orijen that has NO rival/AI station. Returns
 // [urbanId, oilId, stormId], or null if any biome has no qualifying planet.
@@ -16220,6 +16336,9 @@ function drawNewMissionPopup(){
   const _SUMMARY_OBJS={
     create_route:'Create a LOOP ROUTE that allows your TRAIN to ship [Molten Ore] and [Water] to a nearby DESERT PLANET',
     buy_second_train:'Buy a new TRAIN to deliver the [Iron] being produced on the DESERT PLANET back to ORIJEN',
+    // produce_iron's two tracked objectives collapse to its original single line
+    // here so the NEW MISSION popup text stays exactly as before.
+    produce_iron:'Produce [Iron] by delivering both [Molten Ore] and [Water] to a FOUNDRY',
   };
   const _displayObjs=_SUMMARY_OBJS[def.id]
     ? [{id:'__'+def.id+'_summary__', text:_SUMMARY_OBJS[def.id]}]
@@ -16627,10 +16746,11 @@ function drawUpgradeUnlockPopup(){
   ctx.strokeStyle='rgba(245,200,40,0.7)'; ctx.lineWidth=2; ctx.strokeRect(px,py,pw,ph);
   ctx.save();
   ctx.textAlign='center';
-  // Label line
+  // Label line — re-titled "NEW UPGRADE CONSTRUCTED" for the deferred
+  // iron-foundry popup (shown after the foundry is actually built).
   ctx.font='bold 10px Orbitron,sans-serif';
   ctx.fillStyle='rgba(255,225,130,0.78)';
-  ctx.fillText('NEW PLANET UPGRADE UNLOCKED',px+pw/2,py+22);
+  ctx.fillText((popupState.upgradeUnlock||{}).constructed?'NEW UPGRADE CONSTRUCTED':'NEW PLANET UPGRADE UNLOCKED',px+pw/2,py+22);
   // Name — big glowing title
   ctx.font='bold 15px Orbitron,sans-serif';
   ctx.fillStyle='#ffe080'; ctx.shadowColor='#ffaa20'; ctx.shadowBlur=12;
@@ -16689,6 +16809,119 @@ function drawUpgradeUnlockPopup(){
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
   ctx.fillStyle='rgba(255,245,210,0.97)'; ctx.fillText('OKAY!',_bx+_bw/2,_by+17);
   _upgradeUnlockOkBounds={x:_bx,y:_by,w:_bw,h:_bh};
+  ctx.restore();
+}
+
+// Shared word-wrap → array-of-lines helper for the reward / first-delivery popups.
+// Honours explicit '\n' then greedily wraps each segment at maxW.
+function _popupWrapLines(text,font,maxW){
+  ctx.font=font; const out=[];
+  for(const seg of (text||'').split('\n')){
+    const ws=seg.split(' '); let l='';
+    for(const w of ws){ const t=l?l+' '+w:w; if(ctx.measureText(t).width<=maxW) l=t; else { if(l)out.push(l); l=w; } }
+    if(l) out.push(l);
+  }
+  return out.length?out:[''];
+}
+
+// ── Mission-reward popup (green) ─────────────────────────────
+// Fires on any mission completion that grants +credits. Title "Mission
+// Completed: <name>", a large green reward pill, a one-line detail, OKAY.
+let _missionRewardOkBounds=null;
+function drawMissionRewardPopup(){
+  if(activePopup!=='mission_reward') return;
+  const _mr=popupState.missionReward; if(!_mr) return;
+  const pw=380;
+  const _nameLines=_popupWrapLines(_mr.name,'bold 15px Orbitron,sans-serif',pw-44);
+  const _detTxt='Mission accomplished! Your corporation earned a reward of '+_fmtCr(_mr.reward)+' credits.';
+  const _detLines=_popupWrapLines(_detTxt,'11px "Exo 2",sans-serif',pw-48);
+  // Height sized to content.
+  const _pillH=38;
+  let ph=24+18 + _nameLines.length*20+8 + (_pillH+22) + (_detLines.length*16+10) + (26+18);
+  const px=(W-pw)/2; let py=(H-ph)/2; if(py<TOP_H+4) py=TOP_H+4;
+  _clearTextOverlayRect(px,py,pw,ph);
+  ctx.fillStyle='rgba(4,16,10,0.97)'; ctx.fillRect(px,py,pw,ph);
+  ctx.strokeStyle='rgba(60,210,130,0.75)'; ctx.lineWidth=2; ctx.strokeRect(px,py,pw,ph);
+  ctx.save(); ctx.textAlign='center';
+  // Caption + name (reads as "Mission Completed: <name>").
+  ctx.font='bold 10px Orbitron,sans-serif'; ctx.fillStyle='rgba(130,235,175,0.82)';
+  ctx.fillText('MISSION COMPLETED',px+pw/2,py+24);
+  ctx.font='bold 15px Orbitron,sans-serif'; ctx.fillStyle='#7dffb0'; ctx.shadowColor='#1fae6e'; ctx.shadowBlur=12;
+  let _ny=py+46; for(const l of _nameLines){ ctx.fillText(l,px+pw/2,_ny); _ny+=20; }
+  ctx.shadowBlur=0;
+  // Large green reward pill.
+  const _pillTxt='+ '+_fmtCr(_mr.reward)+' CR';
+  ctx.font='bold 18px Orbitron,sans-serif';
+  const _pillW=ctx.measureText(_pillTxt).width+44;
+  const _pillY=_ny+8, _pillX=px+(pw-_pillW)/2;
+  const _pg=ctx.createLinearGradient(0,_pillY,0,_pillY+_pillH);
+  _pg.addColorStop(0,'rgba(44,196,116,0.96)'); _pg.addColorStop(1,'rgba(20,138,80,0.96)');
+  ctx.fillStyle=_pg; ctx.beginPath(); ctx.roundRect(_pillX,_pillY,_pillW,_pillH,_pillH/2); ctx.fill();
+  ctx.strokeStyle='rgba(150,255,200,0.9)'; ctx.lineWidth=1.5; ctx.beginPath(); ctx.roundRect(_pillX,_pillY,_pillW,_pillH,_pillH/2); ctx.stroke();
+  ctx.fillStyle='rgba(255,255,255,0.98)'; ctx.shadowColor='rgba(8,55,28,0.7)'; ctx.shadowBlur=4;
+  ctx.textBaseline='middle'; ctx.fillText(_pillTxt,px+pw/2,_pillY+_pillH/2+1); ctx.textBaseline='alphabetic'; ctx.shadowBlur=0;
+  // Detail line(s).
+  let _dy=_pillY+_pillH+22;
+  ctx.font='11px "Exo 2",sans-serif'; ctx.fillStyle='rgba(208,234,218,0.92)';
+  for(const l of _detLines){ ctx.fillText(l,px+pw/2,_dy); _dy+=16; }
+  // OKAY button.
+  const _bw=110,_bh=26,_bx=px+(pw-_bw)/2,_by=py+ph-_bh-14;
+  const _hov=!!popupState.mrOkHover;
+  ctx.fillStyle=_hov?'rgba(28,180,105,0.97)':'rgba(18,120,72,0.9)'; ctx.fillRect(_bx,_by,_bw,_bh);
+  ctx.strokeStyle=_hov?'rgba(130,255,190,0.95)':'rgba(80,225,150,0.82)'; ctx.lineWidth=1.5; ctx.strokeRect(_bx,_by,_bw,_bh);
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.fillStyle='rgba(240,255,245,0.97)';
+  ctx.fillText('OKAY!',_bx+_bw/2,_by+17);
+  _missionRewardOkBounds={x:_bx,y:_by,w:_bw,h:_bh};
+  ctx.restore();
+}
+
+// ── First-delivery popup ─────────────────────────────────────
+// Fires the first time a planet ever receives player cargo. Shows the delivered
+// car type, "First Delivery arrives at <planet>", and a flavour line.
+let _firstDeliveryOkBounds=null;
+function drawFirstDeliveryPopup(){
+  if(activePopup!=='first_delivery') return;
+  const _fdd=popupState.firstDelivery; if(!_fdd) return;
+  const p=galaxy?galaxy.planets[_fdd.planetId]:null;
+  const _pName=p?p.name:'the planet';
+  const _inhabited=!!(p&&(p.population||0)>0);
+  const _cargoName=CARGO_LABEL[_fdd.cargo]||((_fdd.cargo||'cargo').toUpperCase());
+  const _who=_inhabited?'Citizens':((corpName||'Corporation')+' investors');
+  const pw=400;
+  const _titleLines=_popupWrapLines('First Delivery arrives at '+_pName,'bold 15px Orbitron,sans-serif',pw-40);
+  const _detTxt=_who+' rejoice as the first-ever shipment of '+_cargoName+' arrives at '+_pName+'. S.D. '+(_fdd.sd||0).toFixed(1);
+  const _detLines=_popupWrapLines(_detTxt,'12px "Exo 2",sans-serif',pw-44);
+  const _vizH=64;
+  let ph=22+_titleLines.length*20+12 + (_vizH+18) + (_detLines.length*17+10) + (28+18);
+  const px=(W-pw)/2; let py=(H-ph)/2; if(py<TOP_H+4) py=TOP_H+4;
+  _clearTextOverlayRect(px,py,pw,ph);
+  ctx.fillStyle='rgba(4,11,22,0.97)'; ctx.fillRect(px,py,pw,ph);
+  ctx.strokeStyle='rgba(90,180,255,0.78)'; ctx.lineWidth=2; ctx.strokeRect(px,py,pw,ph);
+  ctx.save(); ctx.textAlign='center';
+  // Title.
+  ctx.font='bold 15px Orbitron,sans-serif'; ctx.fillStyle='#9ad6ff'; ctx.shadowColor='#2a78d0'; ctx.shadowBlur=11;
+  let _ty=py+30; for(const l of _titleLines){ ctx.fillText(l,px+pw/2,_ty); _ty+=20; }
+  ctx.shadowBlur=0;
+  // Delivered car sprite (loaded variant), bottom-aligned over the rail line.
+  const _vizBottomY=_ty+_vizH;
+  const _spK=getCarSprite(_fdd.carType,true);
+  if(_spK&&imgs[_spK]){
+    ctx.strokeStyle='rgba(70,130,210,0.35)'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(px+pw/2-90,_vizBottomY+2); ctx.lineTo(px+pw/2+90,_vizBottomY+2); ctx.stroke();
+    _drawFittedSprite(ctx,_fdd.carType,px+pw/2,_vizBottomY,150,_vizH,_spK);
+  }
+  // Flavour detail.
+  let _dy=_vizBottomY+30;
+  ctx.font='12px "Exo 2",sans-serif'; ctx.fillStyle='rgba(206,226,250,0.92)';
+  for(const l of _detLines){ ctx.fillText(l,px+pw/2,_dy); _dy+=17; }
+  // OKAY button.
+  const _bw=110,_bh=27,_bx=px+(pw-_bw)/2,_by=py+ph-_bh-13;
+  const _hov=!!popupState.fdOkHover;
+  ctx.fillStyle=_hov?'rgba(40,120,225,0.97)':'rgba(24,80,170,0.9)'; ctx.fillRect(_bx,_by,_bw,_bh);
+  ctx.strokeStyle=_hov?'rgba(140,200,255,0.95)':'rgba(90,160,240,0.82)'; ctx.lineWidth=1.5; ctx.strokeRect(_bx,_by,_bw,_bh);
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.fillStyle='rgba(235,245,255,0.97)';
+  ctx.fillText('OKAY!',_bx+_bw/2,_by+17);
+  _firstDeliveryOkBounds={x:_bx,y:_by,w:_bw,h:_bh};
   ctx.restore();
 }
 
@@ -20045,45 +20278,42 @@ function _drawStationHoverTooltipOverlay(){
   if(activePopup!=='planet'||!_stationHoverInfo||!popupState.planet) return;
   const p=popupState.planet;
   const _elapsed=Date.now()-_stationHoverInfo.enterTime;
-  if(_elapsed<=1000) return;
-  const _fa=Math.min(1,(_elapsed-1000)/200);
-  const sprH=40;
-  const _allCargo=['passengers','livestock','grain','fruit','cargo','mail','water','ice','sand','molten_ore','iron','steel','glass','machinery','gold','hazmat','oil','battery','chemical','flowers','medical'];
-  const {isSupply:_his,tx:_htx,ty:_hty}=_stationHoverInfo;
-  // Collect cargo types with non-zero value on the hovered side, sorted most→least.
+  if(_elapsed<=500) return;            // 2× faster than the old 1000ms delay
+  const _fa=Math.min(1,(_elapsed-500)/200);
+  const {kind:_hkind,isSupply:_his,ctype:_hc,tx:_htx,ty:_hty}=_stationHoverInfo;
+  const _anchorH=_hkind==='more'?13:26; // fallback offset when the tooltip flips below the anchor
+  const _side=_his?(p.supply||{}):(p.demand||{});
+  // Rows: a single-resource tooltip for a hovered row, or the folded "… and N
+  // more" list for the overflow link. Values read LIVE and rounded to a tenth.
   const _ttRows=[];
-  for(const ctype of _allCargo){
-    if(ctype==='gold'&&!p.goldRevealed) continue;
-    if(ctype==='diamond'&&!p.diamondRevealed) continue;
-    const amt=_his?((p.supply||{})[ctype]||0):((p.demand||{})[ctype]||0);
-    if(amt>0.005) _ttRows.push({ctype,amt});
+  if(_hkind==='more'){
+    for(const ct of (_stationHoverInfo.items||[])){
+      if(ct==='gold'&&!p.goldRevealed) continue;
+      if(ct==='diamond'&&!p.diamondRevealed) continue;
+      _ttRows.push({ctype:ct,amt:(_side[ct]||0)});
+    }
+    _ttRows.sort((a,b)=>b.amt-a.amt);
+  } else if(_hc){
+    _ttRows.push({ctype:_hc,amt:(_side[_hc]||0)});
   }
-  _ttRows.sort((a,b)=>b.amt-a.amt);
   if(!_ttRows.length) return;
   ctx.save();
   const _pad=8, _rowH=15, _hdH=22;
   const _hdTxt=_his?'SUPPLY':'DEMAND';
-  const _twoCol=_ttRows.length>8;
-  const _leftN=_twoCol?Math.ceil(_ttRows.length/2):_ttRows.length;
-  const _rightN=_twoCol?_ttRows.length-_leftN:0;
   ctx.font='bold 8px Orbitron,sans-serif';
-  let _hdrW=ctx.measureText(_hdTxt).width;
+  let _maxLW=ctx.measureText(_hdTxt).width;
   ctx.font='9px "Exo 2",sans-serif';
-  let _maxLW_L=_hdrW, _maxLW_R=0;
-  for(let _ri=0;_ri<_ttRows.length;_ri++){
-    const lw=ctx.measureText(CARGO_LABEL[_ttRows[_ri].ctype]||_ttRows[_ri].ctype.toUpperCase()).width;
-    if(_ri<_leftN){ if(lw>_maxLW_L) _maxLW_L=lw; }
-    else          { if(lw>_maxLW_R) _maxLW_R=lw; }
+  for(const r of _ttRows){
+    const lw=ctx.measureText(CARGO_LABEL[r.ctype]||r.ctype.toUpperCase()).width;
+    if(lw>_maxLW) _maxLW=lw;
   }
   const _valW=34;
-  const _colW_L=_maxLW_L+_valW+8;
-  const _colW_R=_twoCol?(_maxLW_R+_valW+8):0;
-  const _colGap=_twoCol?14:0;
-  const _ttW=_pad*2+_colW_L+_colGap+_colW_R;
-  const _rowsTall=Math.max(_leftN,_rightN);
-  const _ttH=_hdH+_rowsTall*_rowH+_pad;
+  const _colW_L=_maxLW+_valW+8;
+  const _leftN=_ttRows.length, _rightN=0;
+  const _ttW=_pad*2+_colW_L;
+  const _ttH=_hdH+_ttRows.length*_rowH+_pad;
   let _ttx=_htx, _tty=_hty-_ttH-6;
-  if(_tty<4) _tty=_hty+sprH+6;
+  if(_tty<4) _tty=_hty+_anchorH+6;
   if(_tty+_ttH>GH-4) _tty=GH-4-_ttH;
   if(_tty<4) _tty=4;
   if(_ttx+_ttW>W-4) _ttx=W-4-_ttW;
@@ -20113,17 +20343,12 @@ function _drawStationHoverTooltipOverlay(){
     ctx.fillText(CARGO_LABEL[ctype]||ctype.toUpperCase(),colX,ry);
     ctx.fillStyle='rgba(230,240,255,0.95)';
     ctx.textAlign='right';
-    ctx.fillText(amt.toFixed(2),colX+colW,ry);
+    ctx.fillText(amt.toFixed(1),colX+colW,ry); // rounded to nearest tenth
   };
   const _leftColX=_ttx+_pad;
-  const _rightColX=_ttx+_pad+_colW_L+_colGap;
   for(let ri=0;ri<_leftN;ri++){
     const {ctype,amt}=_ttRows[ri];
     _drawRow(ctype,amt,_leftColX,_colW_L,_tty+_hdH+ri*_rowH+10);
-  }
-  for(let ri=0;ri<_rightN;ri++){
-    const {ctype,amt}=_ttRows[_leftN+ri];
-    _drawRow(ctype,amt,_rightColX,_colW_R,_tty+_hdH+ri*_rowH+10);
   }
   ctx.restore();
 }
@@ -20253,11 +20478,13 @@ function updateMissions(dtSd){
   if(_doIntroGates) _missionTickAcc=0;
   if(_doIntroGates){
   // IRON FOUNDRY unlock: fires the moment the player ACCEPTS the build_foundry
-  // mission (it lands in `missions` with status 'active'). Unlocks the upgrade +
-  // shows the "NEW PLANET UPGRADE UNLOCKED" popup so the foundry is buildable for
-  // the mission they just accepted.
+  // mission (it lands in `missions` with status 'active'). Unlocks the upgrade so
+  // the foundry is buildable for the mission they just accepted. The popup is NOT
+  // shown here anymore — it's deferred until the foundry is actually BUILT and the
+  // player closes that planet's details window (see _foundryConstructedPopupPending),
+  // where it appears with the title "NEW UPGRADE CONSTRUCTED".
   if(!_foundryUnlocked && missions.some(mx=>mx.id==='build_foundry'&&mx.status==='active')){
-    _foundryUnlocked=true; pendingUpgradeUnlocks.push({key:'iron_foundry'});
+    _foundryUnlocked=true;
     _chatMsg('IRON FOUNDRY UPGRADE UNLOCKED','rgba(255,210,120,1)');
   }
   // "Build a Foundry" intro: 10 real-time seconds after the create_route
@@ -20492,7 +20719,7 @@ function updateMissions(dtSd){
       m.status='completed'; m.completedSd=stardate; _recomputeMissionTargets();
       _ga('mission_complete',{mission_id:m.id, mission_name:m.name, sd:Math.floor(stardate)});
       _newsLog('mission_complete',{missionId:m.id,missionName:m.name});
-      if(m.reward){ credits=Math.min(credits+m.reward,999999999); pendingCreditDeltas.push({timer:60,amount:m.reward}); }
+      if(m.reward){ credits=Math.min(credits+m.reward,999999999); pendingCreditDeltas.push({timer:60,amount:m.reward}); pendingMissionRewards.push({name:m.name,reward:m.reward}); }
       _chatMsg('MISSION COMPLETE: '+m.name.toUpperCase(),'rgba(255,220,80,1)');
       // Start build_foundry countdown when create_route completes
       // (var name _findOreTimerMs is legacy from the removed Find Molten Ore mission)
@@ -20720,7 +20947,7 @@ function drawMissionsPopup(){
     }
     ctx.font='11px "Exo 2",sans-serif';
     for(const obj of (m.objectives||[])){
-      let txt=obj.text;
+      let txt=_objDisplayText(m,obj);
       const wds=txt.split(' '); let ln='',nl=1;
       for(const w of wds){const t=ln?ln+' '+w:w;if(ctx.measureText(t).width<=(cMaxW2-_mCbW))ln=t;else{nl++;ln=w;}}
       h+=nl*_mObjLH;
@@ -20842,7 +21069,7 @@ function drawMissionsPopup(){
       else               _col='rgba(180,200,235,0.78)';
       // Tokenize for colored [Name] segments, then word-wrap by tokens.
       const _objFontStrM='11px "Exo 2",sans-serif';
-      const _objTokensM=_objTokenize(obj.text);
+      const _objTokensM=_objTokenize(_objDisplayText(m,obj));
       const _objLines=_objWrapTokens(_objTokensM,cMaxW-_mCbW,_objFontStrM);
       const _objTotalH=_objLines.length*_mObjLH;
       const _prog=_mObjProgress(m,obj.id);
@@ -24135,7 +24362,7 @@ function drawPlanetDetailPopup(){
     const _cpFont='italic 9px “Exo 2”,sans-serif';
     ctx.font=_cpFont;
     const _cpMaxW=pw-(lx-px)-14;
-    const _cpText='”'+(p.catchphrase||'')+'”';
+    const _cpText='“'+(p.catchphrase||'')+'”'; // “ opening … ” closing
     const _cpWords=_cpText.split(' ');
     const _cpLines=[];
     let _cpCur='';
@@ -24197,44 +24424,59 @@ function drawPlanetDetailPopup(){
   if(activeTab==='station'){
     {
       // Supply/demand visualization — shown for both station-built and no-station (dimmed)
-      const sprH=40, sprW=~~(sprH*(CAR_W/CAR_H)); // ~56px wide sprites
-      const rowPitch=44; // row step (sprH + 4px gap)
+      const sprH=26, sprW=~~(sprH*(CAR_W/CAR_H)); // ~36px wide sprites (shrunk so 5 rows fit)
+      const rowPitch=28; // row step (sprH + 2px gap)
+      const MAX_ROWS=5;  // up to 5 supplied/demanded resources per pane; rest fold into "… and N more"
       const colW=pw/2, pad=10;
       const maxSpr=Math.max(1,Math.floor((colW-pad-40)/sprW)); // sprites that fit per row
       const allCargo=['passengers','livestock','grain','fruit','cargo','mail','water','ice','sand','molten_ore','iron','steel','glass','machinery','gold','hazmat','oil','battery','chemical','flowers','medical'];
 
-      function _drawCargoStrip(cx,cy,cargoType,amount,labelCol){
+      // capCars  — max train-cars of sprite to draw before fading out (default maxSpr).
+      //            When the MORE panel is showing it's 3.5 so the strip clears its area.
+      // labelLimitX — clamp the ×N label's right edge so it can't run under the MORE panel.
+      function _drawCargoStrip(cx,cy,cargoType,amount,labelCol,capCars,labelLimitX){
         const sprKey=CARGO_CAR_SPRITE[cargoType];
         const _dk=sprKey?getCarSprite(sprKey,true):null;
         const img=_dk?imgs[_dk]:null;
-        const full=Math.floor(amount), frac=amount-full;
-        const overflow=full>=maxSpr;
-        const n=overflow?maxSpr:full;
+        const _cap=(capCars==null?maxSpr:capCars);
+        // Round DOWN to the nearest tenth of a car for the sprite visualization
+        // (3.15 supply → 3.1 cars: 3 full sprites + a 0.1-wide clipped sprite).
+        const tenth=Math.floor(amount*10)/10;
+        const overflow=tenth>_cap+1e-6;
+        const shown=overflow?_cap:tenth;             // cars actually drawn
+        const full=Math.floor(shown+1e-6);
+        const frac=Math.max(0,Math.round((shown-full)*10)/10); // 0..0.9 (0.5 at a 3.5 cap)
         let sx=cx;
         // Each icon de-stretched (galaxy-view proportions), bottom-aligned in
         // the row and tiled by the fixed sprW cell width.
         let _iconMet=null;
         const _icon=(ix)=>{ const _r=_drawFittedSprite(ctx, sprKey, ix+sprW/2, cy+sprH, sprW, sprH, _dk); if(_r) _iconMet=_r; };
         if(img){
-          for(let i=0;i<n;i++){ _icon(sx); sx+=sprW; }
-          if(!overflow&&frac>=0.5){
-            ctx.save();ctx.beginPath();ctx.rect(sx,cy,sprW/2,sprH);ctx.clip();
-            _icon(sx);ctx.restore();sx+=sprW/2;
+          for(let i=0;i<full;i++){ _icon(sx); sx+=sprW; }
+          if(frac>0.001){
+            const _pwF=sprW*frac;
+            ctx.save();ctx.beginPath();ctx.rect(sx,cy,_pwF,sprH);ctx.clip();
+            _icon(sx);ctx.restore();sx+=_pwF;
           }
           if(overflow){
-            const fadeX=sx-sprW/2;
+            const _fadeW=Math.min(sprW*0.5,sx-cx);
+            const fadeX=sx-_fadeW;
             const _fg=ctx.createLinearGradient(fadeX,0,sx,0);
             _fg.addColorStop(0,'rgba(3,6,20,0)'); _fg.addColorStop(1,'rgba(3,6,20,1)');
-            ctx.fillStyle=_fg; ctx.fillRect(fadeX,cy,sprW/2,sprH);
+            ctx.fillStyle=_fg; ctx.fillRect(fadeX,cy,_fadeW,sprH);
           }
         }
         // Vertically centre the ×N label on the SPRITE's visible body (which is
         // bottom-aligned in the cell), not on the cell — otherwise it floats too
-        // high above the shorter de-stretched sprites.
+        // high above the shorter de-stretched sprites. The label shows the TRUE
+        // amount (floored to a tenth) even when the sprites are capped/faded.
         const _lblCY = _iconMet ? (_iconMet.top + _iconMet.visH/2) : (cy+sprH/2);
         ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left'; ctx.textBaseline='middle';
         ctx.fillStyle=labelCol||'rgba(180,220,255,0.9)';
-        ctx.fillText('\xd7'+(amount%1===0?amount.toFixed(0):amount.toFixed(1)),sx+2,_lblCY);
+        const _lblTxt='\xd7'+(tenth%1===0?tenth.toFixed(0):tenth.toFixed(1));
+        let _lblX=sx+2;
+        if(labelLimitX!=null){ const _lw=ctx.measureText(_lblTxt).width; if(_lblX+_lw>labelLimitX) _lblX=Math.max(cx,labelLimitX-_lw); }
+        ctx.fillText(_lblTxt,_lblX,_lblCY);
         ctx.textBaseline='alphabetic';
       }
 
@@ -24266,8 +24508,8 @@ function drawPlanetDetailPopup(){
         if(ctype==='diamond'&&!p.diamondRevealed) continue;
         const rawSup=((p.supply||{})[ctype]||0);
         const rawDem=((p.demand||{})[ctype]||0);
-        const sup=Math.floor(rawSup*2)/2;
-        const dem=Math.floor(rawDem*2)/2;
+        const sup=Math.round(rawSup*10)/10; // nearest tenth (was nearest half)
+        const dem=Math.round(rawDem*10)/10;
         // Supply: show all cargo with supply ≥0.5
         if(sup>=0.5) _supItems.push({ctype,sup,rawSup});
         // Demand: show resource-type cargo only (no hazmat, no passengers/mail)
@@ -24283,22 +24525,70 @@ function drawPlanetDetailPopup(){
       else _supItems.sort((a,b)=>b.sup-a.sup);
       _demItems.sort((a,b)=>b.dem-a.dem);
       const _stRowBounds=[];
-      for(let si=0;si<_supItems.length;si++){
-        const {ctype,sup,rawSup}=_supItems[si];
-        const ry=tcY+20+si*rowPitch;
-        if(ry+sprH<=tcY+tcH){
-          _drawCargoStrip(px+pad,ry,ctype,sup,'rgba(140,200,255,0.9)');
-          if(!_noStation) _stRowBounds.push({x:px+pad,y:ry,w:colW-pad-2,h:sprH,ctype,isSupply:true,rawAmt:rawSup});
+      const CAP_CARS=3.5; // top-5 sprites truncate after 3.5 cars (fade) when a MORE panel shows
+      // Tooltip-style "MORE" panel anchored to the lower-right corner of a pane,
+      // listing every overflow resource (beyond the top-5) in a single column with
+      // no sprites — same look as the old hover tooltip, but always visible.
+      const _moreGeo=(items,rightX)=>{
+        if(_noStation||!items.length) return null;
+        const _mpad=5,_mrowH=12,_mhdH=15,_mvalW=24;
+        ctx.font='8px "Exo 2",sans-serif';
+        let _mlw=0;
+        for(const it of items){ const _l=CARGO_LABEL[it.ctype]||it.ctype.toUpperCase(); const lw=ctx.measureText(_l).width; if(lw>_mlw)_mlw=lw; }
+        _mlw=Math.min(_mlw,56);
+        const _w=_mpad*2+_mlw+_mvalW+5;
+        const _h=_mhdH+items.length*_mrowH+_mpad;
+        const _y=Math.max(tcY+23,(tcY+tcH-5)-_h); // keep below the SUPPLY/DEMAND header + divider
+        return {x:rightX-_w,y:_y,w:_w,h:_h,rowH:_mrowH,hdH:_mhdH,pad:_mpad,mlw:_mlw,items};
+      };
+      const _drawMorePanel=(geo,isSupply)=>{
+        if(!geo) return;
+        const sideCol=isSupply?'rgba(150,205,255,0.95)':'rgba(255,178,98,0.95)';
+        const brd=isSupply?'rgba(80,140,255,0.5)':'rgba(255,140,60,0.5)';
+        ctx.fillStyle='rgba(8,14,32,0.97)'; ctx.beginPath(); ctx.roundRect(geo.x,geo.y,geo.w,geo.h,4); ctx.fill();
+        ctx.strokeStyle=brd; ctx.lineWidth=0.8; ctx.beginPath(); ctx.roundRect(geo.x,geo.y,geo.w,geo.h,4); ctx.stroke();
+        ctx.fillStyle=sideCol; ctx.font='bold 7px Orbitron,sans-serif'; ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+        ctx.fillText('+ '+geo.items.length+' MORE',geo.x+geo.pad,geo.y+11);
+        ctx.strokeStyle=brd; ctx.lineWidth=0.5;
+        ctx.beginPath(); ctx.moveTo(geo.x+geo.pad,geo.y+geo.hdH-1); ctx.lineTo(geo.x+geo.w-geo.pad,geo.y+geo.hdH-1); ctx.stroke();
+        ctx.font='8px "Exo 2",sans-serif';
+        for(let i=0;i<geo.items.length;i++){
+          const it=geo.items[i];
+          const amt=Math.floor(((it.rawSup??it.rawDem??0))*10)/10;
+          const ry=geo.y+geo.hdH+i*geo.rowH+8;
+          let _lbl=CARGO_LABEL[it.ctype]||it.ctype.toUpperCase();
+          while(ctx.measureText(_lbl).width>geo.mlw&&_lbl.length>3) _lbl=_lbl.slice(0,-1);
+          ctx.fillStyle='rgba(195,218,255,0.85)'; ctx.textAlign='left';
+          ctx.fillText(_lbl,geo.x+geo.pad,ry);
+          ctx.fillStyle='rgba(232,242,255,0.96)'; ctx.textAlign='right';
+          ctx.fillText(amt.toFixed(1),geo.x+geo.w-geo.pad,ry);
         }
-      }
-      for(let di=0;di<_demItems.length;di++){
-        const {ctype,dem,rawDem}=_demItems[di];
-        const ry=tcY+20+di*rowPitch;
-        if(ry+sprH<=tcY+tcH){
-          _drawCargoStrip(px+colW+pad,ry,ctype,dem,'rgba(255,170,90,0.9)');
-          if(!_noStation) _stRowBounds.push({x:px+colW+pad,y:ry,w:colW-pad-2,h:sprH,ctype,isSupply:false,rawAmt:rawDem});
+        ctx.textAlign='left';
+      };
+      // Draw the top-5 rows of one side, then its MORE panel. Rows whose sprite
+      // band would vertically overlap the panel get their sprites capped at 3.5
+      // cars and their labels clamped left of the panel — no overlap.
+      const _drawSide=(items,colX,rightX,isSupply,col)=>{
+        const _over=items.slice(MAX_ROWS);
+        const _geo=_moreGeo(_over,rightX);
+        const _shown=Math.min(items.length,MAX_ROWS);
+        for(let i=0;i<_shown;i++){
+          const it=items[i];
+          const raw=isSupply?it.rawSup:it.rawDem;
+          const ry=tcY+20+i*rowPitch;
+          const _intersect=_geo&&(ry+sprH)>_geo.y;
+          const _cap=_geo?CAP_CARS:undefined;
+          const _limit=_intersect?(_geo.x-3):undefined;
+          _drawCargoStrip(colX,ry,it.ctype,raw,col,_cap,_limit);
+          if(!_noStation){
+            const _bw=_intersect?Math.max(20,_geo.x-3-colX):(rightX-colX);
+            _stRowBounds.push({kind:'row',x:colX,y:ry,w:_bw,h:sprH,ctype:it.ctype,isSupply,rawAmt:raw});
+          }
         }
-      }
+        _drawMorePanel(_geo,isSupply);
+      };
+      _drawSide(_supItems,px+pad,px+colW-4,true,'rgba(140,200,255,0.9)');
+      _drawSide(_demItems,px+colW+pad,px+pw-4,false,'rgba(255,170,90,0.9)');
       popupState.stationTabRowBounds=_stRowBounds;
       ctx.restore();
 
@@ -28380,7 +28670,7 @@ function drawGalaxy(ts,dt){
           // treats them as atomic, then restore and tokenize each wrapped
           // line for colored rendering. (NBSP U+00A0 also matches \s+ in
           // JS so it can't be used as the placeholder.)
-          const _safe=(_obj.text||'').replace(/\[([^\]]+)\]/g,(m2,inner)=>'['+inner.replace(/ /g,'\u0001')+']');
+          const _safe=(_objDisplayText(m,_obj)||'').replace(/\[([^\]]+)\]/g,(m2,inner)=>'['+inner.replace(/ /g,'\u0001')+']');
           // Protect two-word planet phrases (LAVA / DESERT PLANET) from being
           // split across tracker lines (which would drop their colour). The
           // protector char is the same one restored to a space below.
@@ -28660,6 +28950,8 @@ function drawGalaxy(ts,dt){
   drawCarUnlockPopup();
   drawEngineUnlockPopup();
   drawUpgradeUnlockPopup();
+  drawMissionRewardPopup();
+  drawFirstDeliveryPopup();
   drawRivalFoundedPopup();
   drawAncientMessagePopup();
   drawMissionsPopup();
@@ -29589,9 +29881,10 @@ canvas.addEventListener('mousemove',e=>{
     let _found=null;
     if(_bounds){ for(const b of _bounds){ if(cp.x>=b.x&&cp.x<b.x+b.w&&cp.y>=b.y&&cp.y<b.y+b.h){_found=b;break;} } }
     if(_found){
-      if(!_stationHoverInfo||_stationHoverInfo.ctype!==_found.ctype||_stationHoverInfo.isSupply!==_found.isSupply){
-        _stationHoverInfo={ctype:_found.ctype,isSupply:_found.isSupply,rawAmt:_found.rawAmt,
-                           tx:_found.x,ty:_found.y,enterTime:Date.now()};
+      const _fk=_found.kind||'row';
+      if(!_stationHoverInfo||_stationHoverInfo.kind!==_fk||_stationHoverInfo.ctype!==_found.ctype||_stationHoverInfo.isSupply!==_found.isSupply){
+        _stationHoverInfo={kind:_fk,ctype:_found.ctype,isSupply:_found.isSupply,rawAmt:_found.rawAmt,
+                           items:_found.items||null,tx:_found.tx??_found.x,ty:_found.ty??_found.y,enterTime:Date.now()};
       }
     } else { _stationHoverInfo=null; }
   }
@@ -29893,6 +30186,8 @@ canvas.addEventListener('mousemove',e=>{
   _carUnlockOkHover=!!(activePopup==='car_unlock'&&_carUnlockOkBounds&&cp.x>=_carUnlockOkBounds.x&&cp.x<=_carUnlockOkBounds.x+_carUnlockOkBounds.w&&cp.y>=_carUnlockOkBounds.y&&cp.y<=_carUnlockOkBounds.y+_carUnlockOkBounds.h);
   _engineUnlockOkHover=!!(activePopup==='engine_unlock'&&_engineUnlockOkBounds&&cp.x>=_engineUnlockOkBounds.x&&cp.x<=_engineUnlockOkBounds.x+_engineUnlockOkBounds.w&&cp.y>=_engineUnlockOkBounds.y&&cp.y<=_engineUnlockOkBounds.y+_engineUnlockOkBounds.h);
   _upgradeUnlockOkHover=!!(activePopup==='upgrade_unlock'&&_upgradeUnlockOkBounds&&cp.x>=_upgradeUnlockOkBounds.x&&cp.x<=_upgradeUnlockOkBounds.x+_upgradeUnlockOkBounds.w&&cp.y>=_upgradeUnlockOkBounds.y&&cp.y<=_upgradeUnlockOkBounds.y+_upgradeUnlockOkBounds.h);
+  if(activePopup==='mission_reward'&&_missionRewardOkBounds){const b=_missionRewardOkBounds; popupState.mrOkHover=cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h; if(popupState.mrOkHover) canvas.style.cursor='pointer';}
+  if(activePopup==='first_delivery'&&_firstDeliveryOkBounds){const b=_firstDeliveryOkBounds; popupState.fdOkHover=cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h; if(popupState.fdOkHover) canvas.style.cursor='pointer';}
   if(activePopup==='rival_founded'&&_rivalFoundedOkBounds){const b=_rivalFoundedOkBounds; popupState.rivalOkHover=cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h; if(popupState.rivalOkHover) canvas.style.cursor='pointer';}
   if(activePopup==='ancient_message'&&_ancientPopupOkBounds){const b=_ancientPopupOkBounds; popupState.ancientOkHover=cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h; if(popupState.ancientOkHover) canvas.style.cursor='pointer';}
   _quitYesHover=!!(activePopup==='quitconfirm'&&quitConfirmYesBounds&&cp.x>=quitConfirmYesBounds.x&&cp.x<=quitConfirmYesBounds.x+quitConfirmYesBounds.w&&cp.y>=quitConfirmYesBounds.y&&cp.y<=quitConfirmYesBounds.y+quitConfirmYesBounds.h);
@@ -29983,8 +30278,9 @@ canvas.addEventListener('mousemove',e=>{
     _startBtnHover=!!(startBtnBounds&&cp.x>=startBtnBounds.x&&cp.x<=startBtnBounds.x+startBtnBounds.w&&cp.y>=startBtnBounds.y&&cp.y<=startBtnBounds.y+startBtnBounds.h);
     _loadBtnHover=!!(loadBtnBounds&&cp.x>=loadBtnBounds.x&&cp.x<=loadBtnBounds.x+loadBtnBounds.w&&cp.y>=loadBtnBounds.y&&cp.y<=loadBtnBounds.y+loadBtnBounds.h);
     _muteBtnHover=!!(_muteBtnBounds&&cp.x>=_muteBtnBounds.x&&cp.x<=_muteBtnBounds.x+_muteBtnBounds.w&&cp.y>=_muteBtnBounds.y&&cp.y<=_muteBtnBounds.y+_muteBtnBounds.h);
+    _fsBtnHover=!!(_fsBtnBounds&&cp.x>=_fsBtnBounds.x&&cp.x<=_fsBtnBounds.x+_fsBtnBounds.w&&cp.y>=_fsBtnBounds.y&&cp.y<=_fsBtnBounds.y+_fsBtnBounds.h);
     _leaderboardBtnHover=!!(leaderboardBtnBounds&&cp.x>=leaderboardBtnBounds.x&&cp.x<=leaderboardBtnBounds.x+leaderboardBtnBounds.w&&cp.y>=leaderboardBtnBounds.y&&cp.y<=leaderboardBtnBounds.y+leaderboardBtnBounds.h);
-    canvas.style.cursor=(_startBtnHover||_loadBtnHover||_muteBtnHover||_leaderboardBtnHover)?'pointer':'default';
+    canvas.style.cursor=(_startBtnHover||_loadBtnHover||_muteBtnHover||_fsBtnHover||_leaderboardBtnHover)?'pointer':'default';
   } else { _startBtnHover=false; _loadBtnHover=false; _leaderboardBtnHover=false; }
   if(gs==='leaderboard'){
     const _in=(b)=>b&&cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h;
@@ -30192,6 +30488,7 @@ canvas.addEventListener('mouseup',e=>{
     _tryPlaySoundtrack();
     if(_smHandleClick(cp)) return;
     if(_muteBtnBounds){const mb=_muteBtnBounds;if(cp.x>=mb.x&&cp.x<=mb.x+mb.w&&cp.y>=mb.y&&cp.y<=mb.y+mb.h){_toggleMusicMute();return;}}
+    if(_fsBtnBounds){const fb=_fsBtnBounds;if(cp.x>=fb.x&&cp.x<=fb.x+fb.w&&cp.y>=fb.y&&cp.y<=fb.y+fb.h){_toggleFullscreen();return;}}
     const b=startBtnBounds;
     if(b&&cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h) startGame();
     const lb=loadBtnBounds;
@@ -30223,7 +30520,7 @@ canvas.addEventListener('mouseup',e=>{
     // Lower-left QUIT → back to title screen (mirrors the quit-confirm Yes path).
     const qb=_introQuitBtnBounds;
     if(qb&&cp.x>=qb.x&&cp.x<=qb.x+qb.w&&cp.y>=qb.y&&cp.y<=qb.y+qb.h){
-      gs='title'; document.getElementById('refresh-btn').classList.remove('hidden');
+      gs='title';
       return;
     }
     // Lower-left mute → toggle soundtrack (shared with title/options buttons).
@@ -30714,6 +31011,22 @@ canvas.addEventListener('mouseup',e=>{
         }}
         return;
       }
+      // Mission-reward popup (green)
+      if(activePopup==='mission_reward'){
+        if(_missionRewardOkBounds){const b=_missionRewardOkBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+          pendingMissionRewards.shift();
+          activePopup=null; popupState={}; return;
+        }}
+        return;
+      }
+      // First-delivery popup
+      if(activePopup==='first_delivery'){
+        if(_firstDeliveryOkBounds){const b=_firstDeliveryOkBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+          pendingFirstDeliveries.shift();
+          activePopup=null; popupState={}; return;
+        }}
+        return;
+      }
       // [ESC] text click in any popup
       if(activePopup&&popupState.escBounds){
         const eb=popupState.escBounds;
@@ -30721,7 +31034,7 @@ canvas.addEventListener('mouseup',e=>{
       }
       // Quit confirmation
       if(activePopup==='quitconfirm'){
-        if(quitConfirmYesBounds){const b=quitConfirmYesBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ activePopup=null; popupState={}; gs='title'; document.getElementById('refresh-btn').classList.remove('hidden'); return; }}
+        if(quitConfirmYesBounds){const b=quitConfirmYesBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ activePopup=null; popupState={}; gs='title'; return; }}
         if(saveGameBtnBounds){const b=saveGameBtnBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ saveGame(); return; }}
         if(quitConfirmNoBounds){const b=quitConfirmNoBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ activePopup=null; popupState={}; return; }}
         return; // eat any other click on the popup
@@ -31222,6 +31535,9 @@ canvas.addEventListener('mouseup',e=>{
                 // First foundry ever built → arm the yellow foundry explainer
                 // callout (one-shot). It points at this just-built foundry card.
                 if(!_foundryCalloutShown){ _foundryCalloutStartMs=Date.now(); _foundryCalloutFadeOutStartMs=0; _foundryCalloutShown=true; }
+                // Defer the upgrade popup (re-titled "NEW UPGRADE CONSTRUCTED") until
+                // the player closes this planet's details window — see the dispatch gate.
+                if(!_foundryConstructedPopupShown) _foundryConstructedPopupPending=true;
               }
               if(u.id==='blast_furnace'){
                 if(!p.upgradeData) p.upgradeData={};
@@ -32374,6 +32690,7 @@ function _buildSaveObject(){
     _classJEngineUnlocked, _classREngineUnlocked, _N700EngineUnlocked,
     _steelProdLog,
     _sensorUpgradeActive, _stationCostDiscount, _sandstormCheckSd, _playerDeliveryCount, _foundryCalloutShown,
+    _foundryConstructedPopupShown,
     _foundryUnlocked, _largeStationUnlocked, _terminalUnlocked, _bakeryUnlocked, _glassworksUnlocked,
     _totalPassengersDelivered, _totalHazmatIncinerated, _anyCargoProduced,
     trainyard, financeLedger:_trimmedFinance, _ledgerSummary:_builtLedgerSummary, purchaseLedger, corpValueHistory, corpStatsHistory, aiCorpStatsHistory, _corp, _ceoHireCandidates,
@@ -32533,7 +32850,8 @@ function _restoreFromSave(save){
   // early save where the player hasn't built a foundry yet). Restore the shown
   // flag; never resume an in-flight fade.
   _foundryCalloutShown=!!save._foundryCalloutShown; _foundryCalloutStartMs=0; _foundryCalloutFadeOutStartMs=0; _foundryCardScreenBounds=null;
-  pendingUpgradeUnlocks=[];
+  pendingUpgradeUnlocks=[]; pendingMissionRewards=[]; pendingFirstDeliveries=[];
+  _foundryConstructedPopupShown=!!save._foundryConstructedPopupShown; _foundryConstructedPopupPending=false;
   // Loaded games have played before — treat speed-tip as permanently suppressed.
   _speedTipSuppressed=true; _speedTipStartMs=0; _speedTipNextRealMs=0; _speedTipFadeOutStartMs=0;
   _missionTipFired=true; _missionTipStartMs=0; _missionTipPending=false;   // suppress M-tip on loaded games
@@ -32649,7 +32967,7 @@ function _restoreFromSave(save){
     _bakeryUnlocked       = !!save._bakeryUnlocked       || _saveHasUpg('bakery') || _anyPlanet(q=>q.type&&q.type.id==='agri'&&visitedPlanetIds.has(q.id));
     _glassworksUnlocked   = !!save._glassworksUnlocked   || _saveHasUpg('glassworks') || _sandAndChemicalCarsDiscovered();
   }
-  pendingUpgradeUnlocks=[];
+  pendingUpgradeUnlocks=[]; pendingMissionRewards=[]; pendingFirstDeliveries=[];
   pendingMissionIntros=save.pendingMissionIntros||[];
   pendingGoldDiscoveries=save.pendingGoldDiscoveries||[];
   pendingDiamondDiscoveries=save.pendingDiamondDiscoveries||[];
@@ -32757,7 +33075,6 @@ function _restoreFromSave(save){
   _chatLog=[]; _chatLogHover=false; _chatLogHoverA=0; _chatLogLastDrawMs=0;
   _chatMsg('GAME LOADED — STARDATE '+stardate.toFixed(2),'rgba(80,220,130,1)');
   // Transition to game
-  document.getElementById('refresh-btn').classList.add('hidden');
   gs='galaxy';
   _aiDifficulty=save._aiDifficulty||'none';
   if(save._aiCorp){
@@ -33194,6 +33511,8 @@ function startGame(){
   pendingDiamondDiscoveries=[];
   pendingCarUnlocks=[];
   pendingEngineUnlocks=[];
+  pendingMissionRewards=[]; pendingFirstDeliveries=[];
+  _foundryConstructedPopupPending=false; _foundryConstructedPopupShown=false;
   pendingMissionIntros=[];
   pendingAncientPopups=[]; _ancientTranslatedWords=new Set();
   _ironCarUnlocked=false; _steelCarUnlocked=false; _glassCarUnlocked=false; _machineryCarUnlocked=false; _hazmatCarUnlocked=false; _royalCarUnlocked=false; _flowersCarUnlocked=false; _medicalCarUnlocked=false; _grainCarUnlocked=false; _livestockCarUnlocked=false; _fruitCarUnlocked=false; _cargoCarUnlocked=false; _cheatUnlockAllCars=false; _totalPassengersDelivered=0; _totalHazmatIncinerated=0; _anyCargoProduced=false;
@@ -33255,12 +33574,7 @@ function startGame(){
   // the flow (title PLAY → startGame() runs BEFORE corpsetup + aiselect).
   // It fires later at the fadein → galaxy transition, once setup is final.
   gs='fadeout'; fadeA=0;
-  document.getElementById('refresh-btn').classList.add('hidden');
 }
-
-document.getElementById('refresh-btn').addEventListener('click',()=>{
-  makeTrain(); makeTitlePlanets();
-});
 
 // ─── newspaper functions ────────────────────────────────────────────────────
 // Append a game event to the rolling news event log (called at key game moments)
@@ -34451,9 +34765,25 @@ function loop(ts){
       gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='engine_unlock';
       popupState={engineUnlock:pendingEngineUnlocks[0]};
     }
+    // Iron-foundry "constructed" popup: deferred until the foundry is built AND
+    // the player has closed that planet's details window (so !activePopup). Queues
+    // the upgrade-unlock popup with constructed:true so it shows the re-titled
+    // "NEW UPGRADE CONSTRUCTED" header. Fires once (shown latch).
+    if(_foundryConstructedPopupPending&&!activePopup){
+      _foundryConstructedPopupPending=false; _foundryConstructedPopupShown=true;
+      pendingUpgradeUnlocks.push({key:'iron_foundry',constructed:true});
+    }
     if(pendingUpgradeUnlocks.length>0&&!activePopup){
       gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='upgrade_unlock';
       popupState={upgradeUnlock:pendingUpgradeUnlocks[0]};
+    }
+    if(pendingMissionRewards.length>0&&!activePopup){
+      gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='mission_reward';
+      popupState={missionReward:pendingMissionRewards[0]};
+    }
+    if(pendingFirstDeliveries.length>0&&!activePopup){
+      gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='first_delivery';
+      popupState={firstDelivery:pendingFirstDeliveries[0]};
     }
     if(pendingDiamondDiscoveries.length>0&&!activePopup){
       playSound('discovery');
@@ -34540,18 +34870,10 @@ html = f"""<!DOCTYPE html>
   #c{{display:block;image-rendering:pixelated;}}
   #tc{{display:block;image-rendering:auto;-webkit-font-smoothing:antialiased;
        -moz-osx-font-smoothing:grayscale;}}
-  #refresh-btn{{position:fixed;bottom:28px;right:28px;width:48px;height:48px;border-radius:50%;
-    background:rgba(30,40,80,0.85);border:2px solid #4af;color:#4af;font-size:22px;cursor:pointer;
-    display:flex;align-items:center;justify-content:center;transition:background .2s,transform .15s;
-    z-index:10;user-select:none;}}
-  #refresh-btn:hover{{background:rgba(60,80,160,0.95);transform:scale(1.1);}}
-  #refresh-btn:active{{transform:scale(0.95) rotate(30deg);}}
-  #refresh-btn.hidden{{display:none;}}
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<button id="refresh-btn" title="New train">&#x21BB;</button>
 <input id="name-edit" type="text" maxlength="32" autocomplete="off" spellcheck="false"
   style="position:fixed;display:none;background:rgba(4,8,28,0.97);color:#4af;border:1.5px solid rgba(80,160,255,0.7);
   outline:none;font:bold 11px Orbitron,sans-serif;padding:2px 6px;border-radius:2px;z-index:20;"/>
