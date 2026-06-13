@@ -205,7 +205,9 @@
       "Bash(grep -n \"financeLedger=\\\\[\\\\]; _ledgerSummary={totalRevenue:0,totalCost:0,totalInterest:0}; purchaseLedger=\\\\[\\\\]; corpValueHistory={}\" build_game.py)",
       "Bash(awk '{print \"index.html: \"int\\($5/1024\\)\" KB\"}')",
       "Bash(node --check _synccheck.js)",
-      "Bash(rm _synccheck.js)"
+      "Bash(rm _synccheck.js)",
+      "Bash(sed -n '20176,20192p' build_game.py)",
+      "Bash(sed -n '20350,20365p' build_game.py)"
     ]
   },
   "hooks": {

@@ -1102,7 +1102,7 @@ function _objDrawLine(line,x,y,fontStr,baseColor){
   for(let i=0;i<line.length;i++){
     const tok=line[i];
     if(i>0) cx+=spaceW;
-    ctx.font = tok.color ? ('bold '+fontStr) : fontStr;
+    ctx.font = (tok.color?'bold ':'')+(tok.italic?'italic ':'')+fontStr;
     ctx.fillStyle = tok.color || baseColor;
     ctx.fillText(tok.text,cx,y);
     cx+=ctx.measureText(tok.text).width;
@@ -1117,7 +1117,7 @@ function _objLineWidth(line,fontStr){
   for(let i=0;i<line.length;i++){
     const tok=line[i];
     if(i>0) w+=spaceW;
-    ctx.font = tok.color ? ('bold '+fontStr) : fontStr;
+    ctx.font = (tok.color?'bold ':'')+(tok.italic?'italic ':'')+fontStr;
     w+=ctx.measureText(tok.text).width;
   }
   return w;
@@ -3243,8 +3243,9 @@ let _missionTipFired=false;  // M-tip is one-shot once the player has 3 simultan
 let _buyTrainCompletedMs=0;  // real-time ms when buy_second_train completed (0=not yet). Gates the upgrade_station mission intro 10 s later.
 let _foundryCompletedMs=0;   // real-time ms when build_foundry completed (0=not yet). Gates the buy_second_train mission intro 10 s later.
 // New-game tutorial bubble chain (zoom out → double click lava planet → build station)
-let _tutorialPhase='inactive'; // 'inactive'|'pre_zoom'|'look_around'|'look_around_pause'|'zoom_out'|'double_click'|'build_station'|'done'
+let _tutorialPhase='inactive'; // 'inactive'|'pre_zoom'|'look_around'|'look_around_pause'|'zoom_out'|'orijen_welcome'|'orijen_details'|'double_click'|'build_station'|'done'
 let _tutorialPhaseStartMs=0;   // real-time ms when the current phase started
+let _orijenTutCentered=false;  // one-shot: camera framed Orijen for the home-planet intro phase
 let _tutorialFadeOutStartMs=0; // real-time ms when the current bubble began fading out (0 = not yet)
 let _tutorialLavaPlanetId=-1;  // planet id of the lava planet in Orijen's home system
 // Per-phase frozen anchor for the secondary BLUE "HOVER your cursor" callout
@@ -3982,9 +3983,8 @@ function drawTitleScreen(ts,dt){
   ctx.save();
   ctx.shadowColor='#4af'; ctx.shadowBlur=_startBtnHover?28:18*pulse;
   ctx.strokeStyle=_startBtnHover?'rgba(120,200,255,0.95)':`rgba(60,160,255,${0.55+0.45*pulse})`; ctx.lineWidth=_startBtnHover?2.5:2;
-  ctx.strokeRect(bx,by,bw,bh);
   ctx.fillStyle=_startBtnHover?'rgba(14,36,90,0.96)':`rgba(8,22,58,${0.72+0.2*pulse})`;
-  ctx.fillRect(bx+1,by+1,bw-2,bh-2);
+  ctx.beginPath(); ctx.roundRect(bx,by,bw,bh,8); ctx.fill(); ctx.stroke();
   ctx.shadowBlur=_startBtnHover?14:10*pulse; ctx.font='bold 17px Orbitron,sans-serif';
   ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillStyle=_startBtnHover?'#d0eeff':'#aadcff';
   ctx.fillText('PLAY GAME',W/2,by+bh/2);
@@ -3996,23 +3996,22 @@ function drawTitleScreen(ts,dt){
   ctx.save();
   ctx.shadowColor='#fa4'; ctx.shadowBlur=_loadBtnHover?22:12;
   ctx.strokeStyle=_loadBtnHover?'rgba(255,210,100,0.95)':'rgba(200,155,50,0.65)'; ctx.lineWidth=_loadBtnHover?2:1.5;
-  ctx.strokeRect(lbx,lby,lbw,lbh);
   ctx.fillStyle=_loadBtnHover?'rgba(60,36,4,0.96)':'rgba(38,22,2,0.82)';
-  ctx.fillRect(lbx+1,lby+1,lbw-2,lbh-2);
-  ctx.shadowBlur=_loadBtnHover?12:6; ctx.font='bold 14px Orbitron,sans-serif';
+  ctx.beginPath(); ctx.roundRect(lbx,lby,lbw,lbh,6); ctx.fill(); ctx.stroke();
+  ctx.shadowBlur=_loadBtnHover?12:6; ctx.font='bold 12px Orbitron,sans-serif';
   ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillStyle=_loadBtnHover?'rgba(255,225,120,1.0)':'rgba(210,170,80,0.95)';
   ctx.fillText('LOAD GAME',W/2,lby+lbh/2);
   ctx.restore();
-  // LEADERBOARD button (below LOAD GAME) — opens the public high-score board.
-  const _lbBx=W/2-95, _lbBy=lby+lbh+14, _lbBw=190, _lbBh=46;
+  // LEADERBOARD button (below LOAD GAME) — 2/3 size, centred. Opens the board.
+  const _lbBw=Math.round(bw*2/3), _lbBh=Math.round(bh*2/3);
+  const _lbBx=W/2-_lbBw/2, _lbBy=lby+lbh+14;
   leaderboardBtnBounds={x:_lbBx,y:_lbBy,w:_lbBw,h:_lbBh};
   ctx.save();
   ctx.shadowColor='#a76cff'; ctx.shadowBlur=_leaderboardBtnHover?22:12;
   ctx.strokeStyle=_leaderboardBtnHover?'rgba(205,160,255,0.95)':'rgba(150,100,210,0.6)'; ctx.lineWidth=_leaderboardBtnHover?2:1.5;
-  ctx.strokeRect(_lbBx,_lbBy,_lbBw,_lbBh);
   ctx.fillStyle=_leaderboardBtnHover?'rgba(40,22,62,0.96)':'rgba(26,14,42,0.82)';
-  ctx.fillRect(_lbBx+1,_lbBy+1,_lbBw-2,_lbBh-2);
-  ctx.shadowBlur=_leaderboardBtnHover?12:6; ctx.font='bold 14px Orbitron,sans-serif';
+  ctx.beginPath(); ctx.roundRect(_lbBx,_lbBy,_lbBw,_lbBh,6); ctx.fill(); ctx.stroke();
+  ctx.shadowBlur=_leaderboardBtnHover?12:6; ctx.font='bold 12px Orbitron,sans-serif';
   ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillStyle=_leaderboardBtnHover?'rgba(228,205,255,1)':'rgba(190,160,230,0.95)';
   ctx.fillText('LEADERBOARD',W/2,_lbBy+_lbBh/2);
   ctx.restore();
@@ -18664,7 +18663,7 @@ function _drawTutorialChain(stage){
   // drawPanelTabs / drawTopBar, so the yellow bubble can never be partially
   // hidden behind the Stations/Trains folder tabs that sit at the top of the
   // panel.
-  const _POPUP_PHASES=new Set(['build_station','supply_demand','select_train','train_detail_edit','builder_add_cars','builder_purchase','train_detail_post_confirm','bf_click_build_station','bf_click_foundry_upgrade','bst_builder_add_iron']);
+  const _POPUP_PHASES=new Set(['orijen_details','build_station','supply_demand','select_train','train_detail_edit','builder_add_cars','builder_purchase','train_detail_post_confirm','bf_click_build_station','bf_click_foundry_upgrade','bst_builder_add_iron']);
   const _isPopupPhase=_POPUP_PHASES.has(_tutorialPhase);
   // Popup-stage calls for non-popup phases have nothing to do (no advance
   // either — that already ran in the 'galaxy' call earlier this frame).
@@ -18681,7 +18680,7 @@ function _drawTutorialChain(stage){
   // their initializer runs — calling them earlier throws ReferenceError and
   // takes the rest of drawGalaxy down with it.)
   if(_tutorialPhase==='pre_zoom'){
-    if(_elapsed>=2000){ _tutorialPhase='look_around'; _tutorialPhaseStartMs=_now; _tutorialFadeOutStartMs=0; }
+    if(_elapsed>=2000){ _tutorialPhase='look_around'; _tutorialPhaseStartMs=_now; _tutorialFadeOutStartMs=0; _orijenTutCentered=false; }
     return;
   }
   // ── Helpers ──────────────────────────────────────────────
@@ -18698,6 +18697,12 @@ function _drawTutorialChain(stage){
     // mission objective/details text. Measure with that styling so the bubble
     // sizes correctly around the (wider) bold tokens.
     const _lineToks=lines.map(_ln=>_objTokenize(_ln));
+    // opts.italicWords: case-insensitive whole-word list to render italic
+    // (e.g. "supplies"/"demands"). Layers on top of the cargo/planet colouring.
+    if(opts&&opts.italicWords&&opts.italicWords.length){
+      const _iw=new Set(opts.italicWords.map(w=>w.toLowerCase()));
+      for(const _tk of _lineToks) for(const _t of _tk) if(_iw.has(_t.text.toLowerCase())) _t.italic=true;
+    }
     let _maxW=0;
     for(const _tk of _lineToks){ const _w=_objLineWidth(_tk,_bubbleFont); if(_w>_maxW) _maxW=_w; }
     const _pad=12, _lh=15, _bH=Math.max(28,lines.length*_lh+10), _bR=7, _tailH=10;
@@ -18891,7 +18896,7 @@ function _drawTutorialChain(stage){
         const _BUF=30, _visW0=W-PANEL_W;
         _skipZoom=(_sx0-_sr0>=_BUF && _sx0+_sr0<=_visW0-_BUF && _sy0-_sr0>=TOP_H+_BUF && _sy0+_sr0<=GH-_BUF);
       }
-      _tutorialPhase=_skipZoom?'double_click':'zoom_out';
+      _tutorialPhase=_skipZoom?'orijen_welcome':'zoom_out';
       _tutorialPhaseStartMs=_now; _tutorialFadeOutStartMs=0;
     }
     return;
@@ -18899,7 +18904,7 @@ function _drawTutorialChain(stage){
   // ── Phase: zoom_out ────────────────────────────────────────
   if(_tutorialPhase==='zoom_out'){
     const r=_resolveAlpha();
-    if(r.advanced){ _advanceTo('double_click'); return; }
+    if(r.advanced){ _advanceTo('orijen_welcome'); return; }
     if(_tutorialFadeOutStartMs===0){
       const _lp=galaxy.planets[_tutorialLavaPlanetId];
       if(_lp){
@@ -18912,6 +18917,79 @@ function _drawTutorialChain(stage){
       }
     }
     _drawBubble(['ZOOM OUT using the SCROLL WHEEL or ARROW KEYS'], null, r.alpha);
+    return;
+  }
+  // ── Phase: orijen_welcome ──────────────────────────────────
+  // Home-planet intro (NEW). Frames Orijen once, then shows a BLUE welcome
+  // bubble above it; 2 s later a YELLOW "double click for details" bubble fades
+  // in below it. Both persist until the player opens Orijen's detail popup,
+  // then fade out and hand off to orijen_details.
+  if(_tutorialPhase==='orijen_welcome'){
+    const _ori=galaxy.origenId!=null?galaxy.planets[galaxy.origenId]:null;
+    if(_ori && !_orijenTutCentered){
+      cam.scale=Math.sqrt(MIN_SC*MAX_SC);
+      trackingOffset={x:PANEL_W/(2*cam.scale),y:0};
+      cam.x=_ori.x+trackingOffset.x; cam.y=_ori.y; tracking=true;
+      if(typeof clampCamera==='function') clampCamera();
+      _orijenTutCentered=true;
+    }
+    const _open=(activePopup==='planet'&&popupState.planet&&galaxy.origenId!=null&&popupState.planet.id===galaxy.origenId);
+    if(_tutorialFadeOutStartMs===0 && _open) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _advanceTo('orijen_details'); return; }
+    if(_ori){
+      const [_sx,_sy]=w2s(_ori.x,_ori.y);
+      const _sr=Math.max(8,_ori.radius*cam.scale);
+      _drawBubble(['Welcome, CEO. This is your HOME PLANET'], {x:_sx,y:_sy-_sr}, r.alpha, {color:'blue', target:{x:_sx,y:_sy}});
+      // Yellow "double click" prompt fades in 2 s after the welcome bubble.
+      let _ddA=0;
+      if(_tutorialFadeOutStartMs>0) _ddA=r.alpha;            // share the fade-out
+      else if(_elapsed>=FADE_MS+2000) _ddA=Math.min(1,(_elapsed-(FADE_MS+2000))/FADE_MS);
+      if(_ddA>0) _drawBubble(['DOUBLE CLICK on this PLANET for details'], {x:_sx,y:_sy+_sr}, _ddA, {below:true, target:{x:_sx,y:_sy}});
+    }
+    return;
+  }
+  // ── Phase: orijen_details (popup) ──────────────────────────
+  // Inside Orijen's detail popup. (3) box + bubble on the STATION upgrade card;
+  // (4) ~1.5 s later, box + bubble on the supply/demand pane ("supplies" /
+  // "demands" italic); (5) at ~8 s, a blue bubble at the [ESC] close hint. All
+  // persist until the popup closes, then hand off to the lava double_click.
+  if(_tutorialPhase==='orijen_details'){
+    const _open=(activePopup==='planet'&&popupState.planet&&galaxy.origenId!=null&&popupState.planet.id===galaxy.origenId);
+    if(_tutorialFadeOutStartMs===0 && !_open) _tutorialFadeOutStartMs=_now; // popup closed → fade out
+    const r=_resolveAlpha();
+    if(r.advanced){
+      // Re-frame the lava planet for the upcoming double_click step (the camera
+      // was parked on Orijen during the home-planet intro).
+      const _lp=galaxy.planets[_tutorialLavaPlanetId];
+      if(_lp){ cam.scale=Math.sqrt(MIN_SC*MAX_SC); trackingOffset={x:PANEL_W/(2*cam.scale),y:0}; cam.x=_lp.x+trackingOffset.x; cam.y=_lp.y; tracking=true; if(typeof clampCamera==='function') clampCamera(); }
+      _advanceTo('double_click'); return;
+    }
+    // (3) STATION upgrade card — box + bubble (shown immediately).
+    const _sc=popupState._stationCardBounds;
+    if(_sc){
+      _drawHighlightBox(_sc.x,_sc.y,_sc.w,_sc.h,r.alpha,3);
+      // Bubble sits BELOW the card, tail pointing UP at it.
+      _drawBubble(['Your HOME PLANET starts with a STATION, which','allows your TRAINs to LOAD + UNLOAD CARGO','from this planet'], {x:_sc.x+_sc.w/2,y:_sc.y+_sc.h}, r.alpha, {below:true});
+    }
+    // (4) supply/demand pane — fades in 1.5 s after (3); shares the fade-out.
+    let _sdA=0;
+    if(_tutorialFadeOutStartMs>0) _sdA=r.alpha;
+    else if(_elapsed>=FADE_MS+1500) _sdA=Math.min(1,(_elapsed-(FADE_MS+1500))/FADE_MS);
+    const _sd=popupState.supplyDemandPanelBounds;
+    if(_sdA>0 && _sd){
+      _drawHighlightBox(_sd.x,_sd.y,_sd.w,_sd.h,_sdA,3);
+      // Bubble sits ABOVE the pane, tail pointing DOWN at it.
+      _drawBubble(['ORIJEN supplies [Passengers] and [Water] cargo,','and demands [Sand], among other things'], {x:_sd.x+_sd.w/2,y:_sd.y}, _sdA, {italicWords:['supplies','demands']});
+    }
+    // (5) blue [ESC] close hint — fades in ~8 s after the phase starts.
+    let _escA=0;
+    if(_tutorialFadeOutStartMs>0) _escA=r.alpha;
+    else if(_elapsed>=FADE_MS+8000) _escA=Math.min(1,(_elapsed-(FADE_MS+8000))/FADE_MS);
+    const _eb=popupState.escBounds;
+    if(_escA>0 && _eb){
+      _drawBubble(['Press ESC, or CLICK anywhere outside of a window to close it'], {x:_eb.x+_eb.w/2,y:_eb.y+_eb.h}, _escA, {below:true, color:'blue'});
+    }
     return;
   }
   // ── Phase: double_click ────────────────────────────────────
@@ -22675,6 +22753,9 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
       continue;
     }
     if(u.isStation){
+      // Expose the Station upgrade card's bounds so the new-game tutorial can
+      // draw a highlight box around it.
+      popupState._stationCardBounds={x:upX,y:itemY,w:upW,h:ITEM_H};
       // Mini station visualization (right corner)
       const _mvx=upX+upW-34, _mvy=itemY+ITEM_H-26, _mvr=10;
       ctx.save(); ctx.globalAlpha=isBuilt?0.9:0.35;
