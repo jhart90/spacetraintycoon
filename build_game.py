@@ -1018,8 +1018,8 @@ const CARGO_SHORT      = {passengers:'PSNGR', livestock:'LVSTK', mail:'MAIL', wa
 // text. Looked up case-insensitively keyed on the displayed name (handles both
 // "iron" and "Molten Ore"). Choose the dominant hue of each cargo's sprite.
 const CARGO_TEXT_COLORS = {
-  passengers:'#e8c8a4', livestock:'#b6815c', mail:'#f4b450', water:'#42a8ff',
-  ice:'#a4dcff', sand:'#dcc080', 'molten ore':'#ff5a28', iron:'#d2d2d2',
+  passengers:'#c30010', livestock:'#b6815c', mail:'#f4b450', water:'#42a8ff',
+  ice:'#a4dcff', sand:'#bb8459', 'molten ore':'#ff5a28', iron:'#d2d2d2',
   gold:'#ffd148', diamond:'#a4f0ff', hazmat:'#dcff48', oil:'#9aa83a',
   battery:'#ffd744', chemical:'#80e860', flowers:'#ff7acc', medical:'#ff5a78',
   grain:'#d4a76a', fruit:'#ff7a48', steel:'#94a8bc', glass:'#b0e8f0',
@@ -1102,7 +1102,7 @@ function _objDrawLine(line,x,y,fontStr,baseColor){
   for(let i=0;i<line.length;i++){
     const tok=line[i];
     if(i>0) cx+=spaceW;
-    ctx.font = (tok.color?'bold ':'')+(tok.italic?'italic ':'')+fontStr;
+    ctx.font = ((tok.color||tok.bold)?'bold ':'')+(tok.italic?'italic ':'')+fontStr;
     ctx.fillStyle = tok.color || baseColor;
     ctx.fillText(tok.text,cx,y);
     cx+=ctx.measureText(tok.text).width;
@@ -1117,7 +1117,7 @@ function _objLineWidth(line,fontStr){
   for(let i=0;i<line.length;i++){
     const tok=line[i];
     if(i>0) w+=spaceW;
-    ctx.font = (tok.color?'bold ':'')+(tok.italic?'italic ':'')+fontStr;
+    ctx.font = ((tok.color||tok.bold)?'bold ':'')+(tok.italic?'italic ':'')+fontStr;
     w+=ctx.measureText(tok.text).width;
   }
   return w;
@@ -1194,7 +1194,7 @@ const MISSION_DEFS=[
      return false;
    }},
   {id:'create_route',
-   name:'Create a repeating train route',
+   name:'Create a profitable train route',
    imageType:'route_preview', imageKey:null,
    objectives:[
      {id:'sel_lava_start', text:'CLICK on the LAVA PLANET (or a TRAIN orbiting that planet) to select a starting point for your ROUTE'},
@@ -1203,7 +1203,7 @@ const MISSION_DEFS=[
      {id:'shift_loop',     text:'SHIFT+CLICK on the LAVA PLANET to complete the LOOP ROUTE'},
      {id:'assign_route',   text:'ASSIGN this ROUTE to a TRAIN'},
    ],
-   details:"A repeating route keeps your trains busy automatically — no need to redirect them after each delivery.",
+   details:"EARN CREDITS by delivering cargo from planets that supply it to planets that demand it, on a repeating route.",
    reward:2000, timeLimit:null,
    checkObj:(oid,m)=>{
      if(!galaxy) return false;
@@ -2711,8 +2711,11 @@ function drawLeaderboardPopup(){
     ctx.fillStyle=enabled?'rgba(224,214,255,0.96)':'rgba(110,110,132,0.6)'; ctx.fillText(label,x+_bw/2,_by+_bh/2);
     ctx.textBaseline='alphabetic'; return {x,y:_by,w:_bw,h:_bh};
   };
-  popupState.lbPrev=_mk('◀ PREV',px+pw/2-_bw-10,_lbPage>0,popupState.lbPrevHover);
-  popupState.lbNext=_mk('NEXT ▶',px+pw/2+10,_lbPage<_maxPage,popupState.lbNextHover);
+  // Buttons pinned to the lower-left / lower-right corners (with a buffer) so
+  // they no longer overlap the centred "Ranks X–Y of Z" text.
+  const _btnBuf=16;
+  popupState.lbPrev=_mk('◀ PREV',px+_btnBuf,_lbPage>0,popupState.lbPrevHover);
+  popupState.lbNext=_mk('NEXT ▶',px+pw-_bw-_btnBuf,_lbPage<_maxPage,popupState.lbNextHover);
   ctx.restore();
 }
 let tracking=false, trackingOffset={x:0,y:0};
@@ -3258,6 +3261,8 @@ let _blueHoverAnchorFrozen=null; // {x,y} once captured; null until then
 let _zoomBarCenter={x:0,y:0}; // cached screen centre of the zoom bar (set each frame by drawSpeedIndicator)
 let _createRouteTimerMs=0; // real-time ms when player first visited a non-home-star planet (0=not yet). Used by stellar_cartography fallback.
 let _visitPlanetCompletedMs=0; // (legacy) real-time ms when visit_planet mission completed. Superseded by _tutorialDoneMs but kept reset for save compat.
+let _lavaDetailsWasOpen=false; // true once the Lava Planet details window has been opened during the tutorial
+let _lavaClosedTimerMs=0;      // real-time ms when that window was first CLOSED again (0=not yet) — arms the create_route intro
 let _tutorialDoneMs=0;         // real-time ms when the tutorial chain reached 'done' — arms the 1 s create_route intro
 let _crTutorialDoneMs=0;       // real-time ms when the create_route tutorial chain reached 'all_done' — arms buy_second_train (10 s) and build_foundry (40 s) intros
 let _crTrainPreselected=false; // true if a train was already selected when the create_route tutorial chain started (drives the blue companion bubble in cr_click_orijen / cr_shift_click_other)
@@ -3269,6 +3274,7 @@ let _firstNonLowOrbitFired=false; // true once the hint has been triggered
 let _orbitHintStartMs=0;          // real-time ms when callout was triggered (0=inactive)
 let _orbitHintPlanetId=-1;        // planet id the callout points at
 let _findOreTimerMs=0;     // real-time ms when create_route mission completed (0=not yet). Now arms the build_foundry intro 10 s later (was Find Molten Ore before that mission was removed).
+let _foundryUnlockSd=0;    // stardate at which the delayed IRON FOUNDRY unlock+popup fires (0=not armed). 20 in-game seconds after create_route completes = stardate+0.02.
 let _produceIronTimerMs=0; // real-time ms when produce_iron mission completed (0=not yet)
 let _steelMissionTimerMs=0; // real-time ms when first steel was produced (arms 10s intro for design_better_train)
 // Steel production sliding-window log for N700 unlock. Each entry: {sd, units}.
@@ -16187,7 +16193,36 @@ function _acceptNewMissionFromState(state){
 function drawNewMissionPopup(){
   if(activePopup!=='new_mission'||!popupState.newMissionDef) return;
   const def=popupState.newMissionDef;
-  const pw=440,ph=295;
+  const pw=440;
+  // Display objectives — create_route shows ONE summarised line (display only;
+  // def.objectives is unchanged and still drives completion + the [M] tracker).
+  const _displayObjs=(def.id==='create_route')
+    ? [{id:'__cr_summary__', text:'Create a LOOP ROUTE that allows your TRAIN to ship [Molten Ore] and [Water] to a nearby DESERT PLANET'}]
+    : def.objectives;
+  // ── Pre-measure the right-column content to size the popup snugly so short
+  // missions (e.g. create_route) don't leave a big empty gap above the reward /
+  // ACCEPT button. Mirrors the draw layout below; capped at 295 so longer
+  // missions look exactly as before.
+  let _measPh=295;
+  {
+    const _mTxtCtx={sourcePlanetId:popupState.sourcePlanetId,targetPlanetId:popupState.targetPlanetId,scientistSourceIds:popupState.scientistSourceIds};
+    const _mMaxW=pw-114;            // == cMaxW below
+    let _mY=62;                     // imgBY(51)+11 offset from the popup top
+    if(def.details){
+      const _mdL=_objWrapTokens(_objTokenize(_resolveMissionText(def.details,_mTxtCtx)),_mMaxW,'italic 12px "Exo 2",sans-serif');
+      _mY += (_mdL.length-1)*15 + 22;
+    }
+    _mY += 15;                      // OBJECTIVES label row
+    ctx.font='12px "Exo 2",sans-serif'; const _mCbW=Math.round(ctx.measureText('○').width)+5;
+    for(const _o of _displayObjs){
+      const _moL=_objWrapTokens(_objTokenize(_resolveMissionText(_o.text,_mTxtCtx)),_mMaxW-_mCbW,'10px "Exo 2",sans-serif');
+      _mY += _moL.length*13 + 2;
+    }
+    // Content bottom = lower of the right-column end and the 72px image box
+    // (bottom at offset 123). Reward group + button occupy ~95 px below it.
+    _measPh = Math.max(210, Math.min(295, Math.round(Math.max(123,_mY)+95)));
+  }
+  const ph=_measPh;
   const [px,py]=drawPopupBase(pw,ph,'rgba(80,200,130,0.7)');
   ctx.save();
   // "NEW MISSION" label
@@ -16255,8 +16290,10 @@ function drawNewMissionPopup(){
   ctx.font='12px "Exo 2",sans-serif';
   const _cbW=Math.round(ctx.measureText('○').width)+5;
   const _preCompIds=popupState.preCompletedObjIds||new Set();
-  for(let _oi=0;_oi<def.objectives.length;_oi++){
-    const obj=def.objectives[_oi];
+  // _displayObjs is computed once near the top of this function (create_route
+  // shows a single summarised objective; everything else uses def.objectives).
+  for(let _oi=0;_oi<_displayObjs.length;_oi++){
+    const obj=_displayObjs[_oi];
     const _isPreComp=_preCompIds.has(obj.id);
     const _isHov=popupState.hoveredObjIdx===_oi;
     // Pre-completed objectives render in green; others use normal blue-white
@@ -18680,7 +18717,7 @@ function _drawTutorialChain(stage){
   // their initializer runs — calling them earlier throws ReferenceError and
   // takes the rest of drawGalaxy down with it.)
   if(_tutorialPhase==='pre_zoom'){
-    if(_elapsed>=2000){ _tutorialPhase='look_around'; _tutorialPhaseStartMs=_now; _tutorialFadeOutStartMs=0; _orijenTutCentered=false; }
+    if(_elapsed>=2000){ _tutorialPhase='look_around'; _tutorialPhaseStartMs=_now; _tutorialFadeOutStartMs=0; _orijenTutCentered=false; _lavaDetailsWasOpen=false; _lavaClosedTimerMs=0; }
     return;
   }
   // ── Helpers ──────────────────────────────────────────────
@@ -18697,11 +18734,18 @@ function _drawTutorialChain(stage){
     // mission objective/details text. Measure with that styling so the bubble
     // sizes correctly around the (wider) bold tokens.
     const _lineToks=lines.map(_ln=>_objTokenize(_ln));
-    // opts.italicWords: case-insensitive whole-word list to render italic
-    // (e.g. "supplies"/"demands"). Layers on top of the cargo/planet colouring.
+    // opts.italicWords / opts.boldWords: case-insensitive whole-word lists to
+    // render italic / bold (e.g. "supplies", "STATION", "CARGO"). Trailing
+    // punctuation on a token is ignored when matching ("STATION," still hits).
+    // Layers on top of the cargo/planet colouring.
+    const _wordKey=s=>s.toLowerCase().replace(/[^a-z0-9]/g,'');
     if(opts&&opts.italicWords&&opts.italicWords.length){
-      const _iw=new Set(opts.italicWords.map(w=>w.toLowerCase()));
-      for(const _tk of _lineToks) for(const _t of _tk) if(_iw.has(_t.text.toLowerCase())) _t.italic=true;
+      const _iw=new Set(opts.italicWords.map(_wordKey));
+      for(const _tk of _lineToks) for(const _t of _tk) if(_iw.has(_wordKey(_t.text))) _t.italic=true;
+    }
+    if(opts&&opts.boldWords&&opts.boldWords.length){
+      const _bw2=new Set(opts.boldWords.map(_wordKey));
+      for(const _tk of _lineToks) for(const _t of _tk) if(_bw2.has(_wordKey(_t.text))) _t.bold=true;
     }
     let _maxW=0;
     for(const _tk of _lineToks){ const _w=_objLineWidth(_tk,_bubbleFont); if(_w>_maxW) _maxW=_w; }
@@ -18959,10 +19003,27 @@ function _drawTutorialChain(stage){
     if(_tutorialFadeOutStartMs===0 && !_open) _tutorialFadeOutStartMs=_now; // popup closed → fade out
     const r=_resolveAlpha();
     if(r.advanced){
-      // Re-frame the lava planet for the upcoming double_click step (the camera
-      // was parked on Orijen during the home-planet intro).
+      // Re-frame so Orijen + the lava planet + the centre of Gigi Prime are all
+      // visible (with a small buffer) for the upcoming double_click step.
+      const _ori=galaxy.origenId!=null?galaxy.planets[galaxy.origenId]:null;
       const _lp=galaxy.planets[_tutorialLavaPlanetId];
-      if(_lp){ cam.scale=Math.sqrt(MIN_SC*MAX_SC); trackingOffset={x:PANEL_W/(2*cam.scale),y:0}; cam.x=_lp.x+trackingOffset.x; cam.y=_lp.y; tracking=true; if(typeof clampCamera==='function') clampCamera(); }
+      const _gStar=galaxy.stars[galaxy.homeStarId];
+      if(_ori&&_lp&&_gStar){
+        const _oR=_ori.radius||30, _lR=_lp.radius||30, _buf=500;
+        const _xMin=Math.min(_ori.x-_oR,_lp.x-_lR,_gStar.x)-_buf;
+        const _xMax=Math.max(_ori.x+_oR,_lp.x+_lR,_gStar.x)+_buf;
+        const _yMin=Math.min(_ori.y-_oR,_lp.y-_lR,_gStar.y)-_buf;
+        const _yMax=Math.max(_ori.y+_oR,_lp.y+_lR,_gStar.y)+_buf;
+        const _vpW=W-PANEL_W, _vpH=GH-TOP_H;
+        const _scale=Math.max(MIN_SC,Math.min(MAX_SC,Math.min(_vpW/(_xMax-_xMin),_vpH/(_yMax-_yMin))));
+        cam.scale=_scale;
+        // Centre the bbox midpoint in the VISIBLE area (offset for the right
+        // panel in x and the top bar in y).
+        cam.x=(_xMin+_xMax)/2 + PANEL_W/(2*_scale);
+        cam.y=(_yMin+_yMax)/2 - TOP_H/(2*_scale);
+        tracking=false;
+        if(typeof clampCamera==='function') clampCamera();
+      }
       _advanceTo('double_click'); return;
     }
     // (3) STATION upgrade card — box + bubble (shown immediately).
@@ -18970,17 +19031,17 @@ function _drawTutorialChain(stage){
     if(_sc){
       _drawHighlightBox(_sc.x,_sc.y,_sc.w,_sc.h,r.alpha,3);
       // Bubble sits BELOW the card, tail pointing UP at it.
-      _drawBubble(['Your HOME PLANET starts with a STATION, which','allows your TRAINs to LOAD + UNLOAD CARGO','from this planet'], {x:_sc.x+_sc.w/2,y:_sc.y+_sc.h}, r.alpha, {below:true});
+      _drawBubble(['Your HOME PLANET starts with a STATION, which','allows your TRAINs to LOAD + UNLOAD CARGO','from this planet'], {x:_sc.x+_sc.w/2,y:_sc.y+_sc.h}, r.alpha, {below:true, boldWords:['STATION','CARGO']});
     }
-    // (4) supply/demand pane — fades in 1.5 s after (3); shares the fade-out.
+    // (4) supply/demand pane — fades in 3.5 s after (3); shares the fade-out.
     let _sdA=0;
     if(_tutorialFadeOutStartMs>0) _sdA=r.alpha;
-    else if(_elapsed>=FADE_MS+1500) _sdA=Math.min(1,(_elapsed-(FADE_MS+1500))/FADE_MS);
+    else if(_elapsed>=FADE_MS+3500) _sdA=Math.min(1,(_elapsed-(FADE_MS+3500))/FADE_MS);
     const _sd=popupState.supplyDemandPanelBounds;
     if(_sdA>0 && _sd){
       _drawHighlightBox(_sd.x,_sd.y,_sd.w,_sd.h,_sdA,3);
       // Bubble sits ABOVE the pane, tail pointing DOWN at it.
-      _drawBubble(['ORIJEN supplies [Passengers] and [Water] cargo,','and demands [Sand], among other things'], {x:_sd.x+_sd.w/2,y:_sd.y}, _sdA, {italicWords:['supplies','demands']});
+      _drawBubble(['This PLANET supplies CARGO including [Passengers] and [Water],','and demands [Sand], among other things'], {x:_sd.x+_sd.w/2,y:_sd.y}, _sdA, {italicWords:['supplies','demands'], boldWords:['CARGO']});
     }
     // (5) blue [ESC] close hint — fades in ~8 s after the phase starts.
     let _escA=0;
@@ -19025,20 +19086,21 @@ function _drawTutorialChain(stage){
     return;
   }
   // ── Phase: supply_demand ───────────────────────────────────
-  // Yellow box around Supply/Demand pane + bubble. Closes after 10 s
-  // visible-time OR popup close, whichever comes first.
-  // Secondary blue callout: starts fading in 3 s after the yellow bubble
-  // has fully faded in (i.e. at _elapsed >= FADE_MS + 3000 = 4000 ms),
-  // points at the Molten Ore supply sprite, and fades out alongside the
-  // yellow bubble (or disappears immediately if the popup closes).
+  // Yellow box around Supply/Demand pane + bubble. The yellow box+bubble (and
+  // the secondary blue HOVER hint) persist for as long as the Lava Planet
+  // details window stays open — they ONLY fade out when the player closes it.
+  // A blue [ESC] close hint fades in once the bubbles have been up > 10 s.
+  // Secondary blue HOVER callout: starts fading in 3 s after the yellow bubble
+  // has fully faded in (_elapsed >= FADE_MS + 3000), points at the Molten Ore
+  // supply sprite, and shares the popup-close fade-out.
   if(_tutorialPhase==='supply_demand'){
     const _popupOpen=(activePopup==='planet'&&popupState.planet&&popupState.planet.id===_tutorialLavaPlanetId);
-    // Start fade-out at 10s after fade-in began (1s fade-in + 10s persist) OR on popup close
-    if(_tutorialFadeOutStartMs===0){
-      if(!_popupOpen || _elapsed>=11000) _tutorialFadeOutStartMs=_now;
-    }
+    // Fade out ONLY when the player closes the details window (no timeout).
+    if(_tutorialFadeOutStartMs===0 && !_popupOpen) _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
-    if(r.advanced){ _advanceTo('select_train'); return; }
+    // Reordered: the create_route mission is now introduced + accepted BEFORE
+    // the customise-a-train walkthrough. Hand off to cr_pending_accept.
+    if(r.advanced){ _advanceTo('cr_pending_accept'); return; }
     if(_popupOpen&&popupState.supplyDemandPanelBounds){
       const _b=popupState.supplyDemandPanelBounds;
       _drawHighlightBox(_b.x,_b.y,_b.w,_b.h,r.alpha,3);
@@ -19100,6 +19162,30 @@ function _drawTutorialChain(stage){
           );
         }
       }
+      // ── Blue [ESC] close hint ──────────────────────────────
+      // Fades in once the yellow bubble has been up > 10 s, pointing at the
+      // [ESC] close label (top-right of the window). Shares the popup-close
+      // fade-out so it disappears with everything else when the window closes.
+      let _escA2=0;
+      if(_tutorialFadeOutStartMs>0) _escA2=r.alpha;
+      else if(_elapsed>=FADE_MS+10000) _escA2=Math.min(1,(_elapsed-(FADE_MS+10000))/FADE_MS);
+      const _eb2=popupState.escBounds;
+      if(_escA2>0 && _eb2){
+        _drawBubble(['Press ESC, or CLICK anywhere outside of a window to close it'], {x:_eb2.x+_eb2.w/2,y:_eb2.y+_eb2.h}, _escA2, {below:true, color:'blue'});
+      }
+    }
+    return;
+  }
+  // ── Phase: cr_pending_accept ───────────────────────────────
+  // After the Lava details window closes, the create_route ("Create a
+  // profitable train route") mission is introduced (see updateMissions). No
+  // rendering here — just wait for the player to ACCEPT it, then run the
+  // customise-a-train walkthrough (select_train). If it's somehow already
+  // completed, jump straight to the all_done poll.
+  if(_tutorialPhase==='cr_pending_accept'){
+    if(missions.some(m=>m.id==='create_route'&&m.status==='active')) _advanceTo('select_train');
+    else if(missions.some(m=>m.id==='create_route'&&m.status==='completed')){
+      _tutorialPhase='all_done'; if(!_crTutorialDoneMs) _crTutorialDoneMs=_now;
     }
     return;
   }
@@ -19239,12 +19325,37 @@ function _drawTutorialChain(stage){
   if(_tutorialPhase==='post_builder_wait'){
     if(gs==='galaxy' && !activePopup){
       if(_elapsed>=1000){
-        if(!_missionPending('visit_planet')&&!missions.some(mx=>mx.id==='visit_planet'&&mx.status==='completed')){
-          pendingMissionIntros.push({defId:'visit_planet',readySd:stardate});
+        // Reordered: create_route was already introduced + accepted before this
+        // train-builder walkthrough (in cr_pending_accept). Now that the train
+        // detail window is closed, start the create-route yellow-bubble
+        // guidance directly. (The _crChainDone short-circuit handles the case
+        // where the route somehow got assigned already.) The legacy vp_* / 'done'
+        // phases below are now unreachable in the normal flow.
+        if(!_tutorialDoneMs) _tutorialDoneMs=_now;
+        // Re-frame so all three route planets — Orijen, the home-system lava
+        // planet, and the home-system desert planet — are in view (with a small
+        // buffer) before the route-building bubbles start.
+        {
+          const _ori=galaxy.origenId!=null?galaxy.planets[galaxy.origenId]:null;
+          const _lp=galaxy.planets[_tutorialLavaPlanetId];
+          let _des=null;
+          if(_ori){ for(const _p of galaxy.planets){ if(_p.starId===_ori.starId && _p.type && _p.type.id==='desert'){ _des=_p; break; } } }
+          if(_ori&&_lp&&_des){
+            const _pts=[_ori,_lp,_des], _buf=500;
+            const _xMin=Math.min(..._pts.map(p=>p.x-(p.radius||30)))-_buf;
+            const _xMax=Math.max(..._pts.map(p=>p.x+(p.radius||30)))+_buf;
+            const _yMin=Math.min(..._pts.map(p=>p.y-(p.radius||30)))-_buf;
+            const _yMax=Math.max(..._pts.map(p=>p.y+(p.radius||30)))+_buf;
+            const _vpW=W-PANEL_W, _vpH=GH-TOP_H;
+            const _scale=Math.max(MIN_SC,Math.min(MAX_SC,Math.min(_vpW/(_xMax-_xMin),_vpH/(_yMax-_yMin))));
+            cam.scale=_scale;
+            cam.x=(_xMin+_xMax)/2 + PANEL_W/(2*_scale);
+            cam.y=(_yMin+_yMax)/2 - TOP_H/(2*_scale);
+            tracking=false;
+            if(typeof clampCamera==='function') clampCamera();
+          }
         }
-        // Wait for the player to accept the new-mission popup before the
-        // post-accept callout chain starts.
-        _advanceTo('vp_pending_accept');
+        _advanceTo('cr_click_lava');
         return;
       }
     } else {
@@ -19446,7 +19557,7 @@ function _drawTutorialChain(stage){
     if(_lp){
       const [_sx,_sy]=w2s(_lp.x,_lp.y);
       const _sr=Math.max(8,_lp.radius*cam.scale);
-      _drawBubble(['CLICK on the LAVA PLANET to START a ROUTE'], {x:_sx,y:_sy-_sr+6}, r.alpha, {target:{x:_sx,y:_sy}});
+      _drawBubble(['CLICK on the LAVA PLANET to START A ROUTE'], {x:_sx,y:_sy-_sr+6}, r.alpha, {target:{x:_sx,y:_sy}});
     }
     return;
   }
@@ -19464,7 +19575,7 @@ function _drawTutorialChain(stage){
     if(_op){
       const [_sx,_sy]=w2s(_op.x,_op.y);
       const _sr=Math.max(8,_op.radius*cam.scale);
-      _drawBubble(['SHIFT+CLICK on ORIJEN to ADD a STOP to your ROUTE'], {x:_sx,y:_sy-_sr+6}, r.alpha, {target:{x:_sx,y:_sy}});
+      _drawBubble(['SHIFT+CLICK on ORIJEN to ADD A STOP to your ROUTE'], {x:_sx,y:_sy-_sr+6}, r.alpha, {target:{x:_sx,y:_sy}});
     }
     return;
   }
@@ -20021,10 +20132,20 @@ function updateMissions(dtSd){
   const _doIntroGates=_missionTickAcc>=0.01;
   if(_doIntroGates) _missionTickAcc=0;
   if(_doIntroGates){
+  // IRON FOUNDRY unlock: fires the moment the player ACCEPTS the build_foundry
+  // mission (it lands in `missions` with status 'active'). Unlocks the upgrade +
+  // shows the "NEW PLANET UPGRADE UNLOCKED" popup so the foundry is buildable for
+  // the mission they just accepted.
+  if(!_foundryUnlocked && missions.some(mx=>mx.id==='build_foundry'&&mx.status==='active')){
+    _foundryUnlocked=true; pendingUpgradeUnlocks.push({key:'iron_foundry'});
+    _chatMsg('IRON FOUNDRY UPGRADE UNLOCKED','rgba(255,210,120,1)');
+  }
   // "Build a Foundry" intro: 10 real-time seconds after the create_route
   // mission completes. _findOreTimerMs (legacy name — was for the removed
   // Find Molten Ore mission) is stamped when create_route's status flips to
-  // 'completed' in the mission-complete block below.
+  // 'completed' in the mission-complete block below. (No foundry-unlocked gate:
+  // the foundry now unlocks WHEN this mission is accepted, so the intro must be
+  // able to appear first.)
   if(_findOreTimerMs>0&&Date.now()-_findOreTimerMs>=10000&&!_missionPending('build_foundry')&&!missions.some(mx=>mx.id==='build_foundry'&&mx.status==='completed')){
     pendingMissionIntros.push({defId:'build_foundry',readySd:stardate});
   }
@@ -20033,27 +20154,27 @@ function updateMissions(dtSd){
     const _totalHazProd=galaxy.planets.reduce((s,p)=>s+((p.upgradeData?.iron_foundry?.hazmatTotal)||0),0);
     if(_totalHazProd>=2.0) pendingMissionIntros.push({defId:'dispose_hazmat',readySd:stardate});
   }
-  // create_route intro: 5 real-time seconds after the visit_planet mission
-  // ACTUALLY completes (the new 4th objective `await_arrival` means the
-  // mission no longer auto-completes on click — it waits for the train to
-  // reach its destination). _visitPlanetCompletedMs is stamped in the
-  // mission-complete block when m.id==='visit_planet' flips to 'completed'.
-  if(_visitPlanetCompletedMs>0&&Date.now()-_visitPlanetCompletedMs>=5000&&!_missionPending('create_route')&&!missions.some(mx=>mx.id==='create_route'&&mx.status==='completed')){
+  // create_route intro: 3 real-time seconds after the player OPENS then CLOSES
+  // the Lava Planet details window during the tutorial (replaces the removed
+  // visit_planet → create_route chain). The open+close arms _lavaClosedTimerMs;
+  // the push is then held until the train-builder tutorial finishes
+  // (_tutorialPhase==='done') so the mission popup never interrupts that
+  // guidance — by then ≥3 s have elapsed since the close.
+  {
+    const _lavaOpenNow=(activePopup==='planet'&&popupState.planet&&popupState.planet.id===_tutorialLavaPlanetId);
+    if(_lavaOpenNow && _tutorialPhase!=='inactive' && _tutorialPhase!=='all_done') _lavaDetailsWasOpen=true;
+    else if(_lavaDetailsWasOpen && !_lavaOpenNow && _lavaClosedTimerMs===0) _lavaClosedTimerMs=Date.now();
+  }
+  if(_lavaClosedTimerMs>0 && Date.now()-_lavaClosedTimerMs>=1500 && _tutorialPhase==='cr_pending_accept'
+     && !_missionPending('create_route') && !missions.some(mx=>mx.id==='create_route'&&mx.status==='completed')){
     pendingMissionIntros.push({defId:'create_route',readySd:stardate});
   }
   // upgrade_station intro: 10 real-time seconds after buy_second_train completes
   if(_buyTrainCompletedMs>0&&Date.now()-_buyTrainCompletedMs>=10000&&!_missionPending('upgrade_station')){
     pendingMissionIntros.push({defId:'upgrade_station',readySd:stardate});
   }
-  // visit_planet intro: held back at game start; introduced only after the
-  // full new-game tutorial chain finishes (phase reaches 'done', which the
-  // tutorial sets 1 s after the player returns to galaxy view post-builder).
-  // Loaded games skip the chain entirely (phase pre-set to 'done').
-  if(!_missionPending('visit_planet')&&!missions.some(mx=>mx.id==='visit_planet'&&mx.status==='completed')){
-    if(_tutorialPhase==='done'){
-      pendingMissionIntros.push({defId:'visit_planet',readySd:stardate});
-    }
-  }
+  // (visit_planet mission removed — its game-start held-back intro is gone.
+  //  create_route is introduced via the Lava-details open+close gate above.)
   // buy_second_train intro: 10 real-time seconds after the produce_iron
   // ("Make Iron") mission completes. Only introduced if the player still
   // has fewer than 2 player trains at that point.
@@ -20258,11 +20379,8 @@ function updateMissions(dtSd){
       // Start build_foundry countdown when create_route completes
       // (var name _findOreTimerMs is legacy from the removed Find Molten Ore mission)
       if(m.id==='create_route'&&_findOreTimerMs===0) _findOreTimerMs=Date.now();
-      // Completing the repeating-route mission UNLOCKS the IRON FOUNDRY upgrade.
-      if(m.id==='create_route'&&!_foundryUnlocked){
-        _foundryUnlocked=true; pendingUpgradeUnlocks.push({key:'iron_foundry'});
-        _chatMsg('IRON FOUNDRY UPGRADE UNLOCKED','rgba(255,210,120,1)');
-      }
+      // (The IRON FOUNDRY upgrade is NO LONGER unlocked here — it now unlocks the
+      //  moment the player ACCEPTS the build_foundry mission; see updateMissions.)
       // Stamp build_foundry completion — arms the 10 s buy_second_train intro.
       if(m.id==='build_foundry'&&_foundryCompletedMs===0) _foundryCompletedMs=Date.now();
       // Legacy stamp (no longer gates anything — kept so any saved scripts /
@@ -22858,17 +22976,13 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
           if(_tHov) popupState._terminalTooltip={bx:_tBtnX,by:_tBtnY,bw:_tBtnW,upX,upW,lvlOk:_tLvlOk,steelOk:_tSteelOk,credOk:_tCredOk,dl:p.devLevel||0,steel:p.steelDelivered||0};
           } // end if(_terminalUnlocked)
         } else {
-          // Description bullet (same word-wrap style as unbuilt items)
-          ctx.font='9px "Exo 2",sans-serif';
+          // Description — fixed two-line layout: the orbit clause is forced onto
+          // the 2nd line and italicised, with LOW ORBIT in caps.
           ctx.fillStyle='rgba(110,145,195,0.60)';
-          const _stDescW=upW-26, _stDescWds='Allows loading + unloading of cargo in LOW orbit only'.split(' ');
-          let _stDescCur='', _stDescY=itemY+30;
-          for(const _stDW of _stDescWds){
-            const _stT=_stDescCur?_stDescCur+' '+_stDW:_stDW;
-            if(ctx.measureText(_stT).width<=_stDescW) _stDescCur=_stT;
-            else{if(_stDescCur)ctx.fillText(_stDescCur,upX+12,_stDescY); _stDescCur=_stDW; _stDescY+=11;}
-          }
-          if(_stDescCur) ctx.fillText(_stDescCur,upX+12,_stDescY);
+          ctx.font='9px "Exo 2",sans-serif';
+          ctx.fillText('Allows loading + unloading of cargo',upX+12,itemY+30);
+          ctx.font='italic 9px "Exo 2",sans-serif';
+          ctx.fillText('in LOW ORBIT only',upX+12,itemY+41);
           // UPGRADE → Large Station button. Hidden until the player COMPLETES
           // the "Produce Iron" mission (_largeStationUnlocked). Until then the
           // STATION description shows but no upgrade button / hit-target exists.
@@ -32287,6 +32401,7 @@ function _restoreFromSave(save){
   _firstNonLowOrbitFired=true; _orbitHintStartMs=0; _orbitHintPlanetId=-1; // suppress orbit-hint on loaded games
   _prevActivePopupForSfx=null;
   _visitPlanetCompletedMs=0;
+  _lavaDetailsWasOpen=false; _lavaClosedTimerMs=0;
   _tutorialDoneMs=0;
   _crTutorialDoneMs=0;
   _findOreTimerMs=0;
@@ -32298,12 +32413,20 @@ function _restoreFromSave(save){
   const _crIntroduced=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='create_route');
   const _vpDone=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='visit_planet'&&m.status==='completed');
   if(_vpDone && !_crIntroduced) _visitPlanetCompletedMs=Date.now();
-  if(_tutorialPhase==='done'&&!_crIntroduced) _tutorialDoneMs=Date.now();
+  // create_route is now gated on the Lava-details open+close timer. For a save
+  // taken at tutorial 'done' before create_route was introduced, arm that timer
+  // so the intro fires ~3 s after load.
+  if((_tutorialPhase==='cr_pending_accept'||_tutorialPhase==='done')&&!_crIntroduced){ _tutorialDoneMs=Date.now(); _lavaClosedTimerMs=Date.now(); }
   // Re-arm the create_route → build_foundry 10 s gate if create_route is
   // completed in the save but build_foundry hasn't been introduced yet.
   const _bfIntroduced=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='build_foundry');
   const _crDone=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='create_route'&&m.status==='completed');
   if(_crDone && !_bfIntroduced) _findOreTimerMs=Date.now();
+  // The IRON FOUNDRY unlock delay is in-session only — a loaded game whose
+  // create_route is already completed should be unlocked outright (also covers
+  // the rare save taken inside the 0.02 SD delay window).
+  _foundryUnlockSd=0;
+  if(_crDone && !_foundryUnlocked) _foundryUnlocked=true;
   // Re-arm the produce_iron → buy_second_train 10 s gate.
   const _bstIntroduced=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='buy_second_train');
   const _pIDone=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='produce_iron'&&m.status==='completed');
@@ -32904,7 +33027,7 @@ function startGame(){
   // runs at title PLAY, BEFORE the player picks their corp name in corpsetup,
   // so corpName is still the default placeholder at this point. It fires at
   // the fadein → galaxy transition instead (same as the game_start GA event).
-  activePopup=null; popupState={}; gameSpeedIdx=SPEED_DEFAULT_IDX; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _missionTipPending=false; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _foundryCompletedMs=0; _produceIronTimerMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _ancientSchematicsTimerMs=0; _ancientSchematicsPlanetId=-1; _ancientSchematicsFired=false; _hasZoomed=false; _buyTrainTipStartMs=0; _buyTrainTipShown=false; _prevActivePopupForSfx=null; _missionTipFired=false; _visitPlanetCompletedMs=0; _tutorialDoneMs=0; _crTutorialDoneMs=0; _firstNonLowOrbitFired=false; _orbitHintStartMs=0; _orbitHintPlanetId=-1; _crTrainPreselected=false; _foundryCalloutShown=false; _foundryCalloutStartMs=0; _foundryCalloutFadeOutStartMs=0; _foundryCardScreenBounds=null; _foundryUnlocked=false; _largeStationUnlocked=false; _terminalUnlocked=false; _bakeryUnlocked=false; _glassworksUnlocked=false; pendingUpgradeUnlocks=[];
+  activePopup=null; popupState={}; gameSpeedIdx=SPEED_DEFAULT_IDX; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _missionTipPending=false; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _foundryCompletedMs=0; _produceIronTimerMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _ancientSchematicsTimerMs=0; _ancientSchematicsPlanetId=-1; _ancientSchematicsFired=false; _hasZoomed=false; _buyTrainTipStartMs=0; _buyTrainTipShown=false; _prevActivePopupForSfx=null; _missionTipFired=false; _visitPlanetCompletedMs=0; _tutorialDoneMs=0; _crTutorialDoneMs=0; _firstNonLowOrbitFired=false; _orbitHintStartMs=0; _orbitHintPlanetId=-1; _crTrainPreselected=false; _foundryCalloutShown=false; _foundryCalloutStartMs=0; _foundryCalloutFadeOutStartMs=0; _foundryCardScreenBounds=null; _foundryUnlocked=false; _foundryUnlockSd=0; _largeStationUnlocked=false; _terminalUnlocked=false; _bakeryUnlocked=false; _glassworksUnlocked=false; pendingUpgradeUnlocks=[];
   _newspaper=null; _newspaperLastSd=829; _newspaperPrevSpeed=0; _newspaperNextHover=false; _newspaperNextBounds=null; _newspaperPrevHover=false; _newspaperPrevBounds=null; _newspaperArchive=[]; _newspaperViewIdx=null; _paperMajorUsed=[]; _paperMinorUsed=[]; _paperLayout=0; _paperIssueNum=0; _paperIdx=randInt(0,_PAPER_NAMES.length-1); _newsEventLog=[]; _newsSnapshot=null;
   _speedLeftHover=false; _speedRightHover=false; _panelTabHover=null; _routeHereBtnHover=false; _assignBtnHover=false; _cancelRouteBtnHover=false; _planetStarNameHover=false; _starPanelPlanetHover=-1; _trainAddHover=false; _trainRowHover=-1; _pokedexSortHover=false; _pokedexRowHover=-1; _starRegistrySortHover=false; _starRegistryRowHover=-1; _goldOkHover=false; _diamondOkHover=false; _carUnlockOkHover=false; _quitYesHover=false; _quitNoHover=false; _saveGameBtnHover=false; _startBtnHover=false; _loadBtnHover=false; _htpBtnHover=false; _htpDotHover=-1; _htpSkipHover=false; pokedexRowBounds=[]; starRegistryRowBounds=[]; loadBtnBounds=null; saveGameBtnBounds=null;
   fogPoints=[]; fogGridSet=new Set(); fogCanvas=null;
