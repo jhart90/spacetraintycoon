@@ -668,16 +668,29 @@ function _tryPlaySoundtrack(){
   // browsers (the "audio resets every click" report) — the guard avoids it.
   if(_soundtrack.paused) _soundtrack.play().catch(()=>{});
 }
+// Force the soundtrack to (re)start playing if it has somehow been stopped —
+// used by the Options mute / prev / next controls. Playtesters reported the
+// music occasionally stops; this guarantees these explicit user actions kick it
+// back on. Resumes the shared audio context, re-loads the track source if the
+// element lost it, and unconditionally calls play() (unless muted).
+function _forceMusicPlay(){
+  if(_musicMuted) return;
+  _musicEnsureStarted();
+  try{ const _c=_initAudioCtx(); if(_c&&_c.state==='suspended') _c.resume().catch(()=>{}); }catch(_e){}
+  if(!_soundtrack.src) _loadMusicTrack(_musicIdx);
+  const _p=_soundtrack.play();
+  if(_p&&_p.catch) _p.catch(()=>{});
+}
 function _toggleMusicMute(){
   _musicMuted=!_musicMuted;
   if(_musicMuted){ _soundtrack.pause(); }
-  else { _musicEnsureStarted(); _soundtrack.play().catch(()=>{}); }
+  else { _forceMusicPlay(); }  // unmute → force playback back on
 }
 // Next: immediately load + play the next track in fixed order.
 function _musicNext(){
   _musicEnsureStarted();
   _loadMusicTrack(_musicIdx+1);
-  if(!_musicMuted) _soundtrack.play().catch(()=>{});
+  _forceMusicPlay();
 }
 // Prev: restart current track if >5s elapsed, otherwise skip to previous track.
 function _musicPrev(){
@@ -687,7 +700,7 @@ function _musicPrev(){
   } else {
     _loadMusicTrack(_musicIdx-1);
   }
-  if(!_musicMuted) _soundtrack.play().catch(()=>{});
+  _forceMusicPlay();
 }
 let _muteBtnBounds=null, _muteBtnHover=false;
 // Title-screen fullscreen toggle (left of the mute button).
@@ -706,6 +719,28 @@ function _toggleFullscreen(){
       if(_rq) _rq.call(_el);
     }
   }catch(_e){}
+}
+// Stroke the fullscreen corner-bracket glyph centred at (cx,cy), half-size hh.
+// EXPAND (corners at the outer edges) when windowed; COMPRESS (corners pulled to
+// the centre) when already fullscreen. Used by the title screen + Options popup.
+function _drawFullscreenGlyph(cx,cy,hh,col,lw){
+  ctx.save();
+  ctx.strokeStyle=col; ctx.lineWidth=lw||2; ctx.lineCap='round'; ctx.lineJoin='round';
+  const _L=hh*0.62;
+  ctx.beginPath();
+  if(!_isFullscreen()){
+    ctx.moveTo(cx-hh,cy-hh+_L); ctx.lineTo(cx-hh,cy-hh); ctx.lineTo(cx-hh+_L,cy-hh);
+    ctx.moveTo(cx+hh-_L,cy-hh); ctx.lineTo(cx+hh,cy-hh); ctx.lineTo(cx+hh,cy-hh+_L);
+    ctx.moveTo(cx-hh,cy+hh-_L); ctx.lineTo(cx-hh,cy+hh); ctx.lineTo(cx-hh+_L,cy+hh);
+    ctx.moveTo(cx+hh-_L,cy+hh); ctx.lineTo(cx+hh,cy+hh); ctx.lineTo(cx+hh,cy+hh-_L);
+  } else {
+    ctx.moveTo(cx-hh,cy-hh+_L); ctx.lineTo(cx-hh+_L,cy-hh+_L); ctx.lineTo(cx-hh+_L,cy-hh);
+    ctx.moveTo(cx+hh,cy-hh+_L); ctx.lineTo(cx+hh-_L,cy-hh+_L); ctx.lineTo(cx+hh-_L,cy-hh);
+    ctx.moveTo(cx-hh,cy+hh-_L); ctx.lineTo(cx-hh+_L,cy+hh-_L); ctx.lineTo(cx-hh+_L,cy+hh);
+    ctx.moveTo(cx+hh,cy+hh-_L); ctx.lineTo(cx+hh-_L,cy+hh-_L); ctx.lineTo(cx+hh-_L,cy+hh);
+  }
+  ctx.stroke();
+  ctx.restore();
 }
 let _optsMuteBtnBounds=null, _optsMuteBtnHover=false;
 let _optsPrevBtnBounds=null, _optsPrevBtnHover=false;
@@ -757,7 +792,7 @@ function getCP(e){
 }
 
 // ── title constants ──────────────────────────────────────────
-const GAME_VERSION = 'v0.4.4'; // shown bottom-left of the title screen
+const GAME_VERSION = 'v0.4.5'; // shown bottom-left of the title screen
 const CAR_MID = ['car_passenger','car_royal','car_water_tank','car_cargo','car_livestock','car_mail','car_ice','car_sand','car_ore','car_iron','car_hazmat','car_oil','car_battery','car_chemical'];
 const CAR_W=112, CAR_H=80, RAIL_Y=H*0.68;
 const T_PALS = [
@@ -778,6 +813,7 @@ const AI_CORP_COLOR='#e89320';
 const AI_CORP_RGB=[232,147,32];
 const AI_TICK_INTERVALS={very_easy:22,easy:13,normal:7,hard:3.5,very_hard:1.8};
 const AI_START_CREDITS={very_easy:250000,easy:300000,normal:400000,hard:500000,very_hard:750000};
+const PLAYER_START_CREDITS=250000; // credits the player begins each new game with (shown on the corp-setup CEO cards)
 // User spec: no theoretical maximum. AI grows uncapped at every difficulty.
 const AI_MAX_TRAINS={very_easy:Infinity,easy:Infinity,normal:Infinity,hard:Infinity,very_hard:Infinity};
 const AI_MAX_STATIONS={very_easy:Infinity,easy:Infinity,normal:Infinity,hard:Infinity,very_hard:Infinity};
@@ -1217,7 +1253,7 @@ const MISSION_DEFS=[
      return false;
    }},
   {id:'buy_second_train',
-   name:'Buy a 2nd train',
+   name:'Buy an Iron-delivery Train',
    imageType:'car', imageKey:'engine_galaxy',
    objectives:[
      {id:'open_trains',          text:'Press "T" to open the "Trains" window'},
@@ -2085,6 +2121,39 @@ const CAR_LABELS = {
   car_glass:    'GLASS CAR',
   car_machinery:'MACHINERY CAR'
 };
+// Short flavour quips shown in the train-builder hover tooltip. [Cargo] tokens
+// pick up their resource colour via _objTokenize (same as mission/objective text).
+const _BUILDER_QUIPS = {
+  engine_constellation:'The most basic engine.',
+  engine_galaxy:'A faster engine with greater range.',
+  engine_classJ:'A powerful, efficient mid-tier engine.',
+  engine_classR:'A high-speed heavy-duty engine.',
+  engine_N700:'The fastest engine out there.',
+  car_passenger:'Carries [Passengers] between worlds.',
+  car_royal:'Carries VIP [Passengers] in luxury.',
+  car_livestock:'Carries [Livestock] from AGRICULTURAL PLANETS.',
+  car_mail:'Carries [Mail] between populated worlds.',
+  car_water_tank:'Carries [Water] from OCEAN PLANETS.',
+  car_ice:'Carries [Ice] from ICE PLANETS.',
+  car_sand:'Carries [Sand] from DESERT PLANETS.',
+  car_ore:'Carries [Molten Ore] from LAVA PLANETS.',
+  car_iron:'Carries [Iron] produced at FOUNDRIES.',
+  car_gold:'Carries valuable [Gold] ore.',
+  car_diamond:'Carries precious [Diamond].',
+  car_hazmat:'Hauls [Hazmat] off for safe disposal.',
+  car_oil:'Carries [Oil] pumped from wells.',
+  car_battery:'Carries charged [Battery] cells.',
+  car_chemical:'Carries [Chemical] from CHEMICAL PLANETS.',
+  car_flowers:'Carries fragrant [Flowers].',
+  car_medical:'Carries [Medical] supplies where needed.',
+  car_grain:'Carries [Grain] from AGRICULTURAL PLANETS.',
+  car_fruit:'Carries [Fruit] from AGRICULTURAL PLANETS.',
+  car_steel:'Carries [Steel] forged in BLAST FURNACES.',
+  car_glass:'Carries [Glass] made in GLASSWORKS.',
+  car_machinery:'Carries [Machinery] built in FACTORIES.',
+  car_cargo:'Carries general [Cargo].',
+  caboose:'A required final car on every train. Purely aesthetic.',
+};
 
 // Maps car type → empty-state sprite key (only for types that have one).
 // Iron / Gold / Ice all share a single empty-flatcar sprite (car_flat_empty);
@@ -2568,18 +2637,41 @@ function drawLeaderboardScreen(){
     ctx.fillText('Ranks '+_r0+'–'+_r1+' of '+_lbRows.length,W/2,H-86);
   }
   const _btnY=H-66, _btnH=34, _btnW=126;
-  const _mkBtn=(label,x,enabled,hover)=>{
-    ctx.fillStyle=!enabled?'rgba(28,28,42,0.5)':(hover?'rgba(72,52,124,0.96)':'rgba(45,35,80,0.85)');
-    ctx.fillRect(x,_btnY,_btnW,_btnH);
-    ctx.strokeStyle=!enabled?'rgba(60,60,80,0.4)':(hover?'rgba(185,155,255,0.9)':'rgba(120,100,190,0.6)'); ctx.lineWidth=1.5; ctx.strokeRect(x,_btnY,_btnW,_btnH);
+  // ── BACK button — rounded corners ──
+  {
+    const _hov=_lbBackHover;
+    ctx.fillStyle=_hov?'rgba(72,52,124,0.96)':'rgba(45,35,80,0.85)';
+    ctx.beginPath(); ctx.roundRect(tableX,_btnY,_btnW,_btnH,8); ctx.fill();
+    ctx.strokeStyle=_hov?'rgba(185,155,255,0.9)':'rgba(120,100,190,0.6)'; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.roundRect(tableX,_btnY,_btnW,_btnH,8); ctx.stroke();
     ctx.font='bold 12px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
-    ctx.fillStyle=enabled?'rgba(222,212,255,0.96)':'rgba(110,110,130,0.6)'; ctx.fillText(label,x+_btnW/2,_btnY+_btnH/2);
+    ctx.fillStyle='rgba(222,212,255,0.96)'; ctx.fillText('◀ BACK',tableX+_btnW/2,_btnY+_btnH/2);
     ctx.textBaseline='alphabetic';
-    return {x,y:_btnY,w:_btnW,h:_btnH};
-  };
-  _lbBackBounds=_mkBtn('◀ BACK',tableX,true,_lbBackHover);
-  _lbPrevBounds=_mkBtn('◀ PREV',W/2-_btnW-12,_lbPage>0,_lbPrevHover);
-  _lbNextBounds=_mkBtn('NEXT ▶',W/2+12,_lbPage<_maxPage,_lbNextHover);
+    _lbBackBounds={x:tableX,y:_btnY,w:_btnW,h:_btnH};
+  }
+  // ── PREV / NEXT page arrows — bare triangles flanking the "Ranks X–Y of Z"
+  //    label (no boxes / no text). Still hover-aware + click to page. ──
+  _lbPrevBounds=null; _lbNextBounds=null;
+  if(_lbStatus==='ok'){
+    const _rkY=H-86;
+    ctx.font='12px "Exo 2",sans-serif';
+    const _rkTxt='Ranks '+(_lbPage*10+1)+'–'+Math.min(_lbRows.length,_lbPage*10+10)+' of '+_lbRows.length;
+    const _rkHalf=ctx.measureText(_rkTxt).width/2;
+    const _triS=8, _triGap=18, _hitR=15, _cy=_rkY-4;
+    const _prevEn=_lbPage>0, _nextEn=_lbPage<_maxPage;
+    // Left (PREV)
+    const _pcx=W/2-_rkHalf-_triGap;
+    ctx.beginPath();
+    ctx.moveTo(_pcx+_triS/2,_cy-_triS); ctx.lineTo(_pcx-_triS/2,_cy); ctx.lineTo(_pcx+_triS/2,_cy+_triS); ctx.closePath();
+    ctx.fillStyle=!_prevEn?'rgba(110,110,130,0.38)':(_lbPrevHover?'rgba(205,185,255,0.98)':'rgba(160,140,225,0.85)'); ctx.fill();
+    if(_prevEn) _lbPrevBounds={x:_pcx-_hitR,y:_cy-_hitR,w:_hitR*2,h:_hitR*2};
+    // Right (NEXT)
+    const _ncx=W/2+_rkHalf+_triGap;
+    ctx.beginPath();
+    ctx.moveTo(_ncx-_triS/2,_cy-_triS); ctx.lineTo(_ncx+_triS/2,_cy); ctx.lineTo(_ncx-_triS/2,_cy+_triS); ctx.closePath();
+    ctx.fillStyle=!_nextEn?'rgba(110,110,130,0.38)':(_lbNextHover?'rgba(205,185,255,0.98)':'rgba(160,140,225,0.85)'); ctx.fill();
+    if(_nextEn) _lbNextBounds={x:_ncx-_hitR,y:_cy-_hitR,w:_hitR*2,h:_hitR*2};
+  }
 }
 // Short column labels for the compact in-game popup (narrow columns).
 const _LB_HDR_SHORT={corp_value:'VALUE',num_trains:'TRAINS',num_routes:'ROUTES',num_stations:'STAT.',latest_sd:'S.D.',discovered_planets:'PLNTS',discovered_stars:'STARS'};
@@ -2663,20 +2755,27 @@ function drawLeaderboardPopup(){
     ctx.font='11px "Exo 2",sans-serif'; ctx.textAlign='center'; ctx.fillStyle='rgba(190,195,220,0.82)';
     ctx.fillText('Ranks '+(_lbPage*10+1)+'–'+Math.min(_lbRows.length,_lbPage*10+10)+' of '+_lbRows.length,px+pw/2,py+ph-30);
   }
-  const _bw=104,_bh=26,_by=py+ph-46;
-  const _mk=(label,x,enabled,hover)=>{
-    ctx.fillStyle=!enabled?'rgba(30,28,46,0.5)':(hover?'rgba(74,54,128,0.96)':'rgba(48,38,86,0.85)');
-    ctx.fillRect(x,_by,_bw,_bh);
-    ctx.strokeStyle=!enabled?'rgba(60,60,82,0.4)':(hover?'rgba(188,158,255,0.9)':'rgba(122,102,192,0.6)'); ctx.lineWidth=1.3; ctx.strokeRect(x,_by,_bw,_bh);
-    ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
-    ctx.fillStyle=enabled?'rgba(224,214,255,0.96)':'rgba(110,110,132,0.6)'; ctx.fillText(label,x+_bw/2,_by+_bh/2);
-    ctx.textBaseline='alphabetic'; return {x,y:_by,w:_bw,h:_bh};
-  };
-  // Buttons pinned to the lower-left / lower-right corners (with a buffer) so
-  // they no longer overlap the centred "Ranks X–Y of Z" text.
-  const _btnBuf=16;
-  popupState.lbPrev=_mk('◀ PREV',px+_btnBuf,_lbPage>0,popupState.lbPrevHover);
-  popupState.lbNext=_mk('NEXT ▶',px+pw-_bw-_btnBuf,_lbPage<_maxPage,popupState.lbNextHover);
+  // PREV / NEXT page arrows — bare triangles flanking the "Ranks X–Y of Z" label
+  // (matches the title-screen leaderboard). Still hover-aware + click to page.
+  popupState.lbPrev=null; popupState.lbNext=null;
+  if(_lbStatus==='ok'){
+    const _rkY=py+ph-30;
+    ctx.font='11px "Exo 2",sans-serif';
+    const _rkTxt='Ranks '+(_lbPage*10+1)+'–'+Math.min(_lbRows.length,_lbPage*10+10)+' of '+_lbRows.length;
+    const _rkHalf=ctx.measureText(_rkTxt).width/2;
+    const _triS=8,_triGap=18,_hitR=15,_cy=_rkY-4;
+    const _prevEn=_lbPage>0,_nextEn=_lbPage<_maxPage;
+    const _pcx=px+pw/2-_rkHalf-_triGap;
+    ctx.beginPath();
+    ctx.moveTo(_pcx+_triS/2,_cy-_triS); ctx.lineTo(_pcx-_triS/2,_cy); ctx.lineTo(_pcx+_triS/2,_cy+_triS); ctx.closePath();
+    ctx.fillStyle=!_prevEn?'rgba(110,110,130,0.38)':(popupState.lbPrevHover?'rgba(205,185,255,0.98)':'rgba(160,140,225,0.85)'); ctx.fill();
+    if(_prevEn) popupState.lbPrev={x:_pcx-_hitR,y:_cy-_hitR,w:_hitR*2,h:_hitR*2};
+    const _ncx=px+pw/2+_rkHalf+_triGap;
+    ctx.beginPath();
+    ctx.moveTo(_ncx-_triS/2,_cy-_triS); ctx.lineTo(_ncx+_triS/2,_cy); ctx.lineTo(_ncx-_triS/2,_cy+_triS); ctx.closePath();
+    ctx.fillStyle=!_nextEn?'rgba(110,110,130,0.38)':(popupState.lbNextHover?'rgba(205,185,255,0.98)':'rgba(160,140,225,0.85)'); ctx.fill();
+    if(_nextEn) popupState.lbNext={x:_ncx-_hitR,y:_cy-_hitR,w:_hitR*2,h:_hitR*2};
+  }
   ctx.restore();
 }
 let tracking=false, trackingOffset={x:0,y:0};
@@ -3206,6 +3305,10 @@ const _PLAYER_OPENED_POPUPS=new Set([
 let _missionTipFired=false;  // M-tip is one-shot once the player has 3 simultaneously-active missions for the first time
 let _buyTrainCompletedMs=0;  // real-time ms when buy_second_train completed (0=not yet). Gates the upgrade_station mission intro 10 s later.
 let _foundryCompletedMs=0;   // real-time ms when build_foundry completed (0=not yet). Gates the buy_second_train mission intro 10 s later.
+// True once the PLAYER has delivered [Iron] (by train) to any NON-desert planet.
+// If already true when the buy_second_train ("Buy an Iron-delivery Train") intro
+// gate opens, that mission is skipped entirely (the player already does this).
+let _ironDeliveredToNonDesert=false;
 // New-game tutorial bubble chain (zoom out → double click lava planet → build station)
 let _tutorialPhase='inactive'; // 'inactive'|'pre_zoom'|'look_around'|'look_around_pause'|'zoom_out'|'orijen_welcome'|'orijen_details'|'double_click'|'build_station'|'done'
 let _tutorialPhaseStartMs=0;   // real-time ms when the current phase started
@@ -3225,6 +3328,7 @@ let _createRouteTimerMs=0; // real-time ms when player first visited a non-home-
 let _visitPlanetCompletedMs=0; // (legacy) real-time ms when visit_planet mission completed. Superseded by _tutorialDoneMs but kept reset for save compat.
 let _lavaDetailsWasOpen=false; // true once the Lava Planet details window has been opened during the tutorial
 let _lavaClosedTimerMs=0;      // real-time ms when that window was first CLOSED again (0=not yet) — arms the create_route intro
+let _orijenClosedTutMs=0;      // real-time ms when the ORIJEN details window was first closed in the tutorial (0=not yet) — arms the create_route intro 1.5 s later (it now comes BEFORE the lava-station walkthrough)
 let _tutorialDoneMs=0;         // real-time ms when the tutorial chain reached 'done' — arms the 1 s create_route intro
 let _crTutorialDoneMs=0;       // real-time ms when the create_route tutorial chain reached 'all_done' — arms buy_second_train (10 s) and build_foundry (40 s) intros
 let _crTrainPreselected=false; // true if a train was already selected when the create_route tutorial chain started (drives the blue companion bubble in cr_click_orijen / cr_shift_click_other)
@@ -3238,6 +3342,7 @@ let _orbitHintPlanetId=-1;        // planet id the callout points at
 let _findOreTimerMs=0;     // real-time ms when create_route mission completed (0=not yet). Now arms the build_foundry intro 10 s later (was Find Molten Ore before that mission was removed).
 let _foundryUnlockSd=0;    // stardate at which the delayed IRON FOUNDRY unlock+popup fires (0=not armed). 20 in-game seconds after create_route completes = stardate+0.02.
 let _produceIronTimerMs=0; // real-time ms when produce_iron mission completed (0=not yet)
+let _ironCarUnlockedMs=0;  // real-time ms when the IRON CAR first unlocked (0=not yet). Gates the upgrade_station mission intro 10 s later.
 let _steelMissionTimerMs=0; // real-time ms when first steel was produced (arms 10s intro for design_better_train)
 // Steel production sliding-window log for N700 unlock. Each entry: {sd, units}.
 // Pruned every tick to entries within the last 20 stardates; N700 unlocks once
@@ -3260,6 +3365,17 @@ let _glassworksUnlocked=false;    // GLASSWORKS card — unlocked once BOTH the 
 let pendingUpgradeUnlocks=[]; // {key,constructed?} queued to show the upgrade-unlock popup (key ∈ iron_foundry, bakery, glassworks, __large_station__, __terminal__)
 let pendingMissionRewards=[]; // {name,reward} → green "Mission Completed" reward popup (one per +credit mission completion)
 let pendingFirstDeliveries=[]; // {planetId,cargo,carType,sd} → "First Delivery" popup (first ever player cargo unloaded at a planet)
+// True for the three Gigi-Prime tutorial planets — ORIJEN, the home-system LAVA
+// PLANET (_tutorialLavaPlanetId) and the home-system DESERT PLANET — where the
+// First-Delivery popup is suppressed so it never interrupts the guided intro.
+function _isHomeTutorialPlanet(p){
+  if(!p||!galaxy) return false;
+  if(galaxy.origenId!=null && p.id===galaxy.origenId) return true;
+  if(_tutorialLavaPlanetId>=0 && p.id===_tutorialLavaPlanetId) return true;
+  const _ori=galaxy.origenId!=null?galaxy.planets[galaxy.origenId]:null;
+  if(_ori && p.starId===_ori.starId && p.type && p.type.id==='desert') return true;
+  return false;
+}
 let _foundryConstructedPopupPending=false; // defer the iron-foundry upgrade popup until the foundry is BUILT and its planet window is closed
 let _foundryConstructedPopupShown=false;   // one-shot latch so the "constructed" popup shows at most once (persisted)
 // An upgrade CARD is visible only when unlocked (or already built). Station-tier
@@ -3477,6 +3593,21 @@ let cancelRouteBtnBounds=null;
 let routeHereBtnBounds=null;
 let routeHerePending=false; // true when player clicked "Route Train Here" on a planet
 let _routeHereResultMs=0;    // Date.now() when a route-here result callout was armed (0 = none)
+// Tutorial phases that walk the player through the MANUAL route → ASSIGN-TO-TRAIN
+// flow. While in one of these, the auto "skip-to-SELECT-A-TRAIN" behaviour is
+// suppressed so the scripted ASSIGN-button steps still play out.
+const _TUT_MANUAL_ASSIGN_PHASES = new Set([
+  'cr_click_lava','cr_shift_orijen','cr_shift_desert','cr_shift_lava','cr_assign_btn','cr_click_train',
+  'bst_click_desert','bst_shift_orijen','bst_assign_btn','bst_click_train',
+  'vp_click_route','vp_click_train'
+]);
+// True when a built route (≥1 segment) should drop STRAIGHT into the
+// SELECT-A-TRAIN state (no explicit ASSIGN-TO-TRAIN click), letting the player
+// click any train in the Trains panel to assign it. Suppressed during the
+// manual-assign tutorial phases and the single-planet "Route Train Here" flow.
+function _routeAutoAssign(){
+  return routeStops.length>=2 && !routeHerePending && !_TUT_MANUAL_ASSIGN_PHASES.has(_tutorialPhase);
+}
 let _routeHereResultOk=false;// true = green "ROUTE confirmed", false = red "Failed to find a viable ROUTE"
 let planetStarNameBounds=null;
 let starPanelPlanetBounds=[];
@@ -3509,7 +3640,7 @@ let stardate=829.00;
 // new-game; persists through saves so reloading a save at SD 829.5 doesn't
 // re-emit the earlier warnings.
 let _rivalCorpWarnTenth=0;
-let credits=250000;
+let credits=PLAYER_START_CREDITS;
 let corpName='Space Tycoon Corporation';
 let creditSnapshots=[]; // [{sd, cr}]
 let lastCreditSnapshotSd=829.00;
@@ -4019,24 +4150,7 @@ function drawTitleScreen(ts,dt){
   ctx.lineWidth=1.5;
   ctx.beginPath(); ctx.roundRect(_fsX,_fsY,_fsSz,_fsSz,5); ctx.fill(); ctx.stroke();
   ctx.globalAlpha=_fsBtnHover?1.0:0.78;
-  ctx.strokeStyle=_fsBtnHover?'#cfeaff':'#8cf';
-  ctx.lineWidth=2; ctx.lineCap='round'; ctx.lineJoin='round';
-  const _fcx=_fsX+_fsSz/2, _fcy=_fsY+_fsSz/2, _hh=8, _L=_hh*0.62;
-  ctx.beginPath();
-  if(!_isFullscreen()){
-    // EXPAND — brackets hug the four outer corners, arms point inward.
-    ctx.moveTo(_fcx-_hh,_fcy-_hh+_L); ctx.lineTo(_fcx-_hh,_fcy-_hh); ctx.lineTo(_fcx-_hh+_L,_fcy-_hh);
-    ctx.moveTo(_fcx+_hh-_L,_fcy-_hh); ctx.lineTo(_fcx+_hh,_fcy-_hh); ctx.lineTo(_fcx+_hh,_fcy-_hh+_L);
-    ctx.moveTo(_fcx-_hh,_fcy+_hh-_L); ctx.lineTo(_fcx-_hh,_fcy+_hh); ctx.lineTo(_fcx-_hh+_L,_fcy+_hh);
-    ctx.moveTo(_fcx+_hh-_L,_fcy+_hh); ctx.lineTo(_fcx+_hh,_fcy+_hh); ctx.lineTo(_fcx+_hh,_fcy+_hh-_L);
-  } else {
-    // COMPRESS — brackets pulled toward the centre, vertices face the corners.
-    ctx.moveTo(_fcx-_hh,_fcy-_hh+_L); ctx.lineTo(_fcx-_hh+_L,_fcy-_hh+_L); ctx.lineTo(_fcx-_hh+_L,_fcy-_hh);
-    ctx.moveTo(_fcx+_hh,_fcy-_hh+_L); ctx.lineTo(_fcx+_hh-_L,_fcy-_hh+_L); ctx.lineTo(_fcx+_hh-_L,_fcy-_hh);
-    ctx.moveTo(_fcx-_hh,_fcy+_hh-_L); ctx.lineTo(_fcx-_hh+_L,_fcy+_hh-_L); ctx.lineTo(_fcx-_hh+_L,_fcy+_hh);
-    ctx.moveTo(_fcx+_hh,_fcy+_hh-_L); ctx.lineTo(_fcx+_hh-_L,_fcy+_hh-_L); ctx.lineTo(_fcx+_hh-_L,_fcy+_hh);
-  }
-  ctx.stroke();
+  _drawFullscreenGlyph(_fsX+_fsSz/2,_fsY+_fsSz/2,8,_fsBtnHover?'#cfeaff':'#8cf',2);
   ctx.restore();
 }
 
@@ -5795,8 +5909,8 @@ function _doStartGame(){
   _corp.ceoSalary=_cho.ceoSalary; _corp.lastHireSD=null;
   _ceoHireCandidates=_csCeoOptions.filter((_,i)=>i!==_csSelectedCeo)
     .map(c=>{ const _r=CEO_ROSTER.find(r=>r.name===c.ceoName)||CEO_ROSTER[0]; return _genCeoCandidate(_r); });
-  // First-time entry to aiselect in this new-game flow → preselect Very Hard.
-  if(!_aiSelectSeen){ _aiDifficulty='very_hard'; _aiSelectSeen=true; }
+  // First-time entry to aiselect in this new-game flow → preselect Normal.
+  if(!_aiSelectSeen){ _aiDifficulty='normal'; _aiSelectSeen=true; }
   gs='aiselect';
 }
 function drawCorpSetup(ts){
@@ -5867,7 +5981,7 @@ function drawCorpSetup(ts){
   ctx.fillText('SELECT YOUR CEO:',_cspx+30,_cspy+145);
 
   // ── CEO cards ───────────────────────────────────────────────
-  const _cardW=242, _cardH=212, _cardGap=22;
+  const _cardW=242, _cardH=240, _cardGap=22; // +28 tall for the 3 labelled pill rows
   const _totalCW=3*_cardW+2*_cardGap;
   const _card0X=Math.round(W/2-_totalCW/2);
   const _cardY=_cspy+150;
@@ -5901,35 +6015,39 @@ function drawCorpSetup(ts){
     ctx.font='10px "Exo 2",sans-serif';
     ctx.fillStyle='rgba(148,175,238,0.70)';
     ctx.fillText(_ceoNickname(_ceo.primaryPerk),_cc,_pY+_pH+31);
-    // Salary pill — yellow (left) → orange (right) per position
-    const _salTxt='-'+_fmtCr(_ceo.ceoSalary)+' cr/S.D.';
-    ctx.font='11px "Exo 2",sans-serif';
-    const _salTW=ctx.measureText(_salTxt).width;
-    const _salPillW=_salTW+16;
-    const _salPX=Math.round(_cc-_salPillW/2);
-    const _salPY=_pY+_pH+50;
+    // Three labelled rows: a small all-caps header on the LEFT and a pill on
+    // the RIGHT (SALARY · ABILITY · STARTING CREDITS). The header column is
+    // left-aligned at the card padding; the pill is right-aligned to the card
+    // edge and truncated so it can never run under its header.
+    const _csRow=(rowCY,label,pillText,bg,tc)=>{
+      const _pad=14;
+      ctx.font='bold 7px Orbitron,sans-serif'; ctx.textAlign='left'; ctx.textBaseline='middle';
+      ctx.fillStyle='rgba(122,152,208,0.72)';
+      ctx.fillText(label,_cx+_pad,rowCY);
+      const _hdrW=ctx.measureText(label).width;
+      ctx.font='11px "Exo 2",sans-serif';
+      let _txt=pillText;
+      const _rightX=_cx+_cardW-_pad;
+      const _maxPillW=_rightX-(_cx+_pad+_hdrW+8);
+      let _pillW=ctx.measureText(_txt).width+14;
+      if(_pillW>_maxPillW){
+        while(_txt.length>2&&ctx.measureText(_txt).width+14>_maxPillW) _txt=_txt.slice(0,-1);
+        _txt=_txt.slice(0,-1)+'…'; _pillW=ctx.measureText(_txt).width+14;
+      }
+      const _pillX=_rightX-_pillW;
+      ctx.fillStyle=bg;
+      ctx.beginPath(); ctx.roundRect(_pillX,rowCY-10,_pillW,20,4); ctx.fill();
+      ctx.fillStyle=tc; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText(_txt,_pillX+_pillW/2,rowCY);
+      ctx.textBaseline='alphabetic'; ctx.textAlign='left';
+    };
     const _salBg =['rgba(85,72,8,0.68)','rgba(88,55,5,0.68)','rgba(88,36,4,0.68)'][ci];
     const _salTc =['rgba(255,230,50,0.97)','rgba(255,190,36,0.97)','rgba(255,138,22,0.97)'][ci];
-    ctx.fillStyle=_salBg;
-    ctx.beginPath(); ctx.roundRect(_salPX,_salPY-12,_salPillW,20,4); ctx.fill();
-    ctx.fillStyle=_salTc; ctx.textBaseline='middle';
-    ctx.fillText(_salTxt,_cc,_salPY-2); ctx.textBaseline='alphabetic';
-    // Perk pill (no separator line above — the salary/perk pill grouping
-    // reads cleanly on its own and the stray rule was visually noisy).
-    const _pkY=_pY+_pH+78;
-    if(_ceo.primaryPerk){
-      ctx.font='11px "Exo 2",sans-serif';
-      const _pkMaxW=_cardW-28;
-      let _lbl=_ceo.primaryPerk.label;
-      while(ctx.measureText(_lbl).width>_pkMaxW-12&&_lbl.length>4) _lbl=_lbl.slice(0,-1);
-      if(_lbl.length<_ceo.primaryPerk.label.length) _lbl+='…';
-      const _tw=ctx.measureText(_lbl).width;
-      const _pillW=Math.min(_pkMaxW,_tw+14);
-      ctx.fillStyle='rgba(22,42,105,0.65)';
-      ctx.beginPath(); ctx.roundRect(Math.round(_cc-_pillW/2),_pkY-12,_pillW,20,4); ctx.fill();
-      ctx.fillStyle='rgba(175,215,255,0.95)'; ctx.textAlign='center'; ctx.textBaseline='middle';
-      ctx.fillText(_lbl,_cc,_pkY-2); ctx.textBaseline='alphabetic';
-    }
+    _csRow(_pY+_pH+50,'SALARY','-'+_fmtCr(_ceo.ceoSalary)+' cr/S.D.',_salBg,_salTc);
+    _csRow(_pY+_pH+80,'ABILITY',_ceo.primaryPerk?_ceo.primaryPerk.label:'—','rgba(22,42,105,0.65)','rgba(175,215,255,0.95)');
+    // STARTING CREDITS — green pill, same for every CEO, wired to the actual
+    // amount the player starts a new game with (PLAYER_START_CREDITS).
+    _csRow(_pY+_pH+110,'STARTING CREDITS','+'+_fmtCr(PLAYER_START_CREDITS)+' cr','rgba(16,70,42,0.72)','rgba(120,240,165,0.97)');
     // Selected badge
     if(_isSel){
       ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='center';
@@ -5999,64 +6117,76 @@ function drawAISelect(ts){
   const _dselbord={none:'rgba(60,105,215,0.95)',very_easy:'rgba(55,180,85,0.95)',easy:'rgba(50,178,78,0.95)',normal:'rgba(175,168,20,0.95)',hard:'rgba(218,72,72,0.95)',very_hard:'rgba(115,115,155,0.85)'};
   // true = dark text (black), false = light text (white)
   const _ddark ={none:true,very_easy:true,easy:false,normal:true,hard:false,very_hard:false};
-  // Sprites centered on top-middle of each button (108×108 — 3× the original 36px size)
-  const _dsprite={very_easy:'car_flowers',easy:'car_water_tank',normal:'car_sand',hard:'car_ore',very_hard:'car_hazmat'};
-  const _spSz=108;
-  // Layout: button height increased to accommodate taller sprites
-  const _btnW=230,_btnH=96,_gap=52;
-  const _totalBW=3*_btnW+2*_gap,_b0X=Math.round(W/2-_totalBW/2);
-  // Extra top space so row-0 sprites (which hang _spSz/2 above the button) clear the divider
-  const _row0Y=_py+116,_row1Y=_row0Y+_btnH+_gap;
+  // Sprite per option. The GALAXY ENGINE now represents the solo / no-opponent
+  // choice; the others keep their cargo-car sprites.
+  const _dsprite={none:'engine_galaxy',very_easy:'car_flowers',easy:'car_water_tank',normal:'car_sand',hard:'car_ore',very_hard:'car_hazmat'};
+  // ── All 6 options in ONE row, left (No Opponent) → right (Very Hard) ──
+  // Button width is derived from the panel so all six fit with no horizontal
+  // overlap; sprite size and fonts shrink only as far as needed for that.
+  const _innerPad=44;
+  const _avail=_pw-_innerPad*2;
+  const _gap=Math.max(10,Math.round(_avail*0.014));
+  const _btnW=Math.floor((_avail-5*_gap)/6);
+  const _spSz=Math.min(96,Math.round(_btnW*0.84)); // sprite ≤ button so neighbours never touch
+  // Shrink the label font until the LONGEST label still fits the narrowest button.
+  let _lblPx=13;
+  const _maxLbl=()=>{let m=0;ctx.font='bold '+_lblPx+'px Orbitron,sans-serif';for(const d of _diffs){const w=ctx.measureText(_dlabels[d]).width;if(w>m)m=w;}return m;};
+  while(_lblPx>7&&_maxLbl()>_btnW-10) _lblPx--;
+  const _descPx=Math.max(8,_lblPx-3);
+  // Sprites are square-bundled, so drawn height ≈ width; lay text below the sprite.
+  const _sImg=imgs[_dsprite.normal];
+  const _spH=_sImg?Math.round(_spSz*_sImg.naturalHeight/_sImg.naturalWidth):_spSz;
+  // Tall enough for sprite-overhang + label + the worst-case wrapped description.
+  const _wrapCount=(text,maxW,px)=>{ctx.font=px+'px "Exo 2",sans-serif';const ws=text.split(' ');let l='',n=1;for(const w of ws){const t=l?l+' '+w:w;if(ctx.measureText(t).width<=maxW)l=t;else{n++;l=w;}}return n;};
+  let _maxDescLines=1; for(const d of _diffs){const n=_wrapCount(_ddescs[d],_btnW-14,_descPx);if(n>_maxDescLines)_maxDescLines=n;}
+  const _btnH=Math.round(_spH/2)+_lblPx+8+(_descPx+2)*_maxDescLines+12;
+  const _totalBW=6*_btnW+5*_gap,_b0X=Math.round(W/2-_totalBW/2);
+  // Vertically centre the whole cluster (incl. sprite overhang) below the divider.
+  const _areaTop=_py+72, _areaBot=H-90;
+  const _rowY=Math.round(_areaTop+_spH/2+Math.max(0,((_areaBot-_areaTop)-(_spH/2+_btnH))/2));
   _aiSelBounds=[];
-  [[0,['none','very_easy','easy']],[1,['normal','hard','very_hard']]].forEach(([ri,row])=>{
-    const rowY=ri===0?_row0Y:_row1Y;
-    row.forEach((diff,ci)=>{
-      const bx=_b0X+ci*(_btnW+_gap),by=rowY;
-      _aiSelBounds.push({x:bx,y:by,w:_btnW,h:_btnH,diff});
-      const isSel=_aiDifficulty===diff,isHov=_aiSelHover===diff;
-      // Button fill
-      ctx.fillStyle=isSel?_dsel[diff]:isHov?_dhov[diff]:_dbg[diff];
-      ctx.beginPath();ctx.roundRect(bx,by,_btnW,_btnH,7);ctx.fill();
-      // Border
-      ctx.strokeStyle=isSel?_dselbord[diff]:_dbord[diff];
-      ctx.lineWidth=isSel?2.5:1.2;ctx.beginPath();ctx.roundRect(bx,by,_btnW,_btnH,7);ctx.stroke();
-      // Text colors
-      const _tc =_ddark[diff]?'rgba(8,12,24,0.95)':'rgba(238,248,255,0.97)';
-      const _tcd=_ddark[diff]?'rgba(8,14,32,0.60)':'rgba(210,230,255,0.62)';
-      // Sprite buttons: push text below sprite bottom; no-sprite button: vertically centred
-      const _hasSprite=diff!=='none';
-      const _lblY=_hasSprite?by+_spSz/2+8:by+_btnH/2-2;
-      const _descY=_hasSprite?by+_spSz/2+22:by+_btnH/2+12;
-      ctx.textAlign='center';ctx.font='bold 12px Orbitron,sans-serif';
-      ctx.fillStyle=_tc;ctx.fillText(_dlabels[diff],bx+_btnW/2,_lblY);
-      ctx.font='10px "Exo 2",sans-serif';ctx.fillStyle=_tcd;
-      const _dw=_btnW-20,_dwds=_ddescs[diff].split(' ');
-      let _dc='',_dy=_descY;
-      for(const _dwd of _dwds){const _dt=_dc?_dc+' '+_dwd:_dwd;if(ctx.measureText(_dt).width<=_dw)_dc=_dt;else{if(_dc)ctx.fillText(_dc,bx+_btnW/2,_dy);_dc=_dwd;_dy+=12;}}
-      if(_dc)ctx.fillText(_dc,bx+_btnW/2,_dy);
-      // Large white corner checkmark — bleeds off upper-right corner of box
-      if(isSel){
-        ctx.save();
-        ctx.font='bold 72px Orbitron,sans-serif'; ctx.textAlign='right'; ctx.textBaseline='top';
-        ctx.shadowColor='rgba(0,0,0,0.55)'; ctx.shadowBlur=8;
-        ctx.fillStyle='rgba(255,255,255,0.95)';
-        ctx.fillText('✓',bx+_btnW+18,by-18);
-        ctx.textBaseline='alphabetic'; ctx.restore();
-      }
-      // Sprite: centered horizontally on the button, vertically centred on the button's top edge.
-      // Always render at the game's intended CAR_W:CAR_H ratio (112:80 = 1.4:1) so the car
-      // looks exactly as it does in the train view — not squished by its PNG's natural dimensions.
-      if(_hasSprite&&imgs[_dsprite[diff]]){
-        const _img=imgs[_dsprite[diff]];
-        const _spW=_spSz;
-        const _spH=Math.round(_spSz*_img.naturalHeight/_img.naturalWidth);
-        const _spX=bx+_btnW/2-_spW/2, _spY=by-_spH/2;
-        ctx.save();
-        ctx.shadowColor='rgba(0,0,0,0.70)';ctx.shadowBlur=7;
-        ctx.drawImage(_img,_spX,_spY,_spW,_spH);
-        ctx.restore();
-      }
-    });
+  _diffs.forEach((diff,ci)=>{
+    const bx=_b0X+ci*(_btnW+_gap),by=_rowY;
+    _aiSelBounds.push({x:bx,y:by,w:_btnW,h:_btnH,diff});
+    const isSel=_aiDifficulty===diff,isHov=_aiSelHover===diff;
+    // Button fill + border
+    ctx.fillStyle=isSel?_dsel[diff]:isHov?_dhov[diff]:_dbg[diff];
+    ctx.beginPath();ctx.roundRect(bx,by,_btnW,_btnH,7);ctx.fill();
+    ctx.strokeStyle=isSel?_dselbord[diff]:_dbord[diff];
+    ctx.lineWidth=isSel?2.5:1.2;ctx.beginPath();ctx.roundRect(bx,by,_btnW,_btnH,7);ctx.stroke();
+    // Text colors
+    const _tc =_ddark[diff]?'rgba(8,12,24,0.95)':'rgba(238,248,255,0.97)';
+    const _tcd=_ddark[diff]?'rgba(8,14,32,0.60)':'rgba(210,230,255,0.62)';
+    // Label below the sprite; description wrapped beneath it.
+    const _lblY=by+Math.round(_spH/2)+_lblPx+4;
+    const _descY=_lblY+_descPx+6;
+    ctx.textAlign='center';ctx.font='bold '+_lblPx+'px Orbitron,sans-serif';
+    ctx.fillStyle=_tc;ctx.fillText(_dlabels[diff],bx+_btnW/2,_lblY);
+    ctx.font=_descPx+'px "Exo 2",sans-serif';ctx.fillStyle=_tcd;
+    const _dw=_btnW-14,_dwds=_ddescs[diff].split(' ');
+    let _dc='',_dy=_descY;
+    for(const _dwd of _dwds){const _dt=_dc?_dc+' '+_dwd:_dwd;if(ctx.measureText(_dt).width<=_dw)_dc=_dt;else{if(_dc)ctx.fillText(_dc,bx+_btnW/2,_dy);_dc=_dwd;_dy+=_descPx+2;}}
+    if(_dc)ctx.fillText(_dc,bx+_btnW/2,_dy);
+    // Selected checkmark — scaled to the button, bleeds just off the top-right corner.
+    if(isSel){
+      const _ckPx=Math.round(Math.min(60,_btnW*0.5));
+      ctx.save();
+      ctx.font='bold '+_ckPx+'px Orbitron,sans-serif'; ctx.textAlign='right'; ctx.textBaseline='top';
+      ctx.shadowColor='rgba(0,0,0,0.55)'; ctx.shadowBlur=8;
+      ctx.fillStyle='rgba(255,255,255,0.95)';
+      ctx.fillText('✓',bx+_btnW+5,by-Math.round(_ckPx*0.22));
+      ctx.textBaseline='alphabetic'; ctx.restore();
+    }
+    // Sprite — centered on the button's top edge (square-bundle natural ratio).
+    if(imgs[_dsprite[diff]]){
+      const _img=imgs[_dsprite[diff]];
+      const _spW=_spSz, _spHh=Math.round(_spSz*_img.naturalHeight/_img.naturalWidth);
+      const _spX=bx+_btnW/2-_spW/2, _spY=by-_spHh/2;
+      ctx.save();
+      ctx.shadowColor='rgba(0,0,0,0.70)';ctx.shadowBlur=7;
+      ctx.drawImage(_img,_spX,_spY,_spW,_spHh);
+      ctx.restore();
+    }
   });
   // Start Game — lower right, bleeds below panel (like NEXT on corp setup)
   const _cbW=190,_cbH=36,_cbX=W-_cbW-32,_cbY=H-_cbH-28;
@@ -7191,9 +7321,12 @@ function _processCargoQueue(t, p){
         const src=t.carCargoSource?.[i]!=null?galaxy.planets[t.carCargoSource[i]]:null;
         // First-ever player cargo unloaded at this planet → queue the
         // "First Delivery" popup (captures the car type + cargo + S.D.).
+        // Suppressed for the three Gigi-Prime tutorial planets (ORIJEN, the home
+        // LAVA PLANET and DESERT PLANET) — those deliveries are part of the guided
+        // intro and a popup there would interrupt the tutorial flow.
         if(t.isPlayer && !p._firstPlayerDelivery){
           p._firstPlayerDelivery=true;
-          pendingFirstDeliveries.push({planetId:p.id, cargo, carType:t.cars[i], sd:stardate});
+          if(!_isHomeTutorialPlanet(p)) pendingFirstDeliveries.push({planetId:p.id, cargo, carType:t.cars[i], sd:stardate});
         }
         const rev=computeCargoRevenue(t.cars[i],cargo,p,src);
         if(t.isPlayer) credits+=rev; else if(_aiCorp){_aiCorp.credits+=rev;_aiCorp.totalRevenue+=rev;}
@@ -7215,6 +7348,9 @@ function _processCargoQueue(t, p){
         const _cUU=CAR_CARGO_UNITS[t.cars[i]]||1.0;
         if(t.carUnitsUnloaded) t.carUnitsUnloaded[i]=(t.carUnitsUnloaded[i]||0)+_cUU;
         if(cargo==='iron')      p.ironDelivered     =(p.ironDelivered     ||0)+_cUU;
+        // Latch: the player delivered iron to a NON-desert planet (used to skip
+        // the buy_second_train intro — they've already learned this loop).
+        if(cargo==='iron' && t.isPlayer && p.type && p.type.id!=='desert') _ironDeliveredToNonDesert=true;
         // buy_second_train obj 4: count IRON loaded from a DESERT planet that
         // gets delivered to ORIJEN. Player-only; ignores AI deliveries.
         if(cargo==='iron' && t.isPlayer && galaxy && p.id===galaxy.origenId && src && src.type && src.type.id==='desert'){
@@ -13838,10 +13974,10 @@ function updateFoundries(dtG){
           // diversity tally counts it as a unique cargo type at this planet.
           if(!p.devLog) p.devLog=[];
           p.devLog.push({sd:stardate, value:DEV_CARGO_VALUES.iron||100, cargo:'iron'});
-          if(!_ironCarUnlocked){ _ironCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_iron',displayName:'Iron Car'}); _chatMsg('IRON CAR UNLOCKED','rgba(200,210,235,1)'); _ga('car_unlocked',{car_type:'iron', cargo:'iron', sd:Math.floor(stardate)}); }
+          if(!_ironCarUnlocked){ _ironCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_iron',displayName:'Iron Car',planetId:p.id}); _chatMsg('IRON CAR UNLOCKED','rgba(200,210,235,1)'); _ga('car_unlocked',{car_type:'iron', cargo:'iron', sd:Math.floor(stardate)}); }
           p.supply.hazmat=Math.min(CARGO_MAX_SUPPLY,(p.supply.hazmat||0)+0.5);
           _fd.hazmatTotal=(_fd.hazmatTotal||0)+0.5; // cumulative produced, unaffected by consumption
-          if(!_hazmatCarUnlocked&&_fd.hazmatTotal>=1){ _hazmatCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_hazmat',displayName:'Hazmat Car'}); _chatMsg('HAZMAT CAR UNLOCKED','rgba(255,165,40,1)'); _ga('car_unlocked',{car_type:'hazmat', cargo:'hazmat', sd:Math.floor(stardate)}); }
+          if(!_hazmatCarUnlocked&&_fd.hazmatTotal>=1){ _hazmatCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_hazmat',displayName:'Hazmat Car',planetId:p.id}); _chatMsg('HAZMAT CAR UNLOCKED','rgba(255,165,40,1)'); _ga('car_unlocked',{car_type:'hazmat', cargo:'hazmat', sd:Math.floor(stardate)}); }
         }
       } else if((_fd.ore||0)>=1&&(_fd.water||0)>=1){
         _fd.progress=FOUNDRY_PROD_TIME;
@@ -13879,7 +14015,7 @@ function updateFoundries(dtG){
           }
           if(!_steelCarUnlocked){
             _steelCarUnlocked=true;
-            pendingCarUnlocks.push({sprite:'car_steel',displayName:'Steel Car'});
+            pendingCarUnlocks.push({sprite:'car_steel',displayName:'Steel Car',planetId:p.id});
             _chatMsg('STEEL CAR UNLOCKED','rgba(220,230,245,1)');
             _ga('car_unlocked',{car_type:'steel', cargo:'steel', sd:Math.floor(stardate)});
             // NOTE: the "Designing a better space train" 10-second intro
@@ -13896,7 +14032,7 @@ function updateFoundries(dtG){
           _bf.hazmatTotal=(_bf.hazmatTotal||0)+0.5;
           if(!_hazmatCarUnlocked&&_bf.hazmatTotal>=1){
             _hazmatCarUnlocked=true;
-            pendingCarUnlocks.push({sprite:'car_hazmat',displayName:'Hazmat Car'});
+            pendingCarUnlocks.push({sprite:'car_hazmat',displayName:'Hazmat Car',planetId:p.id});
             _chatMsg('HAZMAT CAR UNLOCKED','rgba(255,165,40,1)');
             _ga('car_unlocked',{car_type:'hazmat', cargo:'hazmat', sd:Math.floor(stardate)});
           }
@@ -13920,10 +14056,10 @@ function updateFoundries(dtG){
           _gw.chemical=Math.max(0,(_gw.chemical||0)-1);
           p.supply.glass  =Math.min(CARGO_MAX_SUPPLY,(p.supply.glass||0)+1);
           p.glassDelivered=(p.glassDelivered||0)+1;
-          if(!_glassCarUnlocked){ _glassCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_glass',displayName:'Glass Car'}); _chatMsg('GLASS CAR UNLOCKED','rgba(170,230,210,1)'); _ga('car_unlocked',{car_type:'glass', cargo:'glass', sd:Math.floor(stardate)}); }
+          if(!_glassCarUnlocked){ _glassCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_glass',displayName:'Glass Car',planetId:p.id}); _chatMsg('GLASS CAR UNLOCKED','rgba(170,230,210,1)'); _ga('car_unlocked',{car_type:'glass', cargo:'glass', sd:Math.floor(stardate)}); }
           // Industrial chain reaction: first glass produced also unlocks the
           // Machinery Car (which gets manufactured by Factories on urban planets).
-          if(!_machineryCarUnlocked){ _machineryCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_machinery',displayName:'Machinery Car'}); _chatMsg('MACHINERY CAR UNLOCKED','rgba(200,200,170,1)'); _ga('car_unlocked',{car_type:'machinery', cargo:'machinery', sd:Math.floor(stardate)}); }
+          if(!_machineryCarUnlocked){ _machineryCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_machinery',displayName:'Machinery Car',planetId:p.id}); _chatMsg('MACHINERY CAR UNLOCKED','rgba(200,200,170,1)'); _ga('car_unlocked',{car_type:'machinery', cargo:'machinery', sd:Math.floor(stardate)}); }
         }
       } else if((_gw.sand||0)>=1&&(_gw.chemical||0)>=1){
         _gw.progress=FOUNDRY_PROD_TIME;
@@ -13944,7 +14080,7 @@ function updateFoundries(dtG){
           p.machineryDelivered=(p.machineryDelivered||0)+1;
           // Safety net: in the unlikely case a factory produces machinery
           // before any glassworks has fired, unlock the Machinery Car here too.
-          if(!_machineryCarUnlocked){ _machineryCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_machinery',displayName:'Machinery Car'}); _chatMsg('MACHINERY CAR UNLOCKED','rgba(200,200,170,1)'); _ga('car_unlocked',{car_type:'machinery', cargo:'machinery', sd:Math.floor(stardate)}); }
+          if(!_machineryCarUnlocked){ _machineryCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_machinery',displayName:'Machinery Car',planetId:p.id}); _chatMsg('MACHINERY CAR UNLOCKED','rgba(200,200,170,1)'); _ga('car_unlocked',{car_type:'machinery', cargo:'machinery', sd:Math.floor(stardate)}); }
           // Hazmat byproduct: each machinery unit also produces 0.5 hazmat —
           // metal-shop chemical solvents, oil sludge, and assembly-line waste.
           // Mirrors the foundry (iron→0.5 hazmat) and blast-furnace
@@ -13954,7 +14090,7 @@ function updateFoundries(dtG){
           _ft.hazmatTotal=(_ft.hazmatTotal||0)+0.5;
           if(!_hazmatCarUnlocked&&_ft.hazmatTotal>=1){
             _hazmatCarUnlocked=true;
-            pendingCarUnlocks.push({sprite:'car_hazmat',displayName:'Hazmat Car'});
+            pendingCarUnlocks.push({sprite:'car_hazmat',displayName:'Hazmat Car',planetId:p.id});
             _chatMsg('HAZMAT CAR UNLOCKED','rgba(255,165,40,1)');
             _ga('car_unlocked',{car_type:'hazmat', cargo:'hazmat', sd:Math.floor(stardate)});
           }
@@ -13976,7 +14112,7 @@ function updateFoundries(dtG){
           _anyCargoProduced=true; // one-shot flag for galaxy-wide cargo demand
           if(!_cargoCarUnlocked){
             _cargoCarUnlocked=true;
-            pendingCarUnlocks.push({sprite:'car_cargo',displayName:'Cargo Car'});
+            pendingCarUnlocks.push({sprite:'car_cargo',displayName:'Cargo Car',planetId:p.id});
             _chatMsg('CARGO CAR UNLOCKED','rgba(200,170,120,1)');
             _ga('car_unlocked',{car_type:'cargo', cargo:'cargo', sd:Math.floor(stardate)});
           }
@@ -13997,7 +14133,7 @@ function updateFoundries(dtG){
           _anyCargoProduced=true;
           if(!_cargoCarUnlocked){
             _cargoCarUnlocked=true;
-            pendingCarUnlocks.push({sprite:'car_cargo',displayName:'Cargo Car'});
+            pendingCarUnlocks.push({sprite:'car_cargo',displayName:'Cargo Car',planetId:p.id});
             _chatMsg('CARGO CAR UNLOCKED','rgba(200,170,120,1)');
             _ga('car_unlocked',{car_type:'cargo', cargo:'cargo', sd:Math.floor(stardate)});
           }
@@ -15666,7 +15802,7 @@ function trackVisit(pid){
     if(_tp.isFlowersOrigin){
       if(!_flowersCarUnlocked){
         _flowersCarUnlocked=true;
-        pendingCarUnlocks.push({sprite:'car_flowers',displayName:'Flowers Car'});
+        pendingCarUnlocks.push({sprite:'car_flowers',displayName:'Flowers Car',planetId:_tp.id});
         _chatMsg('FLOWERS CAR UNLOCKED!','rgba(255,160,210,1)');
         _newsLog('flowers_discovered',{pln:_tp.name,plnId:_tp.id});
         _ga('car_unlocked',{car_type:'flowers', cargo:'flowers', sd:Math.floor(stardate)});
@@ -15678,7 +15814,7 @@ function trackVisit(pid){
     // Jungle visit: unlock Medical Supplies car + trigger Outbreak mission if this is the outbreak planet
     if(_bio==='jungle'&&!_medicalCarUnlocked){
       _medicalCarUnlocked=true;
-      pendingCarUnlocks.push({sprite:'car_medical',displayName:'Medical Supplies Car'});
+      pendingCarUnlocks.push({sprite:'car_medical',displayName:'Medical Supplies Car',planetId:_tp.id});
       _chatMsg('MEDICAL SUPPLIES CAR UNLOCKED!','rgba(80,230,180,1)');
       _ga('car_unlocked',{car_type:'medical', cargo:'medical', sd:Math.floor(stardate)});
     }
@@ -15697,7 +15833,7 @@ function trackVisit(pid){
     if(_bioUnlockMsg && galaxy.planets.filter(p=>visitedPlanetIds.has(p.id)&&p.type.id===_bio).length===1){
       _chatMsg(_bioUnlockMsg,'rgba(80,230,130,1)');
       if(_bioUnlockCar){
-        pendingCarUnlocks.push(_bioUnlockCar);
+        pendingCarUnlocks.push({..._bioUnlockCar,planetId:_tp.id});
         // Biome-first-visit car unlocks. Map sprite → (car_type, cargo) for
         // consistent param values across all car_unlocked events.
         const _bioCargo={
@@ -15718,19 +15854,19 @@ function trackVisit(pid){
       const _ups=_tp.upgrades||[];
       if(_ups.includes('granary')&&!_grainCarUnlocked){
         _grainCarUnlocked=true;
-        pendingCarUnlocks.push({sprite:'car_grain',displayName:'Grain Car'});
+        pendingCarUnlocks.push({sprite:'car_grain',displayName:'Grain Car',planetId:_tp.id});
         _chatMsg('GRAIN CAR UNLOCKED','rgba(80,230,130,1)');
         _ga('car_unlocked',{car_type:'grain', cargo:'grain', sd:Math.floor(stardate)});
       }
       if(_ups.includes('farm')&&!_livestockCarUnlocked){
         _livestockCarUnlocked=true;
-        pendingCarUnlocks.push({sprite:'car_livestock',displayName:'Livestock Car'});
+        pendingCarUnlocks.push({sprite:'car_livestock',displayName:'Livestock Car',planetId:_tp.id});
         _chatMsg('LIVESTOCK CAR UNLOCKED','rgba(80,230,130,1)');
         _ga('car_unlocked',{car_type:'livestock', cargo:'livestock', sd:Math.floor(stardate)});
       }
       if(_ups.includes('orchard')&&!_fruitCarUnlocked){
         _fruitCarUnlocked=true;
-        pendingCarUnlocks.push({sprite:'car_fruit',displayName:'Fruit Car'});
+        pendingCarUnlocks.push({sprite:'car_fruit',displayName:'Fruit Car',planetId:_tp.id});
         _chatMsg('FRUIT CAR UNLOCKED','rgba(80,230,130,1)');
         _ga('car_unlocked',{car_type:'fruit', cargo:'fruit', sd:Math.floor(stardate)});
       }
@@ -18901,7 +19037,7 @@ function _drawTutorialChain(stage){
   // their initializer runs — calling them earlier throws ReferenceError and
   // takes the rest of drawGalaxy down with it.)
   if(_tutorialPhase==='pre_zoom'){
-    if(_elapsed>=2000){ _tutorialPhase='look_around'; _tutorialPhaseStartMs=_now; _tutorialFadeOutStartMs=0; _orijenTutCentered=false; _crOrijenFramed=false; _lavaDetailsWasOpen=false; _lavaClosedTimerMs=0; }
+    if(_elapsed>=2000){ _tutorialPhase='look_around'; _tutorialPhaseStartMs=_now; _tutorialFadeOutStartMs=0; _orijenTutCentered=false; _crOrijenFramed=false; _lavaDetailsWasOpen=false; _lavaClosedTimerMs=0; _orijenClosedTutMs=0; }
     return;
   }
   // ── Helpers ──────────────────────────────────────────────
@@ -19184,31 +19320,15 @@ function _drawTutorialChain(stage){
   // persist until the popup closes, then hand off to the lava double_click.
   if(_tutorialPhase==='orijen_details'){
     const _open=(activePopup==='planet'&&popupState.planet&&galaxy.origenId!=null&&popupState.planet.id===galaxy.origenId);
-    if(_tutorialFadeOutStartMs===0 && !_open) _tutorialFadeOutStartMs=_now; // popup closed → fade out
+    // Popup closed → fade out AND arm the create_route intro (fires 1.5 s later).
+    if(_tutorialFadeOutStartMs===0 && !_open){ _tutorialFadeOutStartMs=_now; if(_orijenClosedTutMs===0) _orijenClosedTutMs=_now; }
     const r=_resolveAlpha();
     if(r.advanced){
-      // Re-frame so Orijen + the lava planet + the centre of Gigi Prime are all
-      // visible (with a small buffer) for the upcoming double_click step.
-      const _ori=galaxy.origenId!=null?galaxy.planets[galaxy.origenId]:null;
-      const _lp=galaxy.planets[_tutorialLavaPlanetId];
-      const _gStar=galaxy.stars[galaxy.homeStarId];
-      if(_ori&&_lp&&_gStar){
-        const _oR=_ori.radius||30, _lR=_lp.radius||30, _buf=500;
-        const _xMin=Math.min(_ori.x-_oR,_lp.x-_lR,_gStar.x)-_buf;
-        const _xMax=Math.max(_ori.x+_oR,_lp.x+_lR,_gStar.x)+_buf;
-        const _yMin=Math.min(_ori.y-_oR,_lp.y-_lR,_gStar.y)-_buf;
-        const _yMax=Math.max(_ori.y+_oR,_lp.y+_lR,_gStar.y)+_buf;
-        const _vpW=W-PANEL_W, _vpH=GH-TOP_H;
-        const _scale=Math.max(MIN_SC,Math.min(MAX_SC,Math.min(_vpW/(_xMax-_xMin),_vpH/(_yMax-_yMin))));
-        cam.scale=_scale;
-        // Centre the bbox midpoint in the VISIBLE area (offset for the right
-        // panel in x and the top bar in y).
-        cam.x=(_xMin+_xMax)/2 + PANEL_W/(2*_scale);
-        cam.y=(_yMin+_yMax)/2 - TOP_H/(2*_scale);
-        tracking=false;
-        if(typeof clampCamera==='function') clampCamera();
-      }
-      _advanceTo('double_click'); return;
+      // Reordered: the create_route mission is now introduced FIRST (1.5 s after
+      // the Orijen window closes — see the updateMissions gate), BEFORE the lava-
+      // station walkthrough. Hand off to cr_pending_accept; the lava re-frame +
+      // double-click step run only AFTER the mission is accepted.
+      _advanceTo('cr_pending_accept'); return;
     }
     // (3) STATION upgrade card — box + bubble (shown immediately).
     const _sc=popupState._stationCardBounds;
@@ -19282,9 +19402,10 @@ function _drawTutorialChain(stage){
     // Fade out ONLY when the player closes the details window (no timeout).
     if(_tutorialFadeOutStartMs===0 && !_popupOpen) _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
-    // Reordered: the create_route mission is now introduced + accepted BEFORE
-    // the customise-a-train walkthrough. Hand off to cr_pending_accept.
-    if(r.advanced){ _advanceTo('cr_pending_accept'); return; }
+    // The create_route mission was already introduced + accepted earlier (right
+    // after the Orijen window closed). After the lava station + supply/demand
+    // walkthrough, hand off to the customise-a-train chain.
+    if(r.advanced){ _advanceTo('select_train'); return; }
     if(_popupOpen&&popupState.supplyDemandPanelBounds){
       const _b=popupState.supplyDemandPanelBounds;
       _drawHighlightBox(_b.x,_b.y,_b.w,_b.h,r.alpha,3);
@@ -19361,13 +19482,34 @@ function _drawTutorialChain(stage){
     return;
   }
   // ── Phase: cr_pending_accept ───────────────────────────────
-  // After the Lava details window closes, the create_route ("Create a
-  // profitable train route") mission is introduced (see updateMissions). No
-  // rendering here — just wait for the player to ACCEPT it, then run the
-  // customise-a-train walkthrough (select_train). If it's somehow already
-  // completed, jump straight to the all_done poll.
+  // Reached right after the ORIJEN details window closes (+1.5 s). The create_route
+  // ("Create a profitable train route") mission is introduced here (see
+  // updateMissions). No rendering — just wait for the player to ACCEPT it, then run
+  // the lava double-click / build-station walkthrough (double_click). If it's
+  // somehow already completed, jump straight to the all_done poll.
   if(_tutorialPhase==='cr_pending_accept'){
-    if(missions.some(m=>m.id==='create_route'&&m.status==='active')) _advanceTo('select_train');
+    if(missions.some(m=>m.id==='create_route'&&m.status==='active')){
+      // Mission accepted → NOW re-frame Orijen + lava + Gigi Prime centre and run
+      // the lava double-click / build-station walkthrough.
+      const _ori=galaxy.origenId!=null?galaxy.planets[galaxy.origenId]:null;
+      const _lp=galaxy.planets[_tutorialLavaPlanetId];
+      const _gStar=galaxy.stars[galaxy.homeStarId];
+      if(_ori&&_lp&&_gStar){
+        const _oR=_ori.radius||30, _lR=_lp.radius||30, _buf=500;
+        const _xMin=Math.min(_ori.x-_oR,_lp.x-_lR,_gStar.x)-_buf;
+        const _xMax=Math.max(_ori.x+_oR,_lp.x+_lR,_gStar.x)+_buf;
+        const _yMin=Math.min(_ori.y-_oR,_lp.y-_lR,_gStar.y)-_buf;
+        const _yMax=Math.max(_ori.y+_oR,_lp.y+_lR,_gStar.y)+_buf;
+        const _vpW=W-PANEL_W, _vpH=GH-TOP_H;
+        const _scale=Math.max(MIN_SC,Math.min(MAX_SC,Math.min(_vpW/(_xMax-_xMin),_vpH/(_yMax-_yMin))));
+        cam.scale=_scale;
+        cam.x=(_xMin+_xMax)/2 + PANEL_W/(2*_scale);
+        cam.y=(_yMin+_yMax)/2 - TOP_H/(2*_scale);
+        tracking=false;
+        if(typeof clampCamera==='function') clampCamera();
+      }
+      _advanceTo('double_click');
+    }
     else if(missions.some(m=>m.id==='create_route'&&m.status==='completed')){
       _tutorialPhase='all_done'; if(!_crTutorialDoneMs) _crTutorialDoneMs=_now;
     }
@@ -20417,30 +20559,33 @@ function updateMissions(dtSd){
     const _totalHazProd=galaxy.planets.reduce((s,p)=>s+((p.upgradeData?.iron_foundry?.hazmatTotal)||0),0);
     if(_totalHazProd>=2.0) pendingMissionIntros.push({defId:'dispose_hazmat',readySd:stardate});
   }
-  // create_route intro: QUEUED the moment the player builds a STATION on the
-  // home-system LAVA PLANET (Gigi Prime). The intro-gate then shows the popup as
-  // soon as no window is open (i.e. when the player closes the lava details).
-  // The cr_pending_accept phase waits for the accept before the train-builder
-  // walkthrough. (Replaces the old open+close-the-window timer, which fired far
-  // too late.)
+  // create_route intro: now introduced FIRST in the chain — 1.5 s after the player
+  // closes the ORIJEN details window (the lava-station walkthrough follows the
+  // accept). The lava-station-built condition is kept as a safety fallback in case
+  // the close timer never armed.
   {
     const _crLava=(galaxy && _tutorialLavaPlanetId>=0)?galaxy.planets[_tutorialLavaPlanetId]:null;
-    if(_crLava && _crLava.playerBuiltStation
+    const _orijenCloseReady=(_orijenClosedTutMs>0 && Date.now()-_orijenClosedTutMs>=1500);
+    if((_orijenCloseReady || (_crLava && _crLava.playerBuiltStation))
        && !_missionPending('create_route') && !missions.some(mx=>mx.id==='create_route'&&mx.status==='completed')){
       pendingMissionIntros.push({defId:'create_route',readySd:stardate});
     }
   }
-  // upgrade_station intro: 10 real-time seconds after buy_second_train completes
-  if(_buyTrainCompletedMs>0&&Date.now()-_buyTrainCompletedMs>=10000&&!_missionPending('upgrade_station')){
+  // Stamp the IRON CAR unlock time (one-shot), robust to wherever it unlocks.
+  if(_ironCarUnlocked && _ironCarUnlockedMs===0) _ironCarUnlockedMs=Date.now();
+  // upgrade_station intro: 10 real-time seconds after the IRON CAR unlocks.
+  if(_ironCarUnlockedMs>0&&Date.now()-_ironCarUnlockedMs>=10000&&!_missionPending('upgrade_station')){
     pendingMissionIntros.push({defId:'upgrade_station',readySd:stardate});
   }
   // (visit_planet mission removed — its game-start held-back intro is gone.
   //  create_route is introduced via the Lava-details open+close gate above.)
-  // buy_second_train intro: 10 real-time seconds after the produce_iron
-  // ("Make Iron") mission completes. Only introduced if the player still
-  // has fewer than 2 player trains at that point.
-  if(_produceIronTimerMs>0&&Date.now()-_produceIronTimerMs>=10000&&!_missionPending('buy_second_train')&&!missions.some(mx=>mx.id==='buy_second_train'&&mx.status==='completed')){
-    if(trains.filter(t=>t.isPlayer).length<2){
+  // buy_second_train ("Buy an Iron-delivery Train") intro: at least 10 real-time
+  // seconds after produce_iron completes AND not before S.D. 832.1. If, by the
+  // time the gate opens, the player has ALREADY delivered iron to a non-desert
+  // planet, skip the mission entirely. (upgrade_station no longer depends on this
+  // mission — it's gated on the Iron Car unlock — so skipping it breaks nothing.)
+  if(_produceIronTimerMs>0&&Date.now()-_produceIronTimerMs>=10000&&stardate>=832.1&&!_missionPending('buy_second_train')&&!missions.some(mx=>mx.id==='buy_second_train')){
+    if(!_ironDeliveredToNonDesert && trains.filter(t=>t.isPlayer).length<2){
       pendingMissionIntros.push({defId:'buy_second_train',readySd:stardate});
     }
   }
@@ -20671,7 +20816,7 @@ function updateMissions(dtSd){
       if(m.id==='research_royal_car'&&!_royalCarUnlocked){
         _royalCarUnlocked=true;
         _ga('car_unlocked',{car_type:'royal', cargo:'royal', sd:Math.floor(stardate)});
-        pendingCarUnlocks.push({sprite:'car_royal',displayName:'Royal Car'});
+        pendingCarUnlocks.push({sprite:'car_royal',displayName:'Royal Car',planetId:m.targetPlanetId});
         _chatMsg('ROYAL CAR UNLOCKED','rgba(220,170,255,1)');
       }
       // Designing a better space train: unlock Class J and Class R engines.
@@ -21281,7 +21426,7 @@ function drawOptionsPopup(){
   // (Add Credits, Flower Planet, Colony Planet, Rival) AND the Fog of War
   // toggle all live in the hidden Cheats popup accessed by pressing 'C' while
   // Options is open.
-  const pw=300, ph=332; // +12 vs prior 320 to fit the 'a.o.huge' artist credit under the track title
+  const pw=300, ph=362; // +30 vs prior 332 to fit the FULLSCREEN row above Autosave
   const [px,py]=drawPopupBase(pw,ph,'rgba(80,160,255,0.7)');
   ctx.save();
   ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
@@ -21329,8 +21474,28 @@ function drawOptionsPopup(){
   // Divider after the two top buttons
   ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(px,py+124); ctx.lineTo(px+pw,py+124); ctx.stroke();
-  // Autosave row — pushed down to make room for the new SAVE GAME button.
-  const ry=py+154;
+  // ── FULLSCREEN row (thin — no subtitle) ─────────────────────
+  // Label + the same bracket toggle button as the title screen. Enters / exits
+  // browser fullscreen (F11 equivalent); the glyph reflects the current state.
+  {
+    const _fsRowY=py+150; // label baseline
+    ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
+    ctx.fillStyle='rgba(160,200,255,0.9)'; ctx.fillText('Fullscreen',px+18,_fsRowY);
+    const _ofsSz=24, _ofsX=px+pw-18-_ofsSz, _ofsY=_fsRowY-19;
+    const _ofsHov=!!popupState.optionsFullscreenHover;
+    ctx.save();
+    ctx.globalAlpha=_ofsHov?0.95:0.75;
+    ctx.fillStyle='rgba(20,40,80,0.85)';
+    ctx.strokeStyle=_ofsHov?'rgba(120,200,255,0.9)':'rgba(60,120,200,0.55)';
+    ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.roundRect(_ofsX,_ofsY,_ofsSz,_ofsSz,4); ctx.fill(); ctx.stroke();
+    ctx.globalAlpha=_ofsHov?1.0:0.85;
+    _drawFullscreenGlyph(_ofsX+_ofsSz/2,_ofsY+_ofsSz/2,6,_ofsHov?'#cfeaff':'#8cf',2);
+    ctx.restore();
+    popupState.optionsFullscreenBtnBounds={x:_ofsX,y:_ofsY,w:_ofsSz,h:_ofsSz};
+  }
+  // Autosave row — pushed down (+30) to make room for the FULLSCREEN row above.
+  const ry=py+184;
   ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
   ctx.fillStyle='rgba(160,200,255,0.9)'; ctx.fillText('Autosave',px+18,ry);
   ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,130,180,0.5)';
@@ -21346,13 +21511,13 @@ function drawOptionsPopup(){
   popupState.autosaveToggleBounds={x:asTX,y:asTT,w:asTW,h:asTH};
   // Divider before Mission Objectives Tracker
   ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.moveTo(px,py+191); ctx.lineTo(px+pw,py+191); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(px,py+221); ctx.lineTo(px+pw,py+221); ctx.stroke();
   // Fog toggle has moved to the Cheats popup — clear its bounds so the
   // Options-popup click branch can't hit a stale rectangle from a previous
   // frame's render.
   popupState.fogToggleBounds=null;
   // Mission Objectives Tracker row
-  const ry7=py+221;
+  const ry7=py+251;
   ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
   ctx.fillStyle='rgba(160,200,255,0.9)'; ctx.fillText('Mission Objectives Tracker',px+18,ry7);
   ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,130,180,0.5)';
@@ -21372,14 +21537,14 @@ function drawOptionsPopup(){
   // here. Mute shares state with the title-screen + intro-cutscene mute buttons.
   {
     ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
-    ctx.beginPath(); ctx.moveTo(px,py+253); ctx.lineTo(px+pw,py+253); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(px,py+283); ctx.lineTo(px+pw,py+283); ctx.stroke();
     // Section label, centered + same color as the OPTIONS header at the top.
     ctx.textAlign='center'; ctx.font='bold 11px Orbitron,sans-serif';
-    ctx.fillStyle='#4af'; ctx.fillText('MUSIC',px+pw/2,py+270);
+    ctx.fillStyle='#4af'; ctx.fillText('MUSIC',px+pw/2,py+300);
     // Control row geometry: mute + prev (each 22×22) on the left, bar centered,
     // next (22×22) on the right. Match the rounded-square style of the
     // title-screen mute button.
-    const _spSz=22, _spY=py+280;
+    const _spSz=22, _spY=py+310;
     const _spMuteX=px+18;
     const _spPrevX=_spMuteX+_spSz+10;
     const _spNextX=px+pw-18-_spSz;
@@ -25737,7 +25902,7 @@ function drawTrainBuilderPopup(){
       const drawY=trkTop-m.boxH*(1-m.bot);    // bottom-align visible body on rail
       const isHov=s.hoverVizIdx===i;
       // Hit rect: tight to the visible body so coupled cars don't overlap.
-      s.vizCarBounds.push({x:scx-m.halfW, y:drawY, w:m.bodyW, h:m.boxH, vizIdx:i});
+      s.vizCarBounds.push({x:scx-m.halfW, y:drawY, w:m.bodyW, h:m.boxH, vizIdx:i, type:vizCars[i].type});
       ctx.save();
       if(isHov) ctx.filter='brightness(1.8) saturate(1.15)';
       const _vcsn=getCarSprite(vizCars[i].type,true);
@@ -25834,6 +25999,42 @@ function drawTrainBuilderPopup(){
     }
     ctx.textBaseline='alphabetic';
     ctx.restore();
+  }
+
+  // ── Hover tooltip over a previewed engine / car / caboose ──
+  // After 0.1 s of hover, show the part's NAME and a short flavour quip
+  // ([Cargo] tokens coloured). Anchored above the hovered car (flips below if
+  // it would clip the popup top).
+  if(s.hoverVizIdx!=null && (Date.now()-(s._vizHoverStartMs||0))>=100){
+    const _hb=(s.vizCarBounds||[]).find(b=>b.vizIdx===s.hoverVizIdx);
+    if(_hb){
+      const _ht=_hb.type;
+      const _name=_ht==='caboose'?'Caboose':(CAR_LABELS[_ht]||(_ht||'').toUpperCase());
+      const _quip=_BUILDER_QUIPS[_ht]||'';
+      const _tpad=8, _nameF='bold 11px Orbitron,sans-serif', _quipF='10px "Exo 2",sans-serif';
+      const _maxTW=210, _nameLH=15, _quipLH=13;
+      ctx.font=_nameF; const _nameW=ctx.measureText(_name).width;
+      const _qLines=_quip?_objWrapTokens(_objTokenize(_quip),_maxTW,_quipF):[];
+      let _qMaxW=0; for(const _ln of _qLines){ const _w=_objLineWidth(_ln,_quipF); if(_w>_qMaxW)_qMaxW=_w; }
+      const _ttW=Math.ceil(Math.max(_nameW,_qMaxW))+_tpad*2;
+      const _ttH=_tpad+_nameLH+(_qLines.length?6+_qLines.length*_quipLH:0)+_tpad-4;
+      let _ttX=Math.round(_hb.x+_hb.w/2-_ttW/2);
+      let _ttY=Math.round(_hb.y-_ttH-8);
+      _ttX=Math.max(px+6,Math.min(px+pw-_ttW-6,_ttX));
+      if(_ttY<py+6) _ttY=Math.round(_hb.y+_hb.h+8);
+      _clearTextOverlayRect(_ttX,_ttY,_ttW,_ttH);
+      ctx.save();
+      ctx.fillStyle='rgba(8,16,34,0.97)';
+      ctx.beginPath(); ctx.roundRect(_ttX,_ttY,_ttW,_ttH,5); ctx.fill();
+      ctx.strokeStyle='rgba(90,150,235,0.7)'; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.roundRect(_ttX,_ttY,_ttW,_ttH,5); ctx.stroke();
+      ctx.textAlign='center'; ctx.textBaseline='alphabetic';
+      ctx.font=_nameF; ctx.fillStyle='rgba(212,232,255,0.98)';
+      ctx.fillText(_name,_ttX+_ttW/2,_ttY+_tpad+11);
+      let _qy=_ttY+_tpad+_nameLH+9;
+      for(const _ln of _qLines){ _objDrawLineCentered(_ln,_ttX+_ttW/2,_qy,_quipF,'rgba(168,192,228,0.92)'); _qy+=_quipLH; }
+      ctx.restore();
+    }
   }
 
   ctx.restore();
@@ -28101,6 +28302,13 @@ function drawGalaxy(ts,dt){
     if(trains.some(t=>t.isPlayer)){
       const bx=W-PANEL_W, bw=PANEL_W, by=GH, bh=BAR_H;
       assignBtnBounds={x:bx,y:by,w:bw,h:bh};
+      // Route builder: a 1+ segment route is set up → skip the explicit
+      // "ASSIGN TO TRAIN" click and drop straight into the SELECT-A-TRAIN state
+      // (blue panel highlight + click any train to assign).
+      if(_routeAutoAssign() && !assignPending){
+        assignPending=true;
+        if(panelTab!=='trains'&&!activePopup) panelTab='trains';
+      }
       ctx.save();
       // Fill matching the trains panel background
       const _selPending=assignPending||routeHerePending;
@@ -29932,7 +30140,11 @@ canvas.addEventListener('mousemove',e=>{
       for(const b of trainBuilderState.vizCarBounds){
         if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ newHov=b.vizIdx; break; }
       }
-      trainBuilderState.hoverVizIdx=newHov;
+      // Stamp the moment hover begins (per car) so the tooltip can wait 0.1 s.
+      if(newHov!==trainBuilderState.hoverVizIdx){
+        trainBuilderState.hoverVizIdx=newHov;
+        trainBuilderState._vizHoverStartMs=newHov==null?0:Date.now();
+      }
     }
     // Engine button hover
     let _hEng=null;
@@ -30134,6 +30346,8 @@ canvas.addEventListener('mousemove',e=>{
     popupState.autosaveToggleHover=!!(_astb&&cp.x>=_astb.x&&cp.x<=_astb.x+_astb.w&&cp.y>=_astb.y&&cp.y<=_astb.y+_astb.h);
     const _mttb=popupState.missionTrackerToggleBounds;
     popupState.missionTrackerToggleHover=!!(_mttb&&cp.x>=_mttb.x&&cp.x<=_mttb.x+_mttb.w&&cp.y>=_mttb.y&&cp.y<=_mttb.y+_mttb.h);
+    const _offb=popupState.optionsFullscreenBtnBounds;
+    popupState.optionsFullscreenHover=!!(_offb&&cp.x>=_offb.x&&cp.x<=_offb.x+_offb.w&&cp.y>=_offb.y&&cp.y<=_offb.y+_offb.h);
     _optsMuteBtnHover=!!(_optsMuteBtnBounds&&cp.x>=_optsMuteBtnBounds.x&&cp.x<=_optsMuteBtnBounds.x+_optsMuteBtnBounds.w&&cp.y>=_optsMuteBtnBounds.y&&cp.y<=_optsMuteBtnBounds.y+_optsMuteBtnBounds.h);
     _optsPrevBtnHover=!!(_optsPrevBtnBounds&&cp.x>=_optsPrevBtnBounds.x&&cp.x<=_optsPrevBtnBounds.x+_optsPrevBtnBounds.w&&cp.y>=_optsPrevBtnBounds.y&&cp.y<=_optsPrevBtnBounds.y+_optsPrevBtnBounds.h);
     _optsNextBtnHover=!!(_optsNextBtnBounds&&cp.x>=_optsNextBtnBounds.x&&cp.x<=_optsNextBtnBounds.x+_optsNextBtnBounds.w&&cp.y>=_optsNextBtnBounds.y&&cp.y<=_optsNextBtnBounds.y+_optsNextBtnBounds.h);
@@ -30143,7 +30357,7 @@ canvas.addEventListener('mousemove',e=>{
     popupState.optionsSaveBtnHover=!!(_osbb&&cp.x>=_osbb.x&&cp.x<=_osbb.x+_osbb.w&&cp.y>=_osbb.y&&cp.y<=_osbb.y+_osbb.h);
     const _oeb=popupState.optionsEscBounds;
     popupState.optionsEscHover=!!(_oeb&&cp.x>=_oeb.x&&cp.x<=_oeb.x+_oeb.w&&cp.y>=_oeb.y&&cp.y<=_oeb.y+_oeb.h);
-    if(popupState.fogToggleHover||popupState.addCreditsHover||popupState.flowerPlanetHover||popupState.colonyPlanetHover||popupState.rivalBtnHover||popupState.exportPlanetHover||popupState.unlockAllHover||popupState.autosaveToggleHover||popupState.missionTrackerToggleHover||popupState.controlsBtnHover||popupState.optionsSaveBtnHover||popupState.optionsEscHover) canvas.style.cursor='pointer';
+    if(popupState.fogToggleHover||popupState.addCreditsHover||popupState.flowerPlanetHover||popupState.colonyPlanetHover||popupState.rivalBtnHover||popupState.exportPlanetHover||popupState.unlockAllHover||popupState.autosaveToggleHover||popupState.missionTrackerToggleHover||popupState.optionsFullscreenHover||popupState.controlsBtnHover||popupState.optionsSaveBtnHover||popupState.optionsEscHover) canvas.style.cursor='pointer';
   }
   // Controls popup — [ESC] close hit detection (lives in its own block since
   // the Options/Cheats hover detector only runs while those two popups are
@@ -30862,7 +31076,7 @@ canvas.addEventListener('mouseup',e=>{
             _gp2.goldRevealed=true;
             _gp2.supply=_gp2.supply||{};
             _gp2.supply.gold=(_gp2.devLevel||0)+1;
-            if(!_hadGold){ _chatMsg('GOLD CAR UNLOCKED','rgba(255,215,60,1)'); pendingCarUnlocks.push({sprite:'car_gold',displayName:'Gold Car'}); }
+            if(!_hadGold){ _chatMsg('GOLD CAR UNLOCKED','rgba(255,215,60,1)'); pendingCarUnlocks.push({sprite:'car_gold',displayName:'Gold Car',planetId:_pid}); }
           }
           pendingGoldDiscoveries.shift();
           activePopup=null; popupState={};
@@ -30880,7 +31094,7 @@ canvas.addEventListener('mouseup',e=>{
             _dp2.diamondRevealed=true;
             _dp2.supply=_dp2.supply||{};
             _dp2.supply.diamond=(_dp2.devLevel||0)+1;
-            if(!_hadDiamond){ _chatMsg('DIAMOND CAR UNLOCKED','rgba(80,220,255,1)'); pendingCarUnlocks.push({sprite:'car_diamond',displayName:'Diamond Car'}); }
+            if(!_hadDiamond){ _chatMsg('DIAMOND CAR UNLOCKED','rgba(80,220,255,1)'); pendingCarUnlocks.push({sprite:'car_diamond',displayName:'Diamond Car',planetId:_pid}); }
           }
           pendingDiamondDiscoveries.shift();
           activePopup=null; popupState={};
@@ -31145,6 +31359,14 @@ canvas.addEventListener('mouseup',e=>{
         const b=popupState.optionsSaveBtnBounds;
         if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
           saveGame();
+          return;
+        }
+      }
+      // Options: FULLSCREEN toggle — enters/exits browser fullscreen (F11 equiv).
+      if(activePopup==='options'&&popupState.optionsFullscreenBtnBounds){
+        const b=popupState.optionsFullscreenBtnBounds;
+        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+          _toggleFullscreen();
           return;
         }
       }
@@ -32053,6 +32275,9 @@ canvas.addEventListener('mouseup',e=>{
     }
     // ── assign button ─────────────────────────────────────────
     if(assignBtnBounds&&cp.x>=assignBtnBounds.x&&cp.x<=assignBtnBounds.x+assignBtnBounds.w&&cp.y>=assignBtnBounds.y&&cp.y<=assignBtnBounds.y+assignBtnBounds.h){
+      // In auto SELECT-A-TRAIN mode the bar is just a status indicator — don't
+      // toggle it off (it would only re-arm next frame). Otherwise toggle as before.
+      if(_routeAutoAssign()){ panelTab='trains'; return; }
       assignPending=!assignPending; assignPending&&(routeHerePending=false); if(assignPending) panelTab='trains'; return;
     }
 
@@ -32136,7 +32361,7 @@ function _fireEsc(){
   // (mirrors the clickable [ESC] label in its top-right corner).
   if(activePopup==='controls'){ activePopup='options'; popupState={}; return; }
   if(activePopup==='ancient_message'){ pendingAncientPopups.shift(); activePopup=null; popupState={}; return; }
-  if(routeHerePending||assignPending){ routeHerePending=false; assignPending=false; return; }
+  if(routeHerePending||assignPending){ routeHerePending=false; assignPending=false; routeStops=[]; return; }
   if(activePopup){ activePopup=null; popupState={}; colorPickerState=null; return; }
   activePopup='quitconfirm'; popupState={};
 }
@@ -32606,7 +32831,7 @@ function _buildSaveObject(){
     _classJEngineUnlocked, _classREngineUnlocked, _N700EngineUnlocked,
     _steelProdLog,
     _sensorUpgradeActive, _stationCostDiscount, _sandstormCheckSd, _playerDeliveryCount, _foundryCalloutShown,
-    _foundryConstructedPopupShown,
+    _foundryConstructedPopupShown, _ironDeliveredToNonDesert,
     _foundryUnlocked, _largeStationUnlocked, _terminalUnlocked, _bakeryUnlocked, _glassworksUnlocked,
     _totalPassengersDelivered, _totalHazmatIncinerated, _anyCargoProduced,
     trainyard, financeLedger:_trimmedFinance, _ledgerSummary:_builtLedgerSummary, purchaseLedger, corpValueHistory, corpStatsHistory, aiCorpStatsHistory, _corp, _ceoHireCandidates,
@@ -32768,20 +32993,18 @@ function _restoreFromSave(save){
   _foundryCalloutShown=!!save._foundryCalloutShown; _foundryCalloutStartMs=0; _foundryCalloutFadeOutStartMs=0; _foundryCardScreenBounds=null;
   pendingUpgradeUnlocks=[]; pendingMissionRewards=[]; pendingFirstDeliveries=[];
   _foundryConstructedPopupShown=!!save._foundryConstructedPopupShown; _foundryConstructedPopupPending=false;
+  _ironDeliveredToNonDesert=!!save._ironDeliveredToNonDesert;
   // Loaded games have played before — treat speed-tip as permanently suppressed.
   _speedTipSuppressed=true; _speedTipStartMs=0; _speedTipNextRealMs=0; _speedTipFadeOutStartMs=0;
   _missionTipFired=true; _missionTipStartMs=0; _missionTipPending=false;   // suppress M-tip on loaded games
-  // Re-arm the buy_second_train → upgrade_station 10 s gate if buy_second_train
-  // is completed in the save but upgrade_station hasn't been introduced yet.
-  {
-    const _bstDone=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='buy_second_train'&&m.status==='completed');
-    const _usIntroduced=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='upgrade_station');
-    _buyTrainCompletedMs=(_bstDone && !_usIntroduced)?Date.now():0;
-  }
+  // Re-arm the IRON CAR unlock → upgrade_station 10 s gate. Reset the timer so the
+  // updateMissions one-shot re-stamps it from the restored _ironCarUnlocked flag;
+  // the gate then re-introduces upgrade_station only if it isn't already present.
+  _ironCarUnlockedMs=0; _buyTrainCompletedMs=0;
   _firstNonLowOrbitFired=true; _orbitHintStartMs=0; _orbitHintPlanetId=-1; // suppress orbit-hint on loaded games
   _prevActivePopupForSfx=null;
   _visitPlanetCompletedMs=0;
-  _lavaDetailsWasOpen=false; _lavaClosedTimerMs=0; _crOrijenFramed=false;
+  _lavaDetailsWasOpen=false; _lavaClosedTimerMs=0; _orijenClosedTutMs=0; _crOrijenFramed=false;
   _tutorialDoneMs=0;
   _crTutorialDoneMs=0;
   _findOreTimerMs=0;
@@ -32793,10 +33016,10 @@ function _restoreFromSave(save){
   const _crIntroduced=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='create_route');
   const _vpDone=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='visit_planet'&&m.status==='completed');
   if(_vpDone && !_crIntroduced) _visitPlanetCompletedMs=Date.now();
-  // create_route is now gated on the Lava-details open+close timer. For a save
-  // taken at tutorial 'done' before create_route was introduced, arm that timer
-  // so the intro fires ~3 s after load.
-  if((_tutorialPhase==='cr_pending_accept'||_tutorialPhase==='done')&&!_crIntroduced){ _tutorialDoneMs=Date.now(); _lavaClosedTimerMs=Date.now(); }
+  // create_route is now introduced 1.5 s after the Orijen window closes. For a save
+  // taken at cr_pending_accept (or 'done') before create_route was introduced, arm
+  // the Orijen-close timer so the intro fires shortly after load.
+  if((_tutorialPhase==='cr_pending_accept'||_tutorialPhase==='done')&&!_crIntroduced){ _tutorialDoneMs=Date.now(); _lavaClosedTimerMs=Date.now(); _orijenClosedTutMs=Date.now(); }
   // Re-arm the create_route → build_foundry 10 s gate if create_route is
   // completed in the save but build_foundry hasn't been introduced yet.
   const _bfIntroduced=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='build_foundry');
@@ -33406,7 +33629,7 @@ function startGame(){
   // runs at title PLAY, BEFORE the player picks their corp name in corpsetup,
   // so corpName is still the default placeholder at this point. It fires at
   // the fadein → galaxy transition instead (same as the game_start GA event).
-  activePopup=null; popupState={}; gameSpeedIdx=SPEED_DEFAULT_IDX; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _missionTipPending=false; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _foundryCompletedMs=0; _produceIronTimerMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _ancientSchematicsTimerMs=0; _ancientSchematicsPlanetId=-1; _ancientSchematicsFired=false; _hasZoomed=false; _buyTrainTipStartMs=0; _buyTrainTipShown=false; _prevActivePopupForSfx=null; _missionTipFired=false; _visitPlanetCompletedMs=0; _tutorialDoneMs=0; _crTutorialDoneMs=0; _firstNonLowOrbitFired=false; _orbitHintStartMs=0; _orbitHintPlanetId=-1; _crTrainPreselected=false; _foundryCalloutShown=false; _foundryCalloutStartMs=0; _foundryCalloutFadeOutStartMs=0; _foundryCardScreenBounds=null; _foundryUnlocked=false; _foundryUnlockSd=0; _largeStationUnlocked=false; _terminalUnlocked=false; _bakeryUnlocked=false; _glassworksUnlocked=false; pendingUpgradeUnlocks=[];
+  activePopup=null; popupState={}; gameSpeedIdx=SPEED_DEFAULT_IDX; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _missionTipPending=false; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _foundryCompletedMs=0; _produceIronTimerMs=0; _ironCarUnlockedMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _ancientSchematicsTimerMs=0; _ancientSchematicsPlanetId=-1; _ancientSchematicsFired=false; _hasZoomed=false; _buyTrainTipStartMs=0; _buyTrainTipShown=false; _prevActivePopupForSfx=null; _missionTipFired=false; _visitPlanetCompletedMs=0; _tutorialDoneMs=0; _crTutorialDoneMs=0; _firstNonLowOrbitFired=false; _orbitHintStartMs=0; _orbitHintPlanetId=-1; _crTrainPreselected=false; _foundryCalloutShown=false; _foundryCalloutStartMs=0; _foundryCalloutFadeOutStartMs=0; _foundryCardScreenBounds=null; _foundryUnlocked=false; _foundryUnlockSd=0; _largeStationUnlocked=false; _terminalUnlocked=false; _bakeryUnlocked=false; _glassworksUnlocked=false; pendingUpgradeUnlocks=[];
   _newspaper=null; _newspaperLastSd=829; _newspaperPrevSpeed=0; _newspaperNextHover=false; _newspaperNextBounds=null; _newspaperPrevHover=false; _newspaperPrevBounds=null; _newspaperArchive=[]; _newspaperViewIdx=null; _paperMajorUsed=[]; _paperMinorUsed=[]; _paperLayout=0; _paperIssueNum=0; _paperIdx=randInt(0,_PAPER_NAMES.length-1); _newsEventLog=[]; _newsSnapshot=null;
   _speedLeftHover=false; _speedRightHover=false; _panelTabHover=null; _routeHereBtnHover=false; _assignBtnHover=false; _cancelRouteBtnHover=false; _planetStarNameHover=false; _starPanelPlanetHover=-1; _trainAddHover=false; _trainRowHover=-1; _pokedexSortHover=false; _pokedexRowHover=-1; _starRegistrySortHover=false; _starRegistryRowHover=-1; _goldOkHover=false; _diamondOkHover=false; _carUnlockOkHover=false; _quitYesHover=false; _quitNoHover=false; _saveGameBtnHover=false; _startBtnHover=false; _loadBtnHover=false; _htpBtnHover=false; _htpDotHover=-1; _htpSkipHover=false; pokedexRowBounds=[]; starRegistryRowBounds=[]; loadBtnBounds=null; saveGameBtnBounds=null;
   fogPoints=[]; fogGridSet=new Set(); fogCanvas=null;
@@ -33420,7 +33643,7 @@ function startGame(){
   revealedStarIds=new Set(); revealedStarsInOrder=[]; fogStarReveals=[];
   revealedOrbitedPlanetIds=new Set(); discoveredPlanetIds=new Set();
   panelScroll=0; stationPanelScroll=0; panelTab='trains';
-  stardate=829.00; credits=250000; creditSnapshots=[]; lastCreditSnapshotSd=829.00; creditDelta=0;
+  stardate=829.00; credits=PLAYER_START_CREDITS; creditSnapshots=[]; lastCreditSnapshotSd=829.00; creditDelta=0;
   _rivalCorpWarnTenth=0; // arm the 9 pre-founding chat warnings for the new game
   cargoParticles=[]; creditFloats=[]; pendingCreditDeltas=[]; trainyard={}; zoomReturnPos=null; zoomReturnTimer=0;
   pendingGoldDiscoveries=[];
@@ -33428,7 +33651,7 @@ function startGame(){
   pendingCarUnlocks=[];
   pendingEngineUnlocks=[];
   pendingMissionRewards=[]; pendingFirstDeliveries=[];
-  _foundryConstructedPopupPending=false; _foundryConstructedPopupShown=false;
+  _foundryConstructedPopupPending=false; _foundryConstructedPopupShown=false; _ironDeliveredToNonDesert=false;
   pendingMissionIntros=[];
   pendingAncientPopups=[]; _ancientTranslatedWords=new Set();
   _ironCarUnlocked=false; _steelCarUnlocked=false; _glassCarUnlocked=false; _machineryCarUnlocked=false; _hazmatCarUnlocked=false; _royalCarUnlocked=false; _flowersCarUnlocked=false; _medicalCarUnlocked=false; _grainCarUnlocked=false; _livestockCarUnlocked=false; _fruitCarUnlocked=false; _cargoCarUnlocked=false; _cheatUnlockAllCars=false; _totalPassengersDelivered=0; _totalHazmatIncinerated=0; _anyCargoProduced=false;
@@ -34674,6 +34897,17 @@ function loop(ts){
     if(pendingCarUnlocks.length>0&&!activePopup){
       gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='car_unlock';
       popupState={carUnlock:pendingCarUnlocks[0]};
+      // Focus + select the planet where the discovery was made so the camera
+      // starts tracking it, zoomed to 80% of log scale (mirrors gold/diamond).
+      const _cuPid=pendingCarUnlocks[0].planetId;
+      const _cuP=(_cuPid!=null&&galaxy)?galaxy.planets[_cuPid]:null;
+      if(_cuP){
+        sel={type:'planet',data:_cuP}; routeStops=[]; assignPending=false; routeHerePending=false;
+        const _zTarget=Math.exp(Math.log(MIN_SC)+0.80*(Math.log(MAX_SC)-Math.log(MIN_SC)));
+        cam.scale=Math.max(MIN_SC,Math.min(MAX_SC,_zTarget));
+        cam.x=_cuP.x+(PANEL_W)/(2*cam.scale); cam.y=_cuP.y; clampCamera();
+        tracking=true; trackingOffset={x:cam.x-_cuP.x,y:cam.y-_cuP.y};
+      }
     }
     // Engine-unlock revenue check + popup trigger
     _checkEngineUnlocks();
