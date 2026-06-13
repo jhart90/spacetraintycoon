@@ -3989,8 +3989,9 @@ function drawTitleScreen(ts,dt){
   ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillStyle=_startBtnHover?'#d0eeff':'#aadcff';
   ctx.fillText('PLAY GAME',W/2,by+bh/2);
   ctx.restore();
-  // LOAD GAME button
-  const lbx=W/2-95, lby=by+bh+14, lbw=190, lbh=46;
+  // LOAD GAME button — 2/3 the size of PLAY GAME, centred below it.
+  const lbw=Math.round(bw*2/3), lbh=Math.round(bh*2/3);
+  const lbx=W/2-lbw/2, lby=by+bh+14;
   loadBtnBounds={x:lbx,y:lby,w:lbw,h:lbh};
   ctx.save();
   ctx.shadowColor='#fa4'; ctx.shadowBlur=_loadBtnHover?22:12;
