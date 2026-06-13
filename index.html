@@ -3187,6 +3187,7 @@ let _foundryCompletedMs=0;   // real-time ms when build_foundry completed (0=not
 let _tutorialPhase='inactive'; // 'inactive'|'pre_zoom'|'look_around'|'look_around_pause'|'zoom_out'|'orijen_welcome'|'orijen_details'|'double_click'|'build_station'|'done'
 let _tutorialPhaseStartMs=0;   // real-time ms when the current phase started
 let _orijenTutCentered=false;  // one-shot: camera framed Orijen for the home-planet intro phase
+let _crOrijenFramed=false;     // one-shot: camera framed Orijen (LOW orbit = visible height) when the create_route train first loads at Orijen
 let _tutorialFadeOutStartMs=0; // real-time ms when the current bubble began fading out (0 = not yet)
 let _tutorialLavaPlanetId=-1;  // planet id of the lava planet in Orijen's home system
 // Per-phase frozen anchor for the secondary BLUE "HOVER your cursor" callout
@@ -16132,10 +16133,15 @@ function drawNewMissionPopup(){
   if(activePopup!=='new_mission'||!popupState.newMissionDef) return;
   const def=popupState.newMissionDef;
   const pw=440;
-  // Display objectives — create_route shows ONE summarised line (display only;
-  // def.objectives is unchanged and still drives completion + the [M] tracker).
-  const _displayObjs=(def.id==='create_route')
-    ? [{id:'__cr_summary__', text:'Create a LOOP ROUTE that allows your TRAIN to ship [Molten Ore] and [Water] to a nearby DESERT PLANET'}]
+  // Display objectives — some missions show ONE summarised line in the popup
+  // (display only; def.objectives is unchanged and still drives completion + the
+  // [M] tracker). Keyed by mission id.
+  const _SUMMARY_OBJS={
+    create_route:'Create a LOOP ROUTE that allows your TRAIN to ship [Molten Ore] and [Water] to a nearby DESERT PLANET',
+    buy_second_train:'Buy a new TRAIN to deliver the [Iron] being produced on the DESERT PLANET back to ORIJEN',
+  };
+  const _displayObjs=_SUMMARY_OBJS[def.id]
+    ? [{id:'__'+def.id+'_summary__', text:_SUMMARY_OBJS[def.id]}]
     : def.objectives;
   // ── Pre-measure the right-column content to size the popup snugly so short
   // missions (e.g. create_route) don't leave a big empty gap above the reward /
@@ -16158,7 +16164,9 @@ function drawNewMissionPopup(){
     }
     // Content bottom = lower of the right-column end and the 72px image box
     // (bottom at offset 123). Reward group + button occupy ~95 px below it.
-    _measPh = Math.max(210, Math.min(295, Math.round(Math.max(123,_mY)+95)));
+    // Fully content-driven height (clamped only to sane min/max bounds), so
+    // every mission popup fits snugly — short ones shrink, long ones grow.
+    _measPh = Math.max(200, Math.min(380, Math.round(Math.max(123,_mY)+95)));
   }
   const ph=_measPh;
   const [px,py]=drawPopupBase(pw,ph,'rgba(80,200,130,0.7)');
@@ -16469,7 +16477,7 @@ const _UPGRADE_UNLOCK_INFO={
   __large_station__:{ name:'LARGE STATION', kind:'station', rings:2, biome:'#8893a3',
     cost:'50,000 cr  +  4 Iron',
     buildOn:'any planet where a STATION has already been built',
-    enables:'Enables TRAINS in both LOW and MEDIUM orbits to LOAD/UNLOAD simultaneously.' },
+    enables:'Enables TRAINS in both LOW and MEDIUM orbits\nto LOAD/UNLOAD simultaneously.' },
   __terminal__:{ name:'TERMINAL', kind:'station', rings:3, biome:'#8893a3',
     cost:'75,000 cr  +  6 Steel',
     buildOn:'any planet where a LARGE STATION has already been built',
@@ -16522,7 +16530,7 @@ function drawUpgradeUnlockPopup(){
   // ── Size the popup to its content (no fixed height / blank tail) ──
   // Count wrapped lines per section (mirrors the _wrapC wrapping below: split on
   // spaces, max width pw-36) so the height is exactly what the copy needs.
-  const _lc=(text,font)=>{ ctx.font=font; const _ws=(text||'').split(' '); let _l='',_n=0; for(const _w of _ws){ const _t=_l?_l+' '+_w:_w; if(ctx.measureText(_t).width<=pw-36)_l=_t; else { if(_l)_n++; _l=_w; } } if(_l)_n++; return Math.max(1,_n); };
+  const _lc=(text,font)=>{ ctx.font=font; let _n=0; for(const _seg of (text||'').split('\n')){ const _ws=_seg.split(' '); let _l=''; for(const _w of _ws){ const _t=_l?_l+' '+_w:_w; if(ctx.measureText(_t).width<=pw-36)_l=_t; else { if(_l)_n++; _l=_w; } } if(_l)_n++; } return Math.max(1,_n); };
   const _F_COST='bold 12px "Exo 2",sans-serif',_F_BUILD='bold 11px "Exo 2",sans-serif',_F_EN='10px "Exo 2",sans-serif',_F_FORM='bold 11px "Exo 2",sans-serif';
   const _nCost=_lc(info.cost||'—',_F_COST), _nBuild=_lc(info.buildOn||'—',_F_BUILD), _nEn=_lc(info.enables||'',_F_EN), _nForm=info.formula?_lc(info.formula,_F_FORM):0;
   let _be=196;                       // body cursor start (clears the visual)
@@ -16554,17 +16562,31 @@ function drawUpgradeUnlockPopup(){
   // the line AFTER the block.
   const _wrapC=(text,font,col,startY,lh)=>{
     ctx.font=font; ctx.fillStyle=col;
-    const _ws=(text||'').split(' '); let _line='', _y=startY;
-    for(const _w of _ws){ const _t=_line?_line+' '+_w:_w; if(ctx.measureText(_t).width<=pw-36){_line=_t;} else {ctx.fillText(_line,px+pw/2,_y); _y+=lh; _line=_w;} }
-    if(_line){ ctx.fillText(_line,px+pw/2,_y); _y+=lh; }
+    let _y=startY;
+    // Honour explicit '\n' line breaks, then word-wrap each segment.
+    for(const _seg of (text||'').split('\n')){
+      const _ws=_seg.split(' '); let _line='';
+      for(const _w of _ws){ const _t=_line?_line+' '+_w:_w; if(ctx.measureText(_t).width<=pw-36){_line=_t;} else {ctx.fillText(_line,px+pw/2,_y); _y+=lh; _line=_w;} }
+      if(_line){ ctx.fillText(_line,px+pw/2,_y); _y+=lh; }
+    }
     return _y;
   };
   // Small caption helper for the COST / BUILDABLE ON / ENABLES section headers.
   const _cap=(txt,y)=>{ ctx.font='9px Orbitron,sans-serif'; ctx.fillStyle='rgba(150,200,255,0.65)'; ctx.fillText(txt,px+pw/2,y); };
   let _ly=py+196;
-  // (1) COST
+  // (1) COST — red cost pill (matches the PURCHASE cost pills elsewhere).
   _cap('COST',_ly); _ly+=15;
-  _ly=_wrapC(info.cost||'—',_F_COST,'rgba(255,220,120,0.97)',_ly,15)+9;
+  {
+    const _cTxt=info.cost||'—';
+    ctx.font='bold 11px "Exo 2",sans-serif';
+    const _cPW=ctx.measureText(_cTxt).width+16, _cPH=17;
+    const _cPX=px+(pw-_cPW)/2, _cPY=_ly-13;
+    ctx.fillStyle='rgba(110,18,18,0.92)';
+    ctx.beginPath(); ctx.roundRect(_cPX,_cPY,_cPW,_cPH,4); ctx.fill();
+    ctx.fillStyle='rgba(255,255,255,0.97)'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(_cTxt,px+pw/2,_cPY+_cPH/2); ctx.textBaseline='alphabetic';
+  }
+  _ly+=24;
   // (2) BUILDABLE ON — eligible biomes, or the prerequisite that must be met.
   _cap('BUILDABLE ON',_ly); _ly+=15;
   _ly=_wrapC(info.buildOn||'—',_F_BUILD,'rgba(190,225,255,0.95)',_ly,14)+9;
@@ -18294,23 +18316,18 @@ function _drawFoundryCallout(){
   // Only render while the foundry card is actually visible on-screen.
   const _cb=_foundryCardScreenBounds;
   if(!_cb || activePopup!=='planet') return;
-  // Wrapped bubble text — kept literal-bracketed like the tutorial bubbles.
   const _txt='This upgrade allows this planet to combine delivered [Molten Ore] + [Water] into units of [Iron], a valuable resource';
   ctx.save();
-  ctx.font='10px "Exo 2",sans-serif';
+  const _fcFont='10px "Exo 2",sans-serif';
+  ctx.font=_fcFont;
   const _maxTextW=170;
-  const _words=_txt.split(' ');
-  const _lines=[]; let _cur='';
-  for(const _w of _words){
-    const _t=_cur?_cur+' '+_w:_w;
-    if(ctx.measureText(_t).width<=_maxTextW) _cur=_t;
-    else { if(_cur) _lines.push(_cur); _cur=_w; }
-  }
-  if(_cur) _lines.push(_cur);
-  let _tw=0; for(const _ln of _lines){ const _w=ctx.measureText(_ln).width; if(_w>_tw) _tw=_w; }
+  // Tokenise + wrap so [Molten Ore] / [Water] / [Iron] get the same cargo
+  // colour + bold treatment as mission text and the other callout bubbles.
+  const _lineToks=_objWrapTokens(_objTokenize(_txt), _maxTextW, _fcFont);
+  let _tw=0; for(const _tk of _lineToks){ const _w=_objLineWidth(_tk,_fcFont); if(_w>_tw) _tw=_w; }
   const _pad=12, _lh=15, _bR=7, _tailW=11;
   const _bW=_tw+_pad*2;
-  const _bH=Math.max(28,_lines.length*_lh+10);
+  const _bH=Math.max(28,_lineToks.length*_lh+10);
   // Box around the whole foundry card.
   ctx.globalAlpha=_a;
   ctx.shadowColor='rgba(255,210,40,0.75)'; ctx.shadowBlur=14;
@@ -18336,9 +18353,8 @@ function _drawFoundryCallout(){
   const _tb=Math.max(_by+_bR+8,Math.min(_tipY,_by+_bH-_bR-8));
   ctx.beginPath(); ctx.moveTo(_bx,_tb-7); ctx.lineTo(_bx,_tb+7); ctx.lineTo(_tipX,_tipY); ctx.closePath(); ctx.fill();
   ctx.shadowBlur=0;
-  ctx.fillStyle='#1a1308';
-  ctx.textAlign='center'; ctx.textBaseline='middle';
-  for(let _i=0;_i<_lines.length;_i++) ctx.fillText(_lines[_i],_bx+_bW/2,_by+_pad/2+_lh/2+_i*_lh);
+  ctx.textBaseline='middle';
+  for(let _i=0;_i<_lineToks.length;_i++) _objDrawLineCentered(_lineToks[_i],_bx+_bW/2,_by+_pad/2+_lh/2+_i*_lh,_fcFont,'#1a1308');
   ctx.textBaseline='alphabetic';
   ctx.restore();
 }
@@ -18655,7 +18671,7 @@ function _drawTutorialChain(stage){
   // their initializer runs — calling them earlier throws ReferenceError and
   // takes the rest of drawGalaxy down with it.)
   if(_tutorialPhase==='pre_zoom'){
-    if(_elapsed>=2000){ _tutorialPhase='look_around'; _tutorialPhaseStartMs=_now; _tutorialFadeOutStartMs=0; _orijenTutCentered=false; _lavaDetailsWasOpen=false; _lavaClosedTimerMs=0; }
+    if(_elapsed>=2000){ _tutorialPhase='look_around'; _tutorialPhaseStartMs=_now; _tutorialFadeOutStartMs=0; _orijenTutCentered=false; _crOrijenFramed=false; _lavaDetailsWasOpen=false; _lavaClosedTimerMs=0; }
     return;
   }
   // ── Helpers ──────────────────────────────────────────────
@@ -19415,6 +19431,27 @@ function _drawTutorialChain(stage){
   // accepting (or already having completed) the build_foundry mission,
   // then start the bf_* chain. No rendering in this phase.
   if(_tutorialPhase==='all_done'){
+    // One-shot: the moment the create_route train first starts LOADING cargo at
+    // Orijen, SELECT + TRACK Orijen and zoom so its LOW orbit spans exactly from
+    // the bottom of the top UI (TOP_H) to the top of the bottom UI bar (GH).
+    // Tracking keeps Orijen centred (orbit stays framed) as it orbits its star.
+    if(!_crOrijenFramed && galaxy && galaxy.origenId!=null){
+      const _ori=galaxy.planets[galaxy.origenId];
+      if(_ori && trains.some(t=>t.isPlayer && t.planetId===galaxy.origenId && t.cargoPhase==='loading')){
+        const _lowR=(ORBIT_TIERS[_ori.size]||{}).LOW||_ori.radius*2;
+        const _sc=Math.max(MIN_SC,Math.min(MAX_SC,(GH-TOP_H)/(2*_lowR)));
+        cam.scale=_sc;
+        sel={type:'planet',data:_ori}; routeStops=[]; assignPending=false; routeHerePending=false;
+        // Offset that centres Orijen at the visible-area centre ((W-PANEL_W)/2,
+        // (TOP_H+GH)/2); the tracking loop maintains cam = orijen + this offset.
+        trackingOffset={x:PANEL_W/(2*_sc), y:-TOP_H/(2*_sc)};
+        cam.x=_ori.x+trackingOffset.x;
+        cam.y=_ori.y+trackingOffset.y;
+        tracking=true;
+        if(typeof clampCamera==='function') clampCamera();
+        _crOrijenFramed=true;
+      }
+    }
     if(missions.some(m=>m.id==='build_foundry'&&m.status==='completed')){
       _tutorialPhase='bf_all_done';
       return;
@@ -19700,7 +19737,7 @@ function _drawTutorialChain(stage){
     if(_bfPopupOpen && Array.isArray(popupState.upgradeBuildBounds)){
       const _fb=popupState.upgradeBuildBounds.find(b=>b&&b.upgradeId==='iron_foundry');
       if(_fb){
-        _drawBubble(['CLICK HERE to BUILD a FOUNDRY'], {x:_fb.x+_fb.w/2,y:_fb.y+_fb.h}, r.alpha, {below:true});
+        _drawBubble(['CLICK HERE to BUILD A FOUNDRY'], {x:_fb.x+_fb.w/2,y:_fb.y+_fb.h}, r.alpha, {below:true, boldWords:['FOUNDRY']});
       }
     }
     return;
@@ -19722,14 +19759,32 @@ function _drawTutorialChain(stage){
   })));
   const _bstIronDelivered=!!(_bstMission && (_bstMission._ironFromDesertToOrijen||0)>=1);
   // ── Phase: bf_all_done — poll for buy_second_train becoming active with
-  // the player already owning a 2nd train, then transition into bst_load_iron.
+  // the player already owning a 2nd train, then transition into bst_click_desert.
   // Skips straight to bst_all_done if the mission is already completed. Also
   // detects the train builder being open during the buy phase to surface
   // the "Add 2+ IRON cars" callout.
   if(_tutorialPhase==='bf_all_done'){
     if(_bstMission && _bstMission.status==='completed'){ _tutorialPhase='bst_all_done'; return; }
     if(_bstMission && _bstMission.status==='active' && _bstPlayerOwns2){
-      _advanceTo('bst_load_iron');
+      // Frame the desert + Orijen for the upcoming route-building bubbles.
+      {
+        const _ori=galaxy.origenId!=null?galaxy.planets[galaxy.origenId]:null;
+        if(_ori&&_bfDesert){
+          const _pts=[_ori,_bfDesert], _buf=500;
+          const _xMin=Math.min(..._pts.map(p=>p.x-(p.radius||30)))-_buf;
+          const _xMax=Math.max(..._pts.map(p=>p.x+(p.radius||30)))+_buf;
+          const _yMin=Math.min(..._pts.map(p=>p.y-(p.radius||30)))-_buf;
+          const _yMax=Math.max(..._pts.map(p=>p.y+(p.radius||30)))+_buf;
+          const _vpW=W-PANEL_W, _vpH=GH-TOP_H;
+          const _scale=Math.max(MIN_SC,Math.min(MAX_SC,Math.min(_vpW/(_xMax-_xMin),_vpH/(_yMax-_yMin))));
+          cam.scale=_scale;
+          cam.x=(_xMin+_xMax)/2 + PANEL_W/(2*_scale);
+          cam.y=(_yMin+_yMax)/2 - TOP_H/(2*_scale);
+          tracking=false;
+          if(typeof clampCamera==='function') clampCamera();
+        }
+      }
+      _advanceTo('bst_click_desert');
       return;
     }
     // Train builder open during buy_second_train (before 2nd train owned) and
@@ -19752,7 +19807,7 @@ function _drawTutorialChain(stage){
   if(_tutorialPhase==='bst_builder_add_iron'){
     const _bld=(activePopup==='trainbuilder')?trainBuilderState:null;
     if(!_bld){ _advanceTo('bf_all_done'); return; }
-    if(_bstPlayerOwns2){ _advanceTo('bst_load_iron'); return; }
+    if(_bstPlayerOwns2){ _advanceTo('bst_click_desert'); return; }
     const _ironCt=(_bld.cars||[]).filter(c=>c==='car_iron').length;
     if(_tutorialFadeOutStartMs===0 && _ironCt>=2) _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
@@ -19766,39 +19821,85 @@ function _drawTutorialChain(stage){
     }
     return;
   }
-  // Chain-done short-circuit for the bst_* phases.
-  if(_bstMission && _bstMission.status==='completed' &&
-     (_tutorialPhase==='bst_load_iron'||_tutorialPhase==='bst_deliver_iron')){
+  // ── buy_second_train ROUTE-BUILDING walkthrough (bst_*) ─────
+  // Mirrors the create_route cr_* chain, but for a simple 2-stop DESERT→ORIJEN
+  // route assigned to the player's NEW (2nd) train: CLICK the desert planet,
+  // SHIFT+CLICK Orijen, ASSIGN the route, then click the new train.
+  const _bstDesertId=_bfDesertId; // home-system desert (resolved above)
+  const _bstDesertInRoute = !!(galaxy && _bstDesertId>=0 && routeStops.some(p=>p&&p.id===_bstDesertId));
+  const _bstOrijenInRoute = !!(galaxy && routeStops.some(p=>p&&p.id===galaxy.origenId));
+  // Anchor ready = desert is selected, or desert is already the route's 1st stop.
+  const _bstSelDesert = !!(sel && sel.type==='planet' && sel.data && sel.data.id===_bstDesertId);
+  const _bstAnchorReady = _bstSelDesert || _bstDesertInRoute;
+  const _bstRouteReady = _bstDesertInRoute && _bstOrijenInRoute && routeStops.length>=2;
+  // Route assigned = a 2nd player train now has a real (non-temp) ≥2-stop route
+  // (train 1 already has its create_route loop, so the count hitting 2 signals a
+  // fresh assignment), OR the mission has begun loading/delivering iron.
+  const _bstRoutedCount = galaxy ? trains.filter(t=>t.isPlayer && (
+    (t.route       && !t.route.isTempRoute       && (t.route.stops||[]).length>=2) ||
+    (t.queuedRoute && !t.queuedRoute.isTempRoute && (t.queuedRoute.stops||[]).length>=2)
+  )).length : 0;
+  const _bstRouteDone = _bstRoutedCount>=2 || _bstIronFromDesertLoaded || _bstIronDelivered ||
+                        (_bstMission && _bstMission.status==='completed');
+  // Chain-done short-circuit for the bst_* route phases.
+  if(_bstRouteDone && (_tutorialPhase==='bst_click_desert'||_tutorialPhase==='bst_shift_orijen'||_tutorialPhase==='bst_assign_btn'||_tutorialPhase==='bst_click_train')){
     _tutorialPhase='bst_all_done'; return;
   }
-  // ── Phase: bst_load_iron ──────────────────────────────────
-  // Yellow bubble pointing at the home-system desert planet. Advances the
-  // moment any player train is carrying IRON sourced from a DESERT planet.
-  if(_tutorialPhase==='bst_load_iron'){
-    if(_tutorialFadeOutStartMs===0 && (_bstIronFromDesertLoaded||_bstIronDelivered)) _tutorialFadeOutStartMs=_now;
+  // ── Phase: bst_click_desert ───────────────────────────────
+  if(_tutorialPhase==='bst_click_desert'){
+    if(_tutorialFadeOutStartMs===0 && _bstAnchorReady) _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
-    if(r.advanced){ _advanceTo('bst_deliver_iron'); return; }
+    if(r.advanced){ _advanceTo('bst_shift_orijen'); return; }
     if(_bfDesert){
       const [_sx,_sy]=w2s(_bfDesert.x,_bfDesert.y);
       const _sr=Math.max(8,_bfDesert.radius*cam.scale);
-      _drawBubble(['ROUTE your new TRAIN to LOAD IRON from the DESERT PLANET'], {x:_sx,y:_sy-_sr+6}, r.alpha, {target:{x:_sx,y:_sy}});
+      _drawBubble(['CLICK on the DESERT PLANET to START A ROUTE'], {x:_sx,y:_sy-_sr+6}, r.alpha, {target:{x:_sx,y:_sy}});
     }
     return;
   }
-  // ── Phase: bst_deliver_iron ───────────────────────────────
-  // Yellow bubble pointing at ORIJEN. Rolls back to bst_load_iron if the
-  // iron is no longer in transit (player unloaded it at the wrong stop or
-  // the train ran out of iron cars). Advances when iron is delivered.
-  if(_tutorialPhase==='bst_deliver_iron'){
-    if(!_bstIronFromDesertLoaded && !_bstIronDelivered){ _advanceTo('bst_load_iron'); return; }
-    if(_tutorialFadeOutStartMs===0 && _bstIronDelivered) _tutorialFadeOutStartMs=_now;
+  // ── Phase: bst_shift_orijen ───────────────────────────────
+  if(_tutorialPhase==='bst_shift_orijen'){
+    if(!_bstAnchorReady){ _advanceTo('bst_click_desert'); return; }
+    if(_tutorialFadeOutStartMs===0 && _bstRouteReady) _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
-    if(r.advanced){ _tutorialPhase='bst_all_done'; return; }
+    if(r.advanced){ _advanceTo('bst_assign_btn'); return; }
     const _op=galaxy.planets[galaxy.origenId];
     if(_op){
       const [_sx,_sy]=w2s(_op.x,_op.y);
       const _sr=Math.max(8,_op.radius*cam.scale);
-      _drawBubble(['Deliver the IRON to ORIJEN'], {x:_sx,y:_sy-_sr+6}, r.alpha, {target:{x:_sx,y:_sy}});
+      _drawBubble(['SHIFT+CLICK on ORIJEN to ADD A STOP to your route'], {x:_sx,y:_sy-_sr+6}, r.alpha, {target:{x:_sx,y:_sy}});
+    }
+    return;
+  }
+  // ── Phase: bst_assign_btn ─────────────────────────────────
+  if(_tutorialPhase==='bst_assign_btn'){
+    if(!_bstRouteReady && !assignPending){
+      if(!_bstAnchorReady){ _advanceTo('bst_click_desert'); return; }
+      _advanceTo('bst_shift_orijen'); return;
+    }
+    if(_tutorialFadeOutStartMs===0 && assignPending) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _advanceTo('bst_click_train'); return; }
+    if(assignBtnBounds){
+      const _b=assignBtnBounds;
+      _drawBubble(['CLICK HERE to ASSIGN this ROUTE'], {x:_b.x+_b.w/2,y:_b.y+20}, r.alpha);
+    }
+    return;
+  }
+  // ── Phase: bst_click_train ────────────────────────────────
+  // Highlight box + bubble on the NEW (2nd) train row. Advances when the route
+  // is assigned to a 2nd train.
+  if(_tutorialPhase==='bst_click_train'){
+    if(_elapsed<50 && !activePopup) panelTab='trains';
+    if(_tutorialFadeOutStartMs===0 && _bstRouteDone) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _tutorialPhase='bst_all_done'; return; }
+    if(panelTab==='trains'){
+      const _ROW_H=82;
+      // 2nd row — the newly-bought train (appended to the bottom of the list).
+      const _rx=W-PANEL_W+2, _ry=TOP_H+1+_ROW_H-panelScroll, _rw=PANEL_W-4, _rh=_ROW_H-2;
+      _drawHighlightBox(_rx,_ry,_rw,_rh,r.alpha,2);
+      _drawBubble(['CLICK on your NEW TRAIN to ASSIGN the ROUTE'], {x:_rx+_rw/2,y:_ry+53}, r.alpha, {below:true});
     }
     return;
   }
@@ -20070,22 +20171,21 @@ function updateMissions(dtSd){
   const _doIntroGates=_missionTickAcc>=0.01;
   if(_doIntroGates) _missionTickAcc=0;
   if(_doIntroGates){
-  // Delayed IRON FOUNDRY unlock: fires 20 in-game seconds (0.02 SD) after
-  // create_route completed — armed via _foundryUnlockSd in the mission-complete
-  // handler. Uses stardate so the delay scales with game speed.
-  if(_foundryUnlockSd>0 && stardate>=_foundryUnlockSd && !_foundryUnlocked){
+  // IRON FOUNDRY unlock: fires the moment the player ACCEPTS the build_foundry
+  // mission (it lands in `missions` with status 'active'). Unlocks the upgrade +
+  // shows the "NEW PLANET UPGRADE UNLOCKED" popup so the foundry is buildable for
+  // the mission they just accepted.
+  if(!_foundryUnlocked && missions.some(mx=>mx.id==='build_foundry'&&mx.status==='active')){
     _foundryUnlocked=true; pendingUpgradeUnlocks.push({key:'iron_foundry'});
     _chatMsg('IRON FOUNDRY UPGRADE UNLOCKED','rgba(255,210,120,1)');
-    _foundryUnlockSd=0;
   }
   // "Build a Foundry" intro: 10 real-time seconds after the create_route
   // mission completes. _findOreTimerMs (legacy name — was for the removed
   // Find Molten Ore mission) is stamped when create_route's status flips to
-  // 'completed' in the mission-complete block below. Also gated on the foundry
-  // actually being unlocked, so the mission can't appear before it's buildable
-  // (matters at low speed, where the 20-in-game-second unlock delay is longer
-  // in real time than this 10 s gate).
-  if(_findOreTimerMs>0&&Date.now()-_findOreTimerMs>=10000&&_foundryUnlocked&&!_missionPending('build_foundry')&&!missions.some(mx=>mx.id==='build_foundry'&&mx.status==='completed')){
+  // 'completed' in the mission-complete block below. (No foundry-unlocked gate:
+  // the foundry now unlocks WHEN this mission is accepted, so the intro must be
+  // able to appear first.)
+  if(_findOreTimerMs>0&&Date.now()-_findOreTimerMs>=10000&&!_missionPending('build_foundry')&&!missions.some(mx=>mx.id==='build_foundry'&&mx.status==='completed')){
     pendingMissionIntros.push({defId:'build_foundry',readySd:stardate});
   }
   // Unlock "Dispose of Hazmat" once any foundry has cumulatively produced >= 2.0 units of hazmat
@@ -20093,20 +20193,18 @@ function updateMissions(dtSd){
     const _totalHazProd=galaxy.planets.reduce((s,p)=>s+((p.upgradeData?.iron_foundry?.hazmatTotal)||0),0);
     if(_totalHazProd>=2.0) pendingMissionIntros.push({defId:'dispose_hazmat',readySd:stardate});
   }
-  // create_route intro: 3 real-time seconds after the player OPENS then CLOSES
-  // the Lava Planet details window during the tutorial (replaces the removed
-  // visit_planet → create_route chain). The open+close arms _lavaClosedTimerMs;
-  // the push is then held until the train-builder tutorial finishes
-  // (_tutorialPhase==='done') so the mission popup never interrupts that
-  // guidance — by then ≥3 s have elapsed since the close.
+  // create_route intro: QUEUED the moment the player builds a STATION on the
+  // home-system LAVA PLANET (Gigi Prime). The intro-gate then shows the popup as
+  // soon as no window is open (i.e. when the player closes the lava details).
+  // The cr_pending_accept phase waits for the accept before the train-builder
+  // walkthrough. (Replaces the old open+close-the-window timer, which fired far
+  // too late.)
   {
-    const _lavaOpenNow=(activePopup==='planet'&&popupState.planet&&popupState.planet.id===_tutorialLavaPlanetId);
-    if(_lavaOpenNow && _tutorialPhase!=='inactive' && _tutorialPhase!=='all_done') _lavaDetailsWasOpen=true;
-    else if(_lavaDetailsWasOpen && !_lavaOpenNow && _lavaClosedTimerMs===0) _lavaClosedTimerMs=Date.now();
-  }
-  if(_lavaClosedTimerMs>0 && Date.now()-_lavaClosedTimerMs>=1500 && _tutorialPhase==='cr_pending_accept'
-     && !_missionPending('create_route') && !missions.some(mx=>mx.id==='create_route'&&mx.status==='completed')){
-    pendingMissionIntros.push({defId:'create_route',readySd:stardate});
+    const _crLava=(galaxy && _tutorialLavaPlanetId>=0)?galaxy.planets[_tutorialLavaPlanetId]:null;
+    if(_crLava && _crLava.playerBuiltStation
+       && !_missionPending('create_route') && !missions.some(mx=>mx.id==='create_route'&&mx.status==='completed')){
+      pendingMissionIntros.push({defId:'create_route',readySd:stardate});
+    }
   }
   // upgrade_station intro: 10 real-time seconds after buy_second_train completes
   if(_buyTrainCompletedMs>0&&Date.now()-_buyTrainCompletedMs>=10000&&!_missionPending('upgrade_station')){
@@ -20318,13 +20416,8 @@ function updateMissions(dtSd){
       // Start build_foundry countdown when create_route completes
       // (var name _findOreTimerMs is legacy from the removed Find Molten Ore mission)
       if(m.id==='create_route'&&_findOreTimerMs===0) _findOreTimerMs=Date.now();
-      // Completing the repeating-route mission UNLOCKS the IRON FOUNDRY upgrade —
-      // but DELAYED by 20 IN-GAME seconds (0.02 SD, ≈2 s at 10× speed) so the
-      // unlock + popup don't fire the instant the mission completes. The actual
-      // unlock fires from the _foundryUnlockSd gate in updateMissions.
-      if(m.id==='create_route'&&!_foundryUnlocked&&_foundryUnlockSd===0){
-        _foundryUnlockSd=stardate+0.02;
-      }
+      // (The IRON FOUNDRY upgrade is NO LONGER unlocked here — it now unlocks the
+      //  moment the player ACCEPTS the build_foundry mission; see updateMissions.)
       // Stamp build_foundry completion — arms the 10 s buy_second_train intro.
       if(m.id==='build_foundry'&&_foundryCompletedMs===0) _foundryCompletedMs=Date.now();
       // Legacy stamp (no longer gates anything — kept so any saved scripts /
@@ -27344,6 +27437,34 @@ function drawGalaxy(ts,dt){
         }
       }
     }
+    // ── Sprite-vs-rectangle decision (PER TRAIN, applied to ALL its cars) ──
+    // Different car types have different box widths at the same zoom, so a
+    // per-car (_wcw>8) cutoff dropped narrow cars to rectangles while wide cars
+    // kept their sprites — an awkward mix. Decide ONCE from the NARROWEST car
+    // (and require every drawn sprite to be loaded) so at any zoom it's ALL
+    // sprites or ALL rectangles — never in-between.
+    let _galCarsAsSprites;
+    {
+      const _carBoxW=(_t,_full)=>{
+        const _es2=getCarSprite(_t,_full);
+        const _vf2=(_t==='caboose'?0.66:(_t&&_t.indexOf('engine_')===0)?0.66*(ENGINE_GALAXY_H_TIER[_t]||1.0):0.60)*_GAL_SCALE;
+        const _dk2=(typeof SPRITE_SOLID!=='undefined'&&SPRITE_SOLID[_es2])?_es2:_t;
+        const _sc2=(typeof SPRITE_CONTENT!=='undefined')?SPRITE_CONTENT[_dk2]:null;
+        const _sn2=(typeof SPRITE_NATURAL!=='undefined')?SPRITE_NATURAL[_dk2]:null;
+        const _ssD2=(typeof SPRITE_SOLID!=='undefined')?SPRITE_SOLID[_dk2]:null;
+        const _bhB2=(_ssD2&&_ssD2[2])?_ssD2[2]:(_sc2?_sc2[3]:160);
+        const _fileAR2=(_sn2&&_sn2[1])?(_sn2[0]/_sn2[1]):1.0;
+        const _af2=_carGalAreaFactor(_dk2);
+        return _vf2*ch*_af2*160/Math.max(1,_bhB2)*_fileAR2;     // == _wcw in the draw loop
+      };
+      let _minBoxW=Infinity, _allLoaded=true;
+      for(let _ci=0;_ci<train.cars.length;_ci++){
+        const _full2=train.carFull?.[_ci]??false;
+        const _w2=_carBoxW(train.cars[_ci],_full2); if(_w2<_minBoxW)_minBoxW=_w2;
+        if(!imgs[getCarSprite(train.cars[_ci],_full2)]) _allLoaded=false;
+      }
+      _galCarsAsSprites = _minBoxW>8 && _allLoaded;
+    }
     // Draw cars BACK-TO-FRONT (tail first, engine last) so each forward
     // car renders ON TOP of the car behind it — matching the reference
     // where the engine overlaps car 2, car 2 overlaps car 3, etc.
@@ -27400,11 +27521,11 @@ function drawGalaxy(ts,dt){
       const _bodyCx=_ssD?(_ssD[0]+_ssD[1]/2):80;        // solid body centre in bundle px
       const _drawX=-(_bodyCx/160)*_wcw;                 // so body centre maps to x=0
       ctx.save(); ctx.translate(sx,sy); ctx.rotate(rot); ctx.scale(-1,1);
-      if(imgs[_esn]&&_wcw>8) ctx.drawImage(_sprForSize(_esn,_wcw,_ech),_drawX,-_ech*(1-_ebp),_wcw,_ech);
+      if(imgs[_esn]&&_galCarsAsSprites) ctx.drawImage(_sprForSize(_esn,_wcw,_ech),_drawX,-_ech*(1-_ebp),_wcw,_ech);
       else{ ctx.fillStyle=i===0?'#4af':i===train.cars.length-1?'#f84':'#ccc'; ctx.fillRect(_drawX,-_ech*(1-_ebp),_wcw,_ech*(1-_ebp)); }
       ctx.restore();
       // Hazmat warning light: flashing yellow glow when car is full
-      if(_styp==='car_hazmat'&&(train.carFull?.[i]??false)&&_wcw>8){
+      if(_styp==='car_hazmat'&&(train.carFull?.[i]??false)&&_galCarsAsSprites){
         const _ft=Date.now()*0.009;
         const _fint=Math.pow(Math.max(0,Math.sin(_ft)),0.5); // quick on, gradual fade
         const _lx=sx+_ech*(1-_ebp)*0.8*Math.sin(rot);
@@ -27428,7 +27549,7 @@ function drawGalaxy(ts,dt){
       // passenger): pulsing gold outline around the car until it's unloaded at
       // Orijen. Outlines the visible solid body (x∈[-bw/2,bw/2], y∈[-_visH,0]
       // in the rotated car frame).
-      if(_wcw>8 && _isEscortCar(train,i)){
+      if(_galCarsAsSprites && _isEscortCar(train,i)){
         const _gpls=Math.pow(Math.max(0,Math.sin(Date.now()*0.006)),0.6); // 0..1 pulse
         const _sbw=((_ssD&&_ssD[1])?_ssD[1]:148)/160*_wcw; // visible body width (screen px)
         const _spad=Math.max(2,2.2*cam.scale);
@@ -32345,7 +32466,7 @@ function _restoreFromSave(save){
   _firstNonLowOrbitFired=true; _orbitHintStartMs=0; _orbitHintPlanetId=-1; // suppress orbit-hint on loaded games
   _prevActivePopupForSfx=null;
   _visitPlanetCompletedMs=0;
-  _lavaDetailsWasOpen=false; _lavaClosedTimerMs=0;
+  _lavaDetailsWasOpen=false; _lavaClosedTimerMs=0; _crOrijenFramed=false;
   _tutorialDoneMs=0;
   _crTutorialDoneMs=0;
   _findOreTimerMs=0;
@@ -32366,11 +32487,11 @@ function _restoreFromSave(save){
   const _bfIntroduced=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='build_foundry');
   const _crDone=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='create_route'&&m.status==='completed');
   if(_crDone && !_bfIntroduced) _findOreTimerMs=Date.now();
-  // The IRON FOUNDRY unlock delay is in-session only — a loaded game whose
-  // create_route is already completed should be unlocked outright (also covers
-  // the rare save taken inside the 0.02 SD delay window).
+  // IRON FOUNDRY unlocks when build_foundry is ACCEPTED — so a loaded game whose
+  // build_foundry mission is already active or completed should have it unlocked.
   _foundryUnlockSd=0;
-  if(_crDone && !_foundryUnlocked) _foundryUnlocked=true;
+  const _bfActiveOrDone=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='build_foundry'&&(m.status==='active'||m.status==='completed'));
+  if(_bfActiveOrDone && !_foundryUnlocked) _foundryUnlocked=true;
   // Re-arm the produce_iron → buy_second_train 10 s gate.
   const _bstIntroduced=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='buy_second_train');
   const _pIDone=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='produce_iron'&&m.status==='completed');
