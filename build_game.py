@@ -3427,7 +3427,7 @@ let pendingEngineUnlocks=[]; // {sprite,displayName} queued to show engine-unloc
 // player triggers their unlock event; unlocking pops an explainer window (like
 // the car-unlock popup). All four flags are persisted (and derived from game
 // state on load for backward-compat).
-let _foundryUnlocked=false;       // IRON FOUNDRY card — unlocked by COMPLETING the "Create a repeating train route" mission
+let _foundryUnlocked=true;        // IRON FOUNDRY card — now UNLOCKED BY DEFAULT from game start (the "new upgrade constructed" popup still fires the first time one is built)
 let _largeStationUnlocked=false;  // LARGE STATION upgrade button — unlocked by COMPLETING the "Produce Iron" mission
 let _terminalUnlocked=false;      // TERMINAL upgrade button — unlocked by producing the FIRST steel unit
 let _bakeryUnlocked=false;        // BAKERY card — unlocked by VISITING the first agricultural planet
@@ -6114,7 +6114,7 @@ function drawCorpSetup(ts){
     const _salBg =['rgba(85,72,8,0.68)','rgba(88,55,5,0.68)','rgba(88,36,4,0.68)'][ci];
     const _salTc =['rgba(255,230,50,0.97)','rgba(255,190,36,0.97)','rgba(255,138,22,0.97)'][ci];
     _csRow(_pY+_pH+50,'SALARY','-'+_fmtCr(_ceo.ceoSalary)+' cr/S.D.',_salBg,_salTc);
-    _csRow(_pY+_pH+80,'ABILITY',_ceo.primaryPerk?_ceo.primaryPerk.label:'—','rgba(22,42,105,0.65)','rgba(175,215,255,0.95)');
+    _csRow(_pY+_pH+80,'ABILITY',_ceo.primaryPerk?_ceo.primaryPerk.label:'—','rgba(25,155,255,0.97)','#000000');
     // STARTING CREDITS — green pill, same for every CEO, wired to the actual
     // amount the player starts a new game with (PLAYER_START_CREDITS).
     _csRow(_pY+_pH+110,'STARTING CREDITS','+'+_fmtCr(PLAYER_START_CREDITS)+' cr','rgba(16,70,42,0.72)','rgba(120,240,165,0.97)');
@@ -33172,7 +33172,7 @@ function _restoreFromSave(save){
     const _saveHasUpg=(uid)=>!!(galaxy&&galaxy.planets&&galaxy.planets.some(q=>(q.upgrades||[]).includes(uid)));
     const _missDone=(id)=>missions.some(m=>m.id===id&&m.status==='completed');
     const _anyPlanet=(pred)=>!!(galaxy&&galaxy.planets&&galaxy.planets.some(pred));
-    _foundryUnlocked      = !!save._foundryUnlocked      || _missDone('create_route') || _saveHasUpg('iron_foundry') || !!_ironCarUnlocked;
+    _foundryUnlocked      = true; // IRON FOUNDRY is unlocked by default for all games (new + loaded)
     _largeStationUnlocked = !!save._largeStationUnlocked || _missDone('produce_iron')  || !!_ironCarUnlocked || _anyPlanet(q=>q.hasLargeStation||q.hasTerminal);
     _terminalUnlocked     = !!save._terminalUnlocked     || !!_steelCarUnlocked || _anyPlanet(q=>q.hasTerminal);
     _bakeryUnlocked       = !!save._bakeryUnlocked       || _saveHasUpg('bakery') || _anyPlanet(q=>q.type&&q.type.id==='agri'&&visitedPlanetIds.has(q.id));
@@ -33701,7 +33701,7 @@ function startGame(){
   // runs at title PLAY, BEFORE the player picks their corp name in corpsetup,
   // so corpName is still the default placeholder at this point. It fires at
   // the fadein → galaxy transition instead (same as the game_start GA event).
-  activePopup=null; popupState={}; gameSpeedIdx=SPEED_DEFAULT_IDX; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _missionTipPending=false; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _foundryCompletedMs=0; _produceIronTimerMs=0; _ironCarUnlockedMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _ancientSchematicsTimerMs=0; _ancientSchematicsPlanetId=-1; _ancientSchematicsFired=false; _hasZoomed=false; _buyTrainTipStartMs=0; _buyTrainTipShown=false; _prevActivePopupForSfx=null; _missionTipFired=false; _visitPlanetCompletedMs=0; _tutorialDoneMs=0; _crTutorialDoneMs=0; _firstNonLowOrbitFired=false; _orbitHintStartMs=0; _orbitHintPlanetId=-1; _crTrainPreselected=false; _foundryCalloutShown=false; _foundryCalloutStartMs=0; _foundryCalloutFadeOutStartMs=0; _foundryCardScreenBounds=null; _foundryUnlocked=false; _foundryUnlockSd=0; _largeStationUnlocked=false; _terminalUnlocked=false; _bakeryUnlocked=false; _glassworksUnlocked=false; pendingUpgradeUnlocks=[];
+  activePopup=null; popupState={}; gameSpeedIdx=SPEED_DEFAULT_IDX; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _missionTipPending=false; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _foundryCompletedMs=0; _produceIronTimerMs=0; _ironCarUnlockedMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _ancientSchematicsTimerMs=0; _ancientSchematicsPlanetId=-1; _ancientSchematicsFired=false; _hasZoomed=false; _buyTrainTipStartMs=0; _buyTrainTipShown=false; _prevActivePopupForSfx=null; _missionTipFired=false; _visitPlanetCompletedMs=0; _tutorialDoneMs=0; _crTutorialDoneMs=0; _firstNonLowOrbitFired=false; _orbitHintStartMs=0; _orbitHintPlanetId=-1; _crTrainPreselected=false; _foundryCalloutShown=false; _foundryCalloutStartMs=0; _foundryCalloutFadeOutStartMs=0; _foundryCardScreenBounds=null; _foundryUnlocked=true; _foundryUnlockSd=0; _largeStationUnlocked=false; _terminalUnlocked=false; _bakeryUnlocked=false; _glassworksUnlocked=false; pendingUpgradeUnlocks=[];
   _newspaper=null; _newspaperLastSd=829; _newspaperPrevSpeed=0; _newspaperNextHover=false; _newspaperNextBounds=null; _newspaperPrevHover=false; _newspaperPrevBounds=null; _newspaperArchive=[]; _newspaperViewIdx=null; _paperMajorUsed=[]; _paperMinorUsed=[]; _paperLayout=0; _paperIssueNum=0; _paperIdx=randInt(0,_PAPER_NAMES.length-1); _newsEventLog=[]; _newsSnapshot=null;
   _speedLeftHover=false; _speedRightHover=false; _panelTabHover=null; _routeHereBtnHover=false; _assignBtnHover=false; _cancelRouteBtnHover=false; _planetStarNameHover=false; _starPanelPlanetHover=-1; _trainAddHover=false; _trainRowHover=-1; _pokedexSortHover=false; _pokedexRowHover=-1; _starRegistrySortHover=false; _starRegistryRowHover=-1; _goldOkHover=false; _diamondOkHover=false; _carUnlockOkHover=false; _quitYesHover=false; _quitNoHover=false; _saveGameBtnHover=false; _startBtnHover=false; _loadBtnHover=false; _htpBtnHover=false; _htpDotHover=-1; _htpSkipHover=false; pokedexRowBounds=[]; starRegistryRowBounds=[]; loadBtnBounds=null; saveGameBtnBounds=null;
   fogPoints=[]; fogGridSet=new Set(); fogCanvas=null;
