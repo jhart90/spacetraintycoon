@@ -221,7 +221,12 @@
       "Bash(ffmpeg -y -f lavfi -i color=c=0x0a1428:s=1920x780 -i wordmark2.png -filter_complex \"[0][1]overlay=\\(W-w\\)/2:\\(H-h\\)/2\" -frames:v 1 _wm2_dark.png)",
       "Bash(ffprobe -v error -show_entries format=duration:stream=codec_type,width,height,r_frame_rate -of default=noprint_wrappers=1 \"STT_Trailer_v1.mp4\")",
       "Bash(ffmpeg -y -ss 37 -i \"STT_Trailer_v1.mp4\" -vf \"fps=2,scale=300:-1,drawtext=text='%{eif\\\\:37+n/2\\\\:d}.%{eif\\\\:mod\\(n*5\\\\,10\\)\\\\:d}s':x=4:y=4:fontsize=20:fontcolor=yellow:box=1:boxcolor=black,tile=5x4\" -frames:v 1 _end_contact.png)",
-      "Bash(ffmpeg -y -ss 37 -i \"STT_Trailer_v1.mp4\" -vf \"fps=2,scale=300:-1,tile=5x4\" -frames:v 1 _end_contact.png)"
+      "Bash(ffmpeg -y -ss 37 -i \"STT_Trailer_v1.mp4\" -vf \"fps=2,scale=300:-1,tile=5x4\" -frames:v 1 _end_contact.png)",
+      "Bash(ffmpeg -y -ss 40.0 -i \"STT_Trailer_v1.mp4\" -vf \"fps=10,scale=240:-1,tile=6x2\" -frames:v 1 _fine.png)",
+      "Bash(rm -f _f_*.png _t_*.png _u_*.png _trans*.png _fine.png _end_contact.png)",
+      "Bash(ffmpeg -y -ss 0.3 -i \"STT_Trailer_v1.mp4\" -frames:v 1 -vf scale=620:-1 _open.png)",
+      "Bash(rm -f _open.png _full_open.png _full_dyson.png _full_open_logo.png _full_dyson_logo.png _legib.png)",
+      "Bash(ffmpeg -y -i \"STT_Trailer_v1.mp4\" -loop 1 -i wordmark2.png -filter_complex_script wm_filter_v1.txt -map \"[v]\" -map 0:a -c:v libx264 -crf 18 -preset medium -pix_fmt yuv420p -c:a copy -movflags +faststart -shortest \"STT_Trailer_v1_logo.mp4\")"
     ]
   },
   "hooks": {

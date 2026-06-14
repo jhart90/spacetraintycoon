@@ -2698,36 +2698,34 @@ function drawLeaderboardScreen(){
     }
   }
 
-  // ── Footer: page label + prev/next + back ──
+  // ── Footer: page label + prev/next arrows + back — anchored BELOW the table
+  //    (and toward the screen bottom on tall windows), so it can never overlap
+  //    the last rows regardless of window height. ──
   ctx.textBaseline='alphabetic';
   const _maxPage=Math.max(0,Math.min(9,Math.ceil(_lbRows.length/10)-1));
-  if(_lbStatus==='ok'){
-    const _r0=_lbPage*10+1, _r1=Math.min(_lbRows.length,_lbPage*10+10);
-    ctx.font='12px "Exo 2",sans-serif'; ctx.textAlign='center'; ctx.fillStyle='rgba(190,195,220,0.82)';
-    ctx.fillText('Ranks '+_r0+'–'+_r1+' of '+_lbRows.length,W/2,H-86);
-  }
-  const _btnY=H-66, _btnH=34, _btnW=126;
-  // ── BACK button — rounded corners ──
+  const _tableBot=tableTop+10*rowH;
+  const _footCY=Math.min(Math.max(_tableBot+30,H-56),H-26); // vertical centre of the footer row
+  // BACK button — smaller (buffer below the table), left side, centred on the row.
+  const _btnW=104, _btnH=28, _btnY=Math.round(_footCY-_btnH/2);
   {
     const _hov=_lbBackHover;
     ctx.fillStyle=_hov?'rgba(72,52,124,0.96)':'rgba(45,35,80,0.85)';
     ctx.beginPath(); ctx.roundRect(tableX,_btnY,_btnW,_btnH,8); ctx.fill();
     ctx.strokeStyle=_hov?'rgba(185,155,255,0.9)':'rgba(120,100,190,0.6)'; ctx.lineWidth=1.5;
     ctx.beginPath(); ctx.roundRect(tableX,_btnY,_btnW,_btnH,8); ctx.stroke();
-    ctx.font='bold 12px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
     ctx.fillStyle='rgba(222,212,255,0.96)'; ctx.fillText('◀ BACK',tableX+_btnW/2,_btnY+_btnH/2);
     ctx.textBaseline='alphabetic';
     _lbBackBounds={x:tableX,y:_btnY,w:_btnW,h:_btnH};
   }
-  // ── PREV / NEXT page arrows — bare triangles flanking the "Ranks X–Y of Z"
-  //    label (no boxes / no text). Still hover-aware + click to page. ──
+  // Ranks label + PREV/NEXT triangles, centred on the footer row.
   _lbPrevBounds=null; _lbNextBounds=null;
   if(_lbStatus==='ok'){
-    const _rkY=H-86;
-    ctx.font='12px "Exo 2",sans-serif';
+    ctx.font='12px "Exo 2",sans-serif'; ctx.textAlign='center'; ctx.fillStyle='rgba(190,195,220,0.82)';
     const _rkTxt='Ranks '+(_lbPage*10+1)+'–'+Math.min(_lbRows.length,_lbPage*10+10)+' of '+_lbRows.length;
+    ctx.fillText(_rkTxt,W/2,_footCY+4);
     const _rkHalf=ctx.measureText(_rkTxt).width/2;
-    const _triS=8, _triGap=18, _hitR=15, _cy=_rkY-4;
+    const _triS=8, _triGap=18, _hitR=15, _cy=_footCY;
     const _prevEn=_lbPage>0, _nextEn=_lbPage<_maxPage;
     // Left (PREV)
     const _pcx=W/2-_rkHalf-_triGap;
@@ -4125,33 +4123,37 @@ function drawTitleScreen(ts,dt){
     const shift=(W+60)-curLeft;
     tTrain.forEach(c=>{c.x+=shift;});
   }
-  // Title text — two-pass render for legibility against bright planet
-  // surfaces / dense star fields. Pass 1: dark stroke outline around each
-  // glyph (rounded joins so the corners stay clean at this font size). Pass
-  // 2: the existing cyan glow + cyan-white-blue gradient fill, which paints
-  // over the inside of every glyph so the outline only shows at the edges.
+  // Title wordmark — TWO lines "SPACE TRAIN" / "TYCOON" sharing ONE horizontal
+  // gradient (#88ddff → #fff → #88aaff, edge-to-edge of "SPACE TRAIN") with a
+  // doubled cyan glow and NO dark stroke — matches wordmark2.png.
+  const _twPx=75; // 1.5× the base 50px
+  ctx.font='bold '+_twPx+'px Orbitron,sans-serif'; ctx.textAlign='center';
+  const _stW=ctx.measureText('SPACE TRAIN').width;   // gradient spans this width
+  const _l1Y=82, _l2Y=151, _subBaseY=187; // 1.5× layout (line gap + subtitle gap scaled)
   ctx.save();
-  ctx.font='bold 58px Orbitron,sans-serif'; ctx.textAlign='center';
-  ctx.lineJoin='round'; ctx.lineWidth=10;
-  ctx.strokeStyle='rgba(0,0,0,0.88)';
-  ctx.strokeText('SPACE TRAIN TYCOON',W/2,90);
-  ctx.shadowColor='#4af'; ctx.shadowBlur=24;
-  const tg=ctx.createLinearGradient(W/2-200,80,W/2+200,80);
-  tg.addColorStop(0,'#88ddff'); tg.addColorStop(.5,'#fff'); tg.addColorStop(1,'#88aaff');
-  ctx.fillStyle=tg; ctx.fillText('SPACE TRAIN TYCOON',W/2,90);
+  const _tg=ctx.createLinearGradient(W/2-_stW/2,0,W/2+_stW/2,0);
+  _tg.addColorStop(0,'#88ddff'); _tg.addColorStop(.5,'#fff'); _tg.addColorStop(1,'#88aaff');
+  ctx.shadowColor='#4af'; ctx.shadowBlur=36; ctx.fillStyle=_tg;
+  // Two passes per line → the wordmark's doubled glow "punch".
+  ctx.fillText('SPACE TRAIN',W/2,_l1Y);
+  ctx.fillText('TYCOON',W/2,_l2Y);
+  ctx.fillText('SPACE TRAIN',W/2,_l1Y);
+  ctx.fillText('TYCOON',W/2,_l2Y);
   ctx.restore();
-  // Subtitle — same outline-then-fill trick at smaller line widths.
+  // Subtitle — plain #89b4d8, no glow; auto-fit to ~0.62× the "SPACE TRAIN"
+  // width (the proportion in wordmark2.png).
   ctx.save();
-  ctx.font='18px "Exo 2",sans-serif'; ctx.textAlign='center';
-  ctx.lineJoin='round'; ctx.lineWidth=3.5;
-  ctx.strokeStyle='rgba(0,0,0,0.85)';
-  ctx.strokeText('INTERSTELLAR SHIPPING CORPORATION SIMULATOR',W/2,122);
+  ctx.textAlign='center';
+  const _subStr='INTERSTELLAR SHIPPING CORPORATION SIMULATOR';
+  let _subPx=18; ctx.font=_subPx+'px "Exo 2",sans-serif';
+  _subPx=Math.max(8,Math.min(18,Math.round(_subPx*(_stW*0.62)/ctx.measureText(_subStr).width)));
+  ctx.font=_subPx+'px "Exo 2",sans-serif';
   ctx.fillStyle='#89b4d8';
-  ctx.fillText('INTERSTELLAR SHIPPING CORPORATION SIMULATOR',W/2,122);
+  ctx.fillText(_subStr,W/2,_subBaseY);
   ctx.restore();
   btnPulse=(btnPulse+0.025)%(Math.PI*2);
   const pulse=0.6+0.4*Math.sin(btnPulse);
-  const bx=W/2-95,by=150,bw=190,bh=46;
+  const bx=W/2-95,by=Math.round(_subBaseY+30),bw=190,bh=46; // sits below the (now larger) wordmark
   startBtnBounds={x:bx,y:by,w:bw,h:bh};
   ctx.save();
   ctx.shadowColor='#4af'; ctx.shadowBlur=_startBtnHover?28:18*pulse;
