@@ -3328,7 +3328,7 @@ let _createRouteTimerMs=0; // real-time ms when player first visited a non-home-
 let _visitPlanetCompletedMs=0; // (legacy) real-time ms when visit_planet mission completed. Superseded by _tutorialDoneMs but kept reset for save compat.
 let _lavaDetailsWasOpen=false; // true once the Lava Planet details window has been opened during the tutorial
 let _lavaClosedTimerMs=0;      // real-time ms when that window was first CLOSED again (0=not yet) — arms the create_route intro
-let _orijenClosedTutMs=0;      // real-time ms when the ORIJEN details window was first closed in the tutorial (0=not yet) — arms the create_route intro 1.5 s later (it now comes BEFORE the lava-station walkthrough)
+let _orijenDetailsOpenedTut=false; // true once the player has FIRST opened the ORIJEN details window in the tutorial — queues the create_route intro immediately (it shows the moment the window closes, then the lava-station walkthrough follows)
 let _tutorialDoneMs=0;         // real-time ms when the tutorial chain reached 'done' — arms the 1 s create_route intro
 let _crTutorialDoneMs=0;       // real-time ms when the create_route tutorial chain reached 'all_done' — arms buy_second_train (10 s) and build_foundry (40 s) intros
 let _crTrainPreselected=false; // true if a train was already selected when the create_route tutorial chain started (drives the blue companion bubble in cr_click_orijen / cr_shift_click_other)
@@ -19037,7 +19037,7 @@ function _drawTutorialChain(stage){
   // their initializer runs — calling them earlier throws ReferenceError and
   // takes the rest of drawGalaxy down with it.)
   if(_tutorialPhase==='pre_zoom'){
-    if(_elapsed>=2000){ _tutorialPhase='look_around'; _tutorialPhaseStartMs=_now; _tutorialFadeOutStartMs=0; _orijenTutCentered=false; _crOrijenFramed=false; _lavaDetailsWasOpen=false; _lavaClosedTimerMs=0; _orijenClosedTutMs=0; }
+    if(_elapsed>=2000){ _tutorialPhase='look_around'; _tutorialPhaseStartMs=_now; _tutorialFadeOutStartMs=0; _orijenTutCentered=false; _crOrijenFramed=false; _lavaDetailsWasOpen=false; _lavaClosedTimerMs=0; _orijenDetailsOpenedTut=false; }
     return;
   }
   // ── Helpers ──────────────────────────────────────────────
@@ -19298,6 +19298,9 @@ function _drawTutorialChain(stage){
       _orijenTutCentered=true;
     }
     const _open=(activePopup==='planet'&&popupState.planet&&galaxy.origenId!=null&&popupState.planet.id===galaxy.origenId);
+    // First open of the Orijen details window → queue the create_route intro now
+    // (it appears the moment the window closes; see the updateMissions gate).
+    if(_open) _orijenDetailsOpenedTut=true;
     if(_tutorialFadeOutStartMs===0 && _open) _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
     if(r.advanced){ _advanceTo('orijen_details'); return; }
@@ -19320,14 +19323,14 @@ function _drawTutorialChain(stage){
   // persist until the popup closes, then hand off to the lava double_click.
   if(_tutorialPhase==='orijen_details'){
     const _open=(activePopup==='planet'&&popupState.planet&&galaxy.origenId!=null&&popupState.planet.id===galaxy.origenId);
-    // Popup closed → fade out AND arm the create_route intro (fires 1.5 s later).
-    if(_tutorialFadeOutStartMs===0 && !_open){ _tutorialFadeOutStartMs=_now; if(_orijenClosedTutMs===0) _orijenClosedTutMs=_now; }
+    if(_open) _orijenDetailsOpenedTut=true; // (also caught here in case the player opens it directly)
+    if(_tutorialFadeOutStartMs===0 && !_open) _tutorialFadeOutStartMs=_now; // popup closed → fade out
     const r=_resolveAlpha();
     if(r.advanced){
-      // Reordered: the create_route mission is now introduced FIRST (1.5 s after
-      // the Orijen window closes — see the updateMissions gate), BEFORE the lava-
-      // station walkthrough. Hand off to cr_pending_accept; the lava re-frame +
-      // double-click step run only AFTER the mission is accepted.
+      // Reordered: the create_route mission was queued the moment this window first
+      // opened, so it appears right as the window closes — BEFORE the lava-station
+      // walkthrough. Hand off to cr_pending_accept; the lava re-frame + double-click
+      // step run only AFTER the mission is accepted.
       _advanceTo('cr_pending_accept'); return;
     }
     // (3) STATION upgrade card — box + bubble (shown immediately).
@@ -20559,14 +20562,13 @@ function updateMissions(dtSd){
     const _totalHazProd=galaxy.planets.reduce((s,p)=>s+((p.upgradeData?.iron_foundry?.hazmatTotal)||0),0);
     if(_totalHazProd>=2.0) pendingMissionIntros.push({defId:'dispose_hazmat',readySd:stardate});
   }
-  // create_route intro: now introduced FIRST in the chain — 1.5 s after the player
-  // closes the ORIJEN details window (the lava-station walkthrough follows the
-  // accept). The lava-station-built condition is kept as a safety fallback in case
-  // the close timer never armed.
+  // create_route intro: QUEUED as soon as the player first OPENS the ORIJEN details
+  // window. The popup can't overlay that window, so it appears the moment the window
+  // closes — then the lava-station walkthrough follows the accept. The lava-station-
+  // built condition is kept as a safety fallback.
   {
     const _crLava=(galaxy && _tutorialLavaPlanetId>=0)?galaxy.planets[_tutorialLavaPlanetId]:null;
-    const _orijenCloseReady=(_orijenClosedTutMs>0 && Date.now()-_orijenClosedTutMs>=1500);
-    if((_orijenCloseReady || (_crLava && _crLava.playerBuiltStation))
+    if((_orijenDetailsOpenedTut || (_crLava && _crLava.playerBuiltStation))
        && !_missionPending('create_route') && !missions.some(mx=>mx.id==='create_route'&&mx.status==='completed')){
       pendingMissionIntros.push({defId:'create_route',readySd:stardate});
     }
@@ -33004,7 +33006,7 @@ function _restoreFromSave(save){
   _firstNonLowOrbitFired=true; _orbitHintStartMs=0; _orbitHintPlanetId=-1; // suppress orbit-hint on loaded games
   _prevActivePopupForSfx=null;
   _visitPlanetCompletedMs=0;
-  _lavaDetailsWasOpen=false; _lavaClosedTimerMs=0; _orijenClosedTutMs=0; _crOrijenFramed=false;
+  _lavaDetailsWasOpen=false; _lavaClosedTimerMs=0; _orijenDetailsOpenedTut=false; _crOrijenFramed=false;
   _tutorialDoneMs=0;
   _crTutorialDoneMs=0;
   _findOreTimerMs=0;
@@ -33016,10 +33018,10 @@ function _restoreFromSave(save){
   const _crIntroduced=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='create_route');
   const _vpDone=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='visit_planet'&&m.status==='completed');
   if(_vpDone && !_crIntroduced) _visitPlanetCompletedMs=Date.now();
-  // create_route is now introduced 1.5 s after the Orijen window closes. For a save
-  // taken at cr_pending_accept (or 'done') before create_route was introduced, arm
-  // the Orijen-close timer so the intro fires shortly after load.
-  if((_tutorialPhase==='cr_pending_accept'||_tutorialPhase==='done')&&!_crIntroduced){ _tutorialDoneMs=Date.now(); _lavaClosedTimerMs=Date.now(); _orijenClosedTutMs=Date.now(); }
+  // create_route is queued once the Orijen window has been opened. For a save taken
+  // at cr_pending_accept (or 'done') before create_route was introduced, set the
+  // opened flag so the intro fires shortly after load.
+  if((_tutorialPhase==='cr_pending_accept'||_tutorialPhase==='done')&&!_crIntroduced){ _tutorialDoneMs=Date.now(); _lavaClosedTimerMs=Date.now(); _orijenDetailsOpenedTut=true; }
   // Re-arm the create_route → build_foundry 10 s gate if create_route is
   // completed in the save but build_foundry hasn't been introduced yet.
   const _bfIntroduced=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='build_foundry');
