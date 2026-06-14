@@ -210,7 +210,18 @@
       "Bash(sed -n '20350,20365p' build_game.py)",
       "Bash(node --check _mkt_check.js)",
       "Bash(rm -f _mkt_check.js)",
-      "Bash(node --check _check.js)"
+      "Bash(node --check _check.js)",
+      "Bash(ffprobe -v error -show_entries format=duration,size,bit_rate:stream=index,codec_type,codec_name,width,height,r_frame_rate,nb_frames -of default=noprint_wrappers=1 \"STT_Trailer_v0.mp4\")",
+      "Bash(ffmpeg -version)",
+      "Bash(cd \"C:\\\\Users\\\\jackh\\\\Desktop\\\\Claude\\\\Train Game\" && echo \"=== FONT FILES IN REPO ===\"; find . -iname \"*.ttf\" -o -iname \"*.otf\" -o -iname \"*.woff*\" 2>/dev/null | grep -iv node_modules | head; echo \"=== ORBITRON ON SYSTEM ===\"; ls \"C:/Windows/Fonts\" 2>/dev/null | grep -iE \"orbitron|exo\" ; echo \"=== marketing build? ===\"; ls build_marketing.py marketing.html 2>/dev/null; echo \"=== PIL? ===\"; python -c \"import PIL; print\\('PIL', PIL.__version__\\)\" 2>&1)",
+      "Bash(cd \"C:\\\\Users\\\\jackh\\\\Desktop\\\\Claude\\\\Train Game\" && rm -f _k_*.png _contact.png _chk_*.png && ls -la STT_Trailer_v0_logo.mp4 wordmark.png)",
+      "Bash(ffmpeg -y -i screenshots/title_card.png -vf \"crop=1634:560:0:230\" _wm_crop.png)",
+      "Bash(ffmpeg -y -f lavfi -i color=c=0x0a1428:s=1920x700 -i wordmark2.png -filter_complex \"[0][1]overlay=\\(W-w\\)/2:\\(H-h\\)/2\" -frames:v 1 _wm2_dark.png)",
+      "Bash(ffmpeg -y -f lavfi -i color=c=0x0a1428:s=1920x760 -i wordmark2.png -filter_complex \"[0][1]overlay=\\(W-w\\)/2:\\(H-h\\)/2\" -frames:v 1 _wm2_dark.png)",
+      "Bash(ffmpeg -y -f lavfi -i color=c=0x0a1428:s=1920x780 -i wordmark2.png -filter_complex \"[0][1]overlay=\\(W-w\\)/2:\\(H-h\\)/2\" -frames:v 1 _wm2_dark.png)",
+      "Bash(ffprobe -v error -show_entries format=duration:stream=codec_type,width,height,r_frame_rate -of default=noprint_wrappers=1 \"STT_Trailer_v1.mp4\")",
+      "Bash(ffmpeg -y -ss 37 -i \"STT_Trailer_v1.mp4\" -vf \"fps=2,scale=300:-1,drawtext=text='%{eif\\\\:37+n/2\\\\:d}.%{eif\\\\:mod\\(n*5\\\\,10\\)\\\\:d}s':x=4:y=4:fontsize=20:fontcolor=yellow:box=1:boxcolor=black,tile=5x4\" -frames:v 1 _end_contact.png)",
+      "Bash(ffmpeg -y -ss 37 -i \"STT_Trailer_v1.mp4\" -vf \"fps=2,scale=300:-1,tile=5x4\" -frames:v 1 _end_contact.png)"
     ]
   },
   "hooks": {

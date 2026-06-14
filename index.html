@@ -13950,6 +13950,10 @@ function updateFoundries(dtG){
   // late-game scale where 99% of planets have none, this drops the per-frame
   // foundry loop from ~1,117 iterations to ~37.
   for(const p of _getUpgradePlanets()){
+    // A car-type unlock (iron / hazmat) may ONLY be triggered by production on a
+    // PLAYER-controlled planet (player station, not an AI/rival one). Production
+    // itself still runs for AI planets — only the player's unlock flag is gated.
+    const _playerOwned = !!p.hasStation && !p.aiHasStation;
     if(_pUpg(p,'iron_foundry')&&p.upgradeData?.iron_foundry){
       const _fd=p.upgradeData.iron_foundry;
       if((_fd.progress||0)>0){
@@ -13974,10 +13978,10 @@ function updateFoundries(dtG){
           // diversity tally counts it as a unique cargo type at this planet.
           if(!p.devLog) p.devLog=[];
           p.devLog.push({sd:stardate, value:DEV_CARGO_VALUES.iron||100, cargo:'iron'});
-          if(!_ironCarUnlocked){ _ironCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_iron',displayName:'Iron Car',planetId:p.id}); _chatMsg('IRON CAR UNLOCKED','rgba(200,210,235,1)'); _ga('car_unlocked',{car_type:'iron', cargo:'iron', sd:Math.floor(stardate)}); }
+          if(_playerOwned && !_ironCarUnlocked){ _ironCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_iron',displayName:'Iron Car',planetId:p.id}); _chatMsg('IRON CAR UNLOCKED','rgba(200,210,235,1)'); _ga('car_unlocked',{car_type:'iron', cargo:'iron', sd:Math.floor(stardate)}); }
           p.supply.hazmat=Math.min(CARGO_MAX_SUPPLY,(p.supply.hazmat||0)+0.5);
           _fd.hazmatTotal=(_fd.hazmatTotal||0)+0.5; // cumulative produced, unaffected by consumption
-          if(!_hazmatCarUnlocked&&_fd.hazmatTotal>=1){ _hazmatCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_hazmat',displayName:'Hazmat Car',planetId:p.id}); _chatMsg('HAZMAT CAR UNLOCKED','rgba(255,165,40,1)'); _ga('car_unlocked',{car_type:'hazmat', cargo:'hazmat', sd:Math.floor(stardate)}); }
+          if(_playerOwned && !_hazmatCarUnlocked&&_fd.hazmatTotal>=1){ _hazmatCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_hazmat',displayName:'Hazmat Car',planetId:p.id}); _chatMsg('HAZMAT CAR UNLOCKED','rgba(255,165,40,1)'); _ga('car_unlocked',{car_type:'hazmat', cargo:'hazmat', sd:Math.floor(stardate)}); }
         }
       } else if((_fd.ore||0)>=1&&(_fd.water||0)>=1){
         _fd.progress=FOUNDRY_PROD_TIME;
@@ -14006,14 +14010,15 @@ function updateFoundries(dtG){
           p.supply.steel  =Math.min(CARGO_MAX_SUPPLY,(p.supply.steel||0)+1);
           p.steelDelivered=(p.steelDelivered||0)+1;
           // Sliding-window log of steel production (per-tick units), used for the
-          // N700 unlock check (200 units in any 20-stardate window).
-          _steelProdLog.push({sd:stardate,units:1});
-          // Producing the FIRST steel unit UNLOCKS the TERMINAL upgrade.
-          if(!_terminalUnlocked){
+          // N700 unlock check (200 units in any 20-stardate window). Player planets
+          // only — AI/rival steel must not unlock the N700 for the player.
+          if(_playerOwned) _steelProdLog.push({sd:stardate,units:1});
+          // Producing the FIRST steel unit on a PLAYER planet UNLOCKS the TERMINAL upgrade.
+          if(_playerOwned && !_terminalUnlocked){
             _terminalUnlocked=true; pendingUpgradeUnlocks.push({key:'__terminal__'});
             _chatMsg('TERMINAL UPGRADE UNLOCKED','rgba(255,210,120,1)');
           }
-          if(!_steelCarUnlocked){
+          if(_playerOwned && !_steelCarUnlocked){
             _steelCarUnlocked=true;
             pendingCarUnlocks.push({sprite:'car_steel',displayName:'Steel Car',planetId:p.id});
             _chatMsg('STEEL CAR UNLOCKED','rgba(220,230,245,1)');
@@ -14030,7 +14035,7 @@ function updateFoundries(dtG){
           // arms the Hazmat Car unlock if the foundry hasn't already done so.
           p.supply.hazmat=Math.min(CARGO_MAX_SUPPLY,(p.supply.hazmat||0)+0.5);
           _bf.hazmatTotal=(_bf.hazmatTotal||0)+0.5;
-          if(!_hazmatCarUnlocked&&_bf.hazmatTotal>=1){
+          if(_playerOwned && !_hazmatCarUnlocked&&_bf.hazmatTotal>=1){
             _hazmatCarUnlocked=true;
             pendingCarUnlocks.push({sprite:'car_hazmat',displayName:'Hazmat Car',planetId:p.id});
             _chatMsg('HAZMAT CAR UNLOCKED','rgba(255,165,40,1)');
@@ -14056,10 +14061,10 @@ function updateFoundries(dtG){
           _gw.chemical=Math.max(0,(_gw.chemical||0)-1);
           p.supply.glass  =Math.min(CARGO_MAX_SUPPLY,(p.supply.glass||0)+1);
           p.glassDelivered=(p.glassDelivered||0)+1;
-          if(!_glassCarUnlocked){ _glassCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_glass',displayName:'Glass Car',planetId:p.id}); _chatMsg('GLASS CAR UNLOCKED','rgba(170,230,210,1)'); _ga('car_unlocked',{car_type:'glass', cargo:'glass', sd:Math.floor(stardate)}); }
+          if(_playerOwned && !_glassCarUnlocked){ _glassCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_glass',displayName:'Glass Car',planetId:p.id}); _chatMsg('GLASS CAR UNLOCKED','rgba(170,230,210,1)'); _ga('car_unlocked',{car_type:'glass', cargo:'glass', sd:Math.floor(stardate)}); }
           // Industrial chain reaction: first glass produced also unlocks the
           // Machinery Car (which gets manufactured by Factories on urban planets).
-          if(!_machineryCarUnlocked){ _machineryCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_machinery',displayName:'Machinery Car',planetId:p.id}); _chatMsg('MACHINERY CAR UNLOCKED','rgba(200,200,170,1)'); _ga('car_unlocked',{car_type:'machinery', cargo:'machinery', sd:Math.floor(stardate)}); }
+          if(_playerOwned && !_machineryCarUnlocked){ _machineryCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_machinery',displayName:'Machinery Car',planetId:p.id}); _chatMsg('MACHINERY CAR UNLOCKED','rgba(200,200,170,1)'); _ga('car_unlocked',{car_type:'machinery', cargo:'machinery', sd:Math.floor(stardate)}); }
         }
       } else if((_gw.sand||0)>=1&&(_gw.chemical||0)>=1){
         _gw.progress=FOUNDRY_PROD_TIME;
@@ -14080,7 +14085,7 @@ function updateFoundries(dtG){
           p.machineryDelivered=(p.machineryDelivered||0)+1;
           // Safety net: in the unlikely case a factory produces machinery
           // before any glassworks has fired, unlock the Machinery Car here too.
-          if(!_machineryCarUnlocked){ _machineryCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_machinery',displayName:'Machinery Car',planetId:p.id}); _chatMsg('MACHINERY CAR UNLOCKED','rgba(200,200,170,1)'); _ga('car_unlocked',{car_type:'machinery', cargo:'machinery', sd:Math.floor(stardate)}); }
+          if(_playerOwned && !_machineryCarUnlocked){ _machineryCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_machinery',displayName:'Machinery Car',planetId:p.id}); _chatMsg('MACHINERY CAR UNLOCKED','rgba(200,200,170,1)'); _ga('car_unlocked',{car_type:'machinery', cargo:'machinery', sd:Math.floor(stardate)}); }
           // Hazmat byproduct: each machinery unit also produces 0.5 hazmat —
           // metal-shop chemical solvents, oil sludge, and assembly-line waste.
           // Mirrors the foundry (iron→0.5 hazmat) and blast-furnace
@@ -14088,7 +14093,7 @@ function updateFoundries(dtG){
           // unlock if no upstream producer has already done so.
           p.supply.hazmat=Math.min(CARGO_MAX_SUPPLY,(p.supply.hazmat||0)+0.5);
           _ft.hazmatTotal=(_ft.hazmatTotal||0)+0.5;
-          if(!_hazmatCarUnlocked&&_ft.hazmatTotal>=1){
+          if(_playerOwned && !_hazmatCarUnlocked&&_ft.hazmatTotal>=1){
             _hazmatCarUnlocked=true;
             pendingCarUnlocks.push({sprite:'car_hazmat',displayName:'Hazmat Car',planetId:p.id});
             _chatMsg('HAZMAT CAR UNLOCKED','rgba(255,165,40,1)');
@@ -14110,7 +14115,7 @@ function updateFoundries(dtG){
           _bk.grain=Math.max(0,(_bk.grain||0)-1);
           p.supply.cargo=Math.min(CARGO_MAX_SUPPLY,(p.supply.cargo||0)+1);
           _anyCargoProduced=true; // one-shot flag for galaxy-wide cargo demand
-          if(!_cargoCarUnlocked){
+          if(_playerOwned && !_cargoCarUnlocked){
             _cargoCarUnlocked=true;
             pendingCarUnlocks.push({sprite:'car_cargo',displayName:'Cargo Car',planetId:p.id});
             _chatMsg('CARGO CAR UNLOCKED','rgba(200,170,120,1)');
@@ -14131,7 +14136,7 @@ function updateFoundries(dtG){
           _jc.fruit=Math.max(0,(_jc.fruit||0)-1);
           p.supply.cargo=Math.min(CARGO_MAX_SUPPLY,(p.supply.cargo||0)+1);
           _anyCargoProduced=true;
-          if(!_cargoCarUnlocked){
+          if(_playerOwned && !_cargoCarUnlocked){
             _cargoCarUnlocked=true;
             pendingCarUnlocks.push({sprite:'car_cargo',displayName:'Cargo Car',planetId:p.id});
             _chatMsg('CARGO CAR UNLOCKED','rgba(200,170,120,1)');
