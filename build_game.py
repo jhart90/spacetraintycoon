@@ -1095,17 +1095,43 @@ const _MISSION_PLANET_STYLES = [
   {re:/^desert\s+planet\b/i, up:'DESERT PLANET', color:'#f0a040'}, // desert biome (hi)
   {re:/^orijen\b/i,          up:'ORIJEN',        color:'#38aaf0'}, // resort ocean (hi)
 ];
-function _objTokenize(text){
+// Build dynamic planet-name styles for a mission so its REAL planet names
+// (source / target / scientist sources, substituted in by _resolveMissionText)
+// get the SAME uppercase + bold treatment as the static ORIJEN style, but tinted
+// to the planet's biome colour. Orijen is skipped — the static entry keeps its
+// fixed resort-ocean blue. `ref` is any object carrying the planet ids
+// (sourcePlanetId / targetPlanetId / scientistSourceIds), e.g. a mission or ctx.
+function _missionPlanetStyles(ref){
+  if(!ref||!galaxy) return null;
+  const _ids=[];
+  if(ref.sourcePlanetId!=null) _ids.push(ref.sourcePlanetId);
+  if(ref.targetPlanetId!=null) _ids.push(ref.targetPlanetId);
+  if(Array.isArray(ref.scientistSourceIds)) for(const _s of ref.scientistSourceIds) if(_s!=null) _ids.push(_s);
+  if(!_ids.length) return null;
+  const _out=[], _seen=new Set();
+  for(const _id of _ids){
+    const _p=_gp(_id); if(!_p||!_p.name) continue;
+    if(/^orijen$/i.test(_p.name)) continue;        // static entry owns ORIJEN
+    const _key=_p.name.toLowerCase(); if(_seen.has(_key)) continue; _seen.add(_key);
+    const _esc=_p.name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'); // escape for regex
+    _out.push({re:new RegExp('^'+_esc+'\\b','i'), name:_p.name, up:_p.name.toUpperCase(), color:(_p.type&&_p.type.hi)||'#9ab0d0'});
+  }
+  return _out.length?_out:null;
+}
+function _objTokenize(text, extraStyles){
   const out=[]; let i=0, cur='';
   const flush=()=>{ if(cur){ for(const w of cur.split(/\s+/)) if(w) out.push({text:w,color:null}); cur=''; } };
   const _isWord=(c)=>c!==undefined && /[A-Za-z0-9]/.test(c); // matches regex \b (so "ORIJEN's" still colours ORIJEN)
+  // Static styles first (ORIJEN / LAVA PLANET / DESERT PLANET keep fixed colours),
+  // then any per-mission dynamic planet names tinted to their biome.
+  const _styles=extraStyles&&extraStyles.length?_MISSION_PLANET_STYLES.concat(extraStyles):_MISSION_PLANET_STYLES;
   while(i<text.length){
     // Planet-name phrases → uppercased + coloured (one coloured token per word
     // so the wrapper can still break the phrase across lines). Word-boundary
     // checked on BOTH sides so e.g. "DESERTED" or a mid-word match never hits.
     if(!_isWord(text[i-1])){
       let hit=null;
-      for(const ps of _MISSION_PLANET_STYLES){
+      for(const ps of _styles){
         const m=ps.re.exec(text.slice(i));
         if(m && !_isWord(text[i+m[0].length])){ hit={ps,len:m[0].length}; break; }
       }
@@ -16493,16 +16519,17 @@ function drawNewMissionPopup(){
   let _measPh=295;
   {
     const _mTxtCtx={sourcePlanetId:popupState.sourcePlanetId,targetPlanetId:popupState.targetPlanetId,scientistSourceIds:popupState.scientistSourceIds};
+    const _mPStyles=_missionPlanetStyles(_mTxtCtx);
     const _mMaxW=pw-114;            // == cMaxW below
     let _mY=62;                     // imgBY(51)+11 offset from the popup top
     if(def.details){
-      const _mdL=_objWrapTokens(_objTokenize(_resolveMissionText(def.details,_mTxtCtx)),_mMaxW,'italic 12px "Exo 2",sans-serif');
+      const _mdL=_objWrapTokens(_objTokenize(_resolveMissionText(def.details,_mTxtCtx),_mPStyles),_mMaxW,'italic 12px "Exo 2",sans-serif');
       _mY += (_mdL.length-1)*15 + 22;
     }
     _mY += 15;                      // OBJECTIVES label row
     ctx.font='12px "Exo 2",sans-serif'; const _mCbW=Math.round(ctx.measureText('○').width)+5;
     for(const _o of _displayObjs){
-      const _moL=_objWrapTokens(_objTokenize(_resolveMissionText(_o.text,_mTxtCtx)),_mMaxW-_mCbW,'10px "Exo 2",sans-serif');
+      const _moL=_objWrapTokens(_objTokenize(_resolveMissionText(_o.text,_mTxtCtx),_mPStyles),_mMaxW-_mCbW,'10px "Exo 2",sans-serif');
       _mY += _moL.length*13 + 2;
     }
     // Content bottom = lower of the right-column end and the 72px image box
@@ -16549,6 +16576,8 @@ function drawNewMissionPopup(){
   // Right column: details (above objectives) then objectives
   const cX=imgBX+imgBW+14, cMaxW=pw-(cX-px)-14;
   let _rcy=imgBY+11; // running y cursor for right column
+  // Per-mission planet-name styles (biome-coloured) for details + objectives.
+  const _npPStyles=_missionPlanetStyles({sourcePlanetId:popupState.sourcePlanetId,targetPlanetId:popupState.targetPlanetId,scientistSourceIds:popupState.scientistSourceIds});
   // Flavor / details text — italic 12px, word-wrapped, ABOVE objectives
   if(def.details){
     const _dtLH=15;
@@ -16560,7 +16589,7 @@ function drawNewMissionPopup(){
     // font; coloured planet tokens render bold-italic in their biome colour.
     const _dtFontStr='italic 12px "Exo 2",sans-serif';
     const _dtBaseCol='rgba(150,185,220,0.80)';
-    const _dtLines=_objWrapTokens(_objTokenize(_dtTxt), cMaxW, _dtFontStr);
+    const _dtLines=_objWrapTokens(_objTokenize(_dtTxt,_npPStyles), cMaxW, _dtFontStr);
     for(let _li=0;_li<_dtLines.length;_li++){
       _objDrawLine(_dtLines[_li], cX, _rcy, _dtFontStr, _dtBaseCol);
       if(_li<_dtLines.length-1) _rcy+=_dtLH;
@@ -16592,7 +16621,7 @@ function drawNewMissionPopup(){
     // Tokenize for colored [Name] segments, then word-wrap by tokens.
     const _objFontStr='10px "Exo 2",sans-serif';
     const _objTxtW=cMaxW-_cbW;
-    const _objTokens=_objTokenize(_ot);
+    const _objTokens=_objTokenize(_ot,_npPStyles);
     const _objLines=_objWrapTokens(_objTokens,_objTxtW,_objFontStr);
     const _objRowTotalH=_objLines.length*_objLH+2;
     const _objRowStartY=_rcy-13;
@@ -21241,13 +21270,15 @@ function drawMissionsPopup(){
     }
     // Details — italic 12px, word-wrapped
     let _mRowY=ry+29;
+    // Per-mission planet-name styles (biome-coloured), shared by details + objectives.
+    const _mPStyles=_missionPlanetStyles(m);
     if(m.details){
       ctx.textAlign='left';
       // Tokenised so ORIJEN / LAVA PLANET / DESERT PLANET get uppercased +
       // biome-coloured here too (same as the objectives below).
       const _mDtFontStr='italic 12px "Exo 2",sans-serif';
       const _mDtBaseCol=isDone?'rgba(68,70,78,0.50)':'rgba(138,162,200,0.72)';
-      const _mDtLines=_objWrapTokens(_objTokenize(m.details), cMaxW, _mDtFontStr);
+      const _mDtLines=_objWrapTokens(_objTokenize(m.details,_mPStyles), cMaxW, _mDtFontStr);
       for(let _li=0;_li<_mDtLines.length;_li++){
         _objDrawLine(_mDtLines[_li], cX, _mRowY, _mDtFontStr, _mDtBaseCol);
         if(_li<_mDtLines.length-1) _mRowY+=_mDtLH;
@@ -21266,7 +21297,7 @@ function drawMissionsPopup(){
       else               _col='rgba(180,200,235,0.78)';
       // Tokenize for colored [Name] segments, then word-wrap by tokens.
       const _objFontStrM='11px "Exo 2",sans-serif';
-      const _objTokensM=_objTokenize(_objDisplayText(m,obj));
+      const _objTokensM=_objTokenize(_objDisplayText(m,obj),_mPStyles);
       const _objLines=_objWrapTokens(_objTokensM,cMaxW-_mCbW,_objFontStrM);
       const _objTotalH=_objLines.length*_mObjLH;
       const _prog=_mObjProgress(m,obj.id);
@@ -26333,9 +26364,15 @@ function drawStationsPopup(){
   const _listY=_fy+_fh+8;
 
   // ── Station list (filtered: supply OR demand of ANY selected cargo) ──
+  // Threshold matches the force-include in _drawSide below so a planet only
+  // passes the filter when it has ENOUGH of the cargo to actually display a row
+  // (>= 0.1 → at least ×0.1). Using a lower filter threshold than the top-10
+  // display caused planets like Orijen — which demand a trace of the cargo,
+  // ranked outside their top-10 — to appear with no visible/highlighted row.
+  const _STF_MIN=0.1;
   let _stations=galaxy.planets.filter(p=>p.hasStation&&(!p.isAlienRelic||visitedPlanetIds.has(p.id)));
   if(_stationFilters.size){
-    _stations=_stations.filter(p=>{ for(const c of _stationFilters){ if((p.supply?.[c]||0)>=0.05||(p.demand?.[c]||0)>=0.05) return true; } return false; });
+    _stations=_stations.filter(p=>{ for(const c of _stationFilters){ if((p.supply?.[c]||0)>=_STF_MIN||(p.demand?.[c]||0)>=_STF_MIN) return true; } return false; });
   }
   const PANE_H=136, _listH=py+ph-_listY-8, _scroll=popupState.scroll||0;
   popupState.stationsRowBounds=[]; popupState.stSpriteBounds=[];
@@ -26414,9 +26451,19 @@ function drawStationsPopup(){
       // Filter-selected cargoes float to the top of the list (stable), so e.g.
       // with WATER toggled the water row leads any list that contains water.
       if(_stationFilters.size){
+        const _sideSrc=side==='supply'?(p.supply||{}):(p.demand||{});
+        // Force any filtered cargo the planet actually has on THIS side into the
+        // list even when it ranks outside the natural top-10 — otherwise a planet
+        // that passed the filter could show no row for the cargo you filtered.
+        for(const c of _stationFilters){
+          if((_sideSrc[c]||0)<_STF_MIN) continue;
+          if(c==='gold'&&!p.goldRevealed) continue;
+          if(c==='diamond'&&!p.diamondRevealed) continue;
+          if(!_ents.some(e=>e[0]===c)) _ents.push([c,_sideSrc[c]]);
+        }
         const _sel=[],_rest=[];
         for(const e of _ents){ (_stationFilters.has(e[0])?_sel:_rest).push(e); }
-        _ents=_sel.concat(_rest);
+        _ents=_sel.concat(_rest).slice(0,10); // selected rows first; cap at 2 cols × 5
       }
       const _colW=maxW/2;
       for(let i=0;i<_ents.length;i++){
@@ -29209,7 +29256,11 @@ function drawGalaxy(ts,dt){
           // treats them as atomic, then restore and tokenize each wrapped
           // line for colored rendering. (NBSP U+00A0 also matches \s+ in
           // JS so it can't be used as the placeholder.)
-          const _safe=(_objDisplayText(m,_obj)||'').replace(/\[([^\]]+)\]/g,(m2,inner)=>'['+inner.replace(/ /g,'\u0001')+']');
+          let _safe=(_objDisplayText(m,_obj)||'').replace(/\[([^\]]+)\]/g,(m2,inner)=>'['+inner.replace(/ /g,'\u0001')+']');
+          // Per-mission planet names (biome-coloured). Protect multi-word names
+          // ("San Pentarusor") so they stay atomic across the wrap and keep colour.
+          const _trkStyles=_missionPlanetStyles(m);
+          if(_trkStyles) for(const _ps of _trkStyles){ if(_ps.name.indexOf(' ')>=0) _safe=_safe.split(_ps.name).join(_ps.name.replace(/ /g,String.fromCharCode(1))); }
           // Protect two-word planet phrases (LAVA / DESERT PLANET) from being
           // split across tracker lines (which would drop their colour). The
           // protector char is the same one restored to a space below.
@@ -29218,7 +29269,7 @@ function drawGalaxy(ts,dt){
           const _trkFontStr='8px "Exo 2",sans-serif';
           for(let li=0;li<_trkLines.length;li++){
             const _restored=_trkLines[li].replace(/\u0001/g,' ');
-            const _toks=_objTokenize(_restored);
+            const _toks=_objTokenize(_restored,_trkStyles);
             _objDrawLine(_toks,_mtX+(li===0?0:6),_rowBottom+8+li*_mtLH,_trkFontStr,_trkCol);
           }
           _rowBottom+=_trkLines.length*_mtLH;
