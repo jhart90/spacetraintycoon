@@ -605,6 +605,7 @@ function _initAudioCtx(){
   }catch(e){ _audioCtx=false; return false; }
 }
 function playSound(id){
+  if(_sfxMuted||_sfxVol<=0) return; // SFX muted or volume at 0 → silent
   const _ctx=(_audioCtx===null)?_initAudioCtx():_audioCtx;
   if(_ctx){
     if(_ctx.state==='suspended') _ctx.resume().catch(()=>{});
@@ -612,7 +613,7 @@ function playSound(id){
     if(_buf){
       try{
         const _s=_ctx.createBufferSource(); _s.buffer=_buf;
-        const _g=_ctx.createGain(); _g.gain.value=0.45;
+        const _g=_ctx.createGain(); _g.gain.value=_sfxVol;
         _s.connect(_g); _g.connect(_ctx.destination); _s.start(0);
         return;
       }catch(e){}
@@ -620,7 +621,8 @@ function playSound(id){
     // Buffer not decoded yet → fall through to the HTMLAudio fallback this once.
   }
   let a=_sfxFallback[id];
-  if(!a){ const v=SOUNDS[id]; if(!v) return; a=new Audio(v); a.volume=0.45; _sfxFallback[id]=a; }
+  if(!a){ const v=SOUNDS[id]; if(!v) return; a=new Audio(v); _sfxFallback[id]=a; }
+  a.volume=_sfxVol;
   try{ a.currentTime=0; a.play().catch(()=>{}); }catch(e){}
 }
 // ── soundtrack ───────────────────────────────────────────────
@@ -642,8 +644,10 @@ const _MUSIC_TRACKS=[
   {file:'a.o.huge_07_midnight_cargo_run.mp3',   title:'Midnight Cargo Run'},
 ];
 const _soundtrack=new Audio();
-_soundtrack.volume=0.35;
+_soundtrack.volume=0.35; // 0..1 MUSIC volume (Options slider 0-100 ÷ 100)
 let _musicMuted=false;
+let _sfxMuted=false;     // Sound-Effects mute (separate Options pane)
+let _sfxVol=0.45;        // 0..1 SFX master gain (Options slider 0-100 ÷ 100)
 let _musicIdx=0, _musicStarted=false;
 function _loadMusicTrack(i){
   _musicIdx=((i%_MUSIC_TRACKS.length)+_MUSIC_TRACKS.length)%_MUSIC_TRACKS.length;
@@ -705,6 +709,8 @@ function _musicPrev(){
 let _muteBtnBounds=null, _muteBtnHover=false;
 // Title-screen fullscreen toggle (left of the mute button).
 let _fsBtnBounds=null, _fsBtnHover=false;
+// Title-screen SETTINGS (gear) button — opens the Options window (no Save Game).
+let _settingsBtnBounds=null, _settingsBtnHover=false;
 function _isFullscreen(){
   return !!(document.fullscreenElement||document.webkitFullscreenElement||document.mozFullScreenElement||document.msFullscreenElement);
 }
@@ -742,9 +748,12 @@ function _drawFullscreenGlyph(cx,cy,hh,col,lw){
   ctx.stroke();
   ctx.restore();
 }
-let _optsMuteBtnBounds=null, _optsMuteBtnHover=false;
+let _optsMuteBtnBounds=null, _optsMuteBtnHover=false;       // MUSIC mute
+let _optsSfxMuteBtnBounds=null, _optsSfxMuteBtnHover=false; // SOUND EFFECTS mute
 let _optsPrevBtnBounds=null, _optsPrevBtnHover=false;
 let _optsNextBtnBounds=null, _optsNextBtnHover=false;
+let _optsSfxSliderBounds=null, _optsMusicSliderBounds=null; // volume slider hit-tracks
+let _optsSliderDrag=null;                                   // 'sfx' | 'music' | null (active drag)
 
 // ── name edit overlay ────────────────────────────────────────
 const nameEditEl=document.getElementById('name-edit');
@@ -808,7 +817,9 @@ const T_PALS = [
 const BAR_H    = 72;
 const TOP_H    = 28;
 const GH       = H - BAR_H;
-const PANEL_W  = 185;
+const PANEL_W_BASE = 185;
+let   PANEL_W  = 185;   // live width of the right UI panel; doubles in expanded mode
+let   _panelExpanded = false; // true → panel rendered at 2× width (Trains/Stations tabs)
 const AI_CORP_COLOR='#e89320';
 const AI_CORP_RGB=[232,147,32];
 const AI_TICK_INTERVALS={very_easy:22,easy:13,normal:7,hard:3.5,very_hard:1.8};
@@ -3757,6 +3768,13 @@ let _creditsHover=false;
 // ── hover flags for clickable elements ───────────────────────
 let _speedLeftHover=false, _speedRightHover=false;
 let _panelTabHover=null;           // 'trains' | 'stations' | null
+let _panelExpandArrowBounds=null, _panelArrowHover=false; // expand/collapse arrow by the active tab
+let _optsGearBtnBounds=null, _optsGearBtnHover=false; // settings-wheel button in the lower-right speed cluster
+function _togglePanelExpand(){
+  _panelExpanded=!_panelExpanded;
+  PANEL_W=_panelExpanded?PANEL_W_BASE*2:PANEL_W_BASE;
+  if(typeof clampCamera==='function') clampCamera();
+}
 let _routeHereBtnHover=false, _assignBtnHover=false, _cancelRouteBtnHover=false;
 let _planetDetailsBtnHover=false; let planetDetailsBtnBounds=null;
 let _planetStarNameHover=false;    // star-name link in planet info bar
@@ -4158,33 +4176,36 @@ function drawTitleScreen(ts,dt){
   ctx.fillStyle='rgba(95,100,112,0.8)';
   ctx.fillText(GAME_VERSION, 12, H-12);
   ctx.restore();
-  // Mute button — bottom-right corner of title screen
-  const _mbSz=32, _mbX=W-_mbSz-14, _mbY=H-_mbSz-14;
-  _muteBtnBounds={x:_mbX,y:_mbY,w:_mbSz,h:_mbSz};
+  // Settings (gear) button — bottom-right corner of the title screen. Opens the
+  // Options window (a version WITHOUT the Save Game button). Replaces the former
+  // separate mute + fullscreen buttons — both live inside Options now.
+  const _stSz=32, _stX=W-_stSz-14, _stY=H-_stSz-14;
+  _settingsBtnBounds={x:_stX,y:_stY,w:_stSz,h:_stSz};
+  _muteBtnBounds=null; _fsBtnBounds=null; // retired title buttons
   ctx.save();
-  ctx.globalAlpha=_muteBtnHover?0.92:0.60;
-  ctx.fillStyle=_musicMuted?'rgba(90,30,30,0.92)':'rgba(20,40,80,0.85)';
-  ctx.strokeStyle=_musicMuted?'rgba(255,100,100,0.8)':(_muteBtnHover?'rgba(120,200,255,0.9)':'rgba(60,120,200,0.55)');
-  ctx.lineWidth=1.5;
-  ctx.beginPath(); ctx.roundRect(_mbX,_mbY,_mbSz,_mbSz,5); ctx.fill(); ctx.stroke();
-  ctx.globalAlpha=_muteBtnHover?1.0:0.75;
-  ctx.fillStyle=_musicMuted?'#f88':'#8cf';
-  ctx.font='bold 17px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
-  ctx.fillText(_musicMuted?'🔇':'🔊',_mbX+_mbSz/2,_mbY+_mbSz/2+1);
-  ctx.restore();
-  // Fullscreen toggle button — square, left of the mute button. Corner-bracket
-  // icon: EXPAND (corners at the outer edges) when windowed, COMPRESS (corners
-  // pulled toward the centre) when already fullscreen.
-  const _fsSz=_mbSz, _fsX=_mbX-_mbSz-10, _fsY=_mbY;
-  _fsBtnBounds={x:_fsX,y:_fsY,w:_fsSz,h:_fsSz};
-  ctx.save();
-  ctx.globalAlpha=_fsBtnHover?0.92:0.60;
+  ctx.globalAlpha=_settingsBtnHover?0.92:0.60;
   ctx.fillStyle='rgba(20,40,80,0.85)';
-  ctx.strokeStyle=_fsBtnHover?'rgba(120,200,255,0.9)':'rgba(60,120,200,0.55)';
+  ctx.strokeStyle=_settingsBtnHover?'rgba(120,200,255,0.9)':'rgba(60,120,200,0.55)';
   ctx.lineWidth=1.5;
-  ctx.beginPath(); ctx.roundRect(_fsX,_fsY,_fsSz,_fsSz,5); ctx.fill(); ctx.stroke();
-  ctx.globalAlpha=_fsBtnHover?1.0:0.78;
-  _drawFullscreenGlyph(_fsX+_fsSz/2,_fsY+_fsSz/2,8,_fsBtnHover?'#cfeaff':'#8cf',2);
+  ctx.beginPath(); ctx.roundRect(_stX,_stY,_stSz,_stSz,5); ctx.fill(); ctx.stroke();
+  ctx.globalAlpha=_settingsBtnHover?1.0:0.78;
+  _drawGearGlyph(_stX+_stSz/2,_stY+_stSz/2,9,_settingsBtnHover?'#cfeaff':'#8cf',2);
+  ctx.restore();
+}
+// Settings-wheel (gear) icon: a toothed ring + hub hole. Stroked in `col`.
+function _drawGearGlyph(cx,cy,r,col,lw){
+  ctx.save();
+  ctx.strokeStyle=col; ctx.lineWidth=lw||2; ctx.lineJoin='round'; ctx.lineCap='round';
+  const teeth=8, rOut=r, rIn=r*0.70;
+  ctx.beginPath();
+  for(let i=0;i<teeth*2;i++){
+    const a=(i/(teeth*2))*Math.PI*2 - Math.PI/2;
+    const rr=(i%2===0)?rOut:rIn;
+    const x=cx+Math.cos(a)*rr, y=cy+Math.sin(a)*rr;
+    if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.closePath(); ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx,cy,r*0.34,0,Math.PI*2); ctx.stroke();
   ctx.restore();
 }
 
@@ -13682,8 +13703,13 @@ function drawTrainsPanel(){
       // text row was merged into the first. This leaves more breathing room below
       // the 4th supply/demand item before the row divider.
       {
+        // EXPANDED: panel is 2× wide, so each of SUPPLY and DEMAND fans out into
+        // TWO sub-columns showing the top 8 (4 rows × 2). NORMAL: single column,
+        // top 4 each — unchanged.
+        const _exp=_panelExpanded;
         const colW2=Math.floor((W-8-vizTextX)/2);
         const supX=vizTextX, demX=vizTextX+colW2+2;
+        const _subW=Math.floor(colW2/2); // sub-column width when expanded
         const hdrY=ry+30, rowY0=ry+40, rowStep=8;
         // Headers
         ctx.font='bold 7px Orbitron,sans-serif'; ctx.textAlign='left';
@@ -13691,22 +13717,18 @@ function drawTrainsPanel(){
         ctx.fillStyle='rgba(255,170,60,0.70)';  ctx.fillText('DEMAND',demX,hdrY);
         // Helper: format amount — floor to nearest whole unit (3.7 → 3).
         function _fmtAmt(v){ return Math.floor(v).toString(); }
-        // Supply entries (sorted descending)
-        const supEntries=_planetTop4(p,'supply');
-        ctx.font='7px "Exo 2",sans-serif'; ctx.fillStyle='rgba(80,200,255,0.85)';
-        for(let ei=0;ei<supEntries.length;ei++){
-          const [ct,v]=supEntries[ei];
-          ctx.fillText((CARGO_SHORT[ct]||ct.slice(0,5).toUpperCase())+' x'+_fmtAmt(v), supX, rowY0+ei*rowStep);
-        }
-        if(!supEntries.length){ ctx.fillStyle='rgba(80,150,200,0.35)'; ctx.fillText('none',supX,rowY0); }
-        // Demand entries (sorted descending)
-        const demEntries=_planetTop4(p,'demand');
-        ctx.font='7px "Exo 2",sans-serif'; ctx.fillStyle='rgba(255,170,60,0.85)';
-        for(let ei=0;ei<demEntries.length;ei++){
-          const [ct,v]=demEntries[ei];
-          ctx.fillText((CARGO_SHORT[ct]||ct.slice(0,5).toUpperCase())+' x'+_fmtAmt(v), demX, rowY0+ei*rowStep);
-        }
-        if(!demEntries.length){ ctx.fillStyle='rgba(200,130,40,0.35)'; ctx.fillText('none',demX,rowY0); }
+        const _drawCol=(entries,baseX,col,emptyCol)=>{
+          ctx.font='7px "Exo 2",sans-serif'; ctx.fillStyle=col;
+          for(let ei=0;ei<entries.length;ei++){
+            const [ct,v]=entries[ei];
+            const _ex=baseX+(_exp&&ei>=4?_subW:0);
+            const _ey=rowY0+(_exp?(ei%4):ei)*rowStep;
+            ctx.fillText((CARGO_SHORT[ct]||ct.slice(0,5).toUpperCase())+' x'+_fmtAmt(v), _ex, _ey);
+          }
+          if(!entries.length){ ctx.fillStyle=emptyCol; ctx.fillText('none',baseX,rowY0); }
+        };
+        _drawCol(_exp?_planetTopN(p,'supply',8):_planetTop4(p,'supply'),supX,'rgba(80,200,255,0.85)','rgba(80,150,200,0.35)');
+        _drawCol(_exp?_planetTopN(p,'demand',8):_planetTop4(p,'demand'),demX,'rgba(255,170,60,0.85)','rgba(200,130,40,0.35)');
       }
       // Row divider
       if(ri<stationPlanets.length-1){
@@ -16124,13 +16146,32 @@ function drawArrowBtn(x,y,w,h,dir,active,hov=false){
 
 function drawSpeedIndicator(){
   const spd=SPEED_OPTS[gameSpeedIdx];
-  // Right-aligned cluster: speed selector right, zoom bar left — both above info bar
-  const rightEdge=W-PANEL_W-6;
+  // Right-aligned cluster: [settings gear] | speed selector | zoom bar — above info bar
+  const panelEdge=W-PANEL_W-6;
   const rowY=GH-10; // vertical centre
   ctx.save();
 
-  // Speed selector — 3 elements: left arrow | value | right arrow
   const btnW=18, btnH=16, valW=32;
+
+  // ── Settings (gear) button — far right, same size as a speed arrow, same
+  //    gear design as the title screen. Opens the Options window. ──
+  const _gX=panelEdge-btnW, _gY=rowY-btnH/2;
+  _optsGearBtnBounds={x:_gX,y:_gY,w:btnW,h:btnH};
+  {
+    const r=3, hov=_optsGearBtnHover, x=_gX, y=_gY, w=btnW, h=btnH;
+    ctx.beginPath();
+    ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y); ctx.arcTo(x+w,y,x+w,y+r,r);
+    ctx.lineTo(x+w,y+h-r); ctx.arcTo(x+w,y+h,x+w-r,y+h,r);
+    ctx.lineTo(x+r,y+h); ctx.arcTo(x,y+h,x,y+h-r,r);
+    ctx.lineTo(x,y+r); ctx.arcTo(x,y,x+r,y,r); ctx.closePath();
+    ctx.fillStyle=hov?'rgba(90,150,240,0.92)':'rgba(60,110,200,0.75)'; ctx.fill();
+    ctx.strokeStyle=hov?'rgba(160,220,255,0.90)':'rgba(100,180,255,0.7)'; ctx.lineWidth=1; ctx.stroke();
+    _drawGearGlyph(x+w/2,y+h/2,5.2,hov?'rgba(230,248,255,1.0)':'rgba(160,210,255,0.95)',1.5);
+  }
+  // Speed/zoom cluster sits to the LEFT of the gear button (with a small buffer).
+  const rightEdge=_gX-8;
+
+  // Speed selector — 3 elements: left arrow | value | right arrow
   const selW=btnW+valW+btnW+4; // total width
   const selX=rightEdge-selW;
   const leftBx=selX, rightBx=selX+btnW+valW+4;
@@ -16148,16 +16189,20 @@ function drawSpeedIndicator(){
   ctx.fillStyle=_spdCol;
   ctx.fillText(_spdLbl,selX+btnW+valW/2+2,rowY+3.5);
 
-  // Zoom bar — to the left of speed selector, with ZOOM label
+  // Zoom bar — to the left of the speed selector (its label now sits ABOVE it,
+  // so the 30px left-label reservation is gone; the bar keeps its old position).
   const zoomBarW=60, zoomBarH=5;
-  const zoomLabelW=30;
-  const zoomX=selX-8-zoomBarW-zoomLabelW;
-  _zoomBarCenter={x:Math.round(zoomX+zoomLabelW+zoomBarW/2), y:rowY};
+  const zoomBarX=selX-8-zoomBarW;
+  _zoomBarCenter={x:Math.round(zoomBarX+zoomBarW/2), y:rowY};
   const zt=Math.max(0,Math.min(1,(Math.log(cam.scale)-Math.log(MIN_SC))/(Math.log(MAX_SC)-Math.log(MIN_SC))));
-  ctx.fillStyle='rgba(20,40,80,0.55)'; ctx.fillRect(zoomX+zoomLabelW,rowY-zoomBarH/2,zoomBarW,zoomBarH);
-  ctx.fillStyle='rgba(80,160,255,0.8)'; ctx.fillRect(zoomX+zoomLabelW,rowY-zoomBarH/2,zoomBarW*zt,zoomBarH);
-  ctx.font='9px Orbitron,sans-serif'; ctx.textAlign='right';
-  ctx.fillStyle='rgba(120,180,255,0.6)'; ctx.fillText('ZOOM',zoomX+zoomLabelW-4,rowY+3.5);
+  ctx.fillStyle='rgba(20,40,80,0.55)'; ctx.fillRect(zoomBarX,rowY-zoomBarH/2,zoomBarW,zoomBarH);
+  ctx.fillStyle='rgba(80,160,255,0.8)'; ctx.fillRect(zoomBarX,rowY-zoomBarH/2,zoomBarW*zt,zoomBarH);
+
+  // Labels — each centered just ABOVE its control cluster.
+  const _lblY=rowY-13;
+  ctx.font='8px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.fillStyle='rgba(120,180,255,0.6)';
+  ctx.fillText('ZOOM', zoomBarX+zoomBarW/2, _lblY);
+  ctx.fillText('GAME SPEED', selX+selW/2, _lblY);
 
   ctx.restore();
 }
@@ -18611,53 +18656,78 @@ function _drawRouteHereResult(){
   else _a=1;
   if(_a<=0) return;
   const _ok=_routeHereResultOk;
-  // Default anchor: above the [O] options text; fall back to the galaxy-viewport
-  // centre. On SUCCESS, point at the train the route was assigned to (its engine
-  // in the galaxy view) whenever that train is on-screen.
-  const _ob=_hintBounds.find(b=>b.popup==='options');
-  let _tipX=_ob?(_ob.x+_ob.w/2):((W-PANEL_W)/2);
-  let _tipY=_ob?(_ob.y-3):(GH-11);
-  const _rt=_routeHereResultTrain;
-  if(_ok && _rt && galaxy && trains.includes(_rt)){
-    const _pos=getTrainCarPos(_rt,0); // engine world position
-    if(_pos){
-      const [_sx,_sy]=w2s(_pos[0],_pos[1]);
-      // Only retarget when the engine is inside the galaxy viewport (clear of the
-      // top bar and right panel); otherwise keep the bottom-bar anchor.
-      if(_sx>=10 && _sx<=W-PANEL_W-10 && _sy>=TOP_H+10 && _sy<=GH-6){ _tipX=_sx; _tipY=_sy; }
-    }
-  }
   const _txt=_ok?'ROUTE confirmed':'Failed to find a viable ROUTE';
   ctx.font='bold 9px "Exo 2",sans-serif';
   const _tw=ctx.measureText(_txt).width;
   const _pad=11, _bH=24, _bR=6, _tailH=8;
   const _bW=_tw+_pad*2;
-  let _bx=_tipX-_bW/2;
-  if(_bx<6) _bx=6;
-  if(_bx+_bW>W-6) _bx=W-6-_bW;
-  // Bubble normally sits ABOVE the tip (tail down). If that would clip the top
-  // bar (train near the top of the viewport), flip it BELOW (tail up).
-  let _below=false;
-  let _by=_tipY-_tailH-_bH;
-  if(_by<TOP_H+4){ _below=true; _by=_tipY+_tailH; }
-  const _tailX=Math.max(_bx+_bR+6,Math.min(_tipX,_bx+_bW-_bR-6));
   const _bg=_ok?'rgba(38,170,90,0.97)':'rgba(212,62,56,0.97)';
   const _sh=_ok?'rgba(0,120,50,0.55)':'rgba(150,20,20,0.55)';
-  // Wipe any HD-overlay text behind the pill so it can't bleed through.
-  _clearTextOverlayRect(_bx-2,Math.min(_by,_tipY)-2,_bW+4,Math.abs(_tipY-_by)+_bH+4);
+  // Default anchor: above the settings-gear button (lower-right); fall back to
+  // galaxy-viewport centre. On SUCCESS, point at the train the route was
+  // assigned to (its engine).
+  const _ob=_optsGearBtnBounds;
+  let _tipX=_ob?(_ob.x+_ob.w/2):((W-PANEL_W)/2);
+  let _tipY=_ob?(_ob.y-3):(GH-11);
+  // Galaxy viewport, clear of the top bar + right panel.
+  const vpL=12, vpR=W-PANEL_W-12, vpT=TOP_H+12, vpB=GH-12;
+  let _offTrain=null; // {sx,sy} true screen pos of an OFF-screen target train
+  const _rt=_routeHereResultTrain;
+  if(_ok && _rt && galaxy && trains.includes(_rt)){
+    const _pos=getTrainCarPos(_rt,0); // engine world position
+    if(_pos){
+      const [_sx,_sy]=w2s(_pos[0],_pos[1]);
+      if(_sx>=vpL&&_sx<=vpR&&_sy>=vpT&&_sy<=vpB){ _tipX=_sx; _tipY=_sy; }   // on-screen → point at engine
+      else { _offTrain={sx:_sx,sy:_sy}; }                                    // off-screen → point off the edge toward it
+    }
+  }
   ctx.save();
   ctx.globalAlpha=_a;
-  ctx.shadowColor=_sh; ctx.shadowBlur=8;
-  ctx.fillStyle=_bg;
-  ctx.beginPath(); ctx.roundRect(_bx,_by,_bW,_bH,_bR); ctx.fill();
-  // Tail toward the tip (down when above, up when below).
-  if(_below){ ctx.beginPath(); ctx.moveTo(_tailX-6,_by); ctx.lineTo(_tailX+6,_by); ctx.lineTo(_tailX,_tipY); ctx.closePath(); ctx.fill(); }
-  else      { ctx.beginPath(); ctx.moveTo(_tailX-6,_by+_bH); ctx.lineTo(_tailX+6,_by+_bH); ctx.lineTo(_tailX,_tipY); ctx.closePath(); ctx.fill(); }
-  ctx.shadowBlur=0;
-  ctx.fillStyle='#ffffff';
-  ctx.textAlign='center'; ctx.textBaseline='middle';
-  ctx.fillText(_txt,_bx+_bW/2,_by+_bH/2);
-  ctx.textBaseline='alphabetic';
+  if(_offTrain){
+    // Clamp a tip to the viewport edge in the train's direction; sit the bubble
+    // just inside that edge with a tail pointing OUTWARD toward the off-screen train.
+    const vcx=(vpL+vpR)/2, vcy=(vpT+vpB)/2;
+    const _ex=Math.max(vpL,Math.min(vpR,_offTrain.sx));
+    const _ey=Math.max(vpT,Math.min(vpB,_offTrain.sy));
+    let _dx=_offTrain.sx-vcx, _dy=_offTrain.sy-vcy; const _dl=Math.hypot(_dx,_dy)||1; _dx/=_dl; _dy/=_dl;
+    let _bx=_ex-_dx*(_bH/2+18)-_bW/2, _by=_ey-_dy*(_bH/2+18)-_bH/2;
+    _bx=Math.max(vpL,Math.min(vpR-_bW,_bx));
+    _by=Math.max(vpT,Math.min(vpB-_bH,_by));
+    _clearTextOverlayRect(Math.min(_bx,_ex)-2,Math.min(_by,_ey)-2,Math.abs(_ex-_bx)+_bW+4,Math.abs(_ey-_by)+_bH+4);
+    ctx.shadowColor=_sh; ctx.shadowBlur=8; ctx.fillStyle=_bg;
+    ctx.beginPath(); ctx.roundRect(_bx,_by,_bW,_bH,_bR); ctx.fill();
+    // Triangular tail from the bubble toward the edge point.
+    const _cx=_bx+_bW/2, _cy=_by+_bH/2;
+    let _tdx=_ex-_cx, _tdy=_ey-_cy; const _tl=Math.hypot(_tdx,_tdy)||1; _tdx/=_tl; _tdy/=_tl;
+    const _baseX=_cx+_tdx*(_bH*0.42), _baseY=_cy+_tdy*(_bH*0.42);
+    const _perpX=-_tdy, _perpY=_tdx, _half=6.5;
+    ctx.beginPath();
+    ctx.moveTo(_baseX+_perpX*_half,_baseY+_perpY*_half);
+    ctx.lineTo(_baseX-_perpX*_half,_baseY-_perpY*_half);
+    ctx.lineTo(_ex,_ey);
+    ctx.closePath(); ctx.fill();
+    ctx.shadowBlur=0; ctx.fillStyle='#ffffff';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(_txt,_cx,_cy); ctx.textBaseline='alphabetic';
+  } else {
+    let _bx=_tipX-_bW/2;
+    if(_bx<6) _bx=6;
+    if(_bx+_bW>W-6) _bx=W-6-_bW;
+    // Bubble normally sits ABOVE the tip (tail down). If that would clip the top
+    // bar (train near the top of the viewport), flip it BELOW (tail up).
+    let _below=false;
+    let _by=_tipY-_tailH-_bH;
+    if(_by<TOP_H+4){ _below=true; _by=_tipY+_tailH; }
+    const _tailX=Math.max(_bx+_bR+6,Math.min(_tipX,_bx+_bW-_bR-6));
+    _clearTextOverlayRect(_bx-2,Math.min(_by,_tipY)-2,_bW+4,Math.abs(_tipY-_by)+_bH+4);
+    ctx.shadowColor=_sh; ctx.shadowBlur=8; ctx.fillStyle=_bg;
+    ctx.beginPath(); ctx.roundRect(_bx,_by,_bW,_bH,_bR); ctx.fill();
+    if(_below){ ctx.beginPath(); ctx.moveTo(_tailX-6,_by); ctx.lineTo(_tailX+6,_by); ctx.lineTo(_tailX,_tipY); ctx.closePath(); ctx.fill(); }
+    else      { ctx.beginPath(); ctx.moveTo(_tailX-6,_by+_bH); ctx.lineTo(_tailX+6,_by+_bH); ctx.lineTo(_tailX,_tipY); ctx.closePath(); ctx.fill(); }
+    ctx.shadowBlur=0; ctx.fillStyle='#ffffff';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(_txt,_bx+_bW/2,_by+_bH/2); ctx.textBaseline='alphabetic';
+  }
   ctx.restore();
 }
 
@@ -21516,6 +21586,56 @@ function drawStarRegistry(){
   ctx.restore();
 }
 
+// Horizontal volume slider for the Options SOUND panes: dark track + accent
+// fill + round handle, with a 0-100 value label right-aligned at valX. `val` is
+// 0..1. Returns the slider's hit-track {x,y,w,h} (taller than the visible track
+// so it's easy to grab). Drawn with the shared global ctx.
+function _drawOptionsSlider(x, midY, w, val, accent, hot, valX){
+  const _h=6, _y=midY-_h/2;
+  ctx.save();
+  ctx.fillStyle='rgba(0,0,0,0.82)';
+  ctx.beginPath(); ctx.roundRect(x,_y,w,_h,3); ctx.fill();
+  ctx.fillStyle=accent;
+  ctx.beginPath(); ctx.roundRect(x,_y,Math.max(2,w*val),_h,3); ctx.fill();
+  ctx.strokeStyle='rgba(80,140,210,0.55)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.roundRect(x,_y,w,_h,3); ctx.stroke();
+  const _hx=x+w*Math.max(0,Math.min(1,val));
+  ctx.fillStyle=hot?'#e6f6ff':'#bde6ff';
+  ctx.strokeStyle='rgba(40,90,160,0.9)'; ctx.lineWidth=1.2;
+  ctx.beginPath(); ctx.arc(_hx,midY,5.5,0,Math.PI*2); ctx.fill(); ctx.stroke();
+  // 0-100 value label, right-aligned.
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='right'; ctx.textBaseline='middle';
+  ctx.fillStyle='rgba(170,210,245,0.92)';
+  ctx.fillText(String(Math.round(val*100)), valX, midY+0.5);
+  ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+  ctx.restore();
+  return {x, y:midY-11, w, h:22};
+}
+// Shared click handler for the OPTIONS popup — used both in-game and from the
+// title screen (where popupState.noSave hides the SAVE GAME button). Returns
+// true when the click was consumed so the caller can stop processing it.
+function _handleOptionsPopupClick(cp){
+  if(activePopup!=='options'||!popupState) return false;
+  const _in=(b)=>!!(b&&cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h);
+  const _onSlider=(b)=>!!(b&&cp.x>=b.x-6&&cp.x<=b.x+b.w+6&&cp.y>=b.y&&cp.y<=b.y+b.h);
+  if(_in(popupState.optionsEscBounds)){ activePopup=null; popupState={}; return true; }
+  if(_in(popupState.controlsBtnBounds)){ activePopup='controls'; popupState={}; playSound('click'); return true; }
+  if(_in(popupState.optionsSaveBtnBounds)){ saveGame(); return true; }
+  if(_in(popupState.optionsFullscreenBtnBounds)){ _toggleFullscreen(); return true; }
+  if(_in(popupState.autosaveToggleBounds)){ autosaveEnabled=!autosaveEnabled; return true; }
+  if(_in(popupState.missionTrackerToggleBounds)){ missionTrackerEnabled=!missionTrackerEnabled; return true; }
+  if(_in(_optsSfxMuteBtnBounds)){ _sfxMuted=!_sfxMuted; if(!_sfxMuted) playSound('button'); return true; }
+  if(_onSlider(_optsSfxSliderBounds)){ const b=_optsSfxSliderBounds; _optsSliderDrag='sfx'; _sfxVol=Math.max(0,Math.min(1,(cp.x-b.x)/b.w)); return true; }
+  if(_in(_optsMuteBtnBounds)){ _toggleMusicMute(); return true; }
+  if(_onSlider(_optsMusicSliderBounds)){ const b=_optsMusicSliderBounds; _optsSliderDrag='music'; _soundtrack.volume=Math.max(0,Math.min(1,(cp.x-b.x)/b.w)); return true; }
+  if(_in(_optsPrevBtnBounds)){ _musicPrev(); return true; }
+  if(_in(_optsNextBtnBounds)){ _musicNext(); return true; }
+  // Consume any other click inside the (opaque) popup frame so it can't fall
+  // through to the title-screen buttons or the galaxy behind it.
+  const _opw=300, _oph=448-((popupState.noSave)?36:0), _opx=(W-_opw)/2, _opy=(H-_oph)/2;
+  if(cp.x>=_opx&&cp.x<=_opx+_opw&&cp.y>=_opy&&cp.y<=_opy+_oph) return true;
+  return false;
+}
 function drawOptionsPopup(){
   if(activePopup!=='options') return;
   // Options is now intentionally minimal: Controls/How-To-Play shortcut +
@@ -21523,7 +21643,11 @@ function drawOptionsPopup(){
   // (Add Credits, Flower Planet, Colony Planet, Rival) AND the Fog of War
   // toggle all live in the hidden Cheats popup accessed by pressing 'C' while
   // Options is open.
-  const pw=300, ph=362; // +30 vs prior 332 to fit the FULLSCREEN row above Autosave
+  // When opened from the TITLE screen (popupState.noSave) the SAVE GAME button
+  // is omitted and everything below it shifts up by _dy so there's no gap.
+  const _noSave=!!(popupState&&popupState.noSave);
+  const _dy=_noSave?36:0;
+  const pw=300, ph=448-_dy; // taller to fit the split SOUND EFFECTS + MUSIC panes (each: mute + volume slider) at the bottom
   const [px,py]=drawPopupBase(pw,ph,'rgba(80,160,255,0.7)');
   ctx.save();
   ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
@@ -21558,24 +21682,28 @@ function drawOptionsPopup(){
   // ── SAVE GAME button — same shape/size as CONTROLS but green. Clicking
   // calls saveGame() (identical behavior to the SAVE GAME button in the
   // quit-confirm popup). Hover state lives on popupState.optionsSaveBtnHover.
-  const _saveX=_ctlX, _saveY=py+80, _saveW=_ctlW, _saveH=_ctlH;
-  const _saveHov=!!popupState.optionsSaveBtnHover;
-  ctx.fillStyle=_saveHov?'rgba(45,200,90,0.97)':'rgba(30,160,70,0.85)';
-  ctx.beginPath(); ctx.roundRect(_saveX,_saveY,_saveW,_saveH,4); ctx.fill();
-  ctx.strokeStyle=_saveHov?'rgba(80,240,110,0.95)':'rgba(50,220,90,0.75)'; ctx.lineWidth=_saveHov?1.5:1;
-  ctx.beginPath(); ctx.roundRect(_saveX,_saveY,_saveW,_saveH,4); ctx.stroke();
-  ctx.font='bold 10px Orbitron,sans-serif'; ctx.textAlign='center';
-  ctx.fillStyle=_saveHov?'rgba(230,255,235,0.98)':'rgba(195,240,210,0.95)';
-  ctx.fillText('SAVE GAME',_saveX+_saveW/2,_saveY+_saveH/2+4);
-  popupState.optionsSaveBtnBounds={x:_saveX,y:_saveY,w:_saveW,h:_saveH};
-  // Divider after the two top buttons
+  // Omitted entirely when the popup is opened from the title screen (_noSave).
+  if(_noSave){ popupState.optionsSaveBtnBounds=null; }
+  else {
+    const _saveX=_ctlX, _saveY=py+80, _saveW=_ctlW, _saveH=_ctlH;
+    const _saveHov=!!popupState.optionsSaveBtnHover;
+    ctx.fillStyle=_saveHov?'rgba(45,200,90,0.97)':'rgba(30,160,70,0.85)';
+    ctx.beginPath(); ctx.roundRect(_saveX,_saveY,_saveW,_saveH,4); ctx.fill();
+    ctx.strokeStyle=_saveHov?'rgba(80,240,110,0.95)':'rgba(50,220,90,0.75)'; ctx.lineWidth=_saveHov?1.5:1;
+    ctx.beginPath(); ctx.roundRect(_saveX,_saveY,_saveW,_saveH,4); ctx.stroke();
+    ctx.font='bold 10px Orbitron,sans-serif'; ctx.textAlign='center';
+    ctx.fillStyle=_saveHov?'rgba(230,255,235,0.98)':'rgba(195,240,210,0.95)';
+    ctx.fillText('SAVE GAME',_saveX+_saveW/2,_saveY+_saveH/2+4);
+    popupState.optionsSaveBtnBounds={x:_saveX,y:_saveY,w:_saveW,h:_saveH};
+  }
+  // Divider after the top button(s)
   ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.moveTo(px,py+124); ctx.lineTo(px+pw,py+124); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(px,py+124-_dy); ctx.lineTo(px+pw,py+124-_dy); ctx.stroke();
   // ── FULLSCREEN row (thin — no subtitle) ─────────────────────
   // Label + the same bracket toggle button as the title screen. Enters / exits
   // browser fullscreen (F11 equivalent); the glyph reflects the current state.
   {
-    const _fsRowY=py+150; // label baseline
+    const _fsRowY=py+150-_dy; // label baseline
     ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
     ctx.fillStyle='rgba(160,200,255,0.9)'; ctx.fillText('Fullscreen',px+18,_fsRowY);
     const _ofsSz=24, _ofsX=px+pw-18-_ofsSz, _ofsY=_fsRowY-19;
@@ -21592,7 +21720,7 @@ function drawOptionsPopup(){
     popupState.optionsFullscreenBtnBounds={x:_ofsX,y:_ofsY,w:_ofsSz,h:_ofsSz};
   }
   // Autosave row — pushed down (+30) to make room for the FULLSCREEN row above.
-  const ry=py+184;
+  const ry=py+184-_dy;
   ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
   ctx.fillStyle='rgba(160,200,255,0.9)'; ctx.fillText('Autosave',px+18,ry);
   ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,130,180,0.5)';
@@ -21608,13 +21736,13 @@ function drawOptionsPopup(){
   popupState.autosaveToggleBounds={x:asTX,y:asTT,w:asTW,h:asTH};
   // Divider before Mission Objectives Tracker
   ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.moveTo(px,py+221); ctx.lineTo(px+pw,py+221); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(px,py+221-_dy); ctx.lineTo(px+pw,py+221-_dy); ctx.stroke();
   // Fog toggle has moved to the Cheats popup — clear its bounds so the
   // Options-popup click branch can't hit a stale rectangle from a previous
   // frame's render.
   popupState.fogToggleBounds=null;
   // Mission Objectives Tracker row
-  const ry7=py+251;
+  const ry7=py+251-_dy;
   ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
   ctx.fillStyle='rgba(160,200,255,0.9)'; ctx.fillText('Mission Objectives Tracker',px+18,ry7);
   ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,130,180,0.5)';
@@ -21628,43 +21756,59 @@ function drawOptionsPopup(){
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
   ctx.fillStyle='#fff'; ctx.fillText(missionTrackerEnabled?'ON':'OFF',mtTX+mtTW/2,mtTT+mtTH/2+4);
   popupState.missionTrackerToggleBounds={x:mtTX,y:mtTT,w:mtTW,h:mtTH};
-  // ── SOUND pane ──────────────────────────────────────────────
-  // Divider + label + control row (mute / prev / progress bar / next) + track title.
-  // All four music controls (mute/prev/next + bar click-seek not yet wired) live
-  // here. Mute shares state with the title-screen + intro-cutscene mute buttons.
+  // ── SOUND EFFECTS pane ──────────────────────────────────────
+  // Divider + label + a row with a mute button (left) and a 0-100 volume slider
+  // controlling EVERY non-music sound (playSound reads _sfxMuted / _sfxVol).
+  const _mSz=22;                 // mute-button size — shared by both panes
+  const _muteX=px+18;
+  const _sliderX=_muteX+_mSz+12;
+  const _valX=px+pw-16;          // right-aligned 0-100 value label
+  const _sliderW=(_valX-22)-_sliderX;
+  // Reusable mute-button drawer (rounded square, 🔊/🔇, red when muted).
+  const _drawMuteBtn=(x,y,muted,hot)=>{
+    ctx.save();
+    ctx.globalAlpha=hot?0.92:0.70;
+    ctx.fillStyle=muted?'rgba(90,30,30,0.92)':'rgba(20,40,80,0.85)';
+    ctx.strokeStyle=muted?'rgba(255,100,100,0.8)':(hot?'rgba(120,200,255,0.9)':'rgba(60,120,200,0.55)');
+    ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.roundRect(x,y,_mSz,_mSz,4); ctx.fill(); ctx.stroke();
+    ctx.globalAlpha=hot?1.0:0.80;
+    ctx.fillStyle=muted?'#f88':'#8cf';
+    ctx.font='bold 13px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(muted?'🔇':'🔊',x+_mSz/2,y+_mSz/2+1);
+    ctx.restore();
+    ctx.textBaseline='alphabetic';
+  };
   {
     ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
-    ctx.beginPath(); ctx.moveTo(px,py+283); ctx.lineTo(px+pw,py+283); ctx.stroke();
-    // Section label, centered + same color as the OPTIONS header at the top.
+    ctx.beginPath(); ctx.moveTo(px,py+283-_dy); ctx.lineTo(px+pw,py+283-_dy); ctx.stroke();
     ctx.textAlign='center'; ctx.font='bold 11px Orbitron,sans-serif';
-    ctx.fillStyle='#4af'; ctx.fillText('MUSIC',px+pw/2,py+300);
-    // Control row geometry: mute + prev (each 22×22) on the left, bar centered,
-    // next (22×22) on the right. Match the rounded-square style of the
-    // title-screen mute button.
-    const _spSz=22, _spY=py+310;
-    const _spMuteX=px+18;
-    const _spPrevX=_spMuteX+_spSz+10;
+    ctx.fillStyle='#4af'; ctx.fillText('SOUND EFFECTS',px+pw/2,py+299-_dy);
+    const _rowMid=py+316-_dy, _btnY=_rowMid-_mSz/2;
+    _optsSfxMuteBtnBounds={x:_muteX,y:_btnY,w:_mSz,h:_mSz};
+    _drawMuteBtn(_muteX,_btnY,_sfxMuted,!!_optsSfxMuteBtnHover);
+    _optsSfxSliderBounds=_drawOptionsSlider(_sliderX,_rowMid,_sliderW,_sfxVol,'rgba(120,200,255,0.92)',_optsSliderDrag==='sfx',_valX);
+  }
+  // ── MUSIC pane ──────────────────────────────────────────────
+  // Row 1: mute button (left) + 0-100 music-volume slider. Row 2: prev / next +
+  // a full-width progress bar. Track title + artist centered below.
+  {
+    ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(px,py+335-_dy); ctx.lineTo(px+pw,py+335-_dy); ctx.stroke();
+    ctx.textAlign='center'; ctx.font='bold 11px Orbitron,sans-serif';
+    ctx.fillStyle='#4af'; ctx.fillText('MUSIC',px+pw/2,py+351-_dy);
+    // Row 1 — mute + volume slider.
+    const _volMid=py+368-_dy, _volBtnY=_volMid-_mSz/2;
+    _optsMuteBtnBounds={x:_muteX,y:_volBtnY,w:_mSz,h:_mSz};
+    _drawMuteBtn(_muteX,_volBtnY,_musicMuted,!!_optsMuteBtnHover);
+    _optsMusicSliderBounds=_drawOptionsSlider(_sliderX,_volMid,_sliderW,_soundtrack.volume,'rgba(120,200,255,0.92)',_optsSliderDrag==='music',_valX);
+    // Row 2 — prev (◀) | full-width progress bar | next (▶).
+    const _spSz=_mSz, _spY=py+387-_dy;
+    const _spPrevX=px+18;
     const _spNextX=px+pw-18-_spSz;
     const _spBarX=_spPrevX+_spSz+8;
-    const _spBarW=_spNextX-8-_spBarX;
+    const _spBarW=(_spNextX-8)-_spBarX;
     const _spBarH=6, _spBarY=_spY+(_spSz-_spBarH)/2;
-    // ── Mute button ──
-    _optsMuteBtnBounds={x:_spMuteX,y:_spY,w:_spSz,h:_spSz};
-    {
-      const _h=!!_optsMuteBtnHover;
-      ctx.save();
-      ctx.globalAlpha=_h?0.92:0.70;
-      ctx.fillStyle=_musicMuted?'rgba(90,30,30,0.92)':'rgba(20,40,80,0.85)';
-      ctx.strokeStyle=_musicMuted?'rgba(255,100,100,0.8)':(_h?'rgba(120,200,255,0.9)':'rgba(60,120,200,0.55)');
-      ctx.lineWidth=1.5;
-      ctx.beginPath(); ctx.roundRect(_spMuteX,_spY,_spSz,_spSz,4); ctx.fill(); ctx.stroke();
-      ctx.globalAlpha=_h?1.0:0.80;
-      ctx.fillStyle=_musicMuted?'#f88':'#8cf';
-      ctx.font='bold 13px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
-      ctx.fillText(_musicMuted?'🔇':'🔊',_spMuteX+_spSz/2,_spY+_spSz/2+1);
-      ctx.restore();
-      ctx.textBaseline='alphabetic';
-    }
     // ── Prev button (left arrow ◀) ──
     _optsPrevBtnBounds={x:_spPrevX,y:_spY,w:_spSz,h:_spSz};
     {
@@ -21699,9 +21843,7 @@ function drawOptionsPopup(){
       ctx.restore();
       ctx.textBaseline='alphabetic';
     }
-    // ── Progress bar ──
-    // Black track + light-blue fill showing currentTime / duration. duration
-    // may be NaN until enough of the track has loaded; guard with isFinite.
+    // ── Progress bar (full width between prev/next) ──
     ctx.save();
     ctx.fillStyle='rgba(0,0,0,0.85)';
     ctx.beginPath(); ctx.roundRect(_spBarX,_spBarY,_spBarW,_spBarH,2); ctx.fill();
@@ -21714,9 +21856,7 @@ function drawOptionsPopup(){
     ctx.strokeStyle='rgba(80,140,210,0.55)'; ctx.lineWidth=1;
     ctx.beginPath(); ctx.roundRect(_spBarX,_spBarY,_spBarW,_spBarH,2); ctx.stroke();
     ctx.restore();
-    // ── Timestamp m:ss — tiny, follows the right edge of the fill ──
-    // Sits ABOVE the bar so the track-title row below has room for the
-    // animated waves. Clamped to stay over the bar at the extremes.
+    // ── Timestamp m:ss — tiny, above the bar, follows the fill edge ──
     {
       const _ct=isFinite(_soundtrack.currentTime)?Math.max(0,_soundtrack.currentTime):0;
       const _mm=Math.floor(_ct/60);
@@ -21725,20 +21865,15 @@ function drawOptionsPopup(){
       const _tsX=Math.max(_spBarX+6,Math.min(_spBarX+_spBarW-6,_spBarX+_spBarW*_frac));
       ctx.font='7px Orbitron,sans-serif'; ctx.textAlign='center';
       ctx.fillStyle='rgba(180,210,240,0.80)';
-      ctx.fillText(_tsTxt,_tsX,_spY+7);
+      ctx.fillText(_tsTxt,_tsX,_spY-3);
     }
     // ── Track title row — animated sound wave + centered title ──
-    // Title styled to match the OPTIONS header (#4af, small all-caps).
-    // The wave is two short animated sine segments either side of the
-    // title — drawn first so the title text sits cleanly on top with
-    // no wave pixels directly behind it.
+    // Now that the bar spans the full popup width, the title centers on the
+    // popup itself (px+pw/2), with the waves bounded by the bar's edges.
     const _trk=_MUSIC_TRACKS[_musicIdx];
     const _title=(_trk&&_trk.title?_trk.title:'').toUpperCase();
-    // Centered on the progress bar (not the popup center, which is offset
-    // from the bar by the mute+prev buttons on the left). _titleY sits just
-    // below the bar (bar bottom at _spY+14, baseline at _spY+24 = ~4px gap).
-    const _titleCx=_spBarX+_spBarW/2;
-    const _titleY=_spY+24;
+    const _titleCx=px+pw/2;
+    const _titleY=_spY+_spSz+13;
     // Set the title font BEFORE measureText so the wave-gap math uses the
     // same width the title will actually render at. Same Exo 2 family as the
     // "Mission Objectives Tracker" row above.
@@ -27474,6 +27609,26 @@ function drawPanelTabs(){
   ctx.fillStyle=!showTrains?'rgba(130,200,255,0.95)':_stationTabHov?'rgba(110,165,240,0.80)':'rgba(65,100,160,0.55)';
   ctx.fillText('STATIONS',px+tabW+tabW/2,TOP_H/2);
 
+  // Expand / collapse arrow beside the ACTIVE tab's label. Collapsed → a LEFT
+  // arrow to the LEFT of the label (click widens the panel to 2×). Expanded → a
+  // RIGHT arrow to the RIGHT of the label (click restores normal width). Same
+  // bright colour as the selected tab label; same little triangle as the
+  // leaderboard's rank pager.
+  {
+    const _atCx=showTrains?(px+tabW/2):(px+tabW+tabW/2);
+    const _atLbl=showTrains?'TRAINS':'STATIONS';
+    ctx.font='bold 8px Orbitron,sans-serif';
+    const _atHW=ctx.measureText(_atLbl).width/2;
+    const _arX=_panelExpanded?(_atCx+_atHW+9):(_atCx-_atHW-9);
+    const _arY=TOP_H/2;
+    ctx.fillStyle=_panelArrowHover?'rgba(210,235,255,1)':'rgba(130,200,255,0.95)';
+    ctx.beginPath();
+    if(_panelExpanded){ ctx.moveTo(_arX-2.5,_arY-4); ctx.lineTo(_arX+3.5,_arY); ctx.lineTo(_arX-2.5,_arY+4); } // ▶ collapse
+    else             { ctx.moveTo(_arX+2.5,_arY-4); ctx.lineTo(_arX-3.5,_arY); ctx.lineTo(_arX+2.5,_arY+4); } // ◀ expand
+    ctx.closePath(); ctx.fill();
+    _panelExpandArrowBounds={x:_arX-8,y:_arY-9,w:16,h:18};
+  }
+
   ctx.textBaseline='alphabetic';
   ctx.restore();
 }
@@ -28342,7 +28497,22 @@ function drawGalaxy(ts,dt){
       const [sx,sy]=w2s(wx,wy);
       if(i===0&&train.isPlayer){
         const ti=trains.indexOf(train);
-        trainGalaxyBounds.push({x:sx,y:sy,r:Math.max(cw*0.8,20),trainIdx:ti});
+        // Engine click radius: full while traveling a segment (interplanetary /
+        // interstellar transit, away from planets), but HALVED when the train is
+        // arriving / departing / in orbit of a planet — so a click in a planet's
+        // orbital zone is far likelier to select the PLANET than the train.
+        const _r0=Math.max(cw*0.8,20);
+        let _nearPlanet=false;
+        const _rt=train.route, _ph=_rt&&_rt.phase;
+        if(!_rt || _ph==='orbit' || _ph==='descending' || _ph==='queueing' || _ph==='waiting'){
+          _nearPlanet=true; // in orbit / arriving above orbit
+        } else if(_ph==='transit' && _rt.stops){
+          // Departing or arriving along a segment: still within the orbital zone
+          // of the planet just left (from) or being approached (to).
+          const _chk=(pid)=>{ const _p=_gp(pid); if(!_p) return false; const _tiers=ORBIT_TIERS[_p.size]; const _hi=_tiers?_tiers.HIGH:_p.radius*3; return Math.hypot(wx-_p.x,wy-_p.y)<=_hi*1.15; };
+          if(_chk(_rt.stops[_rt.fromIdx])||_chk(_rt.stops[_rt.toIdx])) _nearPlanet=true;
+        }
+        trainGalaxyBounds.push({x:sx,y:sy,r:_nearPlanet?_r0*0.5:_r0,trainIdx:ti});
       }
       const _styp=train.cars[i];
       const _esn=getCarSprite(_styp,train.carFull?.[i]??false);
@@ -29389,7 +29559,7 @@ function drawGalaxy(ts,dt){
     {label:'[I] tech tree',popup:'techtree',   initState:()=>({})},
     {label:'[M] missions', popup:'missions',   initState:()=>({mScroll:0})},
     {label:'[L] leaderboard',popup:'leaderboard',initState:()=>({})},
-    {label:'[O] options',  popup:'options',    initState:()=>({})},
+    {label:'[U] stations', popup:'stations',   initState:()=>({scroll:0})},
   ];
   _hintBounds=[];
   let _hx=8; const _hy=GH-8;
@@ -29438,9 +29608,8 @@ function drawGalaxy(ts,dt){
   // Popups render over everything
   drawPokedex();
   drawStarRegistry();
-  drawOptionsPopup();
-  drawControlsPopup();
-  drawCheatsPopup();
+  // drawOptionsPopup / drawControlsPopup / drawCheatsPopup moved AFTER drawTopBar
+  // (see below) — the taller Options window was being clipped under the top bar.
   drawSaveManagerPopup();
   drawTrainDetailPopup();
   // Reset the foundry-card bounds each frame BEFORE the planet popup draws;
@@ -29499,6 +29668,11 @@ function drawGalaxy(ts,dt){
   // bar in any vertical overlap region (the rest of the popups are intentionally
   // beneath the top bar — this one is the exception per user request).
   drawCarDetailPopup();
+  // Options / Controls / Cheats drawn AFTER drawTopBar so the (tall) Options
+  // window paints OVER the top stats bar instead of being clipped under it.
+  drawOptionsPopup();
+  drawControlsPopup();
+  drawCheatsPopup();
   // Trains / Routes / Stations unified window drawn AFTER drawTopBar (per user
   // request) so the top of the (tall) window isn't clipped by the top stats bar.
   drawTrainsPopup();
@@ -29705,6 +29879,9 @@ function galaxyClick(sx,sy,shiftKey){
 // ── panel click ──────────────────────────────────────────────
 function panelClick(sx,sy,shiftKey){
   if(!galaxy) return;
+  // Expand / collapse arrow (in the header strip) — checked before the tab
+  // switch so a click on the arrow toggles panel width instead of switching tabs.
+  if(_panelExpandArrowBounds){const a=_panelExpandArrowBounds;if(sx>=a.x&&sx<=a.x+a.w&&sy>=a.y&&sy<=a.y+a.h){_togglePanelExpand();return;}}
   // Tab switch: header area (y < TOP_H), only when not in assignPending mode
   if(sy<TOP_H&&!assignPending){
     panelTab=sx<W-PANEL_W/2?'trains':'stations';
@@ -30368,7 +30545,7 @@ canvas.addEventListener('mousedown',e=>{
   if(gs==='galaxy'&&cp.y>=TOP_H&&cp.y<GH&&cp.x<W-PANEL_W){
     drag=true; dragDist=0; dragFrom={x:cp.x,y:cp.y}; dragCam={x:cam.x,y:cam.y}; dragStarPan={x:starPan.x,y:starPan.y};
     // Don't kill tracking when clicking UI buttons (speed arrows, cancel route, assign)
-    const onSpeedBtn=(speedLeftBounds&&cp.x>=speedLeftBounds.x&&cp.x<=speedLeftBounds.x+speedLeftBounds.w&&cp.y>=speedLeftBounds.y&&cp.y<=speedLeftBounds.y+speedLeftBounds.h)||(speedRightBounds&&cp.x>=speedRightBounds.x&&cp.x<=speedRightBounds.x+speedRightBounds.w&&cp.y>=speedRightBounds.y&&cp.y<=speedRightBounds.y+speedRightBounds.h);
+    const onSpeedBtn=(speedLeftBounds&&cp.x>=speedLeftBounds.x&&cp.x<=speedLeftBounds.x+speedLeftBounds.w&&cp.y>=speedLeftBounds.y&&cp.y<=speedLeftBounds.y+speedLeftBounds.h)||(speedRightBounds&&cp.x>=speedRightBounds.x&&cp.x<=speedRightBounds.x+speedRightBounds.w&&cp.y>=speedRightBounds.y&&cp.y<=speedRightBounds.y+speedRightBounds.h)||(_optsGearBtnBounds&&cp.x>=_optsGearBtnBounds.x&&cp.x<=_optsGearBtnBounds.x+_optsGearBtnBounds.w&&cp.y>=_optsGearBtnBounds.y&&cp.y<=_optsGearBtnBounds.y+_optsGearBtnBounds.h);
     if(!onSpeedBtn && !activePopup){
       // Remember to re-lock onto a tracked car after the drag completes
       relockAfterDrag=(tracking && sel && sel.type==='car');
@@ -30784,6 +30961,11 @@ canvas.addEventListener('mousemove',e=>{
     const _offb=popupState.optionsFullscreenBtnBounds;
     popupState.optionsFullscreenHover=!!(_offb&&cp.x>=_offb.x&&cp.x<=_offb.x+_offb.w&&cp.y>=_offb.y&&cp.y<=_offb.y+_offb.h);
     _optsMuteBtnHover=!!(_optsMuteBtnBounds&&cp.x>=_optsMuteBtnBounds.x&&cp.x<=_optsMuteBtnBounds.x+_optsMuteBtnBounds.w&&cp.y>=_optsMuteBtnBounds.y&&cp.y<=_optsMuteBtnBounds.y+_optsMuteBtnBounds.h);
+    _optsSfxMuteBtnHover=!!(_optsSfxMuteBtnBounds&&cp.x>=_optsSfxMuteBtnBounds.x&&cp.x<=_optsSfxMuteBtnBounds.x+_optsSfxMuteBtnBounds.w&&cp.y>=_optsSfxMuteBtnBounds.y&&cp.y<=_optsSfxMuteBtnBounds.y+_optsSfxMuteBtnBounds.h);
+    // Active volume-slider drag (set on mousedown) — keep updating while held,
+    // even if the cursor strays off the track horizontally/vertically.
+    if(_optsSliderDrag==='sfx'&&_optsSfxSliderBounds){ const b=_optsSfxSliderBounds; _sfxVol=Math.max(0,Math.min(1,(cp.x-b.x)/b.w)); canvas.style.cursor='pointer'; }
+    else if(_optsSliderDrag==='music'&&_optsMusicSliderBounds){ const b=_optsMusicSliderBounds; _soundtrack.volume=Math.max(0,Math.min(1,(cp.x-b.x)/b.w)); canvas.style.cursor='pointer'; }
     _optsPrevBtnHover=!!(_optsPrevBtnBounds&&cp.x>=_optsPrevBtnBounds.x&&cp.x<=_optsPrevBtnBounds.x+_optsPrevBtnBounds.w&&cp.y>=_optsPrevBtnBounds.y&&cp.y<=_optsPrevBtnBounds.y+_optsPrevBtnBounds.h);
     _optsNextBtnHover=!!(_optsNextBtnBounds&&cp.x>=_optsNextBtnBounds.x&&cp.x<=_optsNextBtnBounds.x+_optsNextBtnBounds.w&&cp.y>=_optsNextBtnBounds.y&&cp.y<=_optsNextBtnBounds.y+_optsNextBtnBounds.h);
     const _ctlbb=popupState.controlsBtnBounds;
@@ -30842,10 +31024,9 @@ canvas.addEventListener('mousemove',e=>{
   if(gs==='title'){
     _startBtnHover=!!(startBtnBounds&&cp.x>=startBtnBounds.x&&cp.x<=startBtnBounds.x+startBtnBounds.w&&cp.y>=startBtnBounds.y&&cp.y<=startBtnBounds.y+startBtnBounds.h);
     _loadBtnHover=!!(loadBtnBounds&&cp.x>=loadBtnBounds.x&&cp.x<=loadBtnBounds.x+loadBtnBounds.w&&cp.y>=loadBtnBounds.y&&cp.y<=loadBtnBounds.y+loadBtnBounds.h);
-    _muteBtnHover=!!(_muteBtnBounds&&cp.x>=_muteBtnBounds.x&&cp.x<=_muteBtnBounds.x+_muteBtnBounds.w&&cp.y>=_muteBtnBounds.y&&cp.y<=_muteBtnBounds.y+_muteBtnBounds.h);
-    _fsBtnHover=!!(_fsBtnBounds&&cp.x>=_fsBtnBounds.x&&cp.x<=_fsBtnBounds.x+_fsBtnBounds.w&&cp.y>=_fsBtnBounds.y&&cp.y<=_fsBtnBounds.y+_fsBtnBounds.h);
+    _settingsBtnHover=!!(_settingsBtnBounds&&cp.x>=_settingsBtnBounds.x&&cp.x<=_settingsBtnBounds.x+_settingsBtnBounds.w&&cp.y>=_settingsBtnBounds.y&&cp.y<=_settingsBtnBounds.y+_settingsBtnBounds.h);
     _leaderboardBtnHover=!!(leaderboardBtnBounds&&cp.x>=leaderboardBtnBounds.x&&cp.x<=leaderboardBtnBounds.x+leaderboardBtnBounds.w&&cp.y>=leaderboardBtnBounds.y&&cp.y<=leaderboardBtnBounds.y+leaderboardBtnBounds.h);
-    canvas.style.cursor=(_startBtnHover||_loadBtnHover||_muteBtnHover||_fsBtnHover||_leaderboardBtnHover)?'pointer':'default';
+    canvas.style.cursor=(_startBtnHover||_loadBtnHover||_settingsBtnHover||_leaderboardBtnHover)?'pointer':'default';
   } else { _startBtnHover=false; _loadBtnHover=false; _leaderboardBtnHover=false; }
   if(gs==='leaderboard'){
     const _in=(b)=>b&&cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h;
@@ -30918,9 +31099,15 @@ canvas.addEventListener('mousemove',e=>{
     _creditsHover=!!(_creditsAreaBounds&&cp.x>=_creditsAreaBounds.x&&cp.x<=_creditsAreaBounds.x+_creditsAreaBounds.w&&cp.y>=_creditsAreaBounds.y&&cp.y<=_creditsAreaBounds.y+_creditsAreaBounds.h);
     // Panel tab hover
     _panelTabHover=(cp.y<TOP_H&&cp.x>=W-PANEL_W)?(cp.x<W-PANEL_W/2?'trains':'stations'):null;
+    // Expand/collapse arrow hover (cursor → pointer; brightens the arrow).
+    _panelArrowHover=!!(_panelExpandArrowBounds&&cp.x>=_panelExpandArrowBounds.x&&cp.x<=_panelExpandArrowBounds.x+_panelExpandArrowBounds.w&&cp.y>=_panelExpandArrowBounds.y&&cp.y<=_panelExpandArrowBounds.y+_panelExpandArrowBounds.h);
+    if(_panelArrowHover) canvas.style.cursor='pointer';
     // Speed arrow hover
     _speedLeftHover=!!(speedLeftBounds&&cp.x>=speedLeftBounds.x&&cp.x<=speedLeftBounds.x+speedLeftBounds.w&&cp.y>=speedLeftBounds.y&&cp.y<=speedLeftBounds.y+speedLeftBounds.h);
     _speedRightHover=!!(speedRightBounds&&cp.x>=speedRightBounds.x&&cp.x<=speedRightBounds.x+speedRightBounds.w&&cp.y>=speedRightBounds.y&&cp.y<=speedRightBounds.y+speedRightBounds.h);
+    // Settings-gear button hover
+    _optsGearBtnHover=!!(_optsGearBtnBounds&&cp.x>=_optsGearBtnBounds.x&&cp.x<=_optsGearBtnBounds.x+_optsGearBtnBounds.w&&cp.y>=_optsGearBtnBounds.y&&cp.y<=_optsGearBtnBounds.y+_optsGearBtnBounds.h);
+    if(_optsGearBtnHover) canvas.style.cursor='pointer';
     // Versus-tab metric dropdown option hover. Reset to -1 (none) every
     // frame, then re-scan when the dropdown is actually open on the VS RIVAL
     // tab. Lets the option panel render a hover highlight so the player
@@ -30970,7 +31157,7 @@ canvas.addEventListener('mousemove',e=>{
     _addTrainPanelHover=!!(panelTab==='trains'&&_addTrainPanelBounds&&cp.x>=_addTrainPanelBounds.x&&cp.x<=_addTrainPanelBounds.x+_addTrainPanelBounds.w&&cp.y>=_addTrainPanelBounds.y&&cp.y<=_addTrainPanelBounds.y+_addTrainPanelBounds.h);
     if(_corpHover||_creditsHover||_panelTabHover||_speedLeftHover||_speedRightHover||_routeHereBtnHover||_planetDetailsBtnHover||_assignBtnHover||_cancelRouteBtnHover||_planetStarNameHover||_starPanelPlanetHover>=0||_addTrainPanelHover||_financeTakeLoanHover||(_financeLoanHover&&!(_financeLoanPaneBounds||[]).find(b=>b.id===_financeLoanHover)?.locked)||(_financeRepayBtnHover>=0&&(_financeRepayBtnBounds||[])[_financeRepayBtnHover]?.affordable)||_versusDropdownOptHover>=0) canvas.style.cursor='pointer';
     else canvas.style.cursor='default';
-  } else { _corpHover=false; _creditsHover=false; _panelTabHover=null; _speedLeftHover=false; _speedRightHover=false; _routeHereBtnHover=false; _planetDetailsBtnHover=false; _assignBtnHover=false; _cancelRouteBtnHover=false; _planetStarNameHover=false; _starPanelPlanetHover=-1; _addTrainPanelHover=false; }
+  } else { _corpHover=false; _creditsHover=false; _panelTabHover=null; _speedLeftHover=false; _speedRightHover=false; _optsGearBtnHover=false; _routeHereBtnHover=false; _planetDetailsBtnHover=false; _assignBtnHover=false; _cancelRouteBtnHover=false; _planetStarNameHover=false; _starPanelPlanetHover=-1; _addTrainPanelHover=false; }
   // Hover tracking for bottom hint bar + chat log
   if(gs==='galaxy'){
     let _hh=null;
@@ -31016,6 +31203,8 @@ canvas.addEventListener('mousemove',e=>{
   clampCamera();
 });
 canvas.addEventListener('mouseup',e=>{
+  // End any active volume-slider drag (Options SOUND panes).
+  if(_optsSliderDrag){ _optsSliderDrag=null; drag=false; return; }
   // End any active scrollbar drag — and skip the rest of the click cascade
   // so the underlying popup doesn't see a phantom click on whatever was
   // beneath the cursor when the user released.
@@ -31052,8 +31241,15 @@ canvas.addEventListener('mouseup',e=>{
     // closed it as click-outside-popup).
     _tryPlaySoundtrack();
     if(_smHandleClick(cp)) return;
-    if(_muteBtnBounds){const mb=_muteBtnBounds;if(cp.x>=mb.x&&cp.x<=mb.x+mb.w&&cp.y>=mb.y&&cp.y<=mb.y+mb.h){_toggleMusicMute();return;}}
-    if(_fsBtnBounds){const fb=_fsBtnBounds;if(cp.x>=fb.x&&cp.x<=fb.x+fb.w&&cp.y>=fb.y&&cp.y<=fb.y+fb.h){_toggleFullscreen();return;}}
+    // Settings (gear) → Options window opened over the title (Controls reachable
+    // from inside it). Route those popups' clicks before the PLAY/LOAD buttons.
+    if(activePopup==='options'){ if(_handleOptionsPopupClick(cp)) return; }
+    if(activePopup==='controls'){
+      if(popupState.controlsEscBounds){const cb=popupState.controlsEscBounds;if(cp.x>=cb.x&&cp.x<=cb.x+cb.w&&cp.y>=cb.y&&cp.y<=cb.y+cb.h){activePopup='options';popupState={noSave:true};return;}}
+      return; // Controls is modal over the title — swallow other clicks
+    }
+    if(_settingsBtnBounds){const sb=_settingsBtnBounds;if(cp.x>=sb.x&&cp.x<=sb.x+sb.w&&cp.y>=sb.y&&cp.y<=sb.y+sb.h){ if(activePopup==='options'){activePopup=null;popupState={};}else{activePopup='options';popupState={noSave:true,scroll:0};} return; }}
+    if(activePopup==='options') return; // popup open — don't trigger PLAY/LOAD behind it
     const b=startBtnBounds;
     if(b&&cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h) startGame();
     const lb=loadBtnBounds;
@@ -31185,7 +31381,12 @@ canvas.addEventListener('mouseup',e=>{
     // when one is open and the click lands inside its (centered) frame, let the
     // window's own handlers below claim it instead of the bar underneath.
     const _overBarWin=(activePopup==='trains'||activePopup==='routes'||activePopup==='stations');
-    const _inWinFrame=_overBarWin&&cp.x>=(W-WIN_PW)/2&&cp.x<=(W-WIN_PW)/2+WIN_PW&&cp.y>=(H-WIN_PH)/2&&cp.y<=(H-WIN_PH)/2+WIN_PH;
+    let _inWinFrame=_overBarWin&&cp.x>=(W-WIN_PW)/2&&cp.x<=(W-WIN_PW)/2+WIN_PW&&cp.y>=(H-WIN_PH)/2&&cp.y<=(H-WIN_PH)/2+WIN_PH;
+    // The Options window also paints over the top bar — exclude its frame too.
+    if(!_inWinFrame&&activePopup==='options'){
+      const _oph=448-((popupState&&popupState.noSave)?36:0), _opx=(W-300)/2, _opy=(H-_oph)/2;
+      if(cp.x>=_opx&&cp.x<=_opx+300&&cp.y>=_opy&&cp.y<=_opy+_oph) _inWinFrame=true;
+    }
     if(cp.y<TOP_H&&cp.x<W-PANEL_W&&!_inWinFrame){
       if(_corpNameBounds&&cp.x>=_corpNameBounds.x&&cp.x<=_corpNameBounds.x+_corpNameBounds.w){
         activePopup=activePopup==='corp'?null:'corp'; popupState=activePopup==='corp'?{}:{};
@@ -31776,71 +31977,9 @@ canvas.addEventListener('mouseup',e=>{
           }
         }
       }
-      // Options popup: [ESC] close — clicking closes the popup outright.
-      if(activePopup==='options'&&popupState.optionsEscBounds){
-        const b=popupState.optionsEscBounds;
-        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
-          activePopup=null; popupState={};
-          return;
-        }
-      }
-      // Options: CONTROLS / HOW TO PLAY button — opens the Controls popup.
-      if(activePopup==='options'&&popupState.controlsBtnBounds){
-        const b=popupState.controlsBtnBounds;
-        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
-          activePopup='controls'; popupState={};
-          playSound('click');
-          return;
-        }
-      }
-      // Options: SAVE GAME button — identical behavior to the SAVE GAME
-      // button in the quit-confirm popup (calls saveGame()).
-      if(activePopup==='options'&&popupState.optionsSaveBtnBounds){
-        const b=popupState.optionsSaveBtnBounds;
-        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
-          saveGame();
-          return;
-        }
-      }
-      // Options: FULLSCREEN toggle — enters/exits browser fullscreen (F11 equiv).
-      if(activePopup==='options'&&popupState.optionsFullscreenBtnBounds){
-        const b=popupState.optionsFullscreenBtnBounds;
-        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
-          _toggleFullscreen();
-          return;
-        }
-      }
-      // Options: Autosave toggle — flips the global flag; persisted in saves.
-      if(activePopup==='options'&&popupState.autosaveToggleBounds){
-        const b=popupState.autosaveToggleBounds;
-        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
-          autosaveEnabled=!autosaveEnabled;
-          return;
-        }
-      }
-      // Options: Mission Objectives Tracker toggle — flips the global flag.
-      if(activePopup==='options'&&popupState.missionTrackerToggleBounds){
-        const b=popupState.missionTrackerToggleBounds;
-        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
-          missionTrackerEnabled=!missionTrackerEnabled;
-          return;
-        }
-      }
-      // Options: SOUND pane controls — mute / prev track / next track.
-      if(activePopup==='options'){
-        if(_optsMuteBtnBounds){
-          const b=_optsMuteBtnBounds;
-          if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ _toggleMusicMute(); return; }
-        }
-        if(_optsPrevBtnBounds){
-          const b=_optsPrevBtnBounds;
-          if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ _musicPrev(); return; }
-        }
-        if(_optsNextBtnBounds){
-          const b=_optsNextBtnBounds;
-          if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ _musicNext(); return; }
-        }
-      }
+      // Options popup — all controls (ESC, Controls, Save, Fullscreen, toggles,
+      // SOUND panes) handled by the shared click router.
+      if(_handleOptionsPopupClick(cp)) return;
       // Color picker click handling — SV picker, hue strip, hex input, preset swatches
       if(colorPickerState){
         // SV picker mousedown → pick + begin drag. Subsequent mousemove
@@ -32670,6 +32809,11 @@ canvas.addEventListener('mouseup',e=>{
     }
     if(speedRightBounds&&cp.x>=speedRightBounds.x&&cp.x<=speedRightBounds.x+speedRightBounds.w&&cp.y>=speedRightBounds.y&&cp.y<=speedRightBounds.y+speedRightBounds.h){
       _stepGameSpeed(1);
+      return;
+    }
+    // ── settings (gear) button — opens/closes the Options window ──
+    if(_optsGearBtnBounds&&cp.x>=_optsGearBtnBounds.x&&cp.x<=_optsGearBtnBounds.x+_optsGearBtnBounds.w&&cp.y>=_optsGearBtnBounds.y&&cp.y<=_optsGearBtnBounds.y+_optsGearBtnBounds.h){
+      activePopup=activePopup==='options'?null:'options'; popupState=activePopup==='options'?{}:{};
       return;
     }
 
@@ -35120,6 +35264,10 @@ function loop(ts){
     // Render it on top of the title art when active so the player can pick
     // a slot without leaving the title.
     if(activePopup==='savemanager'){ _sbBounds=[]; drawSaveManagerPopup(); }
+    // Options (gear button) — opens over the title art; SAVE GAME is hidden
+    // here (popupState.noSave). Controls popup can also open from inside it.
+    if(activePopup==='options') drawOptionsPopup();
+    if(activePopup==='controls') drawControlsPopup();
   } else if(gs==='leaderboard'){
     drawLeaderboardScreen();
   } else if(gs==='fadeout'){
