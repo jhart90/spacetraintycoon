@@ -1002,7 +1002,7 @@ const CARGO_SHORT      = {passengers:'PSNGR', livestock:'LVSTK', mail:'MAIL', wa
 // "iron" and "Molten Ore"). Choose the dominant hue of each cargo's sprite.
 const CARGO_TEXT_COLORS = {
   passengers:'#c30010', livestock:'#b6815c', mail:'#f4b450', water:'#42a8ff',
-  ice:'#a4dcff', sand:'#bb8459', 'molten ore':'#ff5a28', iron:'#d2d2d2',
+  ice:'#a4dcff', sand:'#bb8459', 'molten ore':'#ff5a28', iron:'#5e626b',
   gold:'#ffd148', diamond:'#a4f0ff', hazmat:'#dcff48', oil:'#9aa83a',
   battery:'#ffd744', chemical:'#80e860', flowers:'#ff7acc', medical:'#ff5a78',
   grain:'#d4a76a', fruit:'#ff7a48', steel:'#94a8bc', glass:'#b0e8f0',
@@ -15634,6 +15634,14 @@ function updateTrain(t, dt){
         t.route=qr;
         t.queuedRoute=qr._nextQueuedRoute||null;
         qr._nextQueuedRoute=null;
+        // Queueing-or-descending check (mirrors every other arrival path). If the
+        // temp route delivered us into a tier this stop's station can't service —
+        // e.g. LOW was full so we landed in MED at a basic STATION — drop into
+        // descending (if a lower slot is free now) or queueing (otherwise). Without
+        // this the activated route treats the unserviceable orbit as a normal stop,
+        // skips cargo ops, and immediately departs for stop 2.
+        {const _arrP=_gp(t.planetId);
+         if(_shouldQueueForLowerOrbit(t,_arrP)){ _enterQueueOrDescend(t, qr); _invalidateOccOrbit(); }}
         return;
       }
       r.fromIdx=r.toIdx;
@@ -31776,13 +31784,19 @@ canvas.addEventListener('mouseup',e=>{
           }
         }
       }
-      // Planet detail name or viz click → select planet & center camera
+      // Planet detail name click → open the name editor (rename); viz (planet
+      // image) click → select planet & center camera.
       if(activePopup==='planet'){
         const p=popupState.planet;
         const hn=popupState.nameClickBounds, hv=popupState.planetVizBounds;
         const inN=hn&&cp.x>=hn.x&&cp.x<=hn.x+hn.w&&cp.y>=hn.y&&cp.y<=hn.y+hn.h;
         const inV=hv&&cp.x>=hv.x&&cp.x<=hv.x+hv.w&&cp.y>=hv.y&&cp.y<=hv.y+hv.h;
-        if(p&&(inN||inV)){
+        if(p&&inN){
+          const eb=popupState.nameEditBounds;
+          if(eb) startEdit(p.name,v=>{ p.name=v; },eb.x,eb.y,eb.w,eb.h,p.isStarter?'#ffcc44':'#4af',16);
+          return;
+        }
+        if(p&&inV){
           sel={type:'planet',data:p}; routeStops=[p]; assignPending=false;
           cam.x=p.x; cam.y=p.y; clampCamera();
           tracking=true; trackingOffset={x:0,y:0};
