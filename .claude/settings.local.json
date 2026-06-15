@@ -226,7 +226,11 @@
       "Bash(rm -f _f_*.png _t_*.png _u_*.png _trans*.png _fine.png _end_contact.png)",
       "Bash(ffmpeg -y -ss 0.3 -i \"STT_Trailer_v1.mp4\" -frames:v 1 -vf scale=620:-1 _open.png)",
       "Bash(rm -f _open.png _full_open.png _full_dyson.png _full_open_logo.png _full_dyson_logo.png _legib.png)",
-      "Bash(ffmpeg -y -i \"STT_Trailer_v1.mp4\" -loop 1 -i wordmark2.png -filter_complex_script wm_filter_v1.txt -map \"[v]\" -map 0:a -c:v libx264 -crf 18 -preset medium -pix_fmt yuv420p -c:a copy -movflags +faststart -shortest \"STT_Trailer_v1_logo.mp4\")"
+      "Bash(ffmpeg -y -i \"STT_Trailer_v1.mp4\" -loop 1 -i wordmark2.png -filter_complex_script wm_filter_v1.txt -map \"[v]\" -map 0:a -c:v libx264 -crf 18 -preset medium -pix_fmt yuv420p -c:a copy -movflags +faststart -shortest \"STT_Trailer_v1_logo.mp4\")",
+      "Bash(awk 'NR>=13480 && NR<=13540 && /^function /{print NR\": \"$0}' build_game.py)",
+      "Bash(awk 'NR>=13540 && NR<=13560' build_game.py)",
+      "Bash(awk 'NR<13546 && /^function /{ln=NR; fn=$0} END{}' build_game.py)",
+      "Bash(awk -F: '$1>13400 && $1<13560')"
     ]
   },
   "hooks": {

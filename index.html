@@ -5382,8 +5382,13 @@ function _introToCorpSetup(){
         _p.y=_s.y+_p.orbitRadius*Math.sin(_p.orbitAngle);
       }
     };
-    _resetPlanet(galaxy.planets[galaxy.origenId]);
-    if(_tutorialLavaPlanetId>=0) _resetPlanet(galaxy.planets[_tutorialLavaPlanetId]);
+    // Reset the WHOLE home system back to its at-generation framing — this
+    // includes Orijen, the lava planet, AND the desert (which now starts at the
+    // lava planet's clock position), so the starting cluster looks identical
+    // regardless of how long the player lingered on the cutscene narration.
+    const _hStar=galaxy.stars[galaxy.planets[galaxy.origenId].starId];
+    if(_hStar) for(const _hpid of _hStar.planetIds) _resetPlanet(galaxy.planets[_hpid]);
+    else { _resetPlanet(galaxy.planets[galaxy.origenId]); if(_tutorialLavaPlanetId>=0) _resetPlanet(galaxy.planets[_tutorialLavaPlanetId]); }
   }
   // Re-center the camera fully zoomed in on the player's train. The
   // cutscene's last shot can leave cam at any scale (often MIN_SC at the
@@ -8282,6 +8287,7 @@ function generateGalaxy(){
     // The home-system LAVA planet (HOME_BIOMES index 0) is then placed
     // within ±30° of Orijen's anchor angle for tutorial proximity.
     const _homeOrijenAngle=isHome?((dominantDir>0)?Math.PI:0):0;
+    let _homeLavaAngle=null; // captured at home index 0 so the desert can mirror it
     for(let i=0;i<np;i++){
       const isStarter=(isHome&&i===1); // Orijen sits at HOME_BIOMES index 1
       // Orijen is always L (home planet). The HOME_BIOMES index-0 lava is
@@ -8298,9 +8304,14 @@ function generateGalaxy(){
       if(isHome&&i===0){
         // Lava (home index 0) — placed within ±30° of Orijen's anchor.
         angle=_homeOrijenAngle+(Math.random()*2-1)*(Math.PI/6);
+        _homeLavaAngle=angle;
       } else if(isHome&&i===1){
         // Orijen (home index 1) — deterministic 9pm (CW) / 3pm (CCW).
         angle=_homeOrijenAngle;
+      } else if(isHome&&i===2&&_homeLavaAngle!==null){
+        // Desert (home index 2) — starts at the SAME clock position as the lava
+        // planet relative to Gigi Prime (different orbit radius, same angle).
+        angle=_homeLavaAngle;
       }
       // Kepler-inspired speed: closer planets orbit faster (v ∝ 1/√r).
       // Default 2% chance of retrograde — but the home-system lava and
@@ -14006,10 +14017,15 @@ function updateFoundries(dtG){
   // late-game scale where 99% of planets have none, this drops the per-frame
   // foundry loop from ~1,117 iterations to ~37.
   for(const p of _getUpgradePlanets()){
-    // A car-type unlock (iron / hazmat) may ONLY be triggered by production on a
-    // PLAYER-controlled planet (player station, not an AI/rival one). Production
-    // itself still runs for AI planets — only the player's unlock flag is gated.
-    const _playerOwned = !!p.hasStation && !p.aiHasStation;
+    // A car-type unlock (iron / hazmat / steel / glass / machinery) may ONLY be
+    // triggered by production from an upgrade the PLAYER built. The signal is
+    // p.playerBuiltUpgrades — the player's upgrade-purchase path pushes to it,
+    // but the AI/rival build path (see _aiExecuteAction 'build_upgrade') pushes
+    // ONLY to p.upgrades, never to playerBuiltUpgrades. So AI/rival production
+    // can never unlock the player's cars regardless of station-flag state.
+    // (The old `hasStation && !aiHasStation` gate could mis-fire if a non-player
+    // station-bearing planet — e.g. a co-owned planet — ever hosted a foundry.)
+    const _pBuilt = (uid)=>(p.playerBuiltUpgrades||[]).includes(uid);
     if(_pUpg(p,'iron_foundry')&&p.upgradeData?.iron_foundry){
       const _fd=p.upgradeData.iron_foundry;
       if((_fd.progress||0)>0){
@@ -14034,10 +14050,10 @@ function updateFoundries(dtG){
           // diversity tally counts it as a unique cargo type at this planet.
           if(!p.devLog) p.devLog=[];
           p.devLog.push({sd:stardate, value:DEV_CARGO_VALUES.iron||100, cargo:'iron'});
-          if(_playerOwned && !_ironCarUnlocked){ _ironCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_iron',displayName:'Iron Car',planetId:p.id}); _chatMsg('IRON CAR UNLOCKED','rgba(200,210,235,1)'); _ga('car_unlocked',{car_type:'iron', cargo:'iron', sd:Math.floor(stardate)}); }
+          if(_pBuilt('iron_foundry') && !_ironCarUnlocked){ _ironCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_iron',displayName:'Iron Car',planetId:p.id}); _chatMsg('IRON CAR UNLOCKED','rgba(200,210,235,1)'); _ga('car_unlocked',{car_type:'iron', cargo:'iron', sd:Math.floor(stardate)}); }
           p.supply.hazmat=Math.min(CARGO_MAX_SUPPLY,(p.supply.hazmat||0)+0.5);
           _fd.hazmatTotal=(_fd.hazmatTotal||0)+0.5; // cumulative produced, unaffected by consumption
-          if(_playerOwned && !_hazmatCarUnlocked&&_fd.hazmatTotal>=1){ _hazmatCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_hazmat',displayName:'Hazmat Car',planetId:p.id}); _chatMsg('HAZMAT CAR UNLOCKED','rgba(255,165,40,1)'); _ga('car_unlocked',{car_type:'hazmat', cargo:'hazmat', sd:Math.floor(stardate)}); }
+          if(_pBuilt('iron_foundry') && !_hazmatCarUnlocked&&_fd.hazmatTotal>=1){ _hazmatCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_hazmat',displayName:'Hazmat Car',planetId:p.id}); _chatMsg('HAZMAT CAR UNLOCKED','rgba(255,165,40,1)'); _ga('car_unlocked',{car_type:'hazmat', cargo:'hazmat', sd:Math.floor(stardate)}); }
         }
       } else if((_fd.ore||0)>=1&&(_fd.water||0)>=1){
         _fd.progress=FOUNDRY_PROD_TIME;
@@ -14068,13 +14084,13 @@ function updateFoundries(dtG){
           // Sliding-window log of steel production (per-tick units), used for the
           // N700 unlock check (200 units in any 20-stardate window). Player planets
           // only — AI/rival steel must not unlock the N700 for the player.
-          if(_playerOwned) _steelProdLog.push({sd:stardate,units:1});
+          if(_pBuilt('blast_furnace')) _steelProdLog.push({sd:stardate,units:1});
           // Producing the FIRST steel unit on a PLAYER planet UNLOCKS the TERMINAL upgrade.
-          if(_playerOwned && !_terminalUnlocked){
+          if(_pBuilt('blast_furnace') && !_terminalUnlocked){
             _terminalUnlocked=true; pendingUpgradeUnlocks.push({key:'__terminal__'});
             _chatMsg('TERMINAL UPGRADE UNLOCKED','rgba(255,210,120,1)');
           }
-          if(_playerOwned && !_steelCarUnlocked){
+          if(_pBuilt('blast_furnace') && !_steelCarUnlocked){
             _steelCarUnlocked=true;
             pendingCarUnlocks.push({sprite:'car_steel',displayName:'Steel Car',planetId:p.id});
             _chatMsg('STEEL CAR UNLOCKED','rgba(220,230,245,1)');
@@ -14091,7 +14107,7 @@ function updateFoundries(dtG){
           // arms the Hazmat Car unlock if the foundry hasn't already done so.
           p.supply.hazmat=Math.min(CARGO_MAX_SUPPLY,(p.supply.hazmat||0)+0.5);
           _bf.hazmatTotal=(_bf.hazmatTotal||0)+0.5;
-          if(_playerOwned && !_hazmatCarUnlocked&&_bf.hazmatTotal>=1){
+          if(_pBuilt('blast_furnace') && !_hazmatCarUnlocked&&_bf.hazmatTotal>=1){
             _hazmatCarUnlocked=true;
             pendingCarUnlocks.push({sprite:'car_hazmat',displayName:'Hazmat Car',planetId:p.id});
             _chatMsg('HAZMAT CAR UNLOCKED','rgba(255,165,40,1)');
@@ -14117,10 +14133,10 @@ function updateFoundries(dtG){
           _gw.chemical=Math.max(0,(_gw.chemical||0)-1);
           p.supply.glass  =Math.min(CARGO_MAX_SUPPLY,(p.supply.glass||0)+1);
           p.glassDelivered=(p.glassDelivered||0)+1;
-          if(_playerOwned && !_glassCarUnlocked){ _glassCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_glass',displayName:'Glass Car',planetId:p.id}); _chatMsg('GLASS CAR UNLOCKED','rgba(170,230,210,1)'); _ga('car_unlocked',{car_type:'glass', cargo:'glass', sd:Math.floor(stardate)}); }
+          if(_pBuilt('glassworks') && !_glassCarUnlocked){ _glassCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_glass',displayName:'Glass Car',planetId:p.id}); _chatMsg('GLASS CAR UNLOCKED','rgba(170,230,210,1)'); _ga('car_unlocked',{car_type:'glass', cargo:'glass', sd:Math.floor(stardate)}); }
           // Industrial chain reaction: first glass produced also unlocks the
           // Machinery Car (which gets manufactured by Factories on urban planets).
-          if(_playerOwned && !_machineryCarUnlocked){ _machineryCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_machinery',displayName:'Machinery Car',planetId:p.id}); _chatMsg('MACHINERY CAR UNLOCKED','rgba(200,200,170,1)'); _ga('car_unlocked',{car_type:'machinery', cargo:'machinery', sd:Math.floor(stardate)}); }
+          if(_pBuilt('glassworks') && !_machineryCarUnlocked){ _machineryCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_machinery',displayName:'Machinery Car',planetId:p.id}); _chatMsg('MACHINERY CAR UNLOCKED','rgba(200,200,170,1)'); _ga('car_unlocked',{car_type:'machinery', cargo:'machinery', sd:Math.floor(stardate)}); }
         }
       } else if((_gw.sand||0)>=1&&(_gw.chemical||0)>=1){
         _gw.progress=FOUNDRY_PROD_TIME;
@@ -14141,7 +14157,7 @@ function updateFoundries(dtG){
           p.machineryDelivered=(p.machineryDelivered||0)+1;
           // Safety net: in the unlikely case a factory produces machinery
           // before any glassworks has fired, unlock the Machinery Car here too.
-          if(_playerOwned && !_machineryCarUnlocked){ _machineryCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_machinery',displayName:'Machinery Car',planetId:p.id}); _chatMsg('MACHINERY CAR UNLOCKED','rgba(200,200,170,1)'); _ga('car_unlocked',{car_type:'machinery', cargo:'machinery', sd:Math.floor(stardate)}); }
+          if(_pBuilt('factory') && !_machineryCarUnlocked){ _machineryCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_machinery',displayName:'Machinery Car',planetId:p.id}); _chatMsg('MACHINERY CAR UNLOCKED','rgba(200,200,170,1)'); _ga('car_unlocked',{car_type:'machinery', cargo:'machinery', sd:Math.floor(stardate)}); }
           // Hazmat byproduct: each machinery unit also produces 0.5 hazmat —
           // metal-shop chemical solvents, oil sludge, and assembly-line waste.
           // Mirrors the foundry (iron→0.5 hazmat) and blast-furnace
@@ -14149,7 +14165,7 @@ function updateFoundries(dtG){
           // unlock if no upstream producer has already done so.
           p.supply.hazmat=Math.min(CARGO_MAX_SUPPLY,(p.supply.hazmat||0)+0.5);
           _ft.hazmatTotal=(_ft.hazmatTotal||0)+0.5;
-          if(_playerOwned && !_hazmatCarUnlocked&&_ft.hazmatTotal>=1){
+          if(_pBuilt('factory') && !_hazmatCarUnlocked&&_ft.hazmatTotal>=1){
             _hazmatCarUnlocked=true;
             pendingCarUnlocks.push({sprite:'car_hazmat',displayName:'Hazmat Car',planetId:p.id});
             _chatMsg('HAZMAT CAR UNLOCKED','rgba(255,165,40,1)');
@@ -14171,7 +14187,7 @@ function updateFoundries(dtG){
           _bk.grain=Math.max(0,(_bk.grain||0)-1);
           p.supply.cargo=Math.min(CARGO_MAX_SUPPLY,(p.supply.cargo||0)+1);
           _anyCargoProduced=true; // one-shot flag for galaxy-wide cargo demand
-          if(_playerOwned && !_cargoCarUnlocked){
+          if(_pBuilt('bakery') && !_cargoCarUnlocked){
             _cargoCarUnlocked=true;
             pendingCarUnlocks.push({sprite:'car_cargo',displayName:'Cargo Car',planetId:p.id});
             _chatMsg('CARGO CAR UNLOCKED','rgba(200,170,120,1)');
@@ -14192,7 +14208,7 @@ function updateFoundries(dtG){
           _jc.fruit=Math.max(0,(_jc.fruit||0)-1);
           p.supply.cargo=Math.min(CARGO_MAX_SUPPLY,(p.supply.cargo||0)+1);
           _anyCargoProduced=true;
-          if(_playerOwned && !_cargoCarUnlocked){
+          if(_pBuilt('juicery') && !_cargoCarUnlocked){
             _cargoCarUnlocked=true;
             pendingCarUnlocks.push({sprite:'car_cargo',displayName:'Cargo Car',planetId:p.id});
             _chatMsg('CARGO CAR UNLOCKED','rgba(200,170,120,1)');
@@ -26596,16 +26612,23 @@ function drawTrainsPopup(){
   ctx.save();
   _drawWindowTabs(px,py,pw,'trains');
   ctx.font='10px "Exo 2",sans-serif'; ctx.textAlign='right';
-  popupState.escBounds={x:px+pw-88,y:py+11,w:78,h:14};
+  const _escW=ctx.measureText('[ESC] close').width;
+  const _escLeft=px+pw-10-_escW;
+  popupState.escBounds={x:_escLeft-4,y:py+11,w:_escW+8,h:14};
   ctx.fillStyle=popupState.escHover?'rgba(255,255,255,0.92)':'rgba(90,130,190,0.55)';
   ctx.fillText('[ESC] close',px+pw-10,py+21);
-  // + button (add train) — moved right, just left of [ESC].
-  const abx=px+pw-120, aby=py+8, abw=26, abh=18;
+  // "+ NEW TRAIN" button — wide green pill just left of [ESC] (small buffer).
+  ctx.font='bold 9px Orbitron,sans-serif';
+  const _ntLabel='+ NEW TRAIN';
+  const abw=Math.round(ctx.measureText(_ntLabel).width)+16, abh=18;
+  const abx=_escLeft-7-abw, aby=py+6;
   trainsPopupAddBounds={x:abx,y:aby,w:abw,h:abh};
-  ctx.fillStyle=_trainAddHover?'rgba(45,200,90,0.97)':'rgba(30,160,70,0.85)'; ctx.fillRect(abx,aby,abw,abh);
-  ctx.strokeStyle=_trainAddHover?'rgba(80,240,120,0.90)':'rgba(50,220,90,0.7)'; ctx.lineWidth=1; ctx.strokeRect(abx,aby,abw,abh);
-  ctx.font='bold 14px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.fillStyle='#fff';
-  ctx.fillText('+',abx+abw/2,aby+abh/2+5);
+  ctx.fillStyle=_trainAddHover?'rgba(45,200,90,0.97)':'rgba(30,160,70,0.85)';
+  ctx.beginPath(); ctx.roundRect(abx,aby,abw,abh,4); ctx.fill();
+  ctx.strokeStyle=_trainAddHover?'rgba(80,240,120,0.90)':'rgba(50,220,90,0.7)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.roundRect(abx,aby,abw,abh,4); ctx.stroke();
+  ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillStyle='#fff';
+  ctx.fillText(_ntLabel,abx+abw/2,aby+abh/2+0.5); ctx.textBaseline='alphabetic';
   ctx.strokeStyle='rgba(80,50,20,0.4)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(px,py+30); ctx.lineTo(px+pw,py+30); ctx.stroke();
 
@@ -28815,6 +28838,7 @@ function drawGalaxy(ts,dt){
   ctx.beginPath(); ctx.moveTo(0,GH); ctx.lineTo(W,GH); ctx.stroke();
 
   assignBtnBounds=null; routeHereBtnBounds=null; cancelRouteBtnBounds=null; planetStarNameBounds=null; starPanelPlanetBounds=[]; planetDetailsBtnBounds=null;
+  let _pdRightEdge=0; // set by the PLANET DETAILS button so ROUTE TRAIN HERE can sit just right of it (lower-left bar)
   if((sel&&(sel.type==='planet'||sel.type==='star')&&routeStops.length>=2)||routeHerePending){
     // Compute per-segment distances and total
     const segDists=[];
@@ -29167,21 +29191,23 @@ function drawGalaxy(ts,dt){
       ctx.fillText('Type: ???  ·  Size: ???',textX,GH+40);
       ctx.fillText('Star: ???',textX,GH+56);
     }
-    // ── Planet Details button — sits where the Orbit/Coords column used to
-    // live. Same shape as ROUTE TRAIN HERE (rounded blue rectangle) but with
-    // blue theming and half the height, vertically centered in the bar.
+    // ── Planet Details button — compact blue pill in the LOWER-LEFT of the
+    // bottom bar, just right of the planet info text. ROUTE TRAIN HERE sits to
+    // its right (see the unified block below). Text size unchanged (9px).
     {
-      const _pdH=22, _pdY=GH+(BAR_H-_pdH)/2;
-      const _pdX=rightColX;
-      const _pdW=Math.max(120,(W-PANEL_W)-_pdX-12);
+      const _pdH=30, _pdY=GH+(BAR_H-_pdH)/2;
+      const _pdX=Math.max(rightColX, 470);
+      ctx.font='bold 9px Orbitron,sans-serif';
+      const _pdW=Math.round(ctx.measureText('PLANET DETAILS').width)+24;
       planetDetailsBtnBounds={x:_pdX,y:_pdY,w:_pdW,h:_pdH,planetId:p.id};
+      _pdRightEdge=_pdX+_pdW;
       ctx.fillStyle=_planetDetailsBtnHover?'rgba(35,95,200,0.97)':'rgba(20,60,150,0.92)';
       ctx.beginPath(); ctx.roundRect(_pdX,_pdY,_pdW,_pdH,4); ctx.fill();
       ctx.strokeStyle=_planetDetailsBtnHover?'rgba(140,210,255,0.95)':'rgba(80,160,255,0.80)'; ctx.lineWidth=_planetDetailsBtnHover?1.5:1;
       ctx.beginPath(); ctx.roundRect(_pdX,_pdY,_pdW,_pdH,4); ctx.stroke();
-      ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
+      ctx.textAlign='center'; ctx.textBaseline='middle';
       ctx.fillStyle=_planetDetailsBtnHover?'rgba(220,240,255,0.98)':'rgba(170,220,255,0.95)';
-      ctx.fillText('PLANET DETAILS',_pdX+_pdW/2,_pdY+_pdH/2+3.5);
+      ctx.fillText('PLANET DETAILS',_pdX+_pdW/2,_pdY+_pdH/2+0.5); ctx.textBaseline='alphabetic';
     }
   } else {
     const d=sel.data;
@@ -29268,23 +29294,22 @@ function drawGalaxy(ts,dt){
     }
   }
 
-  // ── Route Train Here button — shown in right panel area for star/planet selections ──
-  // Only when no multi-stop route is being planned and no assign/route pending is already active
+  // ── Route Train Here button — compact green pill in the LOWER-LEFT bar,
+  // just right of PLANET DETAILS (or where it would be, for a star). Only when
+  // no multi-stop route is being planned and nothing's pending.
   if(sel&&(sel.type==='planet'||sel.type==='star')&&routeStops.length<2&&!routeHerePending&&!assignPending&&trains.some(t=>t.isPlayer)){
-    const bx=W-PANEL_W, bw=PANEL_W, by=GH, bh=BAR_H;
-    routeHereBtnBounds={x:bx,y:by,w:bw,h:bh};
+    const _rhH=30, _rhY=GH+(BAR_H-_rhH)/2;
+    ctx.font='bold 9px Orbitron,sans-serif';
+    const _rhW=Math.round(ctx.measureText('ROUTE TRAIN HERE').width)+24;
+    const _rhX=_pdRightEdge>0?(_pdRightEdge+14):Math.max(470, 470);
+    routeHereBtnBounds={x:_rhX,y:_rhY,w:_rhW,h:_rhH};
     ctx.save();
-    ctx.fillStyle='rgba(8,30,14,0.93)'; ctx.fillRect(bx,by,bw,bh);
-    ctx.strokeStyle='rgba(50,100,200,0.4)'; ctx.lineWidth=1;
-    ctx.beginPath(); ctx.moveTo(bx,by); ctx.lineTo(bx,by+bh); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(bx,by); ctx.lineTo(bx+bw,by); ctx.stroke();
-    const ibx=bx+8, ibw=bw-16, iby=by+14, ibh=bh-28;
-    ctx.fillStyle=_routeHereBtnHover?'rgba(24,100,52,0.98)':'rgba(18,72,38,0.92)'; ctx.beginPath(); ctx.roundRect(ibx,iby,ibw,ibh,4); ctx.fill();
+    ctx.fillStyle=_routeHereBtnHover?'rgba(24,100,52,0.98)':'rgba(18,72,38,0.92)'; ctx.beginPath(); ctx.roundRect(_rhX,_rhY,_rhW,_rhH,4); ctx.fill();
     ctx.strokeStyle=_routeHereBtnHover?'rgba(90,230,140,0.95)':'rgba(60,200,110,0.80)'; ctx.lineWidth=_routeHereBtnHover?1.5:1;
-    ctx.beginPath(); ctx.roundRect(ibx,iby,ibw,ibh,4); ctx.stroke();
-    ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
+    ctx.beginPath(); ctx.roundRect(_rhX,_rhY,_rhW,_rhH,4); ctx.stroke();
+    ctx.textAlign='center'; ctx.textBaseline='middle';
     ctx.fillStyle=_routeHereBtnHover?'rgba(150,255,200,0.98)':'rgba(100,230,150,0.95)';
-    ctx.fillText('ROUTE TRAIN HERE',ibx+ibw/2,iby+ibh/2+4);
+    ctx.fillText('ROUTE TRAIN HERE',_rhX+_rhW/2,_rhY+_rhH/2+0.5); ctx.textBaseline='alphabetic';
     ctx.restore();
   }
 
