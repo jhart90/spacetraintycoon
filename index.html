@@ -441,7 +441,18 @@ let _smoothTextMode = false;
     // Blit so the bitmap's pen lands exactly at (x, y).
     tctx.drawImage(e.canvas, x - e.penX, y - e.penY, e.w, e.h);
   }
+  // In fullscreen the keyboard's Escape is awkward to reach (it exits
+  // fullscreen), so the game treats X as the universal Escape alias — see the
+  // keydown handler. To match, every drawn "[ESC]" hint label is rewritten to
+  // "[X]" while fullscreen. Cheap: the indexOf check short-circuits the vast
+  // majority of text draws, and _isFullscreen() only runs when the token is
+  // actually present. (_isFullscreen is a hoisted function declaration.)
+  function _escLabelSwap(t){
+    if(typeof t!=='string' || t.indexOf('[ESC]')<0) return t;
+    return _isFullscreen() ? t.split('[ESC]').join('[X]') : t;
+  }
   ctx.fillText = function(text, x, y, maxWidth){
+    text=_escLabelSwap(text);
     _syncTextState();
     if(_smoothTextMode){ _drawTextViaBM(text, x, y, 0); return; }
     // Default: direct, native, full-DPR rasterisation → sharpest possible.
@@ -449,6 +460,7 @@ let _smoothTextMode = false;
     else tctx.fillText(text, x, y);
   };
   ctx.strokeText = function(text, x, y, maxWidth){
+    text=_escLabelSwap(text);
     _syncTextState();
     if(_smoothTextMode){ _drawTextViaBM(text, x, y, 1); return; }
     if(maxWidth!==undefined) tctx.strokeText(text, x, y, maxWidth);
@@ -16197,23 +16209,17 @@ function drawFog(){
 }
 
 function drawArrowBtn(x,y,w,h,dir,active,hov=false){
-  const r=3;
+  // Bare filled triangle (no button box) — styled to match the leaderboard's
+  // PREV/NEXT page arrows that flank the "Ranks X–Y of Z" label: same narrow
+  // tall triangle proportions and lavender fill (disabled / hover / normal).
+  // The (x,y,w,h) rect is still the click hit-box; only the visual is a triangle.
+  const cx=x+w/2, cy=y+h/2, _triS=Math.min(8,h/2);
   ctx.beginPath();
-  ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y); ctx.arcTo(x+w,y,x+w,y+r,r);
-  ctx.lineTo(x+w,y+h-r); ctx.arcTo(x+w,y+h,x+w-r,y+h,r);
-  ctx.lineTo(x+r,y+h); ctx.arcTo(x,y+h,x,y+h-r,r);
-  ctx.lineTo(x,y+r); ctx.arcTo(x,y,x+r,y,r); ctx.closePath();
-  ctx.fillStyle=hov?'rgba(90,150,240,0.92)':active?'rgba(60,110,200,0.75)':'rgba(30,45,80,0.6)';
+  if(dir<0){ ctx.moveTo(cx+_triS/2,cy-_triS); ctx.lineTo(cx-_triS/2,cy); ctx.lineTo(cx+_triS/2,cy+_triS); }
+  else      { ctx.moveTo(cx-_triS/2,cy-_triS); ctx.lineTo(cx+_triS/2,cy); ctx.lineTo(cx-_triS/2,cy+_triS); }
+  ctx.closePath();
+  ctx.fillStyle=!active?'rgba(110,110,130,0.38)':(hov?'rgba(205,185,255,0.98)':'rgba(160,140,225,0.85)');
   ctx.fill();
-  ctx.strokeStyle=hov?'rgba(160,220,255,0.90)':active?'rgba(100,180,255,0.7)':'rgba(50,70,120,0.5)'; ctx.lineWidth=1;
-  ctx.stroke();
-  // Arrow triangle
-  const mx=x+w/2, my=y+h/2, as=h*0.28;
-  ctx.fillStyle=hov?'rgba(230,248,255,1.0)':active?'rgba(160,210,255,0.95)':'rgba(70,90,130,0.5)';
-  ctx.beginPath();
-  if(dir<0){ ctx.moveTo(mx-as,my); ctx.lineTo(mx+as,my-as); ctx.lineTo(mx+as,my+as); }
-  else      { ctx.moveTo(mx+as,my); ctx.lineTo(mx-as,my-as); ctx.lineTo(mx-as,my+as); }
-  ctx.closePath(); ctx.fill();
 }
 
 function drawSpeedIndicator(){
@@ -27922,22 +27928,25 @@ function drawTopBar(){
     ctx.fillStyle=_creditsHover?'rgba(220,235,255,1.0)':'rgba(185,215,255,0.92)';
     ctx.fillText(val,crTX+lw,cy);
 
-    // Delta arrow + text immediately right of the credits value
-    const dAbs=Math.abs(Math.round(creditDelta));
-    const dStr=(creditDelta>=0?'+':'-')+_fmtCr(dAbs);
-    const dCol=creditDelta>=0?'#40e060':'#e04040';
-    ctx.font='9px "Exo 2",sans-serif';
-    const dStartX=crTX+lw+vw+12;
-    const arX=dStartX+4.5, arY=cy;
-    ctx.beginPath();
-    if(creditDelta>=0){
-      ctx.moveTo(arX,arY-3.5); ctx.lineTo(arX+4.5,arY+2.5); ctx.lineTo(arX-4.5,arY+2.5);
-    } else {
-      ctx.moveTo(arX,arY+3.5); ctx.lineTo(arX+4.5,arY-2.5); ctx.lineTo(arX-4.5,arY-2.5);
+    // Delta arrow + text immediately right of the credits value. Hidden while
+    // the right panel is EXPANDED — the narrower top bar has no room for it.
+    if(!_panelExpanded){
+      const dAbs=Math.abs(Math.round(creditDelta));
+      const dStr=(creditDelta>=0?'+':'-')+_fmtCr(dAbs);
+      const dCol=creditDelta>=0?'#40e060':'#e04040';
+      ctx.font='9px "Exo 2",sans-serif';
+      const dStartX=crTX+lw+vw+12;
+      const arX=dStartX+4.5, arY=cy;
+      ctx.beginPath();
+      if(creditDelta>=0){
+        ctx.moveTo(arX,arY-3.5); ctx.lineTo(arX+4.5,arY+2.5); ctx.lineTo(arX-4.5,arY+2.5);
+      } else {
+        ctx.moveTo(arX,arY+3.5); ctx.lineTo(arX+4.5,arY-2.5); ctx.lineTo(arX-4.5,arY-2.5);
+      }
+      ctx.closePath(); ctx.fillStyle=dCol; ctx.fill();
+      ctx.fillStyle=dCol; ctx.textAlign='left';
+      ctx.fillText(dStr,dStartX+11,cy);
     }
-    ctx.closePath(); ctx.fillStyle=dCol; ctx.fill();
-    ctx.fillStyle=dCol; ctx.textAlign='left';
-    ctx.fillText(dStr,dStartX+11,cy);
   }
 
   ctx.restore();
@@ -29000,6 +29009,12 @@ function drawGalaxy(ts,dt){
 
   assignBtnBounds=null; routeHereBtnBounds=null; cancelRouteBtnBounds=null; planetStarNameBounds=null; starPanelPlanetBounds=[]; planetDetailsBtnBounds=null;
   let _pdRightEdge=0; // set by the PLANET DETAILS button so ROUTE TRAIN HERE can sit just right of it (lower-left bar)
+  // When the side-by-side PLANET DETAILS + ROUTE TRAIN HERE buttons can't fit in
+  // the available bottom-bar width (e.g. the right panel is EXPANDED, shrinking
+  // W-PANEL_W), we stack ROUTE TRAIN HERE beneath PLANET DETAILS instead. The
+  // PLANET DETAILS block decides this (it knows _infoRight) and hands the shared
+  // x/width/lower-y to the ROUTE block below.
+  let _stackInfoBtns=false, _stackBtnX=0, _stackBtnW=0, _stackBtnLowerY=0;
   // Safety net: a STAR PROXY (50000+, lives only in starProxyMap) must never be
   // presented as a selected PLANET — it would show "<star> / OCEAN / Orbit 0".
   // If any path selected one (e.g. toggling a train parked at a star), coerce
@@ -29346,22 +29361,47 @@ function drawGalaxy(ts,dt){
       ctx.fillText('Star: ???',textX,GH+56);
     }
     // ── Planet Details button — compact blue pill in the LOWER-LEFT of the
-    // bottom bar, just right of the planet info text. ROUTE TRAIN HERE sits to
-    // its right (see the unified block below). Text size unchanged (9px).
+    // bottom bar, just right of the planet info text. ROUTE TRAIN HERE normally
+    // sits to its right (see the unified block below); when both can't fit in
+    // W-PANEL_W (panel expanded), we STACK them — PLANET DETAILS on top, ROUTE
+    // TRAIN HERE beneath — at a shared smaller width + 8px font.
     {
-      const _pdH=26, _pdY=GH+(BAR_H-_pdH)/2;
       const _pdX=Math.round(_infoRight)+16; // just right of the planet info text
+      // Measure both labels at the normal 9px to test if side-by-side fits.
       ctx.font='bold 9px Orbitron,sans-serif';
-      const _pdW=Math.round(ctx.measureText('PLANET DETAILS').width)+16;
-      planetDetailsBtnBounds={x:_pdX,y:_pdY,w:_pdW,h:_pdH,planetId:p.id};
-      _pdRightEdge=_pdX+_pdW;
-      ctx.fillStyle=_planetDetailsBtnHover?'rgba(35,95,200,0.97)':'rgba(20,60,150,0.92)';
-      ctx.beginPath(); ctx.roundRect(_pdX,_pdY,_pdW,_pdH,4); ctx.fill();
-      ctx.strokeStyle=_planetDetailsBtnHover?'rgba(140,210,255,0.95)':'rgba(80,160,255,0.80)'; ctx.lineWidth=_planetDetailsBtnHover?1.5:1;
-      ctx.beginPath(); ctx.roundRect(_pdX,_pdY,_pdW,_pdH,4); ctx.stroke();
-      ctx.textAlign='center'; ctx.textBaseline='middle';
-      ctx.fillStyle=_planetDetailsBtnHover?'rgba(220,240,255,0.98)':'rgba(170,220,255,0.95)';
-      ctx.fillText('PLANET DETAILS',_pdX+_pdW/2,_pdY+_pdH/2+0.5); ctx.textBaseline='alphabetic';
+      const _pdW9=Math.round(ctx.measureText('PLANET DETAILS').width)+16;
+      const _rhW9=Math.round(ctx.measureText('ROUTE TRAIN HERE').width)+16;
+      const _availR=(W-PANEL_W)-12; // right limit for the bottom-bar content
+      _stackInfoBtns=(_pdX+_pdW9+12+_rhW9)>_availR;
+      if(_stackInfoBtns){
+        // Stacked layout: both buttons share one width (smaller 8px font) and
+        // stack vertically, centred in the bar. Capped so they never reach panel.
+        ctx.font='bold 8px Orbitron,sans-serif';
+        const _sw=Math.max(ctx.measureText('PLANET DETAILS').width,ctx.measureText('ROUTE TRAIN HERE').width);
+        const _sbW=Math.min(Math.round(_sw)+14,(W-PANEL_W)-_pdX-12);
+        const _sbH=22, _gap=4, _topY=GH+(BAR_H-(_sbH*2+_gap))/2;
+        _stackBtnX=_pdX; _stackBtnW=_sbW; _stackBtnLowerY=_topY+_sbH+_gap;
+        planetDetailsBtnBounds={x:_pdX,y:_topY,w:_sbW,h:_sbH,planetId:p.id};
+        _pdRightEdge=_pdX+_sbW;
+        ctx.fillStyle=_planetDetailsBtnHover?'rgba(35,95,200,0.97)':'rgba(20,60,150,0.92)';
+        ctx.beginPath(); ctx.roundRect(_pdX,_topY,_sbW,_sbH,4); ctx.fill();
+        ctx.strokeStyle=_planetDetailsBtnHover?'rgba(140,210,255,0.95)':'rgba(80,160,255,0.80)'; ctx.lineWidth=_planetDetailsBtnHover?1.5:1;
+        ctx.beginPath(); ctx.roundRect(_pdX,_topY,_sbW,_sbH,4); ctx.stroke();
+        ctx.textAlign='center'; ctx.textBaseline='middle';
+        ctx.fillStyle=_planetDetailsBtnHover?'rgba(220,240,255,0.98)':'rgba(170,220,255,0.95)';
+        ctx.fillText('PLANET DETAILS',_pdX+_sbW/2,_topY+_sbH/2+0.5); ctx.textBaseline='alphabetic';
+      } else {
+        const _pdH=26, _pdY=GH+(BAR_H-_pdH)/2, _pdW=_pdW9;
+        planetDetailsBtnBounds={x:_pdX,y:_pdY,w:_pdW,h:_pdH,planetId:p.id};
+        _pdRightEdge=_pdX+_pdW;
+        ctx.fillStyle=_planetDetailsBtnHover?'rgba(35,95,200,0.97)':'rgba(20,60,150,0.92)';
+        ctx.beginPath(); ctx.roundRect(_pdX,_pdY,_pdW,_pdH,4); ctx.fill();
+        ctx.strokeStyle=_planetDetailsBtnHover?'rgba(140,210,255,0.95)':'rgba(80,160,255,0.80)'; ctx.lineWidth=_planetDetailsBtnHover?1.5:1;
+        ctx.beginPath(); ctx.roundRect(_pdX,_pdY,_pdW,_pdH,4); ctx.stroke();
+        ctx.textAlign='center'; ctx.textBaseline='middle';
+        ctx.fillStyle=_planetDetailsBtnHover?'rgba(220,240,255,0.98)':'rgba(170,220,255,0.95)';
+        ctx.fillText('PLANET DETAILS',_pdX+_pdW/2,_pdY+_pdH/2+0.5); ctx.textBaseline='alphabetic';
+      }
     }
   } else {
     const d=sel.data;
@@ -29452,13 +29492,21 @@ function drawGalaxy(ts,dt){
   // just right of PLANET DETAILS (or where it would be, for a star). Only when
   // no multi-stop route is being planned and nothing's pending.
   if(sel&&(sel.type==='planet'||sel.type==='star')&&routeStops.length<2&&!routeHerePending&&!assignPending&&trains.some(t=>t.isPlayer)){
-    const _rhH=26, _rhY=GH+(BAR_H-_rhH)/2;
-    ctx.font='bold 9px Orbitron,sans-serif';
-    const _rhW=Math.round(ctx.measureText('ROUTE TRAIN HERE').width)+16;
-    // For a planet, sit just right of PLANET DETAILS; for a star (no PD button)
-    // fall back to a left-of-centre spot. Capped so it never reaches the panel.
-    let _rhX=_pdRightEdge>0?(_pdRightEdge+12):430;
-    _rhX=Math.min(_rhX, (W-PANEL_W)-_rhW-12);
+    let _rhX,_rhY,_rhW,_rhH,_rhFont;
+    if(_stackInfoBtns){
+      // Stacked beneath PLANET DETAILS — share its x/width + the smaller 8px font.
+      _rhFont='bold 8px Orbitron,sans-serif'; _rhH=22;
+      _rhX=_stackBtnX; _rhW=_stackBtnW; _rhY=_stackBtnLowerY;
+    } else {
+      _rhFont='bold 9px Orbitron,sans-serif'; _rhH=26; _rhY=GH+(BAR_H-_rhH)/2;
+      ctx.font=_rhFont;
+      _rhW=Math.round(ctx.measureText('ROUTE TRAIN HERE').width)+16;
+      // For a planet, sit just right of PLANET DETAILS; for a star (no PD button)
+      // fall back to a left-of-centre spot. Capped so it never reaches the panel.
+      _rhX=_pdRightEdge>0?(_pdRightEdge+12):430;
+      _rhX=Math.min(_rhX, (W-PANEL_W)-_rhW-12);
+    }
+    ctx.font=_rhFont;
     routeHereBtnBounds={x:_rhX,y:_rhY,w:_rhW,h:_rhH};
     ctx.save();
     ctx.fillStyle=_routeHereBtnHover?'rgba(24,100,52,0.98)':'rgba(18,72,38,0.92)'; ctx.beginPath(); ctx.roundRect(_rhX,_rhY,_rhW,_rhH,4); ctx.fill();
@@ -33226,6 +33274,16 @@ window.addEventListener('keyup',e=>{ heldKeys.delete((e.key||'').toLowerCase());
 window.addEventListener('blur',()=>{ heldKeys.clear(); _sbDrag=null; });
 document.addEventListener('keydown',e=>{
   if(nameEditEl.style.display==='block') return; // don't intercept while name editing
+  // X is a universal alias for Escape: wrap the event so every downstream
+  // `e.key==='Escape'` check (plus preventDefault/stopPropagation) sees it as
+  // Escape. Placed after the name-edit guard so typing "x" into a text field is
+  // unaffected. The fullscreen UI swaps every "ESC" label to "X" to match.
+  if(e.key==='x'||e.key==='X'){
+    const _orig=e;
+    e={key:'Escape',repeat:_orig.repeat,shiftKey:_orig.shiftKey,ctrlKey:_orig.ctrlKey,
+       altKey:_orig.altKey,metaKey:_orig.metaKey,
+       preventDefault:()=>_orig.preventDefault(),stopPropagation:()=>_orig.stopPropagation()};
+  }
   // WASD pan — record held keys so the loop can advance the camera. We register
   // before the gs/popup checks below so e.repeat keystrokes (key held for >0.5s)
   // are also captured. Movement itself is gated in the loop (popup-aware).

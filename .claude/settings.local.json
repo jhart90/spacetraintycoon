@@ -231,7 +231,8 @@
       "Bash(awk 'NR>=13540 && NR<=13560' build_game.py)",
       "Bash(awk 'NR<13546 && /^function /{ln=NR; fn=$0} END{}' build_game.py)",
       "Bash(awk -F: '$1>13400 && $1<13560')",
-      "Bash(awk 'NR>=13552 && NR<=13830' build_game.py)"
+      "Bash(awk 'NR>=13552 && NR<=13830' build_game.py)",
+      "Bash(ls -la *.zip)"
     ]
   },
   "hooks": {
