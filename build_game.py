@@ -3840,6 +3840,7 @@ let _speedLeftHover=false, _speedRightHover=false;
 let _panelTabHover=null;           // 'trains' | 'stations' | null
 let _panelExpandArrowBounds=null, _panelArrowHover=false; // expand/collapse arrow by the active tab
 let _optsGearBtnBounds=null, _optsGearBtnHover=false; // settings-wheel button in the lower-right speed cluster
+let _stationsAssignBtnBounds=null, _stationsAssignBtnHover=false; // "ASSIGN TO TRAIN" button at the bottom of the STATIONS panel while building a route from it
 function _togglePanelExpand(){
   _panelExpanded=!_panelExpanded;
   PANEL_W=_panelExpanded?PANEL_W_BASE*2:PANEL_W_BASE;
@@ -13553,6 +13554,7 @@ function drawTrainsPanel(){
   if(!galaxy) return;
   const px=W-PANEL_W;
   const showTrains=panelTab==='trains';
+  _stationsAssignBtnBounds=null; // re-set below only when the Stations route-assign button is shown
 
   // The panel now extends the FULL height of the screen (TOP_H → H), covering
   // the area the bottom info bar used to occupy on the right. _pBot is the
@@ -13829,6 +13831,29 @@ function drawTrainsPanel(){
       ctx.fillStyle='rgba(60,100,200,0.35)'; ctx.fillRect(sbX,TOP_H,sbW,panelViewH);
       ctx.fillStyle='rgba(100,160,255,0.65)'; ctx.fillRect(sbX,sbY,sbW,sbH);
       _regScrollbar({x:sbX,y:TOP_H,w:sbW,h:panelViewH,thumbY:sbY,thumbH:sbH,maxScroll:panelMaxScroll,setScroll:(v)=>{stationPanelScroll=v;}});
+    }
+    // ── ASSIGN TO TRAIN button — overlays the BOTTOM of the Stations panel
+    // (in line with the bottom info bar, GH→H) while a multi-stop route is being
+    // built FROM this panel. Opaque highlight-blue; clicking it flips to the
+    // Trains panel + SELECT-A-TRAIN state.
+    _stationsAssignBtnBounds=null;
+    if(_routeAutoAssign() && !assignPending && trains.some(t=>t.isPlayer)){
+      // Wipe the HD overlay (station-row text) in the band, then opaque backing.
+      _clearTextOverlayRect(px, GH, PANEL_W, H-GH);
+      ctx.fillStyle='rgb(4,8,20)'; ctx.fillRect(px, GH, PANEL_W, H-GH);
+      ctx.strokeStyle='rgba(120,200,255,0.55)'; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.moveTo(px,GH+0.5); ctx.lineTo(px+PANEL_W,GH+0.5); ctx.stroke();
+      const _ah=_stationsAssignBtnHover;
+      const _abx=px+6, _aby=GH+6, _abw=PANEL_W-12, _abh=(H-GH)-12;
+      ctx.fillStyle=_ah?'rgb(70,150,250)':'rgb(45,110,220)';
+      ctx.beginPath(); ctx.roundRect(_abx,_aby,_abw,_abh,5); ctx.fill();
+      ctx.strokeStyle=_ah?'rgba(180,225,255,1)':'rgba(120,190,255,0.9)'; ctx.lineWidth=1.5;
+      ctx.beginPath(); ctx.roundRect(_abx,_aby,_abw,_abh,5); ctx.stroke();
+      ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillStyle='#fff';
+      ctx.fillText('ASSIGN TO TRAIN', px+PANEL_W/2, _aby+_abh/2+0.5);
+      ctx.textBaseline='alphabetic';
+      _stationsAssignBtnBounds={x:_abx,y:_aby,w:_abw,h:_abh};
     }
   }
 }
@@ -29002,10 +29027,11 @@ function drawGalaxy(ts,dt){
       ctx.fillText(starNames.join(' → '),14,GH+54);
     }
     // Route builder: a 1+ segment route is set up → drop straight into the
-    // SELECT-A-TRAIN state. The in-bar ASSIGN / SELECT-A-TRAIN button is gone —
-    // the player just clicks a train in the right panel to assign the route,
-    // and a blue "SELECT A TRAIN" tab is shown over the panel tabs (drawPanelTabs).
-    if(trains.some(t=>t.isPlayer) && _routeAutoAssign() && !assignPending){
+    // SELECT-A-TRAIN state (flip to the Trains panel) — EXCEPT when the route is
+    // being built from the STATIONS panel. In that case keep Stations open and
+    // let the player click the ASSIGN TO TRAIN button at the bottom of that
+    // panel (drawn in drawTrainsPanel); only then do we flip.
+    if(trains.some(t=>t.isPlayer) && _routeAutoAssign() && !assignPending && panelTab!=='stations'){
       assignPending=true;
       if(panelTab!=='trains'&&!activePopup) panelTab='trains';
     }
@@ -30027,6 +30053,13 @@ function panelClick(sx,sy,shiftKey){
   if(sy<TOP_H&&!assignPending){
     panelTab=sx<W-PANEL_W/2?'trains':'stations';
     return;
+  }
+  // ASSIGN TO TRAIN button at the bottom of the Stations panel (route built from
+  // here) → flip to the Trains panel + SELECT-A-TRAIN state. Checked before the
+  // station-row hit-test since it sits over the bottom rows.
+  if(panelTab==='stations' && _stationsAssignBtnBounds){
+    const b=_stationsAssignBtnBounds;
+    if(sx>=b.x&&sx<=b.x+b.w&&sy>=b.y&&sy<=b.y+b.h){ assignPending=true; panelTab='trains'; return; }
   }
   if(panelTab==='stations'){
     const stationPlanets=galaxy.planets.filter(p=>p.hasStation&&(!p.isAlienRelic||visitedPlanetIds.has(p.id)));
@@ -31245,6 +31278,8 @@ canvas.addEventListener('mousemove',e=>{
     // Expand/collapse arrow hover (cursor → pointer; brightens the arrow).
     _panelArrowHover=!!(_panelExpandArrowBounds&&cp.x>=_panelExpandArrowBounds.x&&cp.x<=_panelExpandArrowBounds.x+_panelExpandArrowBounds.w&&cp.y>=_panelExpandArrowBounds.y&&cp.y<=_panelExpandArrowBounds.y+_panelExpandArrowBounds.h);
     if(_panelArrowHover) canvas.style.cursor='pointer';
+    _stationsAssignBtnHover=!!(_stationsAssignBtnBounds&&cp.x>=_stationsAssignBtnBounds.x&&cp.x<=_stationsAssignBtnBounds.x+_stationsAssignBtnBounds.w&&cp.y>=_stationsAssignBtnBounds.y&&cp.y<=_stationsAssignBtnBounds.y+_stationsAssignBtnBounds.h);
+    if(_stationsAssignBtnHover) canvas.style.cursor='pointer';
     // Speed arrow hover
     _speedLeftHover=!!(speedLeftBounds&&cp.x>=speedLeftBounds.x&&cp.x<=speedLeftBounds.x+speedLeftBounds.w&&cp.y>=speedLeftBounds.y&&cp.y<=speedLeftBounds.y+speedLeftBounds.h);
     _speedRightHover=!!(speedRightBounds&&cp.x>=speedRightBounds.x&&cp.x<=speedRightBounds.x+speedRightBounds.w&&cp.y>=speedRightBounds.y&&cp.y<=speedRightBounds.y+speedRightBounds.h);
