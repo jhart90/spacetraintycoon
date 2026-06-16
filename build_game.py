@@ -3467,6 +3467,7 @@ let _tutorialLavaPlanetId=-1;  // planet id of the lava planet in Orijen's home 
 // re-entry starts fresh.
 let _blueHoverAnchorFrozen=null; // {x,y} once captured; null until then
 let _zoomBarCenter={x:0,y:0}; // cached screen centre of the zoom bar (set each frame by drawSpeedIndicator)
+let _speedValCenterX=0;        // cached screen X of the "#X" speed-multiplier text centre (set each frame by drawSpeedIndicator); the stacked planet buttons centre under it
 let _createRouteTimerMs=0; // real-time ms when player first visited a non-home-star planet (0=not yet). Used by stellar_cartography fallback.
 let _visitPlanetCompletedMs=0; // (legacy) real-time ms when visit_planet mission completed. Superseded by _tutorialDoneMs but kept reset for save compat.
 let _lavaDetailsWasOpen=false; // true once the Lava Planet details window has been opened during the tutorial
@@ -16279,16 +16280,16 @@ function drawFog(){
 }
 
 function drawArrowBtn(x,y,w,h,dir,active,hov=false){
-  // Bare filled triangle (no button box) — styled to match the leaderboard's
-  // PREV/NEXT page arrows that flank the "Ranks X–Y of Z" label: same narrow
-  // tall triangle proportions and lavender fill (disabled / hover / normal).
+  // Bare filled triangle (no button box). Smaller than the leaderboard arrows,
+  // and tinted to match the "GAME SPEED" label colour (soft blue) rather than
+  // lavender — normal = label blue, hover = brighter blue, disabled = dim.
   // The (x,y,w,h) rect is still the click hit-box; only the visual is a triangle.
-  const cx=x+w/2, cy=y+h/2, _triS=Math.min(8,h/2);
+  const cx=x+w/2, cy=y+h/2, _triS=Math.min(6,h*0.38);
   ctx.beginPath();
   if(dir<0){ ctx.moveTo(cx+_triS/2,cy-_triS); ctx.lineTo(cx-_triS/2,cy); ctx.lineTo(cx+_triS/2,cy+_triS); }
   else      { ctx.moveTo(cx-_triS/2,cy-_triS); ctx.lineTo(cx+_triS/2,cy); ctx.lineTo(cx-_triS/2,cy+_triS); }
   ctx.closePath();
-  ctx.fillStyle=!active?'rgba(110,110,130,0.38)':(hov?'rgba(205,185,255,0.98)':'rgba(160,140,225,0.85)');
+  ctx.fillStyle=!active?'rgba(110,110,130,0.38)':(hov?'rgba(170,215,255,0.95)':'rgba(120,180,255,0.6)');
   ctx.fill();
 }
 
@@ -16335,7 +16336,8 @@ function drawSpeedIndicator(){
   else if(spd>1)      { _spdLbl=spd+'X';_spdCol='rgba(255,220,60,0.95)';  }
   else                { _spdLbl='1X';   _spdCol='rgba(140,190,255,0.85)'; }
   ctx.fillStyle=_spdCol;
-  ctx.fillText(_spdLbl,selX+btnW+valW/2+2,rowY+3.5);
+  _speedValCenterX=selX+btnW+valW/2+2; // cache for the stacked planet buttons to centre under
+  ctx.fillText(_spdLbl,_speedValCenterX,rowY+3.5);
 
   // Zoom bar — to the left of the speed selector (its label now sits ABOVE it,
   // so the 30px left-label reservation is gone; the bar keeps its old position).
@@ -16958,17 +16960,17 @@ function drawCarUnlockPopup(){
 // and the station-upgrade buttons — keep them in sync if those constants change.
 const _UPGRADE_UNLOCK_INFO={
   iron_foundry:{ name:'IRON FOUNDRY', kind:'iron_foundry', biome:'#c9a55a',
-    cost:'10,000 cr', buildOn:'DESERT planets',
-    enables:'Enables this planet to smelt delivered MOLTEN ORE + WATER into IRON.',
-    formula:'1 Molten Ore  +  1 Water   →   1 Iron', time:'~40 seconds' },
+    cost:'10,000 cr', buildOn:'DESERT planets', buildOnColor:'#f0a040',
+    enables:'Enables this planet to smelt delivered [Molten Ore] + [Water]\ninto [Iron].',
+    formula:'1 [Molten Ore]  +  1 [Water]   →   1 [Iron]', time:'~40 seconds' },
   bakery:{ name:'BAKERY', kind:'bakery', biome:'#3a9fc2',
-    cost:'15,000 cr', buildOn:'RESORT planets',
-    enables:'Enables this planet to bake delivered GRAIN into CARGO.',
-    formula:'1 Grain   →   1 Cargo', time:'~40 seconds' },
+    cost:'15,000 cr', buildOn:'RESORT planets', buildOnColor:'#38aaf0',
+    enables:'Enables this planet to bake delivered [Grain] into [Cargo].',
+    formula:'1 [Grain]   →   1 [Cargo]', time:'~40 seconds' },
   glassworks:{ name:'GLASSWORKS', kind:'glassworks', biome:'#3a9fc2',
-    cost:'25,000 cr', buildOn:'RESORT planets',
-    enables:'Enables this planet to melt delivered SAND + CHEMICALS into GLASS.',
-    formula:'1 Sand  +  1 Chemical   →   1 Glass', time:'~40 seconds' },
+    cost:'25,000 cr', buildOn:'RESORT planets', buildOnColor:'#38aaf0',
+    enables:'Enables this planet to melt delivered [Sand] + [Chemical] into [Glass].',
+    formula:'1 [Sand]  +  1 [Chemical]   →   1 [Glass]', time:'~40 seconds' },
   __large_station__:{ name:'LARGE STATION', kind:'station', rings:2, biome:'#8893a3',
     cost:'50,000 cr  +  4 Iron',
     buildOn:'any planet where a STATION has already been built',
@@ -17026,8 +17028,11 @@ function drawUpgradeUnlockPopup(){
   // Count wrapped lines per section (mirrors the _wrapC wrapping below: split on
   // spaces, max width pw-36) so the height is exactly what the copy needs.
   const _lc=(text,font)=>{ ctx.font=font; let _n=0; for(const _seg of (text||'').split('\n')){ const _ws=_seg.split(' '); let _l=''; for(const _w of _ws){ const _t=_l?_l+' '+_w:_w; if(ctx.measureText(_t).width<=pw-36)_l=_t; else { if(_l)_n++; _l=_w; } } if(_l)_n++; } return Math.max(1,_n); };
+  // Tokenised line-count — mirrors _wrapTokC's [Cargo]-aware wrapping so the
+  // height reserved for enables / formula matches the bold, coloured render.
+  const _lcTok=(text,font)=>{ let _n=0; for(const _seg of (text||'').split('\n')) _n+=_objWrapTokens(_objTokenize(_seg),pw-36,font).length; return Math.max(1,_n); };
   const _F_COST='bold 12px "Exo 2",sans-serif',_F_BUILD='bold 11px "Exo 2",sans-serif',_F_EN='10px "Exo 2",sans-serif',_F_FORM='bold 11px "Exo 2",sans-serif';
-  const _nCost=_lc(info.cost||'—',_F_COST), _nBuild=_lc(info.buildOn||'—',_F_BUILD), _nEn=_lc(info.enables||'',_F_EN), _nForm=info.formula?_lc(info.formula,_F_FORM):0;
+  const _nCost=_lc(info.cost||'—',_F_COST), _nBuild=_lc(info.buildOn||'—',_F_BUILD), _nEn=_lcTok(info.enables||'',_F_EN), _nForm=info.formula?_lcTok(info.formula,_F_FORM):0;
   let _be=196;                       // body cursor start (clears the visual)
   _be+=15+15*_nCost+9;               // COST: caption + value + gap
   _be+=15+14*_nBuild+9;              // BUILDABLE ON
@@ -17067,6 +17072,23 @@ function drawUpgradeUnlockPopup(){
     }
     return _y;
   };
+  // Tokenised centred word-wrap — like _wrapC but routes [Cargo] tokens through
+  // the shared objective tokenizer so resource refs ([Iron], [Water], …) get
+  // their cargo colour + bold, matching the convention used in mission/bubble
+  // text. Honours explicit '\n' breaks. Restores textAlign='center' on exit so
+  // the centred _cap/footer draws that follow are unaffected.
+  const _wrapTokC=(text,font,baseCol,startY,lh)=>{
+    let _y=startY;
+    for(const _seg of (text||'').split('\n')){
+      for(const _ln of _objWrapTokens(_objTokenize(_seg),pw-36,font)){
+        ctx.textBaseline='alphabetic';
+        _objDrawLineCentered(_ln,px+pw/2,_y,font,baseCol);
+        _y+=lh;
+      }
+    }
+    ctx.textAlign='center';
+    return _y;
+  };
   // Small caption helper for the COST / BUILDABLE ON / ENABLES section headers.
   const _cap=(txt,y)=>{ ctx.font='9px Orbitron,sans-serif'; ctx.fillStyle='rgba(150,200,255,0.65)'; ctx.fillText(txt,px+pw/2,y); };
   let _ly=py+196;
@@ -17084,15 +17106,18 @@ function drawUpgradeUnlockPopup(){
   }
   _ly+=24;
   // (2) BUILDABLE ON — eligible biomes, or the prerequisite that must be met.
+  // When the upgrade is biome-specific (info.buildOnColor set), the "BIOME
+  // planets" line is drawn bold in that biome's colour (e.g. DESERT in desert
+  // sand-orange); otherwise it keeps the neutral blue.
   _cap('BUILDABLE ON',_ly); _ly+=15;
-  _ly=_wrapC(info.buildOn||'—',_F_BUILD,'rgba(190,225,255,0.95)',_ly,14)+9;
-  // (3) ENABLES — one-sentence benefit.
+  _ly=_wrapC(info.buildOn||'—',_F_BUILD,info.buildOnColor||'rgba(190,225,255,0.95)',_ly,14)+9;
+  // (3) ENABLES — one-sentence benefit. Tokenised so [Cargo] refs colour+bold.
   _cap('ENABLES',_ly); _ly+=15;
-  _ly=_wrapC(info.enables||'',_F_EN,'rgba(228,228,233,0.9)',_ly,14);
+  _ly=_wrapTokC(info.enables||'',_F_EN,'rgba(228,228,233,0.9)',_ly,14);
   // Processing formula + time (production upgrades only).
   if(info.formula){
     _ly+=8;
-    _ly=_wrapC(info.formula,_F_FORM,'rgba(255,235,160,0.97)',_ly,15);
+    _ly=_wrapTokC(info.formula,_F_FORM,'rgba(255,235,160,0.97)',_ly,15);
     if(info.time) _ly=_wrapC('Processing time: '+info.time,'9px "Exo 2",sans-serif','rgba(200,205,215,0.78)',_ly,13);
   }
   // Footer + OKAY — placed right after the body (no blank tail).
@@ -19342,6 +19367,10 @@ function _drawTutorialChain(stage){
     ctx.save();
     const _bubbleFont='10px "Exo 2",sans-serif';
     ctx.font=_bubbleFont;
+    // In fullscreen, X is the universal Escape alias (see the keydown handler +
+    // _escLabelSwap), so any callout that tells the player to press ESC must say
+    // X instead. Whole-word, case-insensitive; trailing punctuation preserved.
+    if(_isFullscreen()) lines=lines.map(_ln=>_ln.replace(/\bESC\b/gi,'X'));
     // Tokenise each line so [Cargo] brackets + planet/biome phrases (DESERT
     // PLANET / LAVA PLANET / ORIJEN) get the SAME colour+bold treatment as
     // mission objective/details text. Measure with that styling so the bubble
@@ -19681,7 +19710,7 @@ function _drawTutorialChain(stage){
     if(r.advanced){ _advanceTo('supply_demand'); return; }
     if(_popupOpen&&popupState.buildStationBtnBounds){
       const _b=popupState.buildStationBtnBounds;
-      _drawBubble(['CLICK HERE to PURCHASE A STATION','for this planet'], {x:_b.x+_b.w/2,y:_b.y+_b.h}, r.alpha, {below:true});
+      _drawBubble(['CLICK HERE to PURCHASE A STATION','for this planet'], {x:_b.x+_b.w/2,y:_b.y+_b.h}, r.alpha, {below:true, boldWords:['STATION']});
     }
     return;
   }
@@ -19707,7 +19736,7 @@ function _drawTutorialChain(stage){
       _drawHighlightBox(_b.x,_b.y,_b.w,_b.h,r.alpha,3);
       // Bubble anchored to the LEFT edge of the pane, pointing right at it
       const _ax=_b.x, _ay=_b.y+12;
-      _drawBubble(['This PLANET supplies [Molten Ore],','and demands a variety of resources'], {x:_ax+30,y:_ay}, r.alpha);
+      _drawBubble(['This PLANET supplies [Molten Ore],','and demands a variety of resources'], {x:_ax+30,y:_ay}, r.alpha, {italicWords:['supplies','demands']});
       // ── Secondary blue HOVER hint ───────────────────────────
       // 3 s after the yellow bubble finishes fading in, fade in a blue
       // bubble pointing at the Molten Ore supply sprite. Uses the same
@@ -20402,7 +20431,7 @@ function _drawTutorialChain(stage){
     if(r.advanced){ _advanceTo('bf_click_foundry_upgrade'); return; }
     if(_bfPopupOpen && popupState.buildStationBtnBounds){
       const _b=popupState.buildStationBtnBounds;
-      _drawBubble(['CLICK HERE to BUILD a STATION on this PLANET'], {x:_b.x+_b.w/2,y:_b.y+_b.h}, r.alpha, {below:true});
+      _drawBubble(['CLICK HERE to BUILD A STATION on this PLANET'], {x:_b.x+_b.w/2,y:_b.y+_b.h}, r.alpha, {below:true, boldWords:['STATION']});
     }
     return;
   }
@@ -29268,7 +29297,10 @@ function drawGalaxy(ts,dt){
       ctx.fillText('Orbit a planet in this system to reveal.',textX,GH+56);
     }
     // ── Planet strip (visited stars only) ────────────────────
-    if(_ibSVis){
+    // Suppressed while the right panel is EXPANDED — the narrowed bottom bar
+    // doesn't have room for the strip (the discs/names would crowd the ROUTE
+    // TRAIN HERE button). The expanded Stations panel already lists them.
+    if(_ibSVis && !_panelExpanded){
     ctx.font='bold 12px Orbitron,sans-serif';
     const nW=ctx.measureText(s.name).width;
     ctx.font='12px "Exo 2",sans-serif';
@@ -29330,17 +29362,38 @@ function drawGalaxy(ts,dt){
         ctx.save(); ctx.strokeStyle='rgba(180,220,255,0.65)'; ctx.lineWidth=1.2;
         ctx.beginPath(); ctx.arc(cx,barCY,pr+3,0,Math.PI*2); ctx.stroke(); ctx.restore();
       }
-      // Planet name overlaid just below the planet disc
-      const nameY=Math.min(barCY+pr+8,GH+BAR_H-4);
+      // Planet name overlaid just below the planet disc, word-wrapped to the
+      // slot width so long multi-word names (e.g. "New Saturn Terminal") break
+      // onto multiple lines instead of overlapping neighbouring slots.
       ctx.font='9px "Exo 2",sans-serif'; ctx.textAlign='center';
-      ctx.fillStyle='rgba(0,0,0,0.6)';
       const _nameStr=_pVis2?p.name:'???';
-      ctx.fillText(_nameStr,cx+1,nameY+1);
-      ctx.fillStyle=_panelPHov&&_pVis2?'rgba(255,255,255,0.95)':_pVis2?'rgba(215,225,255,0.88)':'rgba(60,80,130,0.65)';
-      ctx.fillText(_nameStr,cx,nameY);
+      const _nameMaxW=Math.max(40, sw-8);
+      const _nmLines=[];
+      {
+        let _cur='';
+        for(const _w of _nameStr.split(' ')){
+          const _try=_cur?_cur+' '+_w:_w;
+          if(_cur && ctx.measureText(_try).width>_nameMaxW){ _nmLines.push(_cur); _cur=_w; }
+          else _cur=_try;
+        }
+        if(_cur) _nmLines.push(_cur);
+      }
+      const _lineH=9.5;
+      // Stack downward from just below the disc, clamped so the LAST line stays
+      // inside the bar (GH+BAR_H-4).
+      const _firstLineY=Math.min(barCY+pr+8, GH+BAR_H-4-(_nmLines.length-1)*_lineH);
+      let _maxLineW=0;
+      for(let _li=0;_li<_nmLines.length;_li++){
+        const _ly=_firstLineY+_li*_lineH;
+        ctx.fillStyle='rgba(0,0,0,0.6)';
+        ctx.fillText(_nmLines[_li],cx+1,_ly+1);
+        ctx.fillStyle=_panelPHov&&_pVis2?'rgba(255,255,255,0.95)':_pVis2?'rgba(215,225,255,0.88)':'rgba(60,80,130,0.65)';
+        ctx.fillText(_nmLines[_li],cx,_ly);
+        _maxLineW=Math.max(_maxLineW,ctx.measureText(_nmLines[_li]).width);
+      }
       // Track the rightmost VISIBLE content (disc edge or centred name) so the
       // ROUTE TRAIN HERE button can sit clear of the planet strip.
-      _starContentRight=Math.max(_starContentRight, cx+Math.max(pr+5, ctx.measureText(_nameStr).width/2+5));
+      _starContentRight=Math.max(_starContentRight, cx+Math.max(pr+5, _maxLineW/2+5));
       xCursor+=sw;
     }
     ctx.restore();
@@ -29430,48 +29483,33 @@ function drawGalaxy(ts,dt){
       ctx.fillText('Type: ???  ·  Size: ???',textX,GH+40);
       ctx.fillText('Star: ???',textX,GH+56);
     }
-    // ── Planet Details button — compact blue pill in the LOWER-LEFT of the
-    // bottom bar, just right of the planet info text. ROUTE TRAIN HERE normally
-    // sits to its right (see the unified block below); when both can't fit in
-    // W-PANEL_W (panel expanded), we STACK them — PLANET DETAILS on top, ROUTE
-    // TRAIN HERE beneath — at a shared smaller width + 8px font.
+    // ── Planet Details button — compact blue pill. The PLANET DETAILS and
+    // ROUTE TRAIN HERE buttons ALWAYS stack (PLANET DETAILS on top, ROUTE TRAIN
+    // HERE beneath) at a shared smaller width + 8px font, and ALWAYS anchor to
+    // the RIGHT — just left of the right UI panel after a buffer — regardless
+    // of whether the panel is in its normal or expanded state.
     {
-      const _pdX=Math.round(_infoRight)+16; // just right of the planet info text
-      // Measure both labels at the normal 9px to test if side-by-side fits.
-      ctx.font='bold 9px Orbitron,sans-serif';
-      const _pdW9=Math.round(ctx.measureText('PLANET DETAILS').width)+16;
-      const _rhW9=Math.round(ctx.measureText('ROUTE TRAIN HERE').width)+16;
-      const _availR=(W-PANEL_W)-12; // right limit for the bottom-bar content
-      _stackInfoBtns=(_pdX+_pdW9+12+_rhW9)>_availR;
-      if(_stackInfoBtns){
-        // Stacked layout: both buttons share one width (smaller 8px font) and
-        // stack vertically, centred in the bar. Capped so they never reach panel.
-        ctx.font='bold 8px Orbitron,sans-serif';
-        const _sw=Math.max(ctx.measureText('PLANET DETAILS').width,ctx.measureText('ROUTE TRAIN HERE').width);
-        const _sbW=Math.min(Math.round(_sw)+14,(W-PANEL_W)-_pdX-12);
-        const _sbH=22, _gap=4, _topY=GH+(BAR_H-(_sbH*2+_gap))/2;
-        _stackBtnX=_pdX; _stackBtnW=_sbW; _stackBtnLowerY=_topY+_sbH+_gap;
-        planetDetailsBtnBounds={x:_pdX,y:_topY,w:_sbW,h:_sbH,planetId:p.id};
-        _pdRightEdge=_pdX+_sbW;
-        ctx.fillStyle=_planetDetailsBtnHover?'rgba(35,95,200,0.97)':'rgba(20,60,150,0.92)';
-        ctx.beginPath(); ctx.roundRect(_pdX,_topY,_sbW,_sbH,4); ctx.fill();
-        ctx.strokeStyle=_planetDetailsBtnHover?'rgba(140,210,255,0.95)':'rgba(80,160,255,0.80)'; ctx.lineWidth=_planetDetailsBtnHover?1.5:1;
-        ctx.beginPath(); ctx.roundRect(_pdX,_topY,_sbW,_sbH,4); ctx.stroke();
-        ctx.textAlign='center'; ctx.textBaseline='middle';
-        ctx.fillStyle=_planetDetailsBtnHover?'rgba(220,240,255,0.98)':'rgba(170,220,255,0.95)';
-        ctx.fillText('PLANET DETAILS',_pdX+_sbW/2,_topY+_sbH/2+0.5); ctx.textBaseline='alphabetic';
-      } else {
-        const _pdH=26, _pdY=GH+(BAR_H-_pdH)/2, _pdW=_pdW9;
-        planetDetailsBtnBounds={x:_pdX,y:_pdY,w:_pdW,h:_pdH,planetId:p.id};
-        _pdRightEdge=_pdX+_pdW;
-        ctx.fillStyle=_planetDetailsBtnHover?'rgba(35,95,200,0.97)':'rgba(20,60,150,0.92)';
-        ctx.beginPath(); ctx.roundRect(_pdX,_pdY,_pdW,_pdH,4); ctx.fill();
-        ctx.strokeStyle=_planetDetailsBtnHover?'rgba(140,210,255,0.95)':'rgba(80,160,255,0.80)'; ctx.lineWidth=_planetDetailsBtnHover?1.5:1;
-        ctx.beginPath(); ctx.roundRect(_pdX,_pdY,_pdW,_pdH,4); ctx.stroke();
-        ctx.textAlign='center'; ctx.textBaseline='middle';
-        ctx.fillStyle=_planetDetailsBtnHover?'rgba(220,240,255,0.98)':'rgba(170,220,255,0.95)';
-        ctx.fillText('PLANET DETAILS',_pdX+_pdW/2,_pdY+_pdH/2+0.5); ctx.textBaseline='alphabetic';
-      }
+      _stackInfoBtns=true;
+      ctx.font='bold 8px Orbitron,sans-serif';
+      const _sw=Math.max(ctx.measureText('PLANET DETAILS').width,ctx.measureText('ROUTE TRAIN HERE').width);
+      const _sbW=Math.round(_sw)+14;
+      const _sbH=22, _gap=4, _topY=GH+(BAR_H-(_sbH*2+_gap))/2;
+      // Centre the stacked buttons horizontally under the "#X" game-speed
+      // multiplier text (cached by drawSpeedIndicator last frame). Both the
+      // speed cluster and these buttons are anchored to W-PANEL_W, so this keeps
+      // them centred under #X in BOTH normal and expanded panel states. Falls
+      // back to a just-left-of-panel anchor on the very first frame.
+      const _sbX=Math.round(_speedValCenterX>0 ? (_speedValCenterX-_sbW/2) : ((W-PANEL_W)-_sbW-12));
+      _stackBtnX=_sbX; _stackBtnW=_sbW; _stackBtnLowerY=_topY+_sbH+_gap;
+      planetDetailsBtnBounds={x:_sbX,y:_topY,w:_sbW,h:_sbH,planetId:p.id};
+      _pdRightEdge=_sbX+_sbW;
+      ctx.fillStyle=_planetDetailsBtnHover?'rgba(35,95,200,0.97)':'rgba(20,60,150,0.92)';
+      ctx.beginPath(); ctx.roundRect(_sbX,_topY,_sbW,_sbH,4); ctx.fill();
+      ctx.strokeStyle=_planetDetailsBtnHover?'rgba(140,210,255,0.95)':'rgba(80,160,255,0.80)'; ctx.lineWidth=_planetDetailsBtnHover?1.5:1;
+      ctx.beginPath(); ctx.roundRect(_sbX,_topY,_sbW,_sbH,4); ctx.stroke();
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillStyle=_planetDetailsBtnHover?'rgba(220,240,255,0.98)':'rgba(170,220,255,0.95)';
+      ctx.fillText('PLANET DETAILS',_sbX+_sbW/2,_topY+_sbH/2+0.5); ctx.textBaseline='alphabetic';
     }
   } else {
     const d=sel.data;
