@@ -29861,7 +29861,10 @@ function drawGalaxy(ts,dt){
     {label:'[I] tech tree',popup:'techtree',   initState:()=>({})},
     {label:'[P] planets',  popup:'pokedex',    initState:()=>({scroll:0})},
     {label:'[L] leaderboard',popup:'leaderboard',initState:()=>({})},
-  ];
+  // When the right panel is EXPANDED it eats into the bottom bar's width, so
+  // drop [I] tech tree and [P] planets from the row to avoid overlap. Their
+  // hotkeys (I / P) still work.
+  ].filter(h=>!(_panelExpanded&&(h.popup==='techtree'||h.popup==='pokedex')));
   _hintBounds=[];
   let _hx=8; const _hy=GH-8;
   for(let i=0;i<_hints.length;i++){
