@@ -3637,8 +3637,13 @@ let _routeHereResultMs=0;    // Date.now() when a route-here result callout was 
 // flow. While in one of these, the auto "skip-to-SELECT-A-TRAIN" behaviour is
 // suppressed so the scripted ASSIGN-button steps still play out.
 const _TUT_MANUAL_ASSIGN_PHASES = new Set([
-  'cr_click_lava','cr_shift_orijen','cr_shift_desert','cr_shift_lava','cr_assign_btn','cr_click_train',
-  'bst_click_desert','bst_shift_orijen','bst_assign_btn','bst_click_train',
+  // SELECT-A-TRAIN now goes live the moment a ≥2-stop route exists (there's no
+  // in-bar ASSIGN button to gate on anymore) — INCLUDING while the player is
+  // still adding stops during the route-building tutorial steps. So none of the
+  // cr_*/bst_* building phases suppress auto-assign now (the old cr_assign_btn /
+  // bst_assign_btn callouts are skipped). vp_* uses the single-planet ROUTE
+  // TRAIN HERE flow (routeHerePending), which _routeAutoAssign already excludes,
+  // so it never triggered auto-assign — listed here only as documentation.
   'vp_click_route','vp_click_train'
 ]);
 // True when a built route (≥1 segment) should drop STRAIGHT into the
@@ -20140,7 +20145,10 @@ function _drawTutorialChain(stage){
     if(!_crDesertInRoute){ _advanceTo('cr_shift_desert'); return; }
     if(_tutorialFadeOutStartMs===0 && _crLoopClosed) _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
-    if(r.advanced){ _advanceTo('cr_assign_btn'); return; }
+    // The route now auto-drops into the SELECT-A-TRAIN state once the loop is
+    // closed (no in-bar ASSIGN TO TRAIN button anymore), so skip the old
+    // cr_assign_btn callout and go STRAIGHT to pointing at the Iron Express.
+    if(r.advanced){ _advanceTo('cr_click_train'); return; }
     const _lp=galaxy.planets[_tutorialLavaPlanetId];
     if(_lp){
       const [_sx,_sy]=w2s(_lp.x,_lp.y);
@@ -20182,6 +20190,19 @@ function _drawTutorialChain(stage){
   // temp routes left over from earlier tutorial steps.)
   if(_tutorialPhase==='cr_click_train'){
     if(_elapsed<50 && !activePopup) panelTab='trains';
+    // Roll back if the player undid the loop BEFORE it auto-dropped into the
+    // SELECT-A-TRAIN state and before any assignment (mirrors the safety the old
+    // cr_assign_btn phase had).
+    if(!assignPending && !_crLoopClosed){
+      const _crBack=missions.find(mx=>mx.id==='create_route');
+      const _crAssignedYet=!!(_crBack&&_crBack._routeAssigned) || trains.some(t=>t.isPlayer&&((t.route&&!t.route.isTempRoute&&t.route.stops&&t.route.stops.length>=2)||(t.queuedRoute&&!t.queuedRoute.isTempRoute&&t.queuedRoute.stops&&t.queuedRoute.stops.length>=2)));
+      if(!_crAssignedYet){
+        if(!_crLavaInRoute){ _advanceTo('cr_click_lava'); return; }
+        if(!_crOrijenInRoute){ _advanceTo('cr_shift_orijen'); return; }
+        if(!_crDesertInRoute){ _advanceTo('cr_shift_desert'); return; }
+        _advanceTo('cr_shift_lava'); return;
+      }
+    }
     // Detect the moment of click via the create_route mission's _routeAssigned
     // flag — set at the END of assignRouteToTrain (line ~17718), which runs
     // synchronously inside the click handler. NOTE: we intentionally do NOT
@@ -20418,7 +20439,9 @@ function _drawTutorialChain(stage){
     if(!_bstAnchorReady){ _advanceTo('bst_click_desert'); return; }
     if(_tutorialFadeOutStartMs===0 && _bstRouteReady) _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
-    if(r.advanced){ _advanceTo('bst_assign_btn'); return; }
+    // Route auto-drops into SELECT-A-TRAIN once the 2nd stop is added — skip the
+    // dead bst_assign_btn callout and go straight to pointing at the new train.
+    if(r.advanced){ _advanceTo('bst_click_train'); return; }
     const _op=galaxy.planets[galaxy.origenId];
     if(_op){
       const [_sx,_sy]=w2s(_op.x,_op.y);
@@ -20447,6 +20470,12 @@ function _drawTutorialChain(stage){
   // is assigned to a 2nd train.
   if(_tutorialPhase==='bst_click_train'){
     if(_elapsed<50 && !activePopup) panelTab='trains';
+    // Roll back if the route was undone before it auto-dropped into SELECT-A-TRAIN
+    // and before assignment (mirrors the old bst_assign_btn safety).
+    if(!assignPending && !_bstRouteReady && !_bstRouteDone){
+      if(!_bstAnchorReady){ _advanceTo('bst_click_desert'); return; }
+      _advanceTo('bst_shift_orijen'); return;
+    }
     if(_tutorialFadeOutStartMs===0 && _bstRouteDone) _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
     if(r.advanced){ _tutorialPhase='bst_all_done'; return; }
