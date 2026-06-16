@@ -6062,7 +6062,7 @@ function _genRandomCorpName(){
 function _genStartingCeos(){
   // Randomly pick 3 of the available CEOs (shuffle + slice so any CEO can appear)
   const _pool=[...CEO_ROSTER].sort(()=>Math.random()-0.5).slice(0,3);
-  const _used=[], _salaries=[8000,8000,12000];
+  const _used=[], _salaries=[8000,10000,12000];
   return _pool.map((r,_si)=>{
     let _pi;
     do { _pi=randInt(0,CEO_PERKS.length-1); } while(_used.includes(_pi));
@@ -6213,7 +6213,7 @@ function drawCorpSetup(ts){
     };
     const _salBg =['rgba(85,72,8,0.68)','rgba(88,55,5,0.68)','rgba(88,36,4,0.68)'][ci];
     const _salTc =['rgba(255,230,50,0.97)','rgba(255,190,36,0.97)','rgba(255,138,22,0.97)'][ci];
-    _csRow(_pY+_pH+50,'SALARY','-'+_fmtCr(_ceo.ceoSalary)+' cr/S.D.',_salBg,_salTc);
+    _csRow(_pY+_pH+50,'SALARY','-'+_fmtCr(_ceo.ceoSalary)+' cr/Stardate',_salBg,_salTc);
     _csRow(_pY+_pH+80,'ABILITY',_ceo.primaryPerk?_ceo.primaryPerk.label:'—','rgba(25,155,255,0.97)','#000000');
     // STARTING CREDITS — green pill, same for every CEO, wired to the actual
     // amount the player starts a new game with (PLAYER_START_CREDITS).
@@ -17671,7 +17671,7 @@ function drawCorpPopup(){
   let _cperkY=_ceoBaseY+14+_portH+45; // salary pill text baseline
   // Salary pill
   const _csal=_corp.ceoSalary||10000;
-  const _csalTxt='-'+_fmtCr(_csal)+' cr/S.D.';
+  const _csalTxt='-'+_fmtCr(_csal)+' cr/Stardate';
   ctx.font='11px "Exo 2",sans-serif';
   const _csalPW=Math.min(_cpMaxW,ctx.measureText(_csalTxt).width+16);
   const _csalBg=_csal>200000?'rgba(90,18,18,0.65)':_csal>100000?'rgba(90,52,10,0.65)':'rgba(85,72,8,0.65)';
@@ -17843,7 +17843,7 @@ function drawCeoHirePopup(){
     ctx.fillText(_ceoNickname(ceoData.primaryPerk),panCX,_pY+_pH+30);
     // Salary pill
     const _sal=ceoData.salary||ceoData.ceoSalary||0;
-    const _salTxt='-'+_fmtCr(_sal)+' cr/S.D.';
+    const _salTxt='-'+_fmtCr(_sal)+' cr/Stardate';
     const _pkMaxW=_panW-20;
     ctx.font='11px "Exo 2",sans-serif';
     const _salTW=ctx.measureText(_salTxt).width;
