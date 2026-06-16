@@ -1688,6 +1688,27 @@ const MISSION_DEFS=[
      return _srcId!=null && m._scientistsDelivered.includes(_srcId);
    }},
 ];
+// Missions whose core deliverable requires a specific train car. The mission
+// intro is HELD (kept queued in pendingMissionIntros) until that car is
+// unlocked — e.g. "Outbreak" can't appear before the Medical Supplies car is
+// unlocked, "Ancient Schematics" before the Cargo car, "Famine" before the
+// Livestock car, etc. Each required car has an independent unlock path (planet
+// visit / industry chain), so holding the intro never deadlocks.
+const _MISSION_REQUIRED_CAR={
+  dispose_hazmat:'car_hazmat',
+  spread_the_seed:'car_flowers',
+  famine:'car_livestock',
+  outbreak:'car_medical',
+  sandstorm_relief:'car_sand',
+  bh_research:'car_chemical',
+  ancient_schematics:'car_cargo',
+};
+// True if the mission has no car requirement, or its required car is unlocked.
+// _carTypeUnlocked is defined later in the file but only called at runtime.
+function _missionCarGateOk(defId){
+  const _rc=_MISSION_REQUIRED_CAR[defId];
+  return !_rc || _carTypeUnlocked(_rc);
+}
 const MAINT_DECAY_PER_AU   = 0.00001; // maintenance fraction lost per SU in transit (constellation base)
 const REPAIR_COST_PER_MAINT = 600;     // credits per car per 1.0 maintenance fraction lost (constellation base)
 const CLOUD_SPEED      = 0.000070; // rad/frame-unit — slow atmospheric drift
@@ -3786,6 +3807,7 @@ let _planetDetailsBtnHover=false; let planetDetailsBtnBounds=null;
 let _planetStarNameHover=false;    // star-name link in planet info bar
 let _starPanelPlanetHover=-1;      // index in starPanelPlanetBounds
 let _trainAddHover=false, _trainRowHover=-1;
+let _trainsWinAddPaneBounds=null, _trainsWinAddPaneHover=false; // "+ Add new train" pane below the last train in the TRAINS window
 let _routesRowHover=-1; // hover index for ROUTES popup rows
 let _routesStopHover=-1; // hover index for ROUTES popup per-stop planet blocks
 let _routesRuleBtnHover=-1; // hover index for the "RULES" button (one per visible stop pane)
@@ -17676,14 +17698,6 @@ function drawCorpPopup(){
   _dRow2('Cargo Delivered',_cargoCount.toLocaleString(),_bRX,_bY+_bRLH*6);
   _dRow2('Passengers Delivered',_paxCount.toLocaleString(),_bRX,_bY+_bRLH*7);
   _dRow2('Hazmat Incinerated',_totalHazmatIncinerated.toLocaleString(),_bRX,_bY+_bRLH*8);
-    if(_aiCorp){
-      const _aiNW=_aiComputeNetWorth();
-      const _aiNWTxt=_aiNW>=1000000?(_aiNW/1000000).toFixed(1)+'M cr':_aiNW>=1000?Math.round(_aiNW/1000)+'k cr':_aiNW+' cr';
-      const _aiNWStr='rivals: '+_aiCorp.name.split(' ').slice(0,2).join(' ')+' · '+_aiNWTxt+' · '+_aiCorp.trainIndices.length+' trains · '+_aiCorp.stationsBuilt+' stn';
-      ctx.font='9px "Exo 2",sans-serif';ctx.textAlign='left';
-      ctx.fillStyle='rgba(232,147,32,0.70)';
-      ctx.fillText(_aiNWStr,_bRX-170,_bY+_bRLH*9+4);
-    }
 
   ctx.restore();
 }
@@ -17860,6 +17874,16 @@ function _versusLiveValue(which){
   if(_m==='trains'  ) return _aiCorp.trainIndices.length;
   return 0;
 }
+// Pick a "nice" axis step (1 / 2 / 2.5 / 5 ×10^n) so ~`ticks` gridlines cover
+// `range` with round-number labels (e.g. 200K steps topping out at 1M).
+function _niceStep(range, ticks){
+  if(!(range>0)) return 1;
+  const _raw=range/Math.max(1,ticks);
+  const _mag=Math.pow(10,Math.floor(Math.log10(_raw)));
+  const _n=_raw/_mag;
+  const _nice=_n<=1?1:_n<=2?2:_n<=2.5?2.5:_n<=5?5:10;
+  return _nice*_mag;
+}
 function _drawFinancesVersusTab(px,py,pw,ph,_tabBaseY){
   const _curSd=Math.floor(stardate);
   // Metric dropdown — sits in the same row, mirrors the FINANCIALS-tab control.
@@ -17916,20 +17940,23 @@ function _drawFinancesVersusTab(px,py,pw,ph,_tabBaseY){
   // ── Chart area ──
   const _cX=px+58, _cY=_ddY+_ddH+22, _cW=pw-78, _cH=py+ph-_cY-34;
 
-  // Y-axis range with a smidge of padding so points don't sit on the frame.
-  let _maxY=Math.max(1,..._pVals,..._aVals);
+  // Y-axis with ROUND-NUMBER gridlines: pick a nice step (1/2/2.5/5 ×10^n) and
+  // round the top up to a multiple of it (e.g. data max ~870K → step 200K, top
+  // 1M), instead of dividing the raw data max into 5 ugly fractions.
+  let _dataMax=Math.max(1,..._pVals,..._aVals)*1.05; // a little headroom above the top point
   let _minY=Math.min(0,..._pVals,..._aVals);
-  const _yPad=Math.max(1,(_maxY-_minY)*0.12);
-  _maxY+=_yPad; if(_minY>0) _minY=0;
-  if(_maxY===_minY) _maxY=_minY+1;
+  const _step=_niceStep(_dataMax-_minY,5);
+  _minY=Math.floor(_minY/_step)*_step;               // 0 for non-negative data; a nice multiple if negative
+  let _maxY=_minY+Math.max(1,Math.ceil((_dataMax-_minY)/_step))*_step;
+  const _numSteps=Math.max(1,Math.round((_maxY-_minY)/_step));
 
   // Axes + gridlines + Y-tick labels
   ctx.strokeStyle='rgba(60,140,90,0.55)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(_cX,_cY); ctx.lineTo(_cX,_cY+_cH); ctx.lineTo(_cX+_cW,_cY+_cH); ctx.stroke();
   ctx.font='8px "Exo 2",sans-serif'; ctx.textAlign='right'; ctx.fillStyle='rgba(140,200,160,0.70)';
-  for(let _ti=0;_ti<=5;_ti++){
-    const _vy=_cY+_cH-(_cH*_ti/5);
-    const _vv=_minY+(_maxY-_minY)*_ti/5;
+  for(let _ti=0;_ti<=_numSteps;_ti++){
+    const _vy=_cY+_cH-(_cH*_ti/_numSteps);
+    const _vv=_minY+_step*_ti;
     ctx.fillText(_selMet.fmt(_vv),_cX-4,_vy+3);
     ctx.strokeStyle='rgba(60,140,90,0.15)';
     ctx.beginPath(); ctx.moveTo(_cX,_vy); ctx.lineTo(_cX+_cW,_vy); ctx.stroke();
@@ -17972,16 +17999,16 @@ function _drawFinancesVersusTab(px,py,pw,ph,_tabBaseY){
   // was open (causing legend text to bleed visibly through the dropdown).
   // Moving it here also keeps it out of the way of the right-most data
   // points, which are usually the most interesting on a per-SD chart.
+  // Colours + corp names overlaid DIRECTLY on the chart — no background box.
+  // Names run much longer before truncating with an ellipsis.
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
   const _lgX=_cX+8, _lgY=_cY+8;
-  ctx.fillStyle='rgba(10,22,16,0.78)'; ctx.fillRect(_lgX-6,_lgY-3,148,28);
-  ctx.strokeStyle='rgba(60,140,90,0.35)'; ctx.strokeRect(_lgX-6,_lgY-3,148,28);
+  const _lgMaxW=Math.min(_cW-30, 280); // generous vs the old 108
+  const _lgTrunc=(s)=>{ if(ctx.measureText(s).width<=_lgMaxW) return s; while(s.length>1 && ctx.measureText(s+'…').width>_lgMaxW) s=s.slice(0,-1); return s+'…'; };
   ctx.fillStyle='rgba(80,180,255,1)'; ctx.fillRect(_lgX,_lgY+1,10,3);
-  ctx.fillStyle='rgba(200,230,255,0.95)';
-  {let _pn=(corpName||'YOU'); while(ctx.measureText(_pn).width>108) _pn=_pn.slice(0,-1); ctx.fillText(_pn,_lgX+16,_lgY+5);}
+  ctx.fillStyle='rgba(200,230,255,0.97)'; ctx.fillText(_lgTrunc(corpName||'YOU'),_lgX+16,_lgY+5);
   ctx.fillStyle='rgba(255,170,60,1)'; ctx.fillRect(_lgX,_lgY+15,10,3);
-  ctx.fillStyle='rgba(255,220,170,0.95)';
-  {let _an=(_aiCorp.name||'RIVAL'); while(ctx.measureText(_an).width>108) _an=_an.slice(0,-1); ctx.fillText(_an,_lgX+16,_lgY+19);}
+  ctx.fillStyle='rgba(255,220,170,0.97)'; ctx.fillText(_lgTrunc(_aiCorp.name||'RIVAL'),_lgX+16,_lgY+19);
 
   // Dropdown options last so they overlay the chart cleanly.
   _drawVersusDropdownOptions(_ddX,_ddY,_ddW,_ddH);
@@ -18490,6 +18517,10 @@ function drawFinancesPopup(){
   }
   // Dropdown options drawn last so they render on top of the table header and rows
   if(_financeDropdownOpen){
+    // Wipe the HD text overlay over the WHOLE dropdown footprint first — the
+    // table text behind it is overlay text (composited last) and would otherwise
+    // bleed THROUGH the dropdown's opaque option backgrounds.
+    _clearTextOverlayRect(_dbX+_lblW, _dbY+_dbH, _dbW, _bdKeys.length*_dbH);
     for(let _oi=0;_oi<_bdKeys.length;_oi++){
       const _oy=_dbY+_dbH+_oi*_dbH;
       const _isAct=_bdKeys[_oi]===_financeBreakdown;
@@ -21452,14 +21483,34 @@ function drawMissionsPopup(){
   ctx.restore();
 }
 
+// Header tab bar shared by the PLANET + STAR registries (same pattern as the
+// Trains/Routes/Stations `_drawWindowTabs`). `active` is 'pokedex' | 'starregistry'.
+// Registers popupState.registryTabBounds for the click + hover handlers.
+function _drawRegistryTabs(px,py,pw,active){
+  const _tabs=[['pokedex','PLANETS','#4af'],['starregistry','STARS','#ffc060']];
+  popupState.registryTabBounds=[];
+  const _tw=96,_th=22,_ty=py+5,_gap=4; let _tx=px+12;
+  for(const [id,label,col] of _tabs){
+    const _isAct=(active===id), _hov=(popupState.regTabHover===id);
+    ctx.fillStyle=_isAct?'rgba(28,52,116,0.96)':(_hov?'rgba(18,36,82,0.9)':'rgba(9,18,46,0.85)');
+    ctx.beginPath(); ctx.roundRect(_tx,_ty,_tw,_th,4); ctx.fill();
+    ctx.strokeStyle=_isAct?col:(_hov?'rgba(90,140,230,0.6)':'rgba(45,75,140,0.45)'); ctx.lineWidth=_isAct?1.6:1;
+    ctx.beginPath(); ctx.roundRect(_tx,_ty,_tw,_th,4); ctx.stroke();
+    ctx.font='bold 10px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillStyle=_isAct?col:(_hov?'rgba(180,205,245,0.92)':'rgba(120,150,200,0.7)');
+    ctx.fillText(label,_tx+_tw/2,_ty+_th/2+1); ctx.textBaseline='alphabetic';
+    popupState.registryTabBounds.push({x:_tx,y:_ty,w:_tw,h:_th,id});
+    _tx+=_tw+_gap;
+  }
+  ctx.textAlign='left';
+}
 function drawPokedex(){
   if(activePopup!=='pokedex'||!galaxy) return;
   const pw=460, ph=390;
   const [px,py]=drawPopupBase(pw,ph,'rgba(80,160,255,0.7)');
   ctx.save();
-  // Header
-  ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
-  ctx.fillStyle='#4af'; ctx.fillText('PLANET REGISTRY',px+pw/2,py+21);
+  // Header: PLANETS / STARS tab bar (switch via the click handler).
+  _drawRegistryTabs(px,py,pw,'pokedex');
   ctx.font='10px "Exo 2",sans-serif'; ctx.textAlign='right';
   popupState.escBounds={x:px+pw-88,y:py+11,w:78,h:14};
   ctx.fillStyle=popupState.escHover?'rgba(255,255,255,0.92)':'rgba(90,130,190,0.55)';
@@ -21575,8 +21626,8 @@ function drawStarRegistry(){
   const pw=460, ph=390;
   const [px,py]=drawPopupBase(pw,ph,'rgba(255,180,60,0.7)');
   ctx.save();
-  ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
-  ctx.fillStyle='#ffc060'; ctx.fillText('STAR REGISTRY',px+pw/2,py+21);
+  // Header: PLANETS / STARS tab bar (switch via the click handler).
+  _drawRegistryTabs(px,py,pw,'starregistry');
   ctx.font='10px "Exo 2",sans-serif'; ctx.textAlign='right';
   popupState.escBounds={x:px+pw-88,y:py+11,w:78,h:14};
   ctx.fillStyle=popupState.escHover?'rgba(255,255,255,0.92)':'rgba(180,130,60,0.55)';
@@ -26699,6 +26750,7 @@ function drawTrainsPopup(){
   const playerTrains=_playerTrainList();
   trainsPopupRowBounds=[];
   trainsPopupReorderBounds=[];
+  _trainsWinAddPaneBounds=null;
   ctx.save(); ctx.beginPath(); ctx.rect(px+1,listY,pw-2,listH); ctx.clip();
   for(let ri=0;ri<playerTrains.length;ri++){
     const {t:train,i:ti}=playerTrains[ri];
@@ -26818,9 +26870,26 @@ function drawTrainsPopup(){
       ctx.beginPath(); ctx.moveTo(px+10,ry+ROW-2); ctx.lineTo(px+pw-10,ry+ROW-2); ctx.stroke();
     }
   }
+  // "+ Add new train" pseudo-slot below the last train — mirrors the right
+  // Trains panel's add-pane (centered text, soft accent, hover highlight).
+  // Click routes to the Train Builder via openTrainBuilder().
+  {
+    const _addRy=listY+playerTrains.length*ROW-scroll;
+    if(_addRy+ROW>listY && _addRy<listY+listH){
+      if(_trainsWinAddPaneHover){
+        ctx.fillStyle='rgba(80,140,255,0.10)'; ctx.fillRect(px+2,_addRy,pw-4,ROW-2);
+        ctx.strokeStyle='rgba(80,160,255,0.30)'; ctx.lineWidth=1; ctx.strokeRect(px+2,_addRy,pw-4,ROW-2);
+      }
+      ctx.font='bold 13px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillStyle=_trainsWinAddPaneHover?'rgba(180,220,255,1.0)':'rgba(130,180,240,0.80)';
+      ctx.fillText('+ Add new train',px+pw/2,_addRy+ROW/2);
+      ctx.textBaseline='alphabetic';
+      _trainsWinAddPaneBounds={x:px+2,y:_addRy,w:pw-4,h:ROW-2};
+    }
+  }
   ctx.restore();
-  // Scrollbar
-  const totalH=playerTrains.length*ROW;
+  // Scrollbar (+1 ROW for the "Add new train" pseudo-slot, so it scrolls into view)
+  const totalH=(playerTrains.length+1)*ROW;
   if(totalH>listH){
     const sbH=Math.max(20,listH*(listH/totalH));
     const _maxSt=Math.max(1,totalH-listH);
@@ -29664,15 +29733,16 @@ function drawGalaxy(ts,dt){
 
   // ── Bottom hint bar ──────────────────────────────────────────
   ctx.textAlign='left'; ctx.font='9px "Exo 2",sans-serif';
+  // [Y] stars dropped from the hint row — the Star Registry is now reachable via
+  // the STARS tab inside the PLANETS ([P]) registry. The [Y] key still opens it.
   const _hints=[
-    {label:'[P] planets',  popup:'pokedex',    initState:()=>({scroll:0})},
-    {label:'[Y] stars',    popup:'starregistry',initState:()=>({starScroll:0})},
     {label:'[T] trains',   popup:'trains',     initState:()=>({scroll:0})},
     {label:'[R] routes',   popup:'routes',     initState:()=>({scroll:0})},
-    {label:'[I] tech tree',popup:'techtree',   initState:()=>({})},
-    {label:'[M] missions', popup:'missions',   initState:()=>({mScroll:0})},
-    {label:'[L] leaderboard',popup:'leaderboard',initState:()=>({})},
     {label:'[U] stations', popup:'stations',   initState:()=>({scroll:0})},
+    {label:'[M] missions', popup:'missions',   initState:()=>({mScroll:0})},
+    {label:'[I] tech tree',popup:'techtree',   initState:()=>({})},
+    {label:'[P] planets',  popup:'pokedex',    initState:()=>({scroll:0})},
+    {label:'[L] leaderboard',popup:'leaderboard',initState:()=>({})},
   ];
   _hintBounds=[];
   let _hx=8; const _hy=GH-8;
@@ -30972,6 +31042,8 @@ canvas.addEventListener('mousemove',e=>{
   // Hover tracking for trains popup rows + add button
   if(activePopup==='trains'){
     _trainAddHover=!!(trainsPopupAddBounds&&cp.x>=trainsPopupAddBounds.x&&cp.x<=trainsPopupAddBounds.x+trainsPopupAddBounds.w&&cp.y>=trainsPopupAddBounds.y&&cp.y<=trainsPopupAddBounds.y+trainsPopupAddBounds.h);
+    _trainsWinAddPaneHover=!!(_trainsWinAddPaneBounds&&cp.x>=_trainsWinAddPaneBounds.x&&cp.x<=_trainsWinAddPaneBounds.x+_trainsWinAddPaneBounds.w&&cp.y>=_trainsWinAddPaneBounds.y&&cp.y<=_trainsWinAddPaneBounds.y+_trainsWinAddPaneBounds.h);
+    if(_trainsWinAddPaneHover) canvas.style.cursor='pointer';
     _trainRowHover=-1;
     for(let _ri=0;_ri<trainsPopupRowBounds.length;_ri++){const _rb=trainsPopupRowBounds[_ri];if(cp.x>=_rb.x&&cp.x<=_rb.x+_rb.w&&cp.y>=_rb.y&&cp.y<=_rb.y+_rb.h){_trainRowHover=_rb.ri;break;}}
     // Reorder up/down arrows (only present for the currently hovered row).
@@ -31055,6 +31127,12 @@ canvas.addEventListener('mousemove',e=>{
     for(let _ri=0;_ri<starRegistryRowBounds.length;_ri++){const _rb=starRegistryRowBounds[_ri];if(cp.x>=_rb.x&&cp.x<=_rb.x+_rb.w&&cp.y>=_rb.y&&cp.y<=_rb.y+_rb.h){_starRegistryRowHover=_rb.rowIdx!=null?_rb.rowIdx:_ri;break;}}
     if(_starRegistrySortHover||_starRegistryRowHover>=0) canvas.style.cursor='pointer';
   } else { _starRegistrySortHover=false; _starRegistryRowHover=-1; }
+  // PLANETS/STARS registry tab-bar hover (shared by both popups).
+  if(activePopup==='pokedex'||activePopup==='starregistry'){
+    popupState.regTabHover=null;
+    for(const tb of (popupState.registryTabBounds||[])){ if(cp.x>=tb.x&&cp.x<=tb.x+tb.w&&cp.y>=tb.y&&cp.y<=tb.y+tb.h){ popupState.regTabHover=tb.id; break; } }
+    if(popupState.regTabHover) canvas.style.cursor='pointer';
+  } else if(popupState){ popupState.regTabHover=null; }
   // Hover tracking for discovery + quit confirm popup buttons
   _goldOkHover=!!(activePopup==='gold_discovery'&&_goldDiscoveryOkBounds&&cp.x>=_goldDiscoveryOkBounds.x&&cp.x<=_goldDiscoveryOkBounds.x+_goldDiscoveryOkBounds.w&&cp.y>=_goldDiscoveryOkBounds.y&&cp.y<=_goldDiscoveryOkBounds.y+_goldDiscoveryOkBounds.h);
   _diamondOkHover=!!(activePopup==='diamond_discovery'&&_diamondDiscoveryOkBounds&&cp.x>=_diamondDiscoveryOkBounds.x&&cp.x<=_diamondDiscoveryOkBounds.x+_diamondDiscoveryOkBounds.w&&cp.y>=_diamondDiscoveryOkBounds.y&&cp.y<=_diamondDiscoveryOkBounds.y+_diamondDiscoveryOkBounds.h);
@@ -31561,6 +31639,13 @@ canvas.addEventListener('mouseup',e=>{
         const _pb=popupState.lbPrev,_nb=popupState.lbNext;
         if(_pb&&cp.x>=_pb.x&&cp.x<=_pb.x+_pb.w&&cp.y>=_pb.y&&cp.y<=_pb.y+_pb.h){ if(_lbPage>0)_lbPage--; return; }
         if(_nb&&cp.x>=_nb.x&&cp.x<=_nb.x+_nb.w&&cp.y>=_nb.y&&cp.y<=_nb.y+_nb.h){ if(_lbPage<_lbMax)_lbPage++; return; }
+      }
+      // PLANETS/STARS registry tab switch — flip activePopup (keep popupState so
+      // each side's scroll position persists across switches).
+      if((activePopup==='pokedex'||activePopup==='starregistry')&&popupState.registryTabBounds){
+        for(const tb of popupState.registryTabBounds){
+          if(cp.x>=tb.x&&cp.x<=tb.x+tb.w&&cp.y>=tb.y&&cp.y<=tb.y+tb.h){ if(activePopup!==tb.id) activePopup=tb.id; return; }
+        }
       }
       // Pokedex sort click
       if(activePopup==='pokedex'&&pokedexSortBounds){
@@ -32559,6 +32644,11 @@ canvas.addEventListener('mouseup',e=>{
             openTrainBuilder();
             return;
           }
+        }
+        // "+ Add new train" pane below the last train (mirrors the right panel) → Train Builder.
+        if(_trainsWinAddPaneBounds){
+          const b=_trainsWinAddPaneBounds;
+          if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ openTrainBuilder(); return; }
         }
         // Double-click row → open train detail popup for that train
         if(isDbl&&trainsPopupRowBounds.length){
@@ -35573,7 +35663,7 @@ function loop(ts){
     if(!activePopup&&pendingMissionIntros.length>0&&Date.now()>=_popupCooldownUntil
        && Date.now()>=_missionReleaseAtMs
        && missions.filter(m=>m.status==='active').length<_MAX_ACTIVE_MISSIONS){
-      const _nmiIdx=pendingMissionIntros.findIndex(e=>stardate>=e.readySd);
+      const _nmiIdx=pendingMissionIntros.findIndex(e=>stardate>=e.readySd && _missionCarGateOk(e.defId));
       if(_nmiIdx>=0){
         const _nmiE=pendingMissionIntros.splice(_nmiIdx,1)[0];
         const _nmDef=MISSION_DEFS.find(d=>d.id===_nmiE.defId);
