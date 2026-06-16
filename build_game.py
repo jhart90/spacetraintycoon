@@ -13554,22 +13554,26 @@ function drawTrainsPanel(){
   const px=W-PANEL_W;
   const showTrains=panelTab==='trains';
 
+  // The panel now extends the FULL height of the screen (TOP_H → H), covering
+  // the area the bottom info bar used to occupy on the right. _pBot is the
+  // panel's bottom edge.
+  const _pBot=H;
   // Background + left border. Wipe the HD text overlay over the panel
   // region so any earlier-drawn world text (planet labels, etc.) doesn't
   // appear ON TOP of the panel chrome.
-  _clearTextOverlayRect(px, TOP_H, PANEL_W, GH-TOP_H);
+  _clearTextOverlayRect(px, TOP_H, PANEL_W, _pBot-TOP_H);
   // Fully opaque so the galaxy-content clip can safely exclude this entire
   // strip — see drawGalaxy's `ctx.rect(0,TOP_H,W-PANEL_W,GH-TOP_H)` clip.
-  ctx.fillStyle='rgb(4,8,20)'; ctx.fillRect(px,TOP_H,PANEL_W,GH-TOP_H);
+  ctx.fillStyle='rgb(4,8,20)'; ctx.fillRect(px,TOP_H,PANEL_W,_pBot-TOP_H);
   if(showTrains&&(assignPending||routeHerePending)){
     ctx.strokeStyle='rgba(120,200,255,0.85)'; ctx.lineWidth=2;
-    ctx.strokeRect(px+1,TOP_H+1,PANEL_W-2,GH-TOP_H-2);
+    ctx.strokeRect(px+1,TOP_H+1,PANEL_W-2,_pBot-TOP_H-2);
   } else {
     ctx.strokeStyle='rgba(50,100,200,0.40)'; ctx.lineWidth=1;
-    ctx.beginPath(); ctx.moveTo(px,TOP_H); ctx.lineTo(px,GH); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(px,TOP_H); ctx.lineTo(px,_pBot); ctx.stroke();
   }
 
-  const panelViewH=GH-TOP_H;
+  const panelViewH=_pBot-TOP_H;
 
   // ── TRAINS tab ──────────────────────────────────────────────
   if(showTrains){
@@ -13587,7 +13591,7 @@ function drawTrainsPanel(){
       const {t:train,i:ti}=playerTrains[ri];
       const ry=TOP_H+ri*ROW_H-panelScroll;
       // Off-panel cull — row not visible in viewport, skip entirely.
-      if(ry+ROW_H<TOP_H||ry>=GH) continue;
+      if(ry+ROW_H<TOP_H||ry>=_pBot) continue;
       const isSelected=sel&&sel.type==='car'&&sel.data.trainIdx===ti;
       // Cache hit/miss check — keyed by every visual-relevant field on the
       // train. ~85% of rows hit per frame (only progress-bar trains miss
@@ -13654,7 +13658,7 @@ function drawTrainsPanel(){
       const _addRy=TOP_H+_addRi*ROW_H-panelScroll;
       // Only register bounds (and draw the highlight) when the slot is at least
       // partially visible inside the panel viewport.
-      if(_addRy+ROW_H>TOP_H && _addRy<GH){
+      if(_addRy+ROW_H>TOP_H && _addRy<_pBot){
         if(_addTrainPanelHover){
           ctx.fillStyle='rgba(80,140,255,0.10)';
           ctx.fillRect(px+2,_addRy-1,PANEL_W-4,ROW_H-2);
@@ -26557,9 +26561,13 @@ function drawStationsPopup(){
     if(popupState.stationsRowHover===ri){ ctx.fillStyle='rgba(30,55,120,0.32)'; ctx.fillRect(px+2,ry,pw-4,PANE_H); }
     else if(ri%2===0){ ctx.fillStyle='rgba(14,24,54,0.30)'; ctx.fillRect(px+2,ry,pw-4,PANE_H); }
     const star=galaxy.stars[p.starId];
-    // Planet + station viz (partially off-left, station pointing right).
-    const _vR=ST_VIZ_R[p.size]||32, _vCx=_vizRightX-Math.round(_vR*1.14), _vCy=ry+PANE_H/2;
-    ctx.save(); ctx.beginPath(); ctx.rect(px+1,ry,_vizRightX-px,PANE_H); ctx.clip();
+    // Planet + station viz — planet CENTERED ON THE WINDOW'S LEFT EDGE (px), so
+    // its LEFT HALF is cut off (same look as the bottom UI bar when a planet is
+    // selected). The station/structures point RIGHT (east) and the clip is wide
+    // (only the row height + short of the DEMAND column), so the ring/structures
+    // are NOT cut off — they render beneath the SUPPLY strips drawn afterward.
+    const _vR=ST_VIZ_R[p.size]||32, _vCx=px, _vCy=ry+PANE_H/2;
+    ctx.save(); ctx.beginPath(); ctx.rect(px+1,ry,Math.round(pw*0.5)-2,PANE_H); ctx.clip();
     if(p.ring) drawPlanetRing(_vCx,_vCy,_vR,p.ring,false);
     drawPlanet(_vCx,_vCy,_vR,p.type,p.ring,2.0,undefined,undefined,!!p.ring,p.flowerPositions||null);
     if(p.type.id==='urban') drawCityscape(_vCx,_vCy,_vR); else if(p.type.id==='ancient') drawAncientRuins(_vCx,_vCy,_vR);
@@ -27720,6 +27728,32 @@ function drawPanelTabs(){
     else             { ctx.moveTo(_arX+2.5,_arY-4); ctx.lineTo(_arX-3.5,_arY); ctx.lineTo(_arX+2.5,_arY+4); } // ◀ expand
     ctx.closePath(); ctx.fill();
     _panelExpandArrowBounds={x:_arX-8,y:_arY-9,w:16,h:18};
+  }
+
+  // "SELECT A TRAIN" banner — shown over BOTH tabs while the player is in the
+  // route-assignment state (assignPending / routeHerePending). Replaces the old
+  // in-bar ASSIGN / SELECT-A-TRAIN button: the player clicks a train row in the
+  // panel below to assign. Blue fill, black text, covering the whole tab strip.
+  if(assignPending||routeHerePending){
+    // The TRAINS / STATIONS labels are drawn to the HD text overlay (composited
+    // LAST), so an opaque main-canvas fill alone won't hide them — wipe the
+    // overlay over the tab strip first.
+    _clearTextOverlayRect(px, 0, PANEL_W, TOP_H);
+    ctx.fillStyle='rgb(4,8,20)'; ctx.fillRect(px,0,PANEL_W,TOP_H);
+    // Solid blue tab that reads as the TOP of the panel-highlight rectangle:
+    // SQUARE corners, the EXACT width of that rectangle (px+1 .. px+PANEL_W-1),
+    // a matching blue border on the left/top/right (NO white outline) and an
+    // OPEN bottom so it flows seamlessly into the highlight rectangle below.
+    ctx.fillStyle='rgb(80,170,255)';
+    ctx.fillRect(px+1, 0, PANEL_W-2, TOP_H+2);
+    ctx.strokeStyle='rgba(120,200,255,0.85)'; ctx.lineWidth=2;
+    ctx.beginPath();
+    ctx.moveTo(px+1, TOP_H+1); ctx.lineTo(px+1, 1);
+    ctx.lineTo(px+PANEL_W-1, 1); ctx.lineTo(px+PANEL_W-1, TOP_H+1);
+    ctx.stroke();
+    ctx.font='bold 10px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillStyle='#000';
+    ctx.fillText('SELECT A TRAIN',px+PANEL_W/2,TOP_H/2+0.5);
   }
 
   ctx.textBaseline='alphabetic';
@@ -28902,13 +28936,25 @@ function drawGalaxy(ts,dt){
   // ── info bar ─────────────────────────────────────────────────
   // Wipe any earlier-drawn world text from the overlay over the info-bar
   // strip so it can't bleed onto the corp name / planet name display.
-  _clearTextOverlayRect(0, GH, W, BAR_H);
-  ctx.fillStyle='rgb(6,10,26)'; ctx.fillRect(0,GH,W,BAR_H);
+  // Bottom info bar spans only the galaxy width (0 → W-PANEL_W); the right panel
+  // now extends full-height (TOP_H → H) and owns the area to its right. Drawing
+  // (and overlay-clearing) only the left part avoids erasing the panel's text /
+  // painting over its bottom rows.
+  _clearTextOverlayRect(0, GH, W-PANEL_W, BAR_H);
+  ctx.fillStyle='rgb(6,10,26)'; ctx.fillRect(0,GH,W-PANEL_W,BAR_H);
   ctx.strokeStyle='rgba(50,100,200,0.4)'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.moveTo(0,GH); ctx.lineTo(W,GH); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0,GH); ctx.lineTo(W-PANEL_W,GH); ctx.stroke();
 
   assignBtnBounds=null; routeHereBtnBounds=null; cancelRouteBtnBounds=null; planetStarNameBounds=null; starPanelPlanetBounds=[]; planetDetailsBtnBounds=null;
   let _pdRightEdge=0; // set by the PLANET DETAILS button so ROUTE TRAIN HERE can sit just right of it (lower-left bar)
+  // Safety net: a STAR PROXY (50000+, lives only in starProxyMap) must never be
+  // presented as a selected PLANET — it would show "<star> / OCEAN / Orbit 0".
+  // If any path selected one (e.g. toggling a train parked at a star), coerce
+  // the selection to the actual star instead.
+  if(sel&&sel.type==='planet'&&sel.data&&sel.data.isStarProxy){
+    const _coerceS=galaxy.stars[sel.data.starId];
+    sel=_coerceS?{type:'star',data:_coerceS}:null;
+  }
   if((sel&&(sel.type==='planet'||sel.type==='star')&&routeStops.length>=2)||routeHerePending){
     // Compute per-segment distances and total
     const segDists=[];
@@ -28955,45 +29001,15 @@ function drawGalaxy(ts,dt){
     } else if(starNames.length>1){
       ctx.fillText(starNames.join(' → '),14,GH+54);
     }
-    if(trains.some(t=>t.isPlayer)){
-      const bx=W-PANEL_W, bw=PANEL_W, by=GH, bh=BAR_H;
-      assignBtnBounds={x:bx,y:by,w:bw,h:bh};
-      // Route builder: a 1+ segment route is set up → skip the explicit
-      // "ASSIGN TO TRAIN" click and drop straight into the SELECT-A-TRAIN state
-      // (blue panel highlight + click any train to assign).
-      if(_routeAutoAssign() && !assignPending){
-        assignPending=true;
-        if(panelTab!=='trains'&&!activePopup) panelTab='trains';
-      }
-      ctx.save();
-      // Fill matching the trains panel background
-      const _selPending=assignPending||routeHerePending;
-      ctx.fillStyle=_selPending?'rgba(12,28,72,0.97)':'rgba(4,8,20,0.93)';
-      ctx.fillRect(bx,by,bw,bh);
-      // Border (continuation of panel edge)
-      ctx.strokeStyle=_selPending?'rgba(120,200,255,0.85)':'rgba(50,100,200,0.4)';
-      ctx.lineWidth=_selPending?2:1;
-      if(_selPending){
-        // Full inset box aligned with panel's active strokeRect: left at x=bx+1, seam at y=by-1
-        ctx.strokeRect(bx+1,by-1,bw-2,bh);
-      } else {
-        ctx.beginPath(); ctx.moveTo(bx,by); ctx.lineTo(bx,by+bh); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(bx,by); ctx.lineTo(bx+bw,by); ctx.stroke();
-      }
-      // Button rect inside
-      const ibx=bx+8, ibw=bw-16, iby=by+14, ibh=bh-28;
-      ctx.fillStyle=_selPending?'rgba(20,60,140,0.97)':_assignBtnHover?'rgba(45,95,195,0.97)':'rgba(30,70,160,0.88)';
-      ctx.beginPath(); ctx.roundRect(ibx,iby,ibw,ibh,4); ctx.fill();
-      ctx.strokeStyle=_selPending?'rgba(120,200,255,1)':_assignBtnHover?'rgba(130,195,255,0.95)':'rgba(80,160,255,0.85)';
-      ctx.lineWidth=_selPending?2:_assignBtnHover?1.5:1;
-      ctx.beginPath(); ctx.roundRect(ibx,iby,ibw,ibh,4); ctx.stroke();
-      ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
-      ctx.fillStyle=_selPending?'#fff':_assignBtnHover?'#d0eeff':'#adf';
-      ctx.fillText(_selPending?'SELECT A TRAIN...':'ASSIGN TO TRAIN',ibx+ibw/2,iby+ibh/2+4);
-      ctx.restore();
-    } else {
-      assignBtnBounds=null;
+    // Route builder: a 1+ segment route is set up → drop straight into the
+    // SELECT-A-TRAIN state. The in-bar ASSIGN / SELECT-A-TRAIN button is gone —
+    // the player just clicks a train in the right panel to assign the route,
+    // and a blue "SELECT A TRAIN" tab is shown over the panel tabs (drawPanelTabs).
+    if(trains.some(t=>t.isPlayer) && _routeAutoAssign() && !assignPending){
+      assignPending=true;
+      if(panelTab!=='trains'&&!activePopup) panelTab='trains';
     }
+    assignBtnBounds=null;
   } else if(!sel){
     // No selection — render a very faint two-line "SPACE TRAIN / TYCOON"
     // watermark inside the bottom bar, sitting on top of a muted ringed-
@@ -29136,6 +29152,7 @@ function drawGalaxy(ts,dt){
     ctx.beginPath(); ctx.rect(stripX,GH,availW,BAR_H); ctx.clip();
     const nShow=Math.min(sPlanets.length,8);
     let xCursor=stripX;
+    let _starContentRight=stripX; // rightmost edge of the drawn planet discs / names
     for(let i=0;i<nShow;i++){
       const p=sPlanets[i];
       const pr=p.radius*psc;
@@ -29182,9 +29199,15 @@ function drawGalaxy(ts,dt){
       ctx.fillText(_nameStr,cx+1,nameY+1);
       ctx.fillStyle=_panelPHov&&_pVis2?'rgba(255,255,255,0.95)':_pVis2?'rgba(215,225,255,0.88)':'rgba(60,80,130,0.65)';
       ctx.fillText(_nameStr,cx,nameY);
+      // Track the rightmost VISIBLE content (disc edge or centred name) so the
+      // ROUTE TRAIN HERE button can sit clear of the planet strip.
+      _starContentRight=Math.max(_starContentRight, cx+Math.max(pr+5, ctx.measureText(_nameStr).width/2+5));
       xCursor+=sw;
     }
     ctx.restore();
+    // Anchor the ROUTE TRAIN HERE button (drawn below) just right of the strip,
+    // reusing _pdRightEdge (no PLANET DETAILS button exists for a star).
+    _pdRightEdge=Math.round(_starContentRight);
     } // end if(_ibSVis) for planet strip
   } else if(sel.type==='planet'){
     const p=sel.data;
@@ -29224,11 +29247,14 @@ function drawGalaxy(ts,dt){
     }
     ctx.restore();
     const textX=Math.round(pDR*pGM*0.5); // ~120px — halfway through glow
-    const rightColX=textX+296;            // preserved for layout reference (Planet Details button starts here)
+    let _infoRight=textX; // rightmost extent of the planet-info text (all rows) — the
+                          // PLANET DETAILS / ROUTE TRAIN HERE buttons anchor just after it
     ctx.textAlign='left'; ctx.font='bold 12px Orbitron,sans-serif';
     if(_ibPVis){
       ctx.fillStyle=p.type.hi;
-      ctx.fillText(p.name+(p.isStarter?' [HOME]':''),textX,GH+22);
+      const _nmStr=p.name+(p.isStarter?' [HOME]':'');
+      ctx.fillText(_nmStr,textX,GH+22);
+      _infoRight=Math.max(_infoRight,textX+ctx.measureText(_nmStr).width);
       ctx.font='12px "Exo 2",sans-serif'; ctx.fillStyle='#8bc';
       // Row 2: Type · Size · Orbit (Orbit appended on the same left-column row).
       // SU rendered separately at 8 px bold (4 sizes smaller than the 12 px
@@ -29241,6 +29267,7 @@ function drawGalaxy(ts,dt){
         const _preW=ctx.measureText(_pre).width;
         ctx.font='bold 8px "Exo 2",sans-serif';
         ctx.fillText(' SU',textX+_preW,GH+40);
+        _infoRight=Math.max(_infoRight,textX+_preW+ctx.measureText(' SU').width);
       }
       // Row 3: Star: NAME · Coords: (X, Y) — Star name remains clickable
       ctx.fillStyle='#8bc';
@@ -29253,10 +29280,13 @@ function drawGalaxy(ts,dt){
       if(_planetStarNameHover){ctx.save();ctx.strokeStyle='rgba(255,255,255,0.6)';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(textX+starLabelW,GH+57);ctx.lineTo(textX+starLabelW+starNameW,GH+57);ctx.stroke();ctx.restore();}
       planetStarNameBounds={x:textX+starLabelW,y:GH+44,w:starNameW,h:16,star};
       ctx.fillStyle='#8bc';
-      ctx.fillText(`  ·  Coords: (${Math.round(p.x/100)}, ${Math.round(p.y/100)})`,textX+starLabelW+starNameW,GH+56);
+      const _coordsStr=`  ·  Coords: (${Math.round(p.x/100)}, ${Math.round(p.y/100)})`;
+      ctx.fillText(_coordsStr,textX+starLabelW+starNameW,GH+56);
+      _infoRight=Math.max(_infoRight,textX+starLabelW+starNameW+ctx.measureText(_coordsStr).width);
     } else {
       ctx.fillStyle='rgba(60,80,140,0.6)';
       ctx.fillText('UNKNOWN PLANET',textX,GH+22);
+      _infoRight=Math.max(_infoRight,textX+ctx.measureText('UNKNOWN PLANET').width);
       ctx.font='12px "Exo 2",sans-serif'; ctx.fillStyle='rgba(50,70,120,0.5)';
       ctx.fillText('Type: ???  ·  Size: ???',textX,GH+40);
       ctx.fillText('Star: ???',textX,GH+56);
@@ -29265,10 +29295,10 @@ function drawGalaxy(ts,dt){
     // bottom bar, just right of the planet info text. ROUTE TRAIN HERE sits to
     // its right (see the unified block below). Text size unchanged (9px).
     {
-      const _pdH=30, _pdY=GH+(BAR_H-_pdH)/2;
-      const _pdX=Math.max(rightColX, 470);
+      const _pdH=26, _pdY=GH+(BAR_H-_pdH)/2;
+      const _pdX=Math.round(_infoRight)+16; // just right of the planet info text
       ctx.font='bold 9px Orbitron,sans-serif';
-      const _pdW=Math.round(ctx.measureText('PLANET DETAILS').width)+24;
+      const _pdW=Math.round(ctx.measureText('PLANET DETAILS').width)+16;
       planetDetailsBtnBounds={x:_pdX,y:_pdY,w:_pdW,h:_pdH,planetId:p.id};
       _pdRightEdge=_pdX+_pdW;
       ctx.fillStyle=_planetDetailsBtnHover?'rgba(35,95,200,0.97)':'rgba(20,60,150,0.92)';
@@ -29368,10 +29398,13 @@ function drawGalaxy(ts,dt){
   // just right of PLANET DETAILS (or where it would be, for a star). Only when
   // no multi-stop route is being planned and nothing's pending.
   if(sel&&(sel.type==='planet'||sel.type==='star')&&routeStops.length<2&&!routeHerePending&&!assignPending&&trains.some(t=>t.isPlayer)){
-    const _rhH=30, _rhY=GH+(BAR_H-_rhH)/2;
+    const _rhH=26, _rhY=GH+(BAR_H-_rhH)/2;
     ctx.font='bold 9px Orbitron,sans-serif';
-    const _rhW=Math.round(ctx.measureText('ROUTE TRAIN HERE').width)+24;
-    const _rhX=_pdRightEdge>0?(_pdRightEdge+14):Math.max(470, 470);
+    const _rhW=Math.round(ctx.measureText('ROUTE TRAIN HERE').width)+16;
+    // For a planet, sit just right of PLANET DETAILS; for a star (no PD button)
+    // fall back to a left-of-centre spot. Capped so it never reaches the panel.
+    let _rhX=_pdRightEdge>0?(_pdRightEdge+12):430;
+    _rhX=Math.min(_rhX, (W-PANEL_W)-_rhW-12);
     routeHereBtnBounds={x:_rhX,y:_rhY,w:_rhW,h:_rhH};
     ctx.save();
     ctx.fillStyle=_routeHereBtnHover?'rgba(24,100,52,0.98)':'rgba(18,72,38,0.92)'; ctx.beginPath(); ctx.roundRect(_rhX,_rhY,_rhW,_rhH,4); ctx.fill();
@@ -29885,7 +29918,12 @@ function galaxyClick(sx,sy,shiftKey){
             const fromP=_gp(selTrain.planetId);
             const _isStarTarget=!!(nearestP.isStar||nearestP.isStarProxy);
             if(fromP&&(_isStarTarget||fromP.id!==nearestP.id)){
-              routeStops=[fromP,nearestP]; sel={type:'planet',data:fromP}; panelTab='trains'; return;
+              // fromP may be a star PROXY (train parked at a star) — select the
+              // real star, never the proxy as a planet. routeStops still seeds
+              // from the proxy for correct routing.
+              routeStops=[fromP,nearestP];
+              sel=fromP.isStarProxy?{type:'star',data:galaxy.stars[fromP.starId]}:{type:'planet',data:fromP};
+              panelTab='trains'; return;
             }
           }
           // Train is mid-route (or has no usable orbiting-planet to seed from):
@@ -29938,8 +29976,16 @@ function galaxyClick(sx,sy,shiftKey){
         if(_alreadySel && _inOrbit){
           const _op=_gp(train.planetId);
           if(_op){
-            sel={type:'planet',data:_op}; routeStops=[]; assignPending=false; routeHerePending=false;
-            return;
+            // If the train is parked at a STAR, its planetId is a star PROXY —
+            // never select the proxy as a planet (it'd show "Gigi Prime / OCEAN
+            // / Orbit 0"); select the actual star instead.
+            if(_op.isStarProxy){
+              const _ops=galaxy.stars[_op.starId];
+              if(_ops){ sel={type:'star',data:_ops}; routeStops=[]; assignPending=false; routeHerePending=false; return; }
+            } else {
+              sel={type:'planet',data:_op}; routeStops=[]; assignPending=false; routeHerePending=false;
+              return;
+            }
           }
         }
         sel={type:'car',data:{trainIdx:ti,carIdx:i,car:train.cars[i]}}; routeStops=[]; assignPending=false; routeHerePending=false;
@@ -30546,16 +30592,18 @@ canvas.addEventListener('wheel',e=>{
   if(activePopup) return; // block zoom when any popup open
   // Panel scroll (right sidebar, no popup open)
   const cp2=getCP(e);
-  if(cp2.x>=W-PANEL_W&&cp2.y<GH&&galaxy){
+  if(cp2.x>=W-PANEL_W&&cp2.y<H&&galaxy){
+    // Panel is full-height now (TOP_H → H), so the visible height is H-TOP_H.
+    const _panViewH=H-TOP_H;
     if(panelTab==='stations'){
       const stCount=galaxy.planets.filter(p=>p.hasStation&&(!p.isAlienRelic||visitedPlanetIds.has(p.id))).length;
-      const maxStScroll=Math.max(0,stCount*82-(GH-TOP_H));
+      const maxStScroll=Math.max(0,stCount*82-_panViewH);
       stationPanelScroll=Math.max(0,Math.min(maxStScroll,stationPanelScroll+e.deltaY*0.6));
     } else {
       const playerCount2=trains.filter(t=>t.isPlayer).length;
       // +1 row for the "Add new train" pseudo-slot drawn after the last train,
       // so wheel-scrolling reaches the bottom of that slot.
-      const maxScroll2=Math.max(0,(playerCount2+1)*82-(GH-TOP_H));
+      const maxScroll2=Math.max(0,(playerCount2+1)*82-_panViewH);
       panelScroll=Math.max(0,Math.min(maxScroll2,panelScroll+e.deltaY*0.6));
     }
     return;
@@ -33001,7 +33049,8 @@ canvas.addEventListener('mouseup',e=>{
     }
 
     // ── panel (single or double click) ────────────────────────
-    if(cp.x>=W-PANEL_W&&cp.y<GH){
+    // Panel now extends full-height (TOP_H → H), so accept clicks down to H.
+    if(cp.x>=W-PANEL_W&&cp.y<H){
       if(isDbl){
         panelDblClick(cp.x,cp.y);
       } else {
