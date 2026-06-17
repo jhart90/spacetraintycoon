@@ -19913,7 +19913,7 @@ function _drawTutorialChain(stage){
         const _minY=Math.min(..._rects.map(b=>b.y));
         const _maxY=Math.max(..._rects.map(b=>b.y+b.h));
         _drawHighlightBox(_minX,_minY,_maxX-_minX,_maxY-_minY,r.alpha,3);
-        _drawBubble(['Add WATER and MOLTEN ORE cars to this train'], {x:(_minX+_maxX)/2,y:_maxY}, r.alpha, {below:true});
+        _drawBubble(['Add [Water] and [Molten Ore] cars to this train'], {x:(_minX+_maxX)/2,y:_maxY}, r.alpha, {below:true});
       }
     }
     return;
@@ -20529,7 +20529,7 @@ function _drawTutorialChain(stage){
       const _ib=_bld.carBtnBounds.find(cb=>cb&&cb.type==='car_iron');
       if(_ib){
         _drawHighlightBox(_ib.x,_ib.y,_ib.w,_ib.h,r.alpha,3);
-        _drawBubble(['Add 2+ IRON cars to this TRAIN'], {x:_ib.x+_ib.w/2,y:_ib.y+_ib.h}, r.alpha, {below:true});
+        _drawBubble(['Add 2+ [Iron] cars to this TRAIN'], {x:_ib.x+_ib.w/2,y:_ib.y+_ib.h}, r.alpha, {below:true});
       }
     }
     return;
@@ -20662,13 +20662,13 @@ function _drawTutorialChain(stage){
     if(_hzDesert && _yA>0){
       const [_dsx,_dsy]=w2s(_hzDesert.x,_hzDesert.y);
       const _dsr=Math.max(8,_hzDesert.radius*cam.scale);
-      _drawBubble(['Industrial activity (like producing IRON) also produces HAZMAT as a byproduct'],
+      _drawBubble(['Industrial activity (like producing [Iron]) also produces [Hazmat] as a byproduct'],
                   {x:_dsx,y:_dsy-_dsr+6}, _yA);
     }
     if(_hzStar && _bA>0){
       const [_ssx,_ssy]=w2s(_hzStar.x,_hzStar.y);
       const _ssr=Math.max(8,_hzStar.radius*cam.scale);
-      _drawBubble(['HAZMAT must be disposed of by EJECTING it into a STAR'],
+      _drawBubble(['[Hazmat] must be disposed of by EJECTING it into a STAR'],
                   {x:_ssx,y:_ssy-_ssr+6}, _bA, {color:'blue'});
     }
     return;
@@ -22095,7 +22095,9 @@ function drawOptionsPopup(){
       const _tsX=Math.max(_spBarX+6,Math.min(_spBarX+_spBarW-6,_spBarX+_spBarW*_frac));
       ctx.font='7px Orbitron,sans-serif'; ctx.textAlign='center';
       ctx.fillStyle='rgba(180,210,240,0.80)';
-      ctx.fillText(_tsTxt,_tsX,_spY-3);
+      // Anchor relative to the bar top (_spBarY) so it floats just ABOVE the
+      // bar with a small 3px gap, rather than well above it.
+      ctx.fillText(_tsTxt,_tsX,_spBarY-3);
     }
     // ── Track title row — animated sound wave + centered title ──
     // Now that the bar spans the full popup width, the title centers on the
