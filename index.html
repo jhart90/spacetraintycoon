@@ -8817,7 +8817,7 @@ function makeGalaxyTrain(name, planetId, orbitTier, cars, isPlayer){
   return {name, cars, planetId, orbitTier, orbitR, orbitGap, angle:Math.random()*Math.PI*2, isPlayer, route:null,
           orbitCounts:{}, routeCounts:{}, totalDist:0, _angleAcc:0, color:pick(TRAIN_COLORS),
           maintenance:1.0, distSinceMaint:0.0, totalRevenue:0, totalCosts:0,
-          _engineFailureSd:_rollEngineFailureSd(), _engineFailed:false,
+          _engineFailureSd:_rollEngineFailureSd(), _engineBornSd:stardate, _engineFailed:false,
           carFull: new Array(cars.length).fill(false),
           carCargo: new Array(cars.length).fill(null),
           carCargoSource: new Array(cars.length).fill(null),
@@ -22600,91 +22600,149 @@ function drawTrainDetailPopup(){
   // Galaxy-view metrics (de-stretched, area-consistent, tightly coupled,
   // bottom-aligned) via the shared strip renderer.
   // scale 0.8 = sprites rendered 20% smaller in the Train Details preview.
-  _drawTrainCarStrip(ctx, t, px+14, SY, SW, SH, {scale:0.8});
+  const _tdLay=_drawTrainCarStrip(ctx, t, px+14, SY, SW, SH, {scale:0.8});
   // Fade right edge
   const fg=ctx.createLinearGradient(px+14+SW*0.6,0,px+14+SW,0);
   fg.addColorStop(0,'rgba(3,6,20,0)'); fg.addColorStop(1,'rgba(3,6,20,0.95)');
   ctx.fillStyle=fg; ctx.fillRect(px+14,SY,SW,SH);
   ctx.restore();
-  // Edit overlay (shown on hover)
+  // ── EDIT TRAIN label — always shown over the pane's lower-right corner ──
+  // Replaces the old big "EDIT" hover overlay: a small clickable label that's
+  // visible at all times and brightens whenever the cursor is anywhere over
+  // the pane (the whole pane is the click target → opens the Train Builder).
   popupState.trainVizBounds={x:px+14,y:SY,w:SW,h:SH};
-  if(popupState.hoverTrainViz){
+  {
+    const _etHov=!!popupState.hoverTrainViz;
     ctx.save();
-    ctx.fillStyle='rgba(0,0,0,0.48)';
-    ctx.fillRect(px+14,SY,SW,SH);
-    ctx.font='bold 13px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
-    ctx.shadowColor='rgba(120,200,255,0.8)'; ctx.shadowBlur=14;
-    ctx.fillStyle='rgba(200,235,255,0.97)';
-    ctx.fillText('EDIT',px+14+SW/2,SY+SH/2);
+    ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='right'; ctx.textBaseline='alphabetic';
+    if(_etHov){ ctx.shadowColor='rgba(120,200,255,0.85)'; ctx.shadowBlur=10; }
+    ctx.fillStyle=_etHov?'rgba(205,238,255,0.98)':'rgba(150,195,235,0.72)';
+    ctx.fillText('EDIT TRAIN',px+14+SW-8,SY+SH-7);
     ctx.restore();
+  }
+  // Per-car hover bounds (for the car tooltip) from the strip layout.
+  popupState.tdCarBounds=[];
+  if(_tdLay&&_tdLay.cars){
+    for(let ci=0;ci<_tdLay.cars.length;ci++){
+      const lc=_tdLay.cars[ci]; if(!lc||!lc.m) continue;
+      const _ccx=px+14+lc.cx, _chw=Math.max(6,lc.m.halfW);
+      const _x0=Math.max(px+14,_ccx-_chw), _x1=Math.min(px+14+SW,_ccx+_chw);
+      if(_x1<=_x0) continue;
+      popupState.tdCarBounds.push({x:_x0,y:SY,w:_x1-_x0,h:SH,ci});
+    }
   }
   ctx.strokeStyle='rgba(80,60,30,0.4)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(px,py+104); ctx.lineTo(px+pw,py+104); ctx.stroke();
-  // Stats
-  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
-  ctx.fillStyle='rgba(200,140,60,0.75)'; ctx.fillText('TRAIN STATS',px+14,py+118);
-  ctx.font='12px "Exo 2",sans-serif';
-  // 1. Currently at (now the first stat row)
-  const pl=_gp(t.planetId);
-  if(pl){
-    const _plStar=galaxy.stars[pl.starId];
-    ctx.fillStyle='rgba(150,180,220,0.75)';
-    ctx.fillText('Currently at:  '+(pl.isStarProxy?'[star orbit] '+(_plStar?.name||'?'):pl.name+' · '+(_plStar?.name||'?')),px+14,py+136);
+  // ── AT A GLANCE / STATS tabs (replace the old "TRAIN STATS" header) ──
+  const _tdTab=(popupState.trainDetailTab==='stats')?'stats':'glance';
+  {
+    const _tabs=[['glance','AT A GLANCE'],['stats','STATS']];
+    const _tabY=py+110, _tabH=20; let _tabX=px+14; popupState.tdTabBounds=[];
+    for(const [id,label] of _tabs){
+      ctx.font='bold 9px Orbitron,sans-serif'; ctx.textBaseline='middle';
+      const _tw=ctx.measureText(label).width+20;
+      const _act=(_tdTab===id), _hov=(popupState.tdTabHover===id);
+      ctx.fillStyle=_act?'rgba(70,42,12,0.96)':(_hov?'rgba(50,32,12,0.9)':'rgba(24,18,10,0.85)');
+      ctx.beginPath(); ctx.roundRect(_tabX,_tabY,_tw,_tabH,4); ctx.fill();
+      ctx.strokeStyle=_act?'rgba(255,180,90,0.9)':(_hov?'rgba(200,140,70,0.6)':'rgba(120,85,40,0.45)'); ctx.lineWidth=_act?1.5:1;
+      ctx.beginPath(); ctx.roundRect(_tabX,_tabY,_tw,_tabH,4); ctx.stroke();
+      ctx.textAlign='center';
+      ctx.fillStyle=_act?'rgba(255,200,110,0.97)':(_hov?'rgba(230,190,140,0.92)':'rgba(170,140,95,0.7)');
+      ctx.fillText(label,_tabX+_tw/2,_tabY+_tabH/2+1);
+      popupState.tdTabBounds.push({x:_tabX,y:_tabY,w:_tw,h:_tabH,id});
+      _tabX+=_tw+5;
+    }
+    ctx.textBaseline='alphabetic';
+  }
+  // ── Tab content ──────────────────────────────────────────────
+  popupState.tdCarsTextBounds=null;
+  // Small blue Orbitron caption (LOCATION / CARGO / CARS), returns its width.
+  const _tdCap=(txt,x,y)=>{ ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='left'; ctx.fillStyle='rgba(110,170,230,0.92)'; ctx.fillText(txt,x,y); return ctx.measureText(txt).width; };
+  if(_tdTab==='glance'){
+    // LOCATION
+    {
+      const _lw=_tdCap('LOCATION',px+14,py+148);
+      const pl=_gp(t.planetId);
+      let _loc;
+      if(pl){ const _plStar=galaxy.stars[pl.starId]; _loc=pl.isStarProxy?('[star orbit] '+(_plStar?.name||'?')):(pl.name+' · '+(_plStar?.name||'?')); }
+      else _loc='in transit';
+      ctx.font='12px "Exo 2",sans-serif'; ctx.textAlign='left'; ctx.fillStyle='rgba(150,180,220,0.85)';
+      ctx.fillText(_loc,px+14+_lw+8,py+148);
+    }
+    // CARGO — one entry per cargo-CAR type carried (incl. empties): a sprite
+    // (33% larger than the old inline list) + "xFull/Total", sorted by total
+    // count desc, vertically centred on the CARGO caption line.
+    {
+      const _lw=_tdCap('CARGO',px+14,py+166);
+      const _ccGroups={};
+      for(let ci=0;ci<t.cars.length;ci++){
+        const cr=t.cars[ci];
+        if(isEngineType(cr)||cr==='caboose') continue;
+        if(!_ccGroups[cr]) _ccGroups[cr]={total:0,full:0};
+        _ccGroups[cr].total++;
+        if(t.carFull&&t.carFull[ci]) _ccGroups[cr].full++;
+      }
+      const _ccSorted=Object.entries(_ccGroups).sort((a,b)=>b[1].total-a[1].total);
+      const _cMid=py+162, _bw=29, _bh=26;
+      if(_ccSorted.length===0){
+        ctx.font='12px "Exo 2",sans-serif'; ctx.textAlign='left'; ctx.textBaseline='alphabetic'; ctx.fillStyle='rgba(150,165,195,0.7)';
+        ctx.fillText('(none)',px+14+_lw+10,py+166);
+      } else {
+        let _cx=px+14+_lw+10;
+        for(const [cr,info] of _ccSorted){
+          if(_cx+_bw>px+pw-12) break;
+          const _spr=getCarSprite(cr,true);
+          if(imgs[_spr]) ctx.drawImage(imgs[_spr],_cx,_cMid-_bh/2,_bw,_bh);
+          ctx.font='bold 11px "Exo 2",sans-serif'; ctx.textAlign='left'; ctx.textBaseline='middle';
+          ctx.fillStyle='rgba(210,220,240,0.92)';
+          const _txt='x'+info.full+'/'+info.total;
+          ctx.fillText(_txt,_cx+_bw+1,_cMid+1);
+          _cx+=_bw+2+ctx.measureText(_txt).width+10;
+        }
+        ctx.textBaseline='alphabetic';
+      }
+    }
+    // CARS: N/max  +  load-penalty (to the RIGHT, same line)
+    {
+      const _engMax=_engMaxCars(t.cars?.[0]);
+      const _lw=_tdCap('CARS:',px+14,py+186);
+      const _valTxt=' '+t.cars.length+'/'+_engMax;
+      ctx.font='bold 12px "Exo 2",sans-serif'; ctx.textAlign='left'; ctx.fillStyle='rgba(222,228,240,0.96)';
+      ctx.fillText(_valTxt,px+14+_lw+3,py+186);
+      const _valW=ctx.measureText(_valTxt).width;
+      const _carsRight=px+14+_lw+3+_valW;
+      popupState.tdCarsTextBounds={x:px+14,y:py+176,w:_carsRight-(px+14)+4,h:15};
+      // Load penalty (−5% speed & accel per car beyond 4) — small orange caps,
+      // to the RIGHT of the CARS value, vertically centred on the same line.
+      const _penPct=Math.max(0,t.cars.length-4)*5;
+      if(_penPct>0){
+        ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='left'; ctx.textBaseline='middle'; ctx.fillStyle='rgba(255,150,55,0.95)';
+        ctx.fillText('-'+_penPct+'% SPEED, -'+_penPct+'% ACCELERATION',_carsRight+12,py+182);
+        ctx.textBaseline='alphabetic';
+      }
+    }
   } else {
-    ctx.fillStyle='rgba(150,180,220,0.55)';
-    ctx.fillText('Currently at:  in transit',px+14,py+136);
-  }
-  // 2. Current cargo — loaded cars only, grouped by cargo type (e.g. "PSNGR x3, MAIL x1")
-  {
-    const _filled=_trainCargoFilledCounts(t);
-    const _cargoTxt=Object.entries(_filled).sort((a,b)=>b[1]-a[1])
-      .map(([ct,n])=>(CARGO_SHORT[ct]||ct.slice(0,5).toUpperCase())+' x'+n).join(', ')||'(empty)';
-    ctx.fillStyle='rgba(200,180,140,0.85)';
-    ctx.fillText('Current cargo:  '+_cargoTxt,px+14,py+154);
-  }
-  // 3. Car count + load penalty: every mid car past the 2nd shaves 5% off both
-  // acceleration and max speed (see _trainLoadMult). Only show the penalty
-  // suffix when it's nonzero so short trains read cleanly without "(0% / 0%)".
-  {
-    const _midCars=Math.max(0,t.cars.length-2);
-    const _penPct=Math.round(Math.max(0,_midCars-2)*5);
-    const _baseCarsTxt=t.cars.length+' cars';
-    const _accelTxt=_penPct>0?('  (-'+_penPct+'% acceleration, '):'';
-    const _maxSpeedTxt=_penPct>0?('-'+_penPct+'% max speed)'):'';
-    const _carsTxt=_baseCarsTxt+_accelTxt+_maxSpeedTxt;
-    ctx.fillStyle='rgba(200,180,140,0.85)';
-    ctx.fillText(_carsTxt,px+14,py+172);
-    // Track the "-X% max speed" portion bounds for the tutorial bubble that
-    // points up at this text after the player CONFIRMs their train edits.
-    if(_penPct>0){
-      const _prefixW=ctx.measureText(_baseCarsTxt+_accelTxt).width;
-      const _msW=ctx.measureText(_maxSpeedTxt).width;
-      popupState.maxSpeedTextBounds={x:px+14+_prefixW, y:py+161, w:_msW, h:14};
-    } else {
-      popupState.maxSpeedTextBounds=null;
+    // STATS tab — distance / planets visited / most orbited.
+    ctx.font='12px "Exo 2",sans-serif'; ctx.textAlign='left'; ctx.fillStyle='rgba(200,180,140,0.85)';
+    const dist=Math.round(t.totalDist||0);
+    ctx.fillText('Total distance traveled:  '+dist.toLocaleString()+' SU',px+14,py+148);
+    const _planetsVisited=Object.keys(t.orbitCounts||{}).length;
+    ctx.fillText('Total planets visited:  '+_planetsVisited,px+14,py+166);
+    const oc=Object.entries(t.orbitCounts||{}).sort((a,b)=>b[1]-a[1]);
+    if(oc.length>0){
+      const [pid,cnt]=oc[0];
+      const pn=galaxy.planets[pid]?.name||'?';
+      ctx.fillText('Most orbited:  '+pn+'  ('+cnt+' orbit'+(cnt!==1?'s':'')+')',px+14,py+184);
     }
   }
-  // 4. Total distance
-  const dist=Math.round(t.totalDist||0);
-  ctx.fillStyle='rgba(200,180,140,0.85)';
-  ctx.fillText('Total distance:  '+dist.toLocaleString()+' SU',px+14,py+190);
-  // 5. Planets visited (distinct planets this train has orbited)
-  const _planetsVisited=Object.keys(t.orbitCounts||{}).length;
-  ctx.fillText('Planets visited:  '+_planetsVisited,px+14,py+208);
-  // 6. Most orbited
-  const oc=Object.entries(t.orbitCounts||{}).sort((a,b)=>b[1]-a[1]);
-  if(oc.length>0){
-    const [pid,cnt]=oc[0];
-    const pn=galaxy.planets[pid]?.name||'?';
-    ctx.fillText('Most orbited:  '+pn+'  ('+cnt+' orbit'+(cnt!==1?'s':'')+')',px+14,py+226);
-  }
-  // ── Maintenance section ──────────────────────────────────────
+  popupState.maxSpeedTextBounds=null;
+  // ── Maintenance + Engine Age section ─────────────────────────
   ctx.strokeStyle='rgba(80,60,30,0.4)'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.moveTo(px,py+236); ctx.lineTo(px+pw,py+236); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(px,py+210); ctx.lineTo(px+pw,py+210); ctx.stroke();
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
-  ctx.fillStyle='rgba(200,140,60,0.75)'; ctx.fillText('MAINTENANCE',px+14,py+250);
+  ctx.fillStyle='rgba(200,140,60,0.75)'; ctx.fillText('MAINTENANCE',px+14,py+222);
   { const maint=t.maintenance??1;
-    const barW=200, barH=8, barX=px+14, barY=py+258;
+    const barW=200, barH=8, barX=px+14, barY=py+228;
     const mCol=maint>=0.75?'rgba(60,220,100,0.85)':maint>=0.40?'rgba(255,200,60,0.85)':'rgba(255,80,60,0.85)';
     ctx.fillStyle='rgba(20,30,60,0.8)'; ctx.beginPath(); ctx.roundRect(barX,barY,barW,barH,2); ctx.fill();
     ctx.fillStyle=mCol; ctx.beginPath(); ctx.roundRect(barX,barY,barW*maint,barH,2); ctx.fill();
@@ -22696,6 +22754,31 @@ function drawTrainDetailPopup(){
     const _dsm=Math.round(t.distSinceMaint||0);
     ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(140,160,200,0.55)';
     ctx.fillText(_dsm.toLocaleString()+' SU since last service',barX+barW+50,barY+barH/2+3.5);
+  }
+  // Engine Age — non-repairable; counts down toward the pre-rolled engine
+  // failure (_engineFailureSd). Full when the engine is new, empties as the
+  // train ages toward an inevitable CRITICAL ENGINE FAILURE (replace engine).
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
+  ctx.fillStyle='rgba(200,140,60,0.75)'; ctx.fillText('ENGINE AGE',px+14,py+250);
+  { let _ageFrac=1, _sdLeft=null;
+    if(t._engineFailed){ _ageFrac=0; }
+    else if(t._engineFailureSd!=null){
+      const _born=(t._engineBornSd!=null)?t._engineBornSd:(t._engineFailureSd-15);
+      const _life=Math.max(0.0001,t._engineFailureSd-_born);
+      _ageFrac=Math.max(0,Math.min(1,(t._engineFailureSd-stardate)/_life));
+      _sdLeft=Math.max(0,t._engineFailureSd-stardate);
+    }
+    const barW=200, barH=8, barX=px+14, barY=py+258;
+    const aCol=_ageFrac>=0.75?'rgba(60,220,100,0.85)':_ageFrac>=0.40?'rgba(255,200,60,0.85)':'rgba(255,80,60,0.85)';
+    ctx.fillStyle='rgba(20,30,60,0.8)'; ctx.beginPath(); ctx.roundRect(barX,barY,barW,barH,2); ctx.fill();
+    ctx.fillStyle=aCol; ctx.beginPath(); ctx.roundRect(barX,barY,barW*_ageFrac,barH,2); ctx.fill();
+    ctx.strokeStyle='rgba(80,100,160,0.35)'; ctx.lineWidth=0.7;
+    ctx.beginPath(); ctx.roundRect(barX,barY,barW,barH,2); ctx.stroke();
+    ctx.font='bold 10px "Exo 2",sans-serif'; ctx.textAlign='left'; ctx.fillStyle=aCol;
+    ctx.fillText(Math.round(_ageFrac*100)+'%',barX+barW+8,barY+barH/2+3.5);
+    ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(140,160,200,0.55)';
+    const _ageNote=t._engineFailed?'engine failed — replace':(_sdLeft!=null?_sdLeft.toFixed(1)+' SD until breakdown':'—');
+    ctx.fillText(_ageNote,barX+barW+50,barY+barH/2+3.5);
   }
   // ── Financial Performance section ────────────────────────────
   ctx.strokeStyle='rgba(80,60,30,0.4)'; ctx.lineWidth=1;
@@ -22770,6 +22853,51 @@ function drawTrainDetailPopup(){
     const spd4=r3.transitSpeed||0, spdPct4=Math.min(999,Math.round(spd4/_engMax4*100));
     ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(160,200,240,0.65)'; ctx.textAlign='left';
     ctx.fillText('Seg: '+pct4+'%  ·  '+spd4.toFixed(2)+' SU/s  ('+spdPct4+'% max)',px+14,py+415);
+  }
+  // ── Hover tooltips (drawn last so they sit above all popup content) ──
+  // Small dark box anchored near (ax, ayTop); clamped inside the popup; clears
+  // the HD text overlay under its footprint (opaque-UI discipline).
+  const _tdTip=(lines, ax, ayTop)=>{
+    const _pad=7, _lh=13;
+    let _w=0; for(const ln of lines){ ctx.font=(ln.bold?'bold ':'')+(ln.size||9)+'px "Exo 2",sans-serif'; _w=Math.max(_w,ctx.measureText(ln.t).width); }
+    const _bw=_w+_pad*2, _bh=lines.length*_lh+_pad*2-3;
+    let _bx=Math.max(px+4,Math.min(px+pw-4-_bw,ax));
+    let _by=ayTop; if(_by+_bh>py+ph-4) _by=ayTop-_bh-12; // flip above if it would overflow
+    _by=Math.max(py+4,Math.min(py+ph-4-_bh,_by));
+    _clearTextOverlayRect(_bx,_by,_bw,_bh);
+    ctx.save();
+    ctx.fillStyle='rgba(8,12,26,0.97)'; ctx.beginPath(); ctx.roundRect(_bx,_by,_bw,_bh,5); ctx.fill();
+    ctx.strokeStyle='rgba(120,160,230,0.55)'; ctx.lineWidth=1; ctx.beginPath(); ctx.roundRect(_bx,_by,_bw,_bh,5); ctx.stroke();
+    ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+    let _ty=_by+_pad+8;
+    for(const ln of lines){ ctx.font=(ln.bold?'bold ':'')+(ln.size||9)+'px "Exo 2",sans-serif'; ctx.fillStyle=ln.col||'rgba(210,225,250,0.95)'; ctx.fillText(ln.t,_bx+_pad,_ty); _ty+=_lh; }
+    ctx.restore();
+  };
+  // (a) Car hover — name + status (+ origin if FULL). Shows after 0.1 s.
+  if(popupState.tdCarHoverIdx!=null && popupState.tdCarHoverIdx>=0 && popupState.tdCarHoverSince!=null
+     && (Date.now()-popupState.tdCarHoverSince)>=100 && popupState.tdCarHoverIdx<t.cars.length){
+    const _ci=popupState.tdCarHoverIdx;
+    const _cn=CAR_LABELS[t.cars[_ci]]||t.cars[_ci];
+    const _full=!!(t.carFull&&t.carFull[_ci]);
+    const _lines=[{t:_cn,col:'rgba(255,210,140,0.97)',bold:true,size:10},
+                  {t:_full?'FULL':'(empty)',col:_full?'rgba(120,235,150,0.95)':'rgba(150,165,195,0.85)',size:9}];
+    if(_full){
+      const _src=(t.carCargoSource&&t.carCargoSource[_ci]!=null)?_gp(t.carCargoSource[_ci]):null;
+      _lines.push({t:'Origin: '+(_src&&_src.name?_src.name:'?'),col:'rgba(190,205,235,0.9)',size:9});
+    }
+    const _cb=(popupState.tdCarBounds||[]).find(b=>b.ci===_ci);
+    _tdTip(_lines, _cb?_cb.x:px+24, SY+SH+8);
+  }
+  // (b) CARS-text hover — engine tow capacity + load-penalty rules.
+  if(popupState.tdCarsTextHover && popupState.tdCarsTextBounds && _tdTab==='glance'){
+    const _engName=CAR_LABELS[t.cars?.[0]]||'ENGINE';
+    const _engMax=_engMaxCars(t.cars?.[0]);
+    const _b=popupState.tdCarsTextBounds;
+    _tdTip([
+      {t:'The '+_engName+' engine can tow up to '+_engMax+' cargo cars',size:9,col:'rgba(210,225,250,0.95)'},
+      {t:'1–4 cars: 100% speed, 100% acceleration',size:9,col:'rgba(150,215,165,0.92)'},
+      {t:'5+ cars: -5% speed, -5% acceleration per car',size:9,col:'rgba(255,180,90,0.93)'},
+    ], _b.x, _b.y+_b.h+6);
   }
   ctx.restore();
   // Draw color picker if open for this train
@@ -31069,7 +31197,19 @@ canvas.addEventListener('mousemove',e=>{
     // CURRENT ROUTE panel — clickable region that opens the [R] ROUTES popup.
     const _crb=popupState.currentRouteBounds;
     popupState.hoverCurrentRoute=!!(_crb&&cp.x>=_crb.x&&cp.x<=_crb.x+_crb.w&&cp.y>=_crb.y&&cp.y<=_crb.y+_crb.h);
-    if(popupState.namePencilHover||popupState.colorSquareHover||popupState.hoverCurrentRoute) canvas.style.cursor='pointer';
+    // AT A GLANCE / STATS tab hover.
+    let _tdth=null;
+    if(popupState.tdTabBounds){ for(const tb of popupState.tdTabBounds){ if(cp.x>=tb.x&&cp.x<=tb.x+tb.w&&cp.y>=tb.y&&cp.y<=tb.y+tb.h){ _tdth=tb.id; break; } } }
+    popupState.tdTabHover=_tdth;
+    // CARS-text hover (tow-capacity tooltip).
+    const _ctb=popupState.tdCarsTextBounds;
+    popupState.tdCarsTextHover=!!(_ctb&&cp.x>=_ctb.x&&cp.x<=_ctb.x+_ctb.w&&cp.y>=_ctb.y&&cp.y<=_ctb.y+_ctb.h);
+    // Per-car hover for the car tooltip — reset the 0.1 s timer when the
+    // hovered car index changes (null/-1 = not over any car).
+    let _tdch=-1;
+    if(popupState.tdCarBounds){ for(const cb of popupState.tdCarBounds){ if(cp.x>=cb.x&&cp.x<=cb.x+cb.w&&cp.y>=cb.y&&cp.y<=cb.y+cb.h){ _tdch=cb.ci; break; } } }
+    if(_tdch!==popupState.tdCarHoverIdx){ popupState.tdCarHoverIdx=_tdch; popupState.tdCarHoverSince=(_tdch>=0?Date.now():null); }
+    if(popupState.namePencilHover||popupState.colorSquareHover||popupState.hoverCurrentRoute||_tdth) canvas.style.cursor='pointer';
   } else if(activePopup!=='train'){ if(popupState) { popupState.namePencilHover=false; popupState.hoverCurrentRoute=false; } }
   // Hover tracking for planet detail popup — tabs, star link, name/pencil
   if(activePopup==='planet'){
@@ -32362,6 +32502,12 @@ canvas.addEventListener('mouseup',e=>{
         }
         return;
       }
+      // Train detail AT A GLANCE / STATS tab click → switch tab.
+      if(activePopup==='train'&&popupState.tdTabBounds){
+        for(const tb of popupState.tdTabBounds){
+          if(cp.x>=tb.x&&cp.x<=tb.x+tb.w&&cp.y>=tb.y&&cp.y<=tb.y+tb.h){ popupState.trainDetailTab=tb.id; playSound('click'); return; }
+        }
+      }
       // Train detail viz overlay click → open edit mode
       if(activePopup==='train'&&popupState.hoverTrainViz&&popupState.trainVizBounds){
         const b=popupState.trainVizBounds;
@@ -32995,6 +33141,7 @@ canvas.addEventListener('mouseup',e=>{
                 if(_etRef){
                   _etRef._engineFailed=false;
                   _etRef._engineFailureSd=_rollEngineFailureSd();
+                  _etRef._engineBornSd=stardate; // fresh engine → reset the Engine Age bar
                 }
               }
               activePopup='train'; popupState={trainIdx:s.editTrainIdx}; trainBuilderState=null;
