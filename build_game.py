@@ -1296,7 +1296,7 @@ const MISSION_DEFS=[
      return false;
    }},
   {id:'create_route',
-   name:'Create a profitable train route',
+   name:'Create a 3-planet train route',
    imageType:'route_preview', imageKey:null,
    objectives:[
      {id:'sel_lava_start', text:'CLICK on the LAVA PLANET (or a TRAIN orbiting that planet) to select a starting point for your ROUTE'},
@@ -3473,6 +3473,18 @@ let _visitPlanetCompletedMs=0; // (legacy) real-time ms when visit_planet missio
 let _lavaDetailsWasOpen=false; // true once the Lava Planet details window has been opened during the tutorial
 let _lavaClosedTimerMs=0;      // real-time ms when that window was first CLOSED again (0=not yet) — arms the create_route intro
 let _orijenDetailsOpenedTut=false; // true once the player has FIRST opened the ORIJEN details window in the tutorial — queues the create_route intro immediately (it shows the moment the window closes, then the lava-station walkthrough follows)
+// First-train tutorial segment (runs AFTER Orijen details, BEFORE the create_route
+// mission): camera-locks on the Iron Express, then walks the player through the
+// train-details window (cars / engine capacity / ESC). _ftFocusFramed = camera
+// framed once on entry; _ftFirstTrainTutDone = segment complete (now gates the
+// deferred create_route intro instead of _orijenDetailsOpenedTut).
+let _ftFocusFramed=false;
+let _ftFirstTrainTutDone=false;
+// Segments 2-3 of the first-train tutorial (desert station + Orijen↔Desert
+// route). _ftFrameKey = which phase last applied its one-shot camera framing
+// (so a framing phase re-frames once on entry, then lets the scene animate).
+let _ftFrameKey='';
+let _ftWaitStartMs=0; // ms when the post-unload 20 s wait began (0=not started)
 let _tutorialDoneMs=0;         // real-time ms when the tutorial chain reached 'done' — arms the 1 s create_route intro
 let _crTutorialDoneMs=0;       // real-time ms when the create_route tutorial chain reached 'all_done' — arms buy_second_train (10 s) and build_foundry (40 s) intros
 let _crTrainPreselected=false; // true if a train was already selected when the create_route tutorial chain started (drives the blue companion bubble in cr_click_orijen / cr_shift_click_other)
@@ -3736,6 +3748,16 @@ let colorPickerState=null; // {trainIdx} when color picker sub-popup is open
 let cancelRouteBtnBounds=null;
 let routeHereBtnBounds=null;
 let routeHerePending=false; // true when player clicked "Route Train Here" on a planet
+// Non-null = "assign a route to THIS already-known train" mode, started from the
+// Train Details "ASSIGN ROUTE" button. The player picks planets/stops in galaxy
+// view (Stations tab forced, yellow box+header); clicking ASSIGN TO TRAIN
+// assigns the built route directly to this train index (no train-pick step).
+let _assignRouteTrainIdx=null;
+// true = "build a NEW route, then pick a train" mode, started from the Routes
+// window "+ NEW ROUTE" button. Same yellow SELECT-A-PLANET box as
+// _assignRouteTrainIdx mode, but ASSIGN TO TRAIN hands off to the normal
+// SELECT-A-TRAIN (assignPending) flow so the player chooses the train.
+let _newRouteMode=false;
 let _routeHereResultMs=0;    // Date.now() when a route-here result callout was armed (0 = none)
 // Tutorial phases that walk the player through the MANUAL route → ASSIGN-TO-TRAIN
 // flow. While in one of these, the auto "skip-to-SELECT-A-TRAIN" behaviour is
@@ -13607,8 +13629,18 @@ function drawTrainsPanel(){
   // Fully opaque so the galaxy-content clip can safely exclude this entire
   // strip — see drawGalaxy's `ctx.rect(0,TOP_H,W-PANEL_W,GH-TOP_H)` clip.
   ctx.fillStyle='rgb(4,8,20)'; ctx.fillRect(px,TOP_H,PANEL_W,_pBot-TOP_H);
+  // Navigating away from the Stations tab cancels the route-stop-picking modes
+  // (the yellow box belongs to the Stations panel). Exception: while
+  // assignPending the +NEW ROUTE flow has legitimately moved to the Trains tab
+  // to pick a train, so don't cancel there.
+  const _routePickMode=(_assignRouteTrainIdx!=null||_newRouteMode);
+  if(_routePickMode && showTrains && !assignPending){ _assignRouteTrainIdx=null; _newRouteMode=false; }
   if(showTrains&&(assignPending||routeHerePending)){
     ctx.strokeStyle='rgba(120,200,255,0.85)'; ctx.lineWidth=2;
+    ctx.strokeRect(px+1,TOP_H+1,PANEL_W-2,_pBot-TOP_H-2);
+  } else if(!showTrains && _routePickMode){
+    // Yellow highlight box around the Stations panel while picking route stops.
+    ctx.strokeStyle='rgba(255,210,70,0.9)'; ctx.lineWidth=2;
     ctx.strokeRect(px+1,TOP_H+1,PANEL_W-2,_pBot-TOP_H-2);
   } else {
     ctx.strokeStyle='rgba(50,100,200,0.40)'; ctx.lineWidth=1;
@@ -19338,7 +19370,7 @@ function _drawTutorialChain(stage){
   // drawPanelTabs / drawTopBar, so the yellow bubble can never be partially
   // hidden behind the Stations/Trains folder tabs that sit at the top of the
   // panel.
-  const _POPUP_PHASES=new Set(['orijen_details','build_station','supply_demand','select_train','train_detail_edit','builder_add_cars','builder_purchase','train_detail_post_confirm','bf_click_build_station','bf_click_foundry_upgrade','bst_builder_add_iron']);
+  const _POPUP_PHASES=new Set(['orijen_details','ft_train_details','ft_desert_pd','ft_route_assign','build_station','supply_demand','select_train','train_detail_edit','builder_add_cars','builder_purchase','train_detail_post_confirm','bf_click_build_station','bf_click_foundry_upgrade','bst_builder_add_iron']);
   const _isPopupPhase=_POPUP_PHASES.has(_tutorialPhase);
   // Popup-stage calls for non-popup phases have nothing to do (no advance
   // either — that already ran in the 'galaxy' call earlier this frame).
@@ -19551,6 +19583,36 @@ function _drawTutorialChain(stage){
     // current sprite layout instead of using a stale one.
     _blueHoverAnchorFrozen=null;
   };
+  // ── First-train tutorial (segments 2-3) helpers ────────────
+  // Home-system desert planet id (Orijen's system).
+  const _ftDesertId=()=>{
+    if(galaxy.origenId==null) return -1;
+    const _op=galaxy.planets[galaxy.origenId]; if(!_op) return -1;
+    for(const _p of galaxy.planets){ if(_p.starId===_op.starId && _p.type && _p.type.id==='desert') return _p.id; }
+    return -1;
+  };
+  // Centre + zoom so a planet's LOW orbit is framed in the visible galaxy area.
+  const _ftFrameLowOrbit=(planet)=>{
+    if(!planet) return;
+    const _lr=(ORBIT_TIERS[planet.size]&&ORBIT_TIERS[planet.size]['LOW'])||120;
+    const _vpW=W-PANEL_W, _vpH=GH-TOP_H;
+    const _sc=Math.max(MIN_SC,Math.min(MAX_SC,Math.min(_vpW/(2.3*_lr),_vpH/(2.3*_lr))));
+    cam.scale=_sc; cam.x=planet.x+PANEL_W/(2*_sc); cam.y=planet.y-TOP_H/(2*_sc); tracking=false;
+    if(typeof clampCamera==='function') clampCamera();
+  };
+  // Frame so two planets both sit in the visible area (for route building).
+  const _ftFrameBoth=(a,b)=>{
+    if(!a||!b) return;
+    const _buf=380;
+    const _xMin=Math.min(a.x,b.x)-_buf,_xMax=Math.max(a.x,b.x)+_buf;
+    const _yMin=Math.min(a.y,b.y)-_buf,_yMax=Math.max(a.y,b.y)+_buf;
+    const _vpW=W-PANEL_W,_vpH=GH-TOP_H;
+    const _sc=Math.max(MIN_SC,Math.min(MAX_SC,Math.min(_vpW/(_xMax-_xMin),_vpH/(_yMax-_yMin))));
+    cam.scale=_sc; cam.x=(_xMin+_xMax)/2+PANEL_W/(2*_sc); cam.y=(_yMin+_yMax)/2-TOP_H/(2*_sc); tracking=false;
+    if(typeof clampCamera==='function') clampCamera();
+  };
+  // First player train + its index.
+  const _ftTrain=()=>{ const _i=trains.findIndex(t=>t.isPlayer); return {i:_i, t:_i>=0?trains[_i]:null}; };
   // ── Phase: look_around ─────────────────────────────────────
   // First tutorial bubble — sits in the same spot as the upcoming ZOOM OUT
   // bubble. Lifecycle: 1 s fade in (handled by _resolveAlpha), 5 s fully
@@ -19649,11 +19711,11 @@ function _drawTutorialChain(stage){
     if(_tutorialFadeOutStartMs===0 && !_open) _tutorialFadeOutStartMs=_now; // popup closed → fade out
     const r=_resolveAlpha();
     if(r.advanced){
-      // Reordered: the create_route mission was queued the moment this window first
-      // opened, so it appears right as the window closes — BEFORE the lava-station
-      // walkthrough. Hand off to cr_pending_accept; the lava re-frame + double-click
-      // step run only AFTER the mission is accepted.
-      _advanceTo('cr_pending_accept'); return;
+      // New flow: instead of queueing the create_route mission here, walk the
+      // player through their FIRST TRAIN (the Iron Express) — camera-lock on it,
+      // then the train-details window. The create_route intro is deferred until
+      // that segment completes (see _ftFirstTrainTutDone gate).
+      _ftFocusFramed=false; _advanceTo('ft_focus_train'); return;
     }
     // (3) STATION upgrade card — box + bubble (shown immediately).
     const _sc=popupState._stationCardBounds;
@@ -19662,20 +19724,20 @@ function _drawTutorialChain(stage){
       // Bubble sits BELOW the card, tail pointing UP at it.
       _drawBubble(['Your HOME PLANET starts with a STATION, which','allows your TRAINs to LOAD + UNLOAD CARGO','from this planet'], {x:_sc.x+_sc.w/2,y:_sc.y+_sc.h}, r.alpha, {below:true, boldWords:['STATION','CARGO']});
     }
-    // (4) supply/demand pane — fades in 3.5 s after (3); shares the fade-out.
+    // (4) supply/demand pane — fades in 5 s after (3); shares the fade-out.
     let _sdA=0;
     if(_tutorialFadeOutStartMs>0) _sdA=r.alpha;
-    else if(_elapsed>=FADE_MS+3500) _sdA=Math.min(1,(_elapsed-(FADE_MS+3500))/FADE_MS);
+    else if(_elapsed>=FADE_MS+5000) _sdA=Math.min(1,(_elapsed-(FADE_MS+5000))/FADE_MS);
     const _sd=popupState.supplyDemandPanelBounds;
     if(_sdA>0 && _sd){
       _drawHighlightBox(_sd.x,_sd.y,_sd.w,_sd.h,_sdA,3);
       // Bubble sits ABOVE the pane, tail pointing DOWN at it.
       _drawBubble(['This PLANET supplies CARGO including [Passengers] and [Water],','and demands [Sand], among other things'], {x:_sd.x+_sd.w/2,y:_sd.y}, _sdA, {italicWords:['supplies','demands'], boldWords:['CARGO']});
     }
-    // (5) blue [ESC] close hint — fades in ~8 s after the phase starts.
+    // (5) blue [ESC] close hint — fades in 10 s after the phase starts (5 s after (4)).
     let _escA=0;
     if(_tutorialFadeOutStartMs>0) _escA=r.alpha;
-    else if(_elapsed>=FADE_MS+8000) _escA=Math.min(1,(_elapsed-(FADE_MS+8000))/FADE_MS);
+    else if(_elapsed>=FADE_MS+10000) _escA=Math.min(1,(_elapsed-(FADE_MS+10000))/FADE_MS);
     const _eb=popupState.escBounds;
     if(_escA>0 && _eb){
       _drawBubble(['Press ESC, or CLICK anywhere outside of a window to close it'], {x:_eb.x+_eb.w/2,y:_eb.y+_eb.h}, _escA, {below:true, color:'blue'});
@@ -19812,6 +19874,218 @@ function _drawTutorialChain(stage){
   // updateMissions). No rendering — just wait for the player to ACCEPT it, then run
   // the lava double-click / build-station walkthrough (double_click). If it's
   // somehow already completed, jump straight to the all_done poll.
+  // ── Phase: ft_focus_train (galaxy) ─────────────────────────
+  // Camera-locks (frames once) on the player's first train as it orbits, then
+  // a blue "first TRAIN" bubble + a yellow "double click for details" prompt.
+  if(_tutorialPhase==='ft_focus_train'){
+    const _ftIdx=trains.findIndex(t=>t.isPlayer);
+    const _ft=_ftIdx>=0?trains[_ftIdx]:null;
+    if(_ft && !_ftFocusFramed){
+      // Frame the train's orbit (centre on its planet, scaled so the orbit fits).
+      const _fp=_gp(_ft.planetId);
+      const _cx=_fp?_fp.x:_ft && getTrainCarPos(_ft,0)[0], _cy=_fp?_fp.y:_ft && getTrainCarPos(_ft,0)[1];
+      const _orb=_ft.orbitR||200;
+      let _sc=Math.min((W-PANEL_W)*0.42/_orb,(GH-TOP_H)*0.42/_orb);
+      _sc=Math.max(MIN_SC,Math.min(MAX_SC,_sc));
+      cam.scale=_sc;
+      trackingOffset={x:PANEL_W/(2*cam.scale),y:0};
+      cam.x=_cx+trackingOffset.x; cam.y=_cy; tracking=false;
+      if(typeof clampCamera==='function') clampCamera();
+      _ftFocusFramed=true;
+    }
+    const _open=(activePopup==='train' && popupState.trainIdx===_ftIdx);
+    if(_tutorialFadeOutStartMs===0 && _open) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _advanceTo('ft_train_details'); return; }
+    if(_ft){
+      const [_twx,_twy]=getTrainCarPos(_ft,0);
+      const [_sx,_sy]=w2s(_twx,_twy);
+      _drawBubble(['This is your first TRAIN'], {x:_sx,y:_sy-18}, r.alpha, {color:'blue', target:{x:_sx,y:_sy}});
+      // Yellow "double click" prompt fades in 2 s after the welcome bubble.
+      let _ddA=0;
+      if(_tutorialFadeOutStartMs>0) _ddA=r.alpha;
+      else if(_elapsed>=FADE_MS+2000) _ddA=Math.min(1,(_elapsed-(FADE_MS+2000))/FADE_MS);
+      if(_ddA>0) _drawBubble(['DOUBLE CLICK on this TRAIN for details'], {x:_sx,y:_sy+18}, _ddA, {below:true, target:{x:_sx,y:_sy}});
+    }
+    return;
+  }
+  // ── Phase: ft_train_details (popup) ────────────────────────
+  // Inside the first train's detail window: (1) blue bubble over the passenger
+  // + mail cars; (2) +5 s blue bubble at the CARS tow-capacity row; (3) +5 s
+  // yellow ESC-close hint. On close → mark the segment done (which queues the
+  // deferred create_route intro) and hand off to cr_pending_accept.
+  if(_tutorialPhase==='ft_train_details'){
+    const _ftIdx=trains.findIndex(t=>t.isPlayer);
+    const _ft=_ftIdx>=0?trains[_ftIdx]:null;
+    const _open=(activePopup==='train' && popupState.trainIdx===_ftIdx);
+    if(_tutorialFadeOutStartMs===0 && !_open) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _ftFrameKey=''; _advanceTo('ft_desert_dblclick'); return; }
+    if(_open && _ft){
+      // (1) passenger + mail cars — blue bubble ABOVE them, pointing down.
+      const _cb=popupState.tdCarBounds||[];
+      let _pcb=null,_mcb=null;
+      for(const b of _cb){ const ct=_ft.cars[b.ci]; if(ct==='car_passenger'&&!_pcb)_pcb=b; if(ct==='car_mail'&&!_mcb)_mcb=b; }
+      const _abs=[_pcb,_mcb].filter(Boolean);
+      if(_abs.length){
+        const _minX=Math.min(..._abs.map(b=>b.x)), _maxX=Math.max(..._abs.map(b=>b.x+b.w));
+        const _ax=(_minX+_maxX)/2, _ay=_abs[0].y;
+        _drawHighlightBox(_minX,_ay,_maxX-_minX,_abs[0].h,r.alpha,2);
+        _drawBubble(['This train has cars for carrying [Passengers] and [Mail]'], {x:_ax,y:_ay}, r.alpha, {color:'blue', target:{x:_ax,y:_ay+8}});
+      }
+      // (2) +5 s — CARS tow-capacity row, blue bubble BELOW it, pointing up.
+      let _c2A=0;
+      if(_tutorialFadeOutStartMs>0) _c2A=r.alpha;
+      else if(_elapsed>=FADE_MS+5000) _c2A=Math.min(1,(_elapsed-(FADE_MS+5000))/FADE_MS);
+      const _ctb=popupState.tdCarsTextBounds;
+      if(_c2A>0 && _ctb){
+        _drawBubble(['The CONSTELLATION ENGINE on this train can tow UP TO 6 CARGO CARS'], {x:_ctb.x+_ctb.w/2,y:_ctb.y+_ctb.h}, _c2A, {below:true, color:'blue'});
+      }
+      // (3) +10 s — yellow ESC-close hint below the [ESC] label, pointing up.
+      let _e3A=0;
+      if(_tutorialFadeOutStartMs>0) _e3A=r.alpha;
+      else if(_elapsed>=FADE_MS+10000) _e3A=Math.min(1,(_elapsed-(FADE_MS+10000))/FADE_MS);
+      const _eb=popupState.escBounds;
+      if(_e3A>0 && _eb){
+        _drawBubble(['Press ESC, or CLICK anywhere outside a window to close it'], {x:_eb.x+_eb.w/2,y:_eb.y+_eb.h}, _e3A, {below:true});
+      }
+    }
+    return;
+  }
+  // ── Phase: ft_desert_dblclick (galaxy) — segment 2 ─────────
+  if(_tutorialPhase==='ft_desert_dblclick'){
+    const _dId=_ftDesertId();
+    const _dp=_dId>=0?galaxy.planets[_dId]:null;
+    const _ori=galaxy.origenId!=null?galaxy.planets[galaxy.origenId]:null;
+    if(_ftFrameKey!=='ft_desert_dblclick'){ _ftFrameBoth(_ori,_dp); _ftFrameKey='ft_desert_dblclick'; }
+    const _open=(activePopup==='planet'&&popupState.planet&&_dId>=0&&popupState.planet.id===_dId);
+    if(_tutorialFadeOutStartMs===0 && _open) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _advanceTo('ft_desert_pd'); return; }
+    if(_dp){
+      const [_sx,_sy]=w2s(_dp.x,_dp.y);
+      const _sr=Math.max(8,_dp.radius*cam.scale);
+      _drawBubble(['DOUBLE CLICK on the DESERT PLANET to view its details'], {x:_sx,y:_sy-_sr}, r.alpha, {target:{x:_sx,y:_sy}});
+    }
+    return;
+  }
+  // ── Phase: ft_desert_pd (popup) ────────────────────────────
+  if(_tutorialPhase==='ft_desert_pd'){
+    const _dId=_ftDesertId();
+    const _dp=_dId>=0?galaxy.planets[_dId]:null;
+    const _open=(activePopup==='planet'&&popupState.planet&&_dId>=0&&popupState.planet.id===_dId);
+    const _built=!!(_dp&&_dp.playerBuiltStation);
+    if(_tutorialFadeOutStartMs===0 && _built && !_open) _tutorialFadeOutStartMs=_now; // station built + window closed → advance
+    const r=_resolveAlpha();
+    if(r.advanced){ _ftFrameKey=''; _advanceTo('ft_route_orijen'); return; }
+    if(_open){
+      // (ii) demand pane — inhabited → demands passengers & mail.
+      const _sd=popupState.supplyDemandPanelBounds;
+      if(_sd){
+        _drawHighlightBox(_sd.x,_sd.y,_sd.w,_sd.h,r.alpha,3);
+        _drawBubble(['This PLANET is INHABITED, so it demands [Passengers] and [Mail]'], {x:_sd.x+_sd.w/2,y:_sd.y}, r.alpha, {color:'blue', italicWords:['demands']});
+      }
+      // (iii) +5 s — can't load/unload without a STATION + build guide.
+      let _stA=0;
+      if(_tutorialFadeOutStartMs>0) _stA=r.alpha;
+      else if(_elapsed>=FADE_MS+5000) _stA=Math.min(1,(_elapsed-(FADE_MS+5000))/FADE_MS);
+      const _bb=popupState.buildStationBtnBounds;
+      if(_stA>0 && _bb && !_built){
+        _drawBubble(['You can’t LOAD or UNLOAD cargo here without a STATION.','CLICK HERE to BUILD A STATION on this PLANET'], {x:_bb.x+_bb.w/2,y:_bb.y+_bb.h}, _stA, {below:true, boldWords:['STATION']});
+      }
+      // (iv) +10 s — blue ESC-close hint.
+      let _e3A=0;
+      if(_tutorialFadeOutStartMs>0) _e3A=r.alpha;
+      else if(_elapsed>=FADE_MS+10000) _e3A=Math.min(1,(_elapsed-(FADE_MS+10000))/FADE_MS);
+      const _eb=popupState.escBounds;
+      if(_e3A>0 && _eb){
+        _drawBubble(['Press ESC, or CLICK anywhere outside a window to close it'], {x:_eb.x+_eb.w/2,y:_eb.y+_eb.h}, _e3A, {below:true, color:'blue'});
+      }
+    }
+    return;
+  }
+  // ── Phase: ft_route_orijen (galaxy) — segment 3 ────────────
+  if(_tutorialPhase==='ft_route_orijen'){
+    const _ori=galaxy.origenId!=null?galaxy.planets[galaxy.origenId]:null;
+    const _dId=_ftDesertId(); const _dp=_dId>=0?galaxy.planets[_dId]:null;
+    if(_ftFrameKey!=='ft_route_orijen'){ _ftFrameBoth(_ori,_dp); _ftFrameKey='ft_route_orijen'; }
+    const _oriPicked=(galaxy.origenId!=null) && (routeStops.some(p=>p&&p.id===galaxy.origenId) || (sel&&sel.type==='planet'&&sel.data&&sel.data.id===galaxy.origenId));
+    if(_tutorialFadeOutStartMs===0 && _oriPicked) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _advanceTo('ft_route_desert'); return; }
+    if(_ori){
+      const [_sx,_sy]=w2s(_ori.x,_ori.y);
+      const _sr=Math.max(8,_ori.radius*cam.scale);
+      _drawBubble(['CLICK on ORIJEN to START A ROUTE'], {x:_sx,y:_sy-_sr}, r.alpha, {target:{x:_sx,y:_sy}});
+    }
+    return;
+  }
+  // ── Phase: ft_route_desert (galaxy) ────────────────────────
+  if(_tutorialPhase==='ft_route_desert'){
+    const _dId=_ftDesertId(); const _dp=_dId>=0?galaxy.planets[_dId]:null;
+    // Rollback if Orijen got cleared from the route (player clicked elsewhere).
+    if(_tutorialFadeOutStartMs===0 && galaxy.origenId!=null && routeStops.length>0 && !routeStops.some(p=>p&&p.id===galaxy.origenId)){ _advanceTo('ft_route_orijen'); return; }
+    const _twoStops=routeStops.length>=2 && _dId>=0 && routeStops.some(p=>p&&p.id===_dId) && routeStops.some(p=>p&&p.id===galaxy.origenId);
+    if(_tutorialFadeOutStartMs===0 && _twoStops) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _advanceTo('ft_route_assign'); return; }
+    if(_dp){
+      const [_sx,_sy]=w2s(_dp.x,_dp.y);
+      const _sr=Math.max(8,_dp.radius*cam.scale);
+      _drawBubble(['SHIFT+CLICK on the DESERT PLANET to ADD A STOP to your ROUTE'], {x:_sx,y:_sy-_sr}, r.alpha, {target:{x:_sx,y:_sy}});
+    }
+    return;
+  }
+  // ── Phase: ft_route_assign (popup-stage, points at panel) ──
+  if(_tutorialPhase==='ft_route_assign'){
+    const {t:_ft}=_ftTrain();
+    const _assigned=!!(_ft && _ft.route);
+    if(_tutorialFadeOutStartMs===0 && _assigned) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _ftFrameKey=''; _advanceTo('ft_loading'); return; }
+    _drawBubble(['CLICK on your TRAIN to ASSIGN the ROUTE'], {x:W-PANEL_W,y:TOP_H+70}, r.alpha, {below:true, target:{x:W-PANEL_W-2,y:TOP_H+70}});
+    return;
+  }
+  // ── Phase: ft_loading (galaxy) — Orijen low orbit framed ───
+  if(_tutorialPhase==='ft_loading'){
+    const {t:_ft}=_ftTrain();
+    const _ori=galaxy.origenId!=null?galaxy.planets[galaxy.origenId]:null;
+    const _dId=_ftDesertId();
+    if(_ftFrameKey!=='ft_loading'){ _ftFrameLowOrbit(_ori); _ftFrameKey='ft_loading'; }
+    const _atDesert=!!(_ft && _ft.planetId===_dId && _dId>=0);
+    if(_tutorialFadeOutStartMs===0 && _atDesert) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _ftFrameKey=''; _advanceTo('ft_unloading'); return; }
+    if(_ft){
+      const [_tx,_ty]=getTrainCarPos(_ft,0);
+      const [_sx,_sy]=w2s(_tx,_ty);
+      _drawBubble(['Your TRAIN is now LOADING CARGO before departure'], {x:_sx,y:_sy-18}, r.alpha, {color:'blue', target:{x:_sx,y:_sy}});
+    }
+    return;
+  }
+  // ── Phase: ft_unloading (galaxy) — Desert low orbit framed ─
+  if(_tutorialPhase==='ft_unloading'){
+    const {t:_ft}=_ftTrain();
+    const _dId=_ftDesertId();
+    const _dp=_dId>=0?galaxy.planets[_dId]:null;
+    if(_ftFrameKey!=='ft_unloading'){ _ftFrameLowOrbit(_dp); _ftFrameKey='ft_unloading'; }
+    const _leftDesert=!!(_ft && _ft.planetId!==_dId && _elapsed>=4000);
+    if(_tutorialFadeOutStartMs===0 && (_leftDesert || _elapsed>=16000)) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _ftWaitStartMs=_now; _advanceTo('ft_wait20'); return; }
+    if(_ft){
+      const [_tx,_ty]=getTrainCarPos(_ft,0);
+      const [_sx,_sy]=w2s(_tx,_ty);
+      _drawBubble(['Your TRAIN will now UNLOAD CARGO','& then LOAD NEW CARGO before heading back'], {x:_sx,y:_sy-18}, r.alpha, {color:'blue', target:{x:_sx,y:_sy}});
+    }
+    return;
+  }
+  // ── Phase: ft_wait20 — 20 s, then queue the create_route mission ──
+  if(_tutorialPhase==='ft_wait20'){
+    if(_ftWaitStartMs===0) _ftWaitStartMs=_now;
+    if(_now-_ftWaitStartMs>=20000){ _ftFirstTrainTutDone=true; _advanceTo('cr_pending_accept'); }
+    return;
+  }
   if(_tutorialPhase==='cr_pending_accept'){
     if(missions.some(m=>m.id==='create_route'&&m.status==='active')){
       // Mission accepted → NOW re-frame Orijen + lava + Gigi Prime centre and run
@@ -20939,7 +21213,9 @@ function updateMissions(dtSd){
   // built condition is kept as a safety fallback.
   {
     const _crLava=(galaxy && _tutorialLavaPlanetId>=0)?galaxy.planets[_tutorialLavaPlanetId]:null;
-    if((_orijenDetailsOpenedTut || (_crLava && _crLava.playerBuiltStation))
+    // Deferred until the first-train tutorial segment completes (was queued on
+    // first Orijen-details open). Lava-station-built remains a safety fallback.
+    if((_ftFirstTrainTutDone || (_crLava && _crLava.playerBuiltStation))
        && !_missionPending('create_route') && !missions.some(mx=>mx.id==='create_route'&&mx.status==='completed')){
       pendingMissionIntros.push({defId:'create_route',readySd:stardate});
     }
@@ -22879,41 +23155,60 @@ function drawTrainDetailPopup(){
     _finRow('PROFIT', profit, py+348);
   }
   // ── Current Route section ─────────────────────────────────────
-  // The whole panel is a single click target: clicking anywhere inside it
-  // opens the [R] ROUTES popup, scrolled so this train's row is visible.
-  // Bounds + hover highlight are painted FIRST so subsequent label / strip
-  // drawing sits on top of the wash.
-  popupState.currentRouteBounds={x:px+1,y:py+366,w:pw-2,h:ph-366-1};
-  if(popupState.hoverCurrentRoute){
-    ctx.fillStyle='rgba(120,210,180,0.10)';
-    ctx.fillRect(px+1,py+367,pw-2,ph-366-2);
-    ctx.strokeStyle='rgba(120,210,180,0.45)'; ctx.lineWidth=1;
-    ctx.beginPath(); ctx.rect(px+1.5,py+366.5,pw-3,ph-366-2); ctx.stroke();
-  }
+  // Divider (always). When the train has NO route, show a centred "ASSIGN
+  // ROUTE" button (no [R]-open hover behaviour). Otherwise the whole pane is a
+  // click target that opens the [R] ROUTES popup, with the route strip.
+  const _tdNoRoute = !(t.route&&t.route.stops&&t.route.stops.length>=2) && !(t.queuedRoute&&t.queuedRoute.stops&&t.queuedRoute.stops.length>=2);
   ctx.strokeStyle='rgba(80,60,30,0.4)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(px,py+366); ctx.lineTo(px+pw,py+366); ctx.stroke();
-  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
-  ctx.fillStyle=popupState.hoverCurrentRoute?'rgba(220,200,120,0.95)':'rgba(200,140,60,0.75)';
-  ctx.fillText('CURRENT ROUTE',px+14,py+380);
-  if(popupState.hoverCurrentRoute){
-    ctx.font='9px "Exo 2",sans-serif'; ctx.textAlign='right';
-    ctx.fillStyle='rgba(180,230,210,0.80)';
-    ctx.fillText('click to open [R] ROUTES →',px+pw-14,py+380);
-    ctx.textAlign='left';
+  if(_tdNoRoute){
+    popupState.currentRouteBounds=null; popupState.hoverCurrentRoute=false;
+    ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
+    ctx.fillStyle='rgba(200,140,60,0.75)'; ctx.fillText('CURRENT ROUTE',px+14,py+380);
+    // ASSIGN ROUTE — blue pill, centred vertically + horizontally in the pane.
+    const _arHov=!!popupState.assignRouteBtnHover;
+    const _abw=150, _abh=30, _paneTop=py+388, _paneBot=py+ph-10;
+    const _abx=Math.round(px+(pw-_abw)/2), _aby=Math.round((_paneTop+_paneBot)/2-_abh/2);
+    ctx.fillStyle=_arHov?'rgb(70,150,250)':'rgb(45,110,220)';
+    ctx.beginPath(); ctx.roundRect(_abx,_aby,_abw,_abh,5); ctx.fill();
+    ctx.strokeStyle=_arHov?'rgba(180,225,255,1)':'rgba(120,190,255,0.9)'; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.roundRect(_abx,_aby,_abw,_abh,5); ctx.stroke();
+    ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillStyle='#fff'; ctx.fillText('ASSIGN ROUTE',_abx+_abw/2,_aby+_abh/2+0.5);
+    ctx.textBaseline='alphabetic'; ctx.textAlign='left';
+    popupState.assignRouteBtnBounds={x:_abx,y:_aby,w:_abw,h:_abh};
+  } else {
+    popupState.assignRouteBtnBounds=null;
+    popupState.currentRouteBounds={x:px+1,y:py+366,w:pw-2,h:ph-366-1};
+    if(popupState.hoverCurrentRoute){
+      ctx.fillStyle='rgba(120,210,180,0.10)';
+      ctx.fillRect(px+1,py+367,pw-2,ph-366-2);
+      ctx.strokeStyle='rgba(120,210,180,0.45)'; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.rect(px+1.5,py+366.5,pw-3,ph-366-2); ctx.stroke();
+    }
+    ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
+    ctx.fillStyle=popupState.hoverCurrentRoute?'rgba(220,200,120,0.95)':'rgba(200,140,60,0.75)';
+    ctx.fillText('CURRENT ROUTE',px+14,py+380);
+    if(popupState.hoverCurrentRoute){
+      ctx.font='9px "Exo 2",sans-serif'; ctx.textAlign='right';
+      ctx.fillStyle='rgba(180,230,210,0.80)';
+      ctx.fillText('click to open [R] ROUTES →',px+pw-14,py+380);
+      ctx.textAlign='left';
+    }
+    if(t.route&&t.route.isTempRoute&&t.route.phase==='transit'&&t.queuedRoute){
+      ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(255,160,60,0.6)';
+      ctx.fillText('(completing segment — new route queued)',px+130,py+380);
+    } else if(t.route&&t.queuedRoute){
+      ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(255,160,60,0.6)';
+      ctx.fillText('(temp route — heading to start)',px+130,py+380);
+    } else if(t.route&&t.route.isTempRoute){
+      ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(255,160,60,0.6)';
+      ctx.fillText('(repositioning)',px+130,py+380);
+    }
+    ctx.save();
+    drawRouteStrip(t, px+14, py+397, pw-28);
+    ctx.restore();
   }
-  if(t.route&&t.route.isTempRoute&&t.route.phase==='transit'&&t.queuedRoute){
-    ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(255,160,60,0.6)';
-    ctx.fillText('(completing segment — new route queued)',px+130,py+380);
-  } else if(t.route&&t.queuedRoute){
-    ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(255,160,60,0.6)';
-    ctx.fillText('(temp route — heading to start)',px+130,py+380);
-  } else if(t.route&&t.route.isTempRoute){
-    ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(255,160,60,0.6)';
-    ctx.fillText('(repositioning)',px+130,py+380);
-  }
-  ctx.save();
-  drawRouteStrip(t, px+14, py+397, pw-28);
-  ctx.restore();
   if(t.route&&t.route.phase==='transit'){
     const r3=t.route;
     const fP4=_gp(r3.stops[r3.fromIdx]), tP4=_gp(r3.stops[r3.toIdx]);
@@ -25206,14 +25501,14 @@ function drawPlanetDetailPopup(){
         const dem=Math.round(rawDem*10)/10;
         // Supply: show all cargo with supply ≥0.5
         if(sup>=0.5) _supItems.push({ctype,sup,rawSup});
-        // Demand: show resource-type cargo only (no hazmat, no passengers/mail)
+        // Demand: show resource-type cargo (and passengers/mail) — no hazmat.
         // Flowers demand is hidden until flowers have been discovered (flowers car unlocked)
         const _flowerDemVisible=ctype==='flowers'&&_flowersCarUnlocked;
         const _medicalDemVisible=ctype==='medical'&&_medicalCarUnlocked;
         const _grainDemVisible=ctype==='grain'&&_grainCarUnlocked;
         const _fruitDemVisible=ctype==='fruit'&&_fruitCarUnlocked;
         const _machineryDemVisible=ctype==='machinery'&&_machineryCarUnlocked;
-        if(ctype!=='hazmat'&&(ctype==='water'||ctype==='livestock'||ctype==='grain'||ctype==='fruit'||ctype==='ice'||ctype==='sand'||ctype==='gold'||ctype==='oil'||ctype==='battery'||ctype==='chemical'||_flowerDemVisible||_medicalDemVisible||_grainDemVisible||_fruitDemVisible||_machineryDemVisible)&&dem>=0.5) _demItems.push({ctype,dem,rawDem});
+        if(ctype!=='hazmat'&&(ctype==='passengers'||ctype==='mail'||ctype==='water'||ctype==='livestock'||ctype==='grain'||ctype==='fruit'||ctype==='ice'||ctype==='sand'||ctype==='gold'||ctype==='oil'||ctype==='battery'||ctype==='chemical'||_flowerDemVisible||_medicalDemVisible||_grainDemVisible||_fruitDemVisible||_machineryDemVisible)&&dem>=0.5) _demItems.push({ctype,dem,rawDem});
       }
       if(p.isFlowersOrigin) _supItems.sort((a,b)=>(a.ctype==='flowers'?-1:b.ctype==='flowers'?1:b.sup-a.sup));
       else _supItems.sort((a,b)=>b.sup-a.sup);
@@ -25423,6 +25718,7 @@ function drawPlanetDetailPopup(){
 }
 
 let trainsPopupAddBounds=null;
+let routesPopupAddBounds=null, _routeAddHover=false; // Routes window "+ NEW ROUTE" button
 let trainsPopupRowBounds=[]; // [{x,y,w,h, trainIdx}] for dbl-click name edit
 let trainsPopupReorderBounds=[]; // [{x,y,w,h, trainObj, dir, ri}] hover up/down reorder arrows
 let routesPopupRowBounds=[]; // [{x,y,w,h, trainIdx}] for ROUTES popup click hit-tests
@@ -27159,6 +27455,18 @@ function drawRoutesPopup(){
   ctx.textAlign='left';
   ctx.fillStyle=popupState.routesEscHover?'rgba(255,255,255,0.92)':'rgba(90,160,140,0.65)';
   ctx.fillText(_rEscTxt,_rEscX,py+21);
+  // "+ NEW ROUTE" button — green pill just left of [ESC] (mirrors +NEW TRAIN).
+  ctx.font='bold 9px Orbitron,sans-serif';
+  const _nrLabel='+ NEW ROUTE';
+  const _nrBw=Math.round(ctx.measureText(_nrLabel).width)+16, _nrBh=18;
+  const _nrBx=_rEscX-10-_nrBw, _nrBy=py+6;
+  routesPopupAddBounds={x:_nrBx,y:_nrBy,w:_nrBw,h:_nrBh};
+  ctx.fillStyle=_routeAddHover?'rgba(45,200,90,0.97)':'rgba(30,160,70,0.85)';
+  ctx.beginPath(); ctx.roundRect(_nrBx,_nrBy,_nrBw,_nrBh,4); ctx.fill();
+  ctx.strokeStyle=_routeAddHover?'rgba(80,240,120,0.90)':'rgba(50,220,90,0.7)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.roundRect(_nrBx,_nrBy,_nrBw,_nrBh,4); ctx.stroke();
+  ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillStyle='#fff';
+  ctx.fillText(_nrLabel,_nrBx+_nrBw/2,_nrBy+_nrBh/2+0.5); ctx.textBaseline='alphabetic'; ctx.textAlign='left';
   ctx.strokeStyle='rgba(40,140,110,0.40)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(px,py+30); ctx.lineTo(px+pw,py+30); ctx.stroke();
 
@@ -28042,6 +28350,26 @@ function drawPanelTabs(){
     ctx.font='bold 10px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
     ctx.fillStyle='#000';
     ctx.fillText('SELECT A TRAIN',px+PANEL_W/2,TOP_H/2+0.5);
+  } else if(_assignRouteTrainIdx!=null||_newRouteMode){
+    // YELLOW variant of the banner for the route-stop-picking flows (assign to a
+    // known train, OR +NEW ROUTE). Header text steps through the route-building
+    // prompts. Modeled on the blue SELECT A TRAIN banner above (opaque, square,
+    // reads as the box top).
+    _clearTextOverlayRect(px, 0, PANEL_W, TOP_H);
+    ctx.fillStyle='rgb(4,8,20)'; ctx.fillRect(px,0,PANEL_W,TOP_H);
+    ctx.fillStyle='rgb(255,205,55)';
+    ctx.fillRect(px+1, 0, PANEL_W-2, TOP_H+2);
+    ctx.strokeStyle='rgba(255,225,90,0.9)'; ctx.lineWidth=2;
+    ctx.beginPath();
+    ctx.moveTo(px+1, TOP_H+1); ctx.lineTo(px+1, 1);
+    ctx.lineTo(px+PANEL_W-1, 1); ctx.lineTo(px+PANEL_W-1, TOP_H+1);
+    ctx.stroke();
+    const _arHdr=(routeStops.length===0)?'SELECT A PLANET':'SHIFT + CLICK TO ADD A STOP';
+    let _arFs=10; ctx.font='bold '+_arFs+'px Orbitron,sans-serif';
+    while(_arFs>7 && ctx.measureText(_arHdr).width>PANEL_W-12){ _arFs--; ctx.font='bold '+_arFs+'px Orbitron,sans-serif'; }
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillStyle='#000';
+    ctx.fillText(_arHdr,px+PANEL_W/2,TOP_H/2+0.5);
   }
 
   ctx.textBaseline='alphabetic';
@@ -29729,7 +30057,7 @@ function drawGalaxy(ts,dt){
   // ── Route Train Here button — compact green pill in the LOWER-LEFT bar,
   // just right of PLANET DETAILS (or where it would be, for a star). Only when
   // no multi-stop route is being planned and nothing's pending.
-  if(sel&&(sel.type==='planet'||sel.type==='star')&&routeStops.length<2&&!routeHerePending&&!assignPending&&trains.some(t=>t.isPlayer)){
+  if(sel&&(sel.type==='planet'||sel.type==='star')&&routeStops.length<2&&!routeHerePending&&!assignPending&&_assignRouteTrainIdx==null&&!_newRouteMode&&trains.some(t=>t.isPlayer)){
     let _rhX,_rhY,_rhW,_rhH,_rhFont;
     if(_stackInfoBtns){
       // Stacked beneath PLANET DETAILS — share its x/width + the smaller 8px font.
@@ -30285,7 +30613,7 @@ function galaxyClick(sx,sy,shiftKey){
           }
           sel={type:'planet',data:nearestP}; routeStops=[nearestP]; return;
         }
-        routeStops.push(nearestP); if(routeStops.length>=2) panelTab='trains'; return;
+        routeStops.push(nearestP); if(routeStops.length>=2 && _assignRouteTrainIdx==null && !_newRouteMode) panelTab='trains'; return;
       }
       if(nearestP.isStar){
         // Raw star object (fallback if no proxy) — still select as star type
@@ -30377,7 +30705,23 @@ function panelClick(sx,sy,shiftKey){
   // station-row hit-test since it sits over the bottom rows.
   if(panelTab==='stations' && _stationsAssignBtnBounds){
     const b=_stationsAssignBtnBounds;
-    if(sx>=b.x&&sx<=b.x+b.w&&sy>=b.y&&sy<=b.y+b.h){ assignPending=true; panelTab='trains'; return; }
+    if(sx>=b.x&&sx<=b.x+b.w&&sy>=b.y&&sy<=b.y+b.h){
+      // "Assign route to a known train" flow (started from Train Details): the
+      // target train is already chosen, so assign the built route to it directly
+      // and fire the green "ROUTE confirmed" callout pointing at that train.
+      if(_assignRouteTrainIdx!=null){
+        const _tr=trains[_assignRouteTrainIdx];
+        if(_tr && routeStops.length>=2){
+          assignRouteToTrain(_tr); // clears routeStops / sel / assignPending
+          _routeHereResultMs=Date.now(); _routeHereResultOk=true; _routeHereResultTrain=_tr;
+        }
+        _assignRouteTrainIdx=null;
+        return;
+      }
+      // +NEW ROUTE flow OR generic build-from-Stations: hand off to SELECT A
+      // TRAIN (the player picks the train next).
+      _newRouteMode=false; assignPending=true; panelTab='trains'; return;
+    }
   }
   if(panelTab==='stations'){
     const stationPlanets=galaxy.planets.filter(p=>p.hasStation&&(!p.isAlienRelic||visitedPlanetIds.has(p.id)));
@@ -30442,7 +30786,9 @@ function panelClick(sx,sy,shiftKey){
     return;
   }
   if(assignPending){
+    const _ok=routeStops.length>=2;
     assignRouteToTrain(train);
+    if(_ok){ _routeHereResultMs=Date.now(); _routeHereResultOk=true; _routeHereResultTrain=train; }
     return;
   }
   const alreadySelected=sel&&sel.type==='car'&&sel.data.trainIdx===ti;
@@ -31267,6 +31613,10 @@ canvas.addEventListener('mousemove',e=>{
     // CURRENT ROUTE panel — clickable region that opens the [R] ROUTES popup.
     const _crb=popupState.currentRouteBounds;
     popupState.hoverCurrentRoute=!!(_crb&&cp.x>=_crb.x&&cp.x<=_crb.x+_crb.w&&cp.y>=_crb.y&&cp.y<=_crb.y+_crb.h);
+    // ASSIGN ROUTE button (shown when the train has no route).
+    const _arb=popupState.assignRouteBtnBounds;
+    popupState.assignRouteBtnHover=!!(_arb&&cp.x>=_arb.x&&cp.x<=_arb.x+_arb.w&&cp.y>=_arb.y&&cp.y<=_arb.y+_arb.h);
+    if(popupState.assignRouteBtnHover) canvas.style.cursor='pointer';
     // AT A GLANCE / STATS tab hover.
     let _tdth=null;
     if(popupState.tdTabBounds){ for(const tb of popupState.tdTabBounds){ if(cp.x>=tb.x&&cp.x<=tb.x+tb.w&&cp.y>=tb.y&&cp.y<=tb.y+tb.h){ _tdth=tb.id; break; } } }
@@ -31373,8 +31723,9 @@ canvas.addEventListener('mousemove',e=>{
     if(_vh>=0){ _routesVizHoverCpX=cp.x; _routesVizHoverCpY=cp.y; }
     const _reb=popupState.routesEscBounds;
     popupState.routesEscHover=!!(_reb&&cp.x>=_reb.x&&cp.x<=_reb.x+_reb.w&&cp.y>=_reb.y&&cp.y<=_reb.y+_reb.h);
-    if(_routesRowHover>=0||_routesStopHover>=0||_routesRuleBtnHover>=0||popupState.routesEscHover) canvas.style.cursor='pointer';
-  } else { _routesRowHover=-1; _routesStopHover=-1; _routesRuleBtnHover=-1; _routesVizHover=-1; _routesVizHoverStartMs=0; }
+    _routeAddHover=!!(routesPopupAddBounds&&cp.x>=routesPopupAddBounds.x&&cp.x<=routesPopupAddBounds.x+routesPopupAddBounds.w&&cp.y>=routesPopupAddBounds.y&&cp.y<=routesPopupAddBounds.y+routesPopupAddBounds.h);
+    if(_routesRowHover>=0||_routesStopHover>=0||_routesRuleBtnHover>=0||popupState.routesEscHover||_routeAddHover) canvas.style.cursor='pointer';
+  } else { _routesRowHover=-1; _routesStopHover=-1; _routesRuleBtnHover=-1; _routesVizHover=-1; _routesVizHoverStartMs=0; _routeAddHover=false; }
   // Pre-Departure Checklist popup — hover tracking for ESC, dropdown rows,
   // CREATE RULE button, and existing-rule delete X.
   if(activePopup==='predeparturechecklist'){
@@ -32572,6 +32923,19 @@ canvas.addEventListener('mouseup',e=>{
         }
         return;
       }
+      // Train detail ASSIGN ROUTE button → enter "assign route to this known
+      // train" mode: close the popup, jump to galaxy view with the Stations tab
+      // selected + the yellow SELECT-A-PLANET box, and remember the train.
+      if(activePopup==='train'&&popupState.assignRouteBtnBounds){
+        const b=popupState.assignRouteBtnBounds;
+        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+          _assignRouteTrainIdx=popupState.trainIdx;
+          activePopup=null; popupState={};
+          panelTab='stations'; sel=null; routeStops=[]; assignPending=false; routeHerePending=false;
+          playSound('click');
+          return;
+        }
+      }
       // Train detail AT A GLANCE / STATS tab click → switch tab.
       if(activePopup==='train'&&popupState.tdTabBounds){
         for(const tb of popupState.tdTabBounds){
@@ -32969,6 +33333,19 @@ canvas.addEventListener('mouseup',e=>{
       }
       // Routes popup interactions
       if(activePopup==='routes'){
+        // "+ NEW ROUTE" button → enter the build-a-new-route flow: close the
+        // popup, jump to galaxy view with the Stations tab + yellow
+        // SELECT-A-PLANET box; ASSIGN TO TRAIN later hands off to SELECT A TRAIN.
+        if(routesPopupAddBounds){
+          const b=routesPopupAddBounds;
+          if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+            _newRouteMode=true; _assignRouteTrainIdx=null;
+            activePopup=null; popupState={};
+            panelTab='stations'; sel=null; routeStops=[]; assignPending=false; routeHerePending=false;
+            playSound('click');
+            return;
+          }
+        }
         // [ESC] close label
         if(popupState.routesEscBounds){
           const b=popupState.routesEscBounds;
@@ -33521,6 +33898,7 @@ function _fireEsc(){
   // (mirrors the clickable [ESC] label in its top-right corner).
   if(activePopup==='controls'){ activePopup='options'; popupState={}; return; }
   if(activePopup==='ancient_message'){ pendingAncientPopups.shift(); activePopup=null; popupState={}; return; }
+  if(_assignRouteTrainIdx!=null||_newRouteMode){ _assignRouteTrainIdx=null; _newRouteMode=false; routeStops=[]; assignPending=false; routeHerePending=false; return; }
   if(routeHerePending||assignPending){ routeHerePending=false; assignPending=false; routeStops=[]; return; }
   if(activePopup){ activePopup=null; popupState={}; colorPickerState=null; return; }
   activePopup='quitconfirm'; popupState={};
@@ -34194,7 +34572,10 @@ function _restoreFromSave(save){
   // create_route is queued once the Orijen window has been opened. For a save taken
   // at cr_pending_accept (or 'done') before create_route was introduced, set the
   // opened flag so the intro fires shortly after load.
-  if((_tutorialPhase==='cr_pending_accept'||_tutorialPhase==='done')&&!_crIntroduced){ _tutorialDoneMs=Date.now(); _lavaClosedTimerMs=Date.now(); _orijenDetailsOpenedTut=true; }
+  if((_tutorialPhase==='cr_pending_accept'||_tutorialPhase==='done')&&!_crIntroduced){ _tutorialDoneMs=Date.now(); _lavaClosedTimerMs=Date.now(); _orijenDetailsOpenedTut=true; _ftFirstTrainTutDone=true; }
+  // If the save was taken DURING the first-train tutorial segment, restore its
+  // "framed" flag so the camera re-locks on the train after load.
+  if(_tutorialPhase==='ft_focus_train') _ftFocusFramed=false;
   // Re-arm the create_route → build_foundry 10 s gate if create_route is
   // completed in the save but build_foundry hasn't been introduced yet.
   const _bfIntroduced=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='build_foundry');
