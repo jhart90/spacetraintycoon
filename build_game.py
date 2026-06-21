@@ -521,7 +521,45 @@ let _smoothTextMode = false;
     if(typeof t!=='string' || t.indexOf('[ESC]')<0) return t;
     return _isFullscreen() ? t.split('[ESC]').join('[X]') : t;
   }
+  // Lighten an rgb/rgba colour string toward white (and bump alpha a touch) so
+  // the ✕ close glyph reads a little brighter than the dim label it replaces.
+  // Non-rgb styles (hex, named) pass through unchanged.
+  function _lightenStyle(s){
+    if(typeof s!=='string') return s;
+    const m=s.match(/^rgba?\(([^)]+)\)/i);
+    if(!m) return s;
+    const p=m[1].split(',').map(v=>parseFloat(v));
+    if(p.length<3||p.some(v=>isNaN(v))) return s;
+    const k=0.34;
+    const r=Math.round(p[0]+(255-p[0])*k), g=Math.round(p[1]+(255-p[1])*k), b=Math.round(p[2]+(255-p[2])*k);
+    const a=Math.min(1,(p.length>=4?p[3]:1)+0.20);
+    return 'rgba('+r+','+g+','+b+','+a+')';
+  }
+  // Draw the ✕ close glyph onto the HD overlay in place of a "[ESC] close"
+  // label — a bigger, bolder, slightly-lighter, more-recognisable close button.
+  // Reconstructs the RIGHT EDGE of where the label would have sat (from the
+  // caller's font + textAlign) so the glyph always lands in the popup's top-
+  // right corner regardless of whether the caller right- or left-aligned it.
+  // The caller's existing escBounds hit-rect is left untouched (a generous
+  // corner click target).
+  function _drawCloseGlyph(x, y){
+    _syncTextState(); // mirror caller font/fill/align/baseline onto tctx
+    const _align=tctx.textAlign||'start';
+    let _rightX=x;
+    if(_align==='left'||_align==='start'){ _rightX=x+tctx.measureText('[ESC] close').width; }
+    else if(_align==='center'){ _rightX=x+tctx.measureText('[ESC] close').width/2; }
+    const _f=tctx.font, _fs=tctx.fillStyle, _al=tctx.textAlign;
+    tctx.textAlign='right';
+    tctx.font='bold 14px "Exo 2",sans-serif';
+    tctx.fillStyle=_lightenStyle(_fs);
+    tctx.fillText('✕', _rightX, y);
+    tctx.font=_f; tctx.fillStyle=_fs; tctx.textAlign=_al;
+  }
   ctx.fillText = function(text, x, y, maxWidth){
+    // Universal close affordance: render every "[ESC] close" label as a bold ✕
+    // glyph in the popup's top-right corner. Intercepted BEFORE _escLabelSwap so
+    // it applies in fullscreen too; the caller's escBounds hit-rect is untouched.
+    if(text==='[ESC] close'){ _drawCloseGlyph(x, y); return; }
     text=_escLabelSwap(text);
     _syncTextState();
     if(_smoothTextMode){ _drawTextViaBM(text, x, y, 0); return; }
@@ -883,7 +921,7 @@ function getCP(e){
 }
 
 // ── title constants ──────────────────────────────────────────
-const GAME_VERSION = 'v0.4.5'; // shown bottom-left of the title screen
+const GAME_VERSION = 'v0.4.6'; // shown bottom-left of the title screen
 const CAR_MID = ['car_passenger','car_royal','car_water_tank','car_cargo','car_livestock','car_mail','car_ice','car_sand','car_ore','car_iron','car_hazmat','car_oil','car_battery','car_chemical'];
 const CAR_W=112, CAR_H=80, RAIL_Y=H*0.68;
 const T_PALS = [
@@ -1094,7 +1132,7 @@ const CARGO_SHORT      = {passengers:'PSNGR', livestock:'LVSTK', mail:'MAIL', wa
 // text. Looked up case-insensitively keyed on the displayed name (handles both
 // "iron" and "Molten Ore"). Choose the dominant hue of each cargo's sprite.
 const CARGO_TEXT_COLORS = {
-  passengers:'#c30010', livestock:'#b6815c', mail:'#4090d0', water:'#42a8ff',
+  passengers:'#c30010', livestock:'#b6815c', mail:'#ffffff', water:'#42a8ff',
   ice:'#a4dcff', sand:'#bb8459', 'molten ore':'#ff5a28', iron:'#5e626b',
   gold:'#ffd148', diamond:'#a4f0ff', hazmat:'#dcff48', oil:'#9aa83a',
   battery:'#ffd744', chemical:'#80e860', flowers:'#ff7acc', medical:'#ff5a78',
@@ -3487,6 +3525,8 @@ let _ftFirstTrainTutDone=false;
 // (so a framing phase re-frames once on entry, then lets the scene animate).
 let _ftFrameKey='';
 let _ftWaitStartMs=0; // ms when the post-unload 20 s wait began (0=not started)
+let _ftSawLoading=false; // ft_loading: true once the first train has been observed LOADING cargo at Orijen
+let _ftLoadDoneMs=0;     // ft_loading: ms when loading finished (0=not yet) — drives the LOADING bubble's own fade-out, independent of the phase advance
 let _tutorialDoneMs=0;         // real-time ms when the tutorial chain reached 'done' — arms the 1 s create_route intro
 let _crTutorialDoneMs=0;       // real-time ms when the create_route tutorial chain reached 'all_done' — arms buy_second_train (10 s) and build_foundry (40 s) intros
 let _crTrainPreselected=false; // true if a train was already selected when the create_route tutorial chain started (drives the blue companion bubble in cr_click_orijen / cr_shift_click_other)
@@ -3500,6 +3540,7 @@ let _orbitHintPlanetId=-1;        // planet id the callout points at
 let _findOreTimerMs=0;     // real-time ms when create_route mission completed (0=not yet). Now arms the build_foundry intro 10 s later (was Find Molten Ore before that mission was removed).
 let _foundryUnlockSd=0;    // stardate at which the delayed IRON FOUNDRY unlock+popup fires (0=not armed). 20 in-game seconds after create_route completes = stardate+0.02.
 let _produceIronTimerMs=0; // real-time ms when produce_iron mission completed (0=not yet)
+let _produceIronIntroAtMs=0; // real-time ms (Date.now()) at which the DELAYED produce_iron NEW MISSION intro fires — armed 15 s after build_foundry completes so the popup doesn't preempt the add-cars tutorial step. 0=not armed.
 let _ironCarUnlockedMs=0;  // real-time ms when the IRON CAR first unlocked (0=not yet). Gates the upgrade_station mission intro 10 s later.
 let _steelMissionTimerMs=0; // real-time ms when first steel was produced (arms 10s intro for design_better_train)
 // Steel production sliding-window log for N700 unlock. Each entry: {sd, units}.
@@ -3597,7 +3638,8 @@ let _playerDeliveryCount=0;
 let _galaxyCensusTimerMs=0;     // real-time ms when 15th planet was visited (0=not yet)
 let _sandstormCheckSd=0;        // last SD at which sandstorm_relief trigger was checked
 let _bhResearchTimerMs=0;       // real-time ms when bh_research's two gate conditions first both held (0=not armed). Not persisted; re-arms on load.
-let _madScientistTimerMs=0;     // real-time ms when player PURCHASED their first Large Station (0=not armed). Armed at the purchase click, not from state; not persisted (so loading a save with a pre-existing Large Station won't fire the mission).
+let _madScientistTimerMs=0;     // real-time ms when player PURCHASED their SECOND Large Station (0=not armed). Armed at the purchase click that brings the player's large-station count to 2, not from state; not persisted (so loading a save with pre-existing Large Stations won't fire the mission).
+let _madSciStationHintFocusPid=-1; // planet id last camera-focused for a station-less Mad Scientist pickup arrival (-1 = none / episode reset). One-shot per arrival so we don't re-yank the camera every frame.
 let _ancientSchematicsTimerMs=0; // real-time ms when the player FIRST visited an ancient planet (0=not armed). Fires the Ancient Schematics mission 5 s later. Transient.
 let _ancientSchematicsPlanetId=-1; // the ancient planet that triggered the schematics mission (the deliver-from source). Transient (mission stores it as sourcePlanetId).
 let _ancientSchematicsFired=false; // one-shot: true once the first ancient visit has armed/created the mission. Persisted.
@@ -19602,6 +19644,16 @@ function _drawTutorialChain(stage){
     cam.scale=_sc; cam.x=planet.x+PANEL_W/(2*_sc); cam.y=planet.y-TOP_H/(2*_sc); tracking=false;
     if(typeof clampCamera==='function') clampCamera();
   };
+  // Re-centre the camera on a world point EVERY frame (keeps the existing
+  // scale). Used to "lock" the camera onto an orbiting planet (or the moving
+  // train) while a tutorial bubble is displayed — the one-shot framers above
+  // drift as the planet orbits, so the lock re-applies the centre each frame.
+  const _ftLockOnWorld=(wx,wy)=>{
+    const _sc=cam.scale;
+    cam.x=wx+PANEL_W/(2*_sc); cam.y=wy-TOP_H/(2*_sc); tracking=false;
+    if(typeof clampCamera==='function') clampCamera();
+  };
+  const _ftLockOnPlanet=(p)=>{ if(p) _ftLockOnWorld(p.x,p.y); };
   // Frame so two planets both sit in the visible area (for route building).
   const _ftFrameBoth=(a,b)=>{
     if(!a||!b) return;
@@ -19977,6 +20029,12 @@ function _drawTutorialChain(stage){
     const _dp=_dId>=0?galaxy.planets[_dId]:null;
     const _open=(activePopup==='planet'&&popupState.planet&&_dId>=0&&popupState.planet.id===_dId);
     const _built=!!(_dp&&_dp.playerBuiltStation);
+    // Fallback: player closed the desert details window BEFORE building a
+    // station → roll back to the double-click prompt so they're guided to
+    // reopen it (mirrors the build_station phase fallback). Without this the
+    // phase would silently stall: no bubble renders (gated on _open) and the
+    // advance never fires (gated on _built).
+    if(!_open && !_built && _tutorialFadeOutStartMs===0){ _ftFrameKey=''; _advanceTo('ft_desert_dblclick'); return; }
     if(_tutorialFadeOutStartMs===0 && _built && !_open) _tutorialFadeOutStartMs=_now; // station built + window closed → advance
     const r=_resolveAlpha();
     if(r.advanced){ _ftFrameKey=''; _advanceTo('ft_route_orijen'); return; }
@@ -20044,7 +20102,7 @@ function _drawTutorialChain(stage){
     const _assigned=!!(_ft && _ft.route);
     if(_tutorialFadeOutStartMs===0 && _assigned) _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
-    if(r.advanced){ _ftFrameKey=''; _advanceTo('ft_loading'); return; }
+    if(r.advanced){ _ftFrameKey=''; _ftSawLoading=false; _ftLoadDoneMs=0; _advanceTo('ft_loading'); return; }
     _drawBubble(['CLICK on your TRAIN to ASSIGN the ROUTE'], {x:W-PANEL_W,y:TOP_H+70}, r.alpha, {below:true, target:{x:W-PANEL_W-2,y:TOP_H+70}});
     return;
   }
@@ -20058,10 +20116,28 @@ function _drawTutorialChain(stage){
     if(_tutorialFadeOutStartMs===0 && _atDesert) _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
     if(r.advanced){ _ftFrameKey=''; _advanceTo('ft_unloading'); return; }
-    if(_ft){
+    // ── Done-loading detection ──────────────────────────────────
+    // The bubble fades out as soon as the train FINISHES loading cargo at
+    // Orijen — independently of the phase advance, which still waits until the
+    // train reaches the desert planet (_atDesert above). cargoPhase==='loading'
+    // while loading; clears to null when done. r.phase==='transit' is a
+    // fast-forward fallback (loading may complete between frames at high speed).
+    const _loadingNow=!!(_ft && _ft.cargoPhase==='loading');
+    if(_loadingNow) _ftSawLoading=true;
+    const _doneLoading=(_ftSawLoading && !_loadingNow) || !!(_ft && _ft.route && _ft.route.phase==='transit');
+    let _bubA=r.alpha;
+    if(_doneLoading){
+      if(_ftLoadDoneMs===0) _ftLoadDoneMs=_now;
+      _bubA=Math.min(_bubA, Math.max(0,1-(_now-_ftLoadDoneMs)/FADE_MS));
+    }
+    // Camera lock: hold Orijen centred while the bubble is up (watch it load);
+    // once loading is done, follow the departing train toward the desert.
+    if(!_doneLoading) _ftLockOnPlanet(_ori);
+    else if(_ft){ const [_lx,_ly]=getTrainCarPos(_ft,0); _ftLockOnWorld(_lx,_ly); }
+    if(_ft && _bubA>0){
       const [_tx,_ty]=getTrainCarPos(_ft,0);
       const [_sx,_sy]=w2s(_tx,_ty);
-      _drawBubble(['Your TRAIN is now LOADING CARGO before departure'], {x:_sx,y:_sy-18}, r.alpha, {color:'blue', target:{x:_sx,y:_sy}});
+      _drawBubble(['Your TRAIN is now LOADING CARGO before departure'], {x:_sx,y:_sy-18}, _bubA, {color:'blue', target:{x:_sx,y:_sy}});
     }
     return;
   }
@@ -20071,6 +20147,9 @@ function _drawTutorialChain(stage){
     const _dId=_ftDesertId();
     const _dp=_dId>=0?galaxy.planets[_dId]:null;
     if(_ftFrameKey!=='ft_unloading'){ _ftFrameLowOrbit(_dp); _ftFrameKey='ft_unloading'; }
+    // Camera lock: keep the desert planet centred every frame while the
+    // UNLOAD/RELOAD bubble is displayed (the train is in its orbit here).
+    _ftLockOnPlanet(_dp);
     const _leftDesert=!!(_ft && _ft.planetId!==_dId && _elapsed>=4000);
     if(_tutorialFadeOutStartMs===0 && (_leftDesert || _elapsed>=16000)) _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
@@ -21169,6 +21248,70 @@ function _drawVisitHint(){
   ctx.restore();
 }
 
+// A Mad Scientist: while the pickup is still outstanding and a PLAYER train has
+// arrived at the (station-less) scientist source planet, focus the camera on it
+// (once per arrival) and draw a blue callout bubble ABOVE the planet, tail
+// pointing DOWN, reminding the player that a STATION is needed before the
+// scientist ([Passengers]) can be loaded. STATION is bold; [Passengers] picks up
+// its cargo colour. Modeled on _drawVisitHint but uses the [bracket]/bold token
+// renderer so the styled words render correctly.
+function _drawMadSciStationHint(){
+  if(gs!=='galaxy'||!galaxy) return;
+  if(activePopup) return; // don't draw over open popups (keep the focus latch)
+  const m=missions.find(mx=>mx.id==='mad_scientist'&&mx.status==='active');
+  if(!m){ _madSciStationHintFocusPid=-1; return; }
+  const _pick=Array.isArray(m.objectives)?m.objectives.find(o=>o.id==='pickup_scientist'):null;
+  if(_pick&&_pick.done){ _madSciStationHintFocusPid=-1; return; } // scientist already aboard
+  const _sid=m.sourcePlanetId;
+  if(_sid==null){ _madSciStationHintFocusPid=-1; return; }
+  const _p=galaxy.planets[_sid];
+  if(!_p){ _madSciStationHintFocusPid=-1; return; }
+  // A station already here (player/starter/AI) → nothing to warn about.
+  if(_p.hasStation||_p.playerBuiltStation||_p.isStarter||_p.aiHasStation){ _madSciStationHintFocusPid=-1; return; }
+  // A PLAYER train must currently be AT this planet (arrived/orbiting — not mid-transit).
+  const _arrived=trains.some(t=>t&&t.isPlayer&&t.planetId===_sid&&(!t.route||t.route.phase!=='transit'));
+  if(!_arrived){ _madSciStationHintFocusPid=-1; return; }
+  // Focus the camera on the planet ONCE per arrival episode (zoom + centre in
+  // the visible playfield, accounting for the right panel + top bar).
+  if(_madSciStationHintFocusPid!==_sid){
+    _madSciStationHintFocusPid=_sid;
+    const _zTarget=Math.exp(Math.log(MIN_SC)+0.80*(Math.log(MAX_SC)-Math.log(MIN_SC)));
+    cam.scale=Math.max(MIN_SC,Math.min(MAX_SC,_zTarget));
+    const _sc=cam.scale;
+    cam.x=_p.x+PANEL_W/(2*_sc); cam.y=_p.y-TOP_H/(2*_sc); tracking=false;
+    if(typeof clampCamera==='function') clampCamera();
+  }
+  // Blue bubble ABOVE the planet, tail pointing DOWN.
+  const [_sx,_sy]=w2s(_p.x,_p.y);
+  const _sr=Math.max(10,_p.radius*cam.scale);
+  ctx.save();
+  const _font='10px "Exo 2",sans-serif';
+  ctx.font=_font;
+  const _toks=_objTokenize('A STATION must be built before [Passengers] can be loaded');
+  for(const _t of _toks){ if(_t.text.replace(/[^A-Za-z]/g,'').toUpperCase()==='STATION') _t.bold=true; }
+  const _tw=_objLineWidth(_toks,_font);
+  const _pad=12,_bH=28,_bR=7,_tailH=10;
+  const _bW=_tw+_pad*2;
+  let _bx=Math.round(_sx-_bW/2);
+  _bx=Math.max(8,Math.min(W-PANEL_W-8-_bW,_bx));
+  let _by=_sy-_sr-_tailH-_bH-6;
+  if(_by<TOP_H+6) _by=TOP_H+6; // keep on-screen; tail still points down at the planet
+  const _tailX=Math.max(_bx+_bR+8,Math.min(_sx,_bx+_bW-_bR-8));
+  // Clear the HD text overlay under the bubble so chat-log / hint-bar text
+  // doesn't bleed through (the bubble fill is on the MAIN canvas — see §1.1).
+  _clearTextOverlayRect(_bx-2,_by-2,_bW+4,_bH+4);
+  ctx.shadowColor='rgba(40,120,210,0.55)'; ctx.shadowBlur=8;
+  ctx.fillStyle='rgba(70,150,235,0.97)';
+  ctx.beginPath(); ctx.roundRect(_bx,_by,_bW,_bH,_bR); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(_tailX-7,_by+_bH); ctx.lineTo(_tailX+7,_by+_bH); ctx.lineTo(_tailX,_sy-_sr-2); ctx.closePath(); ctx.fill();
+  ctx.shadowBlur=0;
+  ctx.textBaseline='middle';
+  _objDrawLineCentered(_toks,_bx+_bW/2,_by+_bH/2,_font,'#fff');
+  ctx.textBaseline='alphabetic';
+  ctx.restore();
+}
+
 // Split-throttle design:
 //   • Intro-gate scans (mission-trigger conditions like "did the player visit
 //     a rocky planet", "total hazmat produced >= 2") run at most once per
@@ -21239,6 +21382,13 @@ function updateMissions(dtSd){
     if(!_ironDeliveredToNonDesert && trains.filter(t=>t.isPlayer).length<2){
       pendingMissionIntros.push({defId:'buy_second_train',readySd:stardate});
     }
+  }
+  // produce_iron intro: 15 real-time seconds after build_foundry completes
+  // (timer armed in the prerequisite-unlock loop). The delay lets the
+  // "Add Molten Ore + Water cars" train-builder tutorial step fire before the
+  // NEW MISSION popup steals focus. Guarded so it's queued exactly once.
+  if(_produceIronIntroAtMs>0&&Date.now()>=_produceIronIntroAtMs&&!_missionPending('produce_iron')&&!missions.some(mx=>mx.id==='produce_iron'&&mx.status==='completed')){
+    pendingMissionIntros.push({defId:'produce_iron',readySd:stardate});
   }
   // design_better_train intro: requires BOTH (a) steel has been produced
   // AND (b) the Class J engine is ALREADY unlocked. The 10-second real-time
@@ -21346,16 +21496,16 @@ function updateMissions(dtSd){
       _bhResearchTimerMs=0; // a gate condition lapsed before firing — disarm
     }
   }
-  // mad_scientist: fires 60 real-time seconds after the player PURCHASES
-  // their first Large Station. The timer is armed at the purchase-button
-  // click (see draw... build handler) — NOT from detecting the persistent
-  // hasLargeStation state — so loading a save that already has a Large
-  // Station won't fire it on game start. Timer not persisted: if the
-  // player reloads during the 60 s window the mission simply won't fire
-  // (acceptable edge case; avoids the load-time false trigger). Source =
-  // a random URBAN planet 20k–60k SU from the home star (Gigi Prime) with
-  // no rival/AI station.
-  if(_madScientistTimerMs>0&&Date.now()-_madScientistTimerMs>=60000&&
+  // mad_scientist: fires 15 real-time seconds after the player has built their
+  // SECOND Large Station. The timer is armed at the purchase-button click of the
+  // 2nd large station (see draw... build handler) — NOT from detecting the
+  // persistent hasLargeStation state — so loading a save that already has 2+
+  // Large Stations won't fire it on game start. Timer not persisted: if the
+  // player reloads during the 15 s window the mission simply won't fire until
+  // the next large-station purchase (acceptable edge case; avoids the load-time
+  // false trigger). Source = a random URBAN planet 20k–60k SU from the home star
+  // (Gigi Prime) with no rival/AI station.
+  if(_madScientistTimerMs>0&&Date.now()-_madScientistTimerMs>=15000&&
      !_missionPending('mad_scientist')&&!missions.some(mx=>mx.id==='mad_scientist')){
     const _msHomeP=galaxy.planets[galaxy.origenId];
     const _msHs=_msHomeP?galaxy.stars[_msHomeP.starId]:null;
@@ -21542,6 +21692,11 @@ function updateMissions(dtSd){
       // Unlock any missions whose prerequisite was this mission
       for(const _pd of MISSION_DEFS){
         if(_pd.prerequisite===m.id&&!_missionPending(_pd.id)){
+          // produce_iron's NEW MISSION popup is delayed an extra 15 s (armed
+          // here, fired in the timed-intro block in updateMissions) so it
+          // doesn't preempt the "Add Molten Ore + Water cars" train-builder
+          // tutorial step. All other prerequisite chains queue immediately.
+          if(_pd.id==='produce_iron'){ if(_produceIronIntroAtMs===0) _produceIronIntroAtMs=Date.now()+15000; continue; }
           pendingMissionIntros.push({defId:_pd.id,readySd:stardate});
         }
       }
@@ -30483,6 +30638,7 @@ function drawGalaxy(ts,dt){
   // Finance popup drawn last so its dropdown renders above the top stats bar
   drawFinancesPopup();
   _drawVisitHint();
+  _drawMadSciStationHint();
   // (_drawOrbitHintCallout moved to the pre-popup callout block above so it
   // renders BEHIND any open popup window.)
   // Supply/Demand hover tooltip drawn LAST so it floats on top of any
@@ -33064,15 +33220,19 @@ canvas.addEventListener('mouseup',e=>{
             p.hasLargeStation=true;
             _ga('station_upgraded_large',{biome:p.type.id, planet:p.name, sd:Math.floor(stardate)});
             playSound('construction_complete');
-            // A Mad Scientist: arm the 60-second intro timer the moment the
-            // player PURCHASES a Large Station (this click). Armed here — at
-            // the purchase EVENT — rather than from detecting the persistent
-            // hasLargeStation state, so loading a save that already has a
-            // Large Station does NOT fire the mission ("on game start" bug).
-            // Only arms if the mission hasn't already fired/completed and the
-            // timer isn't already running.
-            if(gs==='galaxy'&&_madScientistTimerMs===0&&!_missionPending('mad_scientist')){
-              _madScientistTimerMs=Date.now();
+            // A Mad Scientist: arm the 15-second intro timer the moment this
+            // purchase brings the player's LARGE-STATION count to 2 (this click
+            // included). Armed here — at the purchase EVENT — rather than from
+            // detecting the persistent hasLargeStation state, so loading a save
+            // that already has 2+ Large Stations does NOT fire the mission ("on
+            // game start" bug). Only arms if the mission hasn't already fired/
+            // completed and the timer isn't already running. Counts only the
+            // player's own large stations (AI large stations also set
+            // hasLargeStation — see _aiUpgradeStation — so they're excluded via
+            // playerBuiltStation/isStarter, matching design_better_train's gate).
+            if(gs==='galaxy'&&_madScientistTimerMs===0&&!_missionPending('mad_scientist')&&!missions.some(mx=>mx.id==='mad_scientist')){
+              const _plLargeCount=galaxy.planets.filter(q=>q&&(q.playerBuiltStation||q.isStarter)&&q.hasLargeStation).length;
+              if(_plLargeCount>=2) _madScientistTimerMs=Date.now();
             }
             // User spec #4: queueing trains at MED tier here are now cargo-ready.
             _promoteQueueingTrainsAtPlanet(p);
@@ -34595,6 +34755,13 @@ function _restoreFromSave(save){
   const _bstIntroduced=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='buy_second_train');
   const _pIDone=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='produce_iron'&&m.status==='completed');
   if(_pIDone && !_bstIntroduced) _produceIronTimerMs=Date.now();
+  // Re-arm the build_foundry → produce_iron 15 s intro delay if it was mid-countdown
+  // when the game was saved (build_foundry done, produce_iron not yet introduced).
+  _produceIronIntroAtMs=0;
+  const _bfCompleted=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='build_foundry'&&m.status==='completed');
+  const _pIIntroduced=(Array.isArray(save.missions)&&save.missions.some(m=>m.id==='produce_iron'))
+                    ||(Array.isArray(save.pendingMissionIntros)&&save.pendingMissionIntros.some(e=>e&&e.defId==='produce_iron'));
+  if(_bfCompleted && !_pIIntroduced) _produceIronIntroAtMs=Date.now()+15000;
   if(_tutorialPhase==='all_done'&&!_bstIntroduced) _crTutorialDoneMs=Date.now();
   _newspaper=null; // never show newspaper immediately on load
   _newspaperLastSd=save._newspaperLastSd||Math.floor(save.stardate);
@@ -35217,7 +35384,7 @@ function startGame(){
   pendingAncientPopups=[]; _ancientTranslatedWords=new Set();
   _ironCarUnlocked=false; _steelCarUnlocked=false; _glassCarUnlocked=false; _machineryCarUnlocked=false; _hazmatCarUnlocked=false; _royalCarUnlocked=false; _flowersCarUnlocked=false; _medicalCarUnlocked=false; _grainCarUnlocked=false; _livestockCarUnlocked=false; _fruitCarUnlocked=false; _cargoCarUnlocked=false; _cheatUnlockAllCars=false; _totalPassengersDelivered=0; _totalHazmatIncinerated=0; _anyCargoProduced=false;
   _classJEngineUnlocked=false; _classREngineUnlocked=false; _N700EngineUnlocked=false;
-  _steelProdLog=[]; _steelMissionTimerMs=0;
+  _steelProdLog=[]; _steelMissionTimerMs=0; _produceIronIntroAtMs=0;
   _sensorUpgradeActive=false; _stationCostDiscount=0; _galaxyCensusTimerMs=0; _sandstormCheckSd=0; _bhResearchTimerMs=0; _madScientistTimerMs=0; _anotherDimTimerMs=0;
   _playerDeliveryCount=0; // new game starts with zero successful deliveries logged
   missions=[]; _recomputeMissionTargets();
@@ -36364,7 +36531,10 @@ function loop(ts){
     // Show new-mission intro popup (timed or prerequisite-unlocked).
     // Hold while at the active-mission cap, or during the 10 s post-completion
     // release delay — the ready intro just stays queued in pendingMissionIntros.
-    if(!activePopup&&pendingMissionIntros.length>0&&Date.now()>=_popupCooldownUntil
+    // ALSO hold while a "Mission Completed" reward popup is still pending: when a
+    // mission completion ALSO triggers a follow-up mission intro, the completion
+    // popup must be acknowledged first (see the mission_reward gate below).
+    if(!activePopup&&pendingMissionRewards.length===0&&pendingMissionIntros.length>0&&Date.now()>=_popupCooldownUntil
        && Date.now()>=_missionReleaseAtMs
        && missions.filter(m=>m.status==='active').length<_MAX_ACTIVE_MISSIONS){
       const _nmiIdx=pendingMissionIntros.findIndex(e=>stardate>=e.readySd && _missionCarGateOk(e.defId));
@@ -36485,8 +36655,10 @@ function loop(ts){
       const _ae=pendingAncientPopups[0];
       popupState={ancientPlanetId:_ae.planetId, ancientPlanetName:_ae.planetName};
     }
-    // Show diamond discovery popup when nothing else is blocking
-    if(pendingCarUnlocks.length>0&&!activePopup){
+    // Show diamond discovery popup when nothing else is blocking.
+    // (pendingMissionRewards gate: a mission completion that also unlocks a car
+    // must show its "Mission Completed" popup BEFORE the car-unlock window.)
+    if(pendingCarUnlocks.length>0&&!activePopup&&pendingMissionRewards.length===0){
       gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='car_unlock';
       popupState={carUnlock:pendingCarUnlocks[0]};
       // Focus + select the planet where the discovery was made so the camera
@@ -36503,7 +36675,7 @@ function loop(ts){
     }
     // Engine-unlock revenue check + popup trigger
     _checkEngineUnlocks();
-    if(pendingEngineUnlocks.length>0&&!activePopup){
+    if(pendingEngineUnlocks.length>0&&!activePopup&&pendingMissionRewards.length===0){
       gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='engine_unlock';
       popupState={engineUnlock:pendingEngineUnlocks[0]};
     }
@@ -36515,7 +36687,7 @@ function loop(ts){
       _foundryConstructedPopupPending=false; _foundryConstructedPopupShown=true;
       pendingUpgradeUnlocks.push({key:'iron_foundry',constructed:true});
     }
-    if(pendingUpgradeUnlocks.length>0&&!activePopup){
+    if(pendingUpgradeUnlocks.length>0&&!activePopup&&pendingMissionRewards.length===0){
       gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='upgrade_unlock';
       popupState={upgradeUnlock:pendingUpgradeUnlocks[0]};
     }
