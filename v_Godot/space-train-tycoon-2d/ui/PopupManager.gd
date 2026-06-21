@@ -25,6 +25,8 @@ var tb_cars: Array = []
 var f_exo: Font
 var f_orb: Font
 var f_orb_b: Font
+var f_phags: Font       # Phags-pa glyphs for the ancient-broadcast popup
+var f_lato_b: Font      # bold Lato for translated ancient words
 
 # hit-rects registered during _draw, consumed by input.
 var _rects: Dictionary = {}
@@ -49,6 +51,8 @@ func _ready() -> void:
 	fv.base_font = f_orb
 	fv.variation_opentype = {"wght": 700}
 	f_orb_b = fv
+	f_phags = load("res://assets/fonts/NotoSansPhagsPa-Regular.woff2")
+	f_lato_b = load("res://assets/fonts/Lato-Bold.woff2")
 	GameState.popup_requested.connect(_on_popup_requested)
 	Leaderboard.changed.connect(func(): if active == "leaderboard": queue_redraw())
 	# Auto event popups (build_game.py new_mission etc.). Connected after the
@@ -62,6 +66,7 @@ func _ready() -> void:
 	Discovery.gold_discovered.connect(func(pid: int): _present_event({"kind": "gold", "planet_id": pid}))
 	Discovery.diamond_discovered.connect(func(pid: int): _present_event({"kind": "diamond", "planet_id": pid}))
 	GameState.upgrade_unlocked.connect(func(uid: String): _present_event({"kind": "upgrade", "upgrade": uid}))
+	GameState.ancient_message.connect(func(pid: int): _present_event({"kind": "ancient", "planet_id": pid}))
 
 func _disp_name(id: String) -> String:
 	return String(_TT_NAMES.get(id, id.trim_prefix("engine_").trim_prefix("car_").to_upper().replace("_", " ")))
@@ -833,6 +838,7 @@ func _draw_event() -> void:
 		"gold": _draw_event_deposit(true)
 		"diamond": _draw_event_deposit(false)
 		"upgrade": _draw_event_upgrade()
+		"ancient": _draw_event_ancient()
 		_: _draw_event_generic()
 
 # First-delivery popup (build_game.py drawFirstDeliveryPopup 17278): blue, title +
@@ -1162,6 +1168,95 @@ func _tok_words(text: String, base: Color) -> Array:
 			i += 1
 	for w in cur.split(" ", false):
 		out.append({"w": w, "c": base})
+	return out
+
+# Transliterate ASCII letters into the Phags-pa block (U+A840+) so the alien font
+# has glyphs; non-letters pass through as noise (build_game.py _ancientToGlyphs 17433).
+func _ancient_glyphs(s: String) -> String:
+	var out := ""
+	for i in s.length():
+		var c := s.unicode_at(i)
+		if c >= 0x41 and c <= 0x5A:
+			out += char(0xA840 + (c - 0x41))
+		elif c >= 0x61 and c <= 0x7A:
+			out += char(0xA840 + (c - 0x61))
+		else:
+			out += s[i]
+	return out
+
+# Ancient-world broadcast (build_game.py drawAncientMessagePopup 17443): 520×320
+# amber popup; the mystery sentence renders word-by-word — translated words in
+# green Lato, untranslated words transliterated to Phags-pa glyphs.
+func _draw_event_ancient() -> void:
+	var p := _planet_by_id(int(state.get("planet_id", -1)))
+	var pw := 520.0
+	var ph := 320.0
+	var o := _base(pw, ph, Color(0.847, 0.722, 0.471, 0.72))
+	var px := o.x
+	var py := o.y
+	var cx := px + pw * 0.5
+	_ctr(f_orb_b, cx, py + 18.0, "ANCIENT WORLD — REPEATING BROADCAST", 9, Color(0.941, 0.863, 0.667, 0.85))
+	for off in [Vector2(-1, 0), Vector2(1, 0), Vector2(0, -1), Vector2(0, 1)]:
+		_ctr(f_orb_b, cx + off.x, py + 38.0 + off.y, String(p.get("name", "")), 13, Color(0.627, 0.471, 0.157, 0.6))
+	_ctr(f_orb_b, cx, py + 38.0, String(p.get("name", "")), 13, Color(0.941, 0.847, 0.565))
+	draw_line(Vector2(px + 20.0, py + 48.0), Vector2(px + pw - 20.0, py + 48.0), Color(0.706, 0.549, 0.275, 0.4), 0.7)
+	# English intro paragraph (wrapped).
+	var intro := "You find an ancient planet that looks like it was once thriving, but looks like it's been ripped to shreds. Your computers receive a repeating broadcast, which even your computers cannot fully translate:"
+	var body_x := px + 24.0
+	var body_w := pw - 48.0
+	var y_cur := py + 72.0
+	for seg in _wrap_words(f_exo, intro, 12, body_w):
+		draw_string(f_exo, Vector2(body_x, y_cur), seg, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(0.902, 0.831, 0.686, 0.93))
+		y_cur += 17.0
+	y_cur += 24.0
+	# Mystery paragraph — word-by-word, centred, with mixed fonts.
+	var space_w := 7.0
+	var items: Array = []
+	for i in GameState.ANCIENT_MSG_WORDS.size():
+		var w := String(GameState.ANCIENT_MSG_WORDS[i])
+		var is_trans := GameState.ancient_translated_words.has(i) and i != GameState.ANCIENT_GIBBERISH_IDX
+		var disp := w if is_trans else _ancient_glyphs(w)
+		var fnt: Font = f_lato_b if is_trans else f_phags
+		var sz := 16 if is_trans else 17
+		var col := Color(0.373, 0.863, 0.471, 0.97) if is_trans else Color(0.373, 0.255, 0.118, 0.95)
+		items.append({"t": disp, "f": fnt, "sz": sz, "c": col, "w": fnt.get_string_size(disp, HORIZONTAL_ALIGNMENT_LEFT, -1, sz).x})
+	# Lay out + draw centred lines.
+	var line: Array = []
+	var line_w := 0.0
+	for it in items:
+		var added := line_w + (space_w if not line.is_empty() else 0.0) + float(it.w)
+		if added > body_w and not line.is_empty():
+			_draw_ancient_line(line, body_x, body_w, y_cur, space_w); y_cur += 24.0
+			line = [it]; line_w = float(it.w)
+		else:
+			line.append(it); line_w = added
+	if not line.is_empty():
+		_draw_ancient_line(line, body_x, body_w, y_cur, space_w); y_cur += 24.0
+	var ok := Rect2(cx - 60.0, py + ph - 42.0, 120.0, 28.0)
+	_btn(ok.position.x, ok.position.y, 120.0, 28.0, "ACKNOWLEDGED", Color(0.451, 0.333, 0.157, 0.92), Color(1.0, 0.902, 0.706, 0.97), 9)
+	_rects["event_ok"] = ok
+
+func _draw_ancient_line(items: Array, body_x: float, body_w: float, y: float, space_w: float) -> void:
+	var tot := 0.0
+	for i in items.size():
+		tot += float(items[i].w) + (space_w if i > 0 else 0.0)
+	var x := body_x + maxf(0.0, (body_w - tot) * 0.5)
+	for it in items:
+		draw_string(it.f, Vector2(x, y), String(it.t), HORIZONTAL_ALIGNMENT_LEFT, -1, int(it.sz), it.c)
+		x += float(it.w) + space_w
+
+# Greedy word-wrap → Array[String] (no token colouring).
+func _wrap_words(font: Font, text: String, size: int, maxw: float) -> Array:
+	var out: Array = []
+	var line := ""
+	for w in text.split(" ", false):
+		var t := w if line == "" else line + " " + w
+		if font.get_string_size(t, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x <= maxw:
+			line = t
+		else:
+			if line != "": out.append(line)
+			line = w
+	if line != "": out.append(line)
 	return out
 
 # Mission reward (build_game.py drawMissionRewardPopup 17185): green, name + reward pill.

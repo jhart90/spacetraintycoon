@@ -72,6 +72,11 @@ func track_visit(pid: int) -> void:
 		diamond_discovered.emit(pid)
 	if not visited_planet_ids.has(pid):
 		visited_planet_ids[pid] = true
+		# Ancient-world first-visit broadcast (build_game.py trackVisit ~16035):
+		# each visit translates 3 more words, then queues the popup.
+		if String(p.type.id) == "ancient":
+			GameState.translate_ancient_words()
+			GameState.ancient_message.emit(pid)
 		# TODO(Phase 2 / Economy): award the first-visit credit reward. Per
 		# memory: reward = dist_from_Orijen > 100000 ? 3000 : (otherStar ? 2000 : 1000),
 		# plus a separate star-discovery reward. Verify against current JS.

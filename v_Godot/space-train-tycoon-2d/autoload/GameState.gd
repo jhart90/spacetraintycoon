@@ -165,6 +165,26 @@ signal engine_unlocked(id: String)
 signal car_unlocked(id: String)
 # Planet-upgrade type newly unlocked (build_game.py pendingUpgradeUnlocks ~3564).
 signal upgrade_unlocked(id: String)
+# Ancient-world repeating broadcast on first visit (build_game.py ~16035).
+signal ancient_message(planet_id: int)
+# The mystery sentence; each ancient visit translates 3 more random words. The
+# gibberish placeholder (index 12) never translates. (build_game.py:3600.)
+const ANCIENT_MSG_WORDS := ["DO", "NOT", "VISIT", "OUR", "SACRED", "WORLDS.", "EACH", "WORLD", "YOU", "VISIT", "ALERTS", "THE", "!^#<$(%", "TO", "YOUR", "GROWING", "PRESENCE.", "BEWARE", "OR", "YOU", "WILL", "SUFFER", "THE", "SAME", "FATE", "AS", "OUR", "CIVILIZATION"]
+const ANCIENT_GIBBERISH_IDX := 12
+var ancient_translated_words: Dictionary = {}  # {wordIndex: true}
+
+# Translate up to 3 more random untranslated words (gibberish excluded).
+func translate_ancient_words() -> void:
+	var untranslated: Array = []
+	for wi in ANCIENT_MSG_WORDS.size():
+		if wi != ANCIENT_GIBBERISH_IDX and not ancient_translated_words.has(wi):
+			untranslated.append(wi)
+	for k in 3:
+		if untranslated.is_empty():
+			break
+		var swp := _ceo_rng.randi() % untranslated.size()
+		ancient_translated_words[untranslated[swp]] = true
+		untranslated.remove_at(swp)
 
 # Unlock sets (Phase 3 — missions grant these). {key: true}.
 var unlocked_engines: Dictionary = {}

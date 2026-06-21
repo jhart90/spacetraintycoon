@@ -19864,17 +19864,13 @@ function _drawTutorialChain(stage){
   if(_tutorialPhase==='ft_focus_train'){
     const _ftIdx=trains.findIndex(t=>t.isPlayer);
     const _ft=_ftIdx>=0?trains[_ftIdx]:null;
-    if(_ft && !_ftFocusFramed){
-      // Frame the train's orbit (centre on its planet, scaled so the orbit fits).
-      const _fp=_gp(_ft.planetId);
-      const _cx=_fp?_fp.x:_ft && getTrainCarPos(_ft,0)[0], _cy=_fp?_fp.y:_ft && getTrainCarPos(_ft,0)[1];
-      const _orb=_ft.orbitR||200;
-      let _sc=Math.min((W-PANEL_W)*0.42/_orb,(GH-TOP_H)*0.42/_orb);
-      _sc=Math.max(MIN_SC,Math.min(MAX_SC,_sc));
-      cam.scale=_sc;
-      trackingOffset={x:PANEL_W/(2*cam.scale),y:0};
-      cam.x=_cx+trackingOffset.x; cam.y=_cy; tracking=false;
-      if(typeof clampCamera==='function') clampCamera();
+    // Lock the camera on the TRAIN, FULLY zoomed in, every frame while the
+    // "This is your first TRAIN" bubble is up. (Was a one-shot orbit-fit framing;
+    // now it pins the orbiting train dead-centre at MAX zoom so it stays put.)
+    if(_ft){
+      const [_flx,_fly]=getTrainCarPos(_ft,0);
+      cam.scale=MAX_SC;
+      _ftLockOnWorld(_flx,_fly);
       _ftFocusFramed=true;
     }
     const _open=(activePopup==='train' && popupState.trainIdx===_ftIdx);
