@@ -92,6 +92,21 @@ func _ready() -> void:
 			else: GameState.car_unlocked.emit(uid)
 		elif a.begins_with("--test-reward="):
 			Missions.mission_completed.emit("build_foundry", int(a.split("=", true, 1)[1]))
+		elif a.begins_with("--test-mission="):
+			Missions.mission_introduced.emit(a.split("=", true, 1)[1])
+		elif a == "--test-firstdelivery":
+			GameState.first_delivery.emit(Galaxy.origen_id, "passengers", "car_passenger", GameState.stardate)
+		elif a == "--test-gold":
+			Discovery.gold_discovered.emit(Galaxy.origen_id)
+		elif a == "--test-diamond":
+			Discovery.diamond_discovered.emit(Galaxy.origen_id)
+		elif a.begins_with("--test-upgrade="):
+			GameState.upgrade_unlocked.emit(a.split("=", true, 1)[1])
+		elif a == "--test-ceohire":
+			if GameState.ceo.is_empty():
+				GameState.set_ceo(GameState._gen_ceo("Gigi", "ceo_gigi"))
+			GameState.roll_ceo_candidates()
+			GameState.popup_requested.emit("ceohire")
 		elif a == "--expand":
 			GameState.panel_expanded = true
 		elif a == "--rival":

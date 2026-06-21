@@ -51,6 +51,10 @@ func build_train(planet_id: int, engine: String, car_types: Array, is_player: bo
 		"orbitSpun": 0.0,
 		# Per-car cargo ops (build_game.py:7380): phase "" | "unloading" | "loading".
 		"cargoPhase": "", "cargoQueue": [], "cargoTimer": 0.0, "_cargoChecked": false,
+		# Maintenance + lifetime financials (build_game.py:8955).
+		"maintenance": 1.0, "distSinceMaint": 0.0, "totalDist": 0.0,
+		"totalRevenue": 0, "totalCosts": 0, "_engineBornSd": GameState.stardate,
+		"_engineFailureSd": GameState.stardate + 30.0 + Galaxy.random() * 40.0, "_engineFailed": false,
 	}
 	for _i in car_types.size():
 		t.carCargo.append(null)
@@ -161,6 +165,19 @@ func _arrive(t: Dictionary, tp: Dictionary, ang: float) -> void:
 		var ix: int = t.route.stops.find(t.planetId)
 		if ix >= 0:
 			t.route.idx = ix
+	# Maintenance repair on orbit entry at a station (build_game.py:15335). Cost
+	# scales with damage × car count × engine repair-mult × repair-drones discount.
+	if bool(t.isPlayer) and float(t.get("maintenance", 1.0)) < 1.0 and (bool(tp.get("hasStation", false)) or bool(tp.get("aiHasStation", false))):
+		var rdmg: float = 1.0 - float(t.maintenance)
+		var rmult: float = float(Tuning.ENGINE_REPAIR_MULT.get(String(t.engine), 1.0))
+		var maint_mult := 0.75 if (tp.get("upgrades", []) as Array).has("repair_drones") else 1.0
+		var rcost := int(round(rdmg * (t.cars.size() + 1) * Tuning.REPAIR_COST_PER_MAINT * rmult * maint_mult))
+		if rcost > 0:
+			GameState.credits -= rcost
+			t.totalCosts = int(t.get("totalCosts", 0)) + rcost
+			GameState.finance_ledger.append({"sd": GameState.stardate, "cargoType": "maintenance", "trainName": String(t.get("name", "")), "planetId": int(tp.id), "starId": int(tp.get("starId", -1)), "revenue": 0, "cost": rcost})
+		t.maintenance = 1.0
+		t.distSinceMaint = 0.0
 	_place_in_orbit(t, tp)
 
 # Current segment's live external tangent (for route-line drawing), or {}.
@@ -274,7 +291,17 @@ func _tick_train(t: Dictionary, dtG: float) -> void:
 			t.transitSpeed = maxf(v_target, t.transitSpeed - accel * dtG)
 		else:
 			t.transitSpeed = minf(v_max, t.transitSpeed + accel * dtG)
-	t.transitDist += t.transitSpeed * dtG
+	var moved: float = t.transitSpeed * dtG
+	t.transitDist += moved
+	# Maintenance decay + distance tracking (player trains only; build_game.py:15677).
+	if bool(t.isPlayer):
+		t.distSinceMaint = float(t.get("distSinceMaint", 0.0)) + moved
+		t.totalDist = float(t.get("totalDist", 0.0)) + moved
+		var pm: float = float(t.get("maintenance", 1.0))
+		var decay: float = float(Tuning.ENGINE_MAINT_DECAY.get(String(t.engine), Tuning.MAINT_DECAY_PER_AU))
+		t.maintenance = maxf(0.0, pm - decay * moved)
+		if pm > 0.0 and float(t.maintenance) <= 0.0:
+			Audio.play("breakdown")
 	if t.transitDist >= arrive_dist:
 		# Whole consist on the orbit → dock at the engine's CURRENT orbit angle so
 		# every car's position is continuous across the TRANSIT→ORBIT switch.
@@ -360,6 +387,11 @@ func _process_cargo_queue(t: Dictionary, p: Dictionary) -> void:
 				# CEO revenue perk (build_game.py corp perks). Default mult 1.0.
 				rev = int(round(float(rev) * float(GameState.ceo_revenue_mult.get(String(cargo), 1.0))))
 				GameState.credits += rev
+				t.totalRevenue = int(t.get("totalRevenue", 0)) + rev
+				# First-ever delivery to this planet → celebration popup.
+				if not GameState.delivered_planets.has(int(p.id)):
+					GameState.delivered_planets[int(p.id)] = true
+					GameState.first_delivery.emit(int(p.id), String(cargo), String(t.cars[i]), GameState.stardate)
 				GameState.record_revenue(String(cargo), String(t.get("name", "")), int(p.id), int(p.get("starId", -1)), rev)
 				if cargo == "passengers":
 					GameState.total_passengers_delivered += 1

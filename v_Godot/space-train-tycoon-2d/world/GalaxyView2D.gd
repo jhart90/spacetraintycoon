@@ -195,9 +195,12 @@ func _unhandled_input(event: InputEvent) -> void:
 			_zoom_at(mb.position, false)
 		elif mb.button_index == MOUSE_BUTTON_LEFT:
 			if mb.pressed:
-				_dragging = true
-				_drag_moved = false
-				_drag_last = mb.position
+				if mb.double_click:
+					_dbl_at(mb.position)  # double-click → open the body's detail popup
+				else:
+					_dragging = true
+					_drag_moved = false
+					_drag_last = mb.position
 			else:
 				_dragging = false
 				if not _drag_moved:
@@ -275,6 +278,25 @@ func _pick_at(screen_pos: Vector2, shift := false) -> void:
 	GameState.route_stops = []  # clicking empty space cancels a building route
 	GameState.clear_selection()
 
+
+# Double-click (build_game.py panelDblClick / galaxy dbl): a planet opens its
+# detail popup, a train opens its details. Picks trains → planets (stars/black
+# holes have no dbl action).
+func _dbl_at(screen_pos: Vector2) -> void:
+	var w := _s2w(screen_pos)
+	for t in Transit.trains:
+		var tr: float = max(120.0 / sc, 200.0)
+		if w.distance_to(Vector2(t.x, t.y)) <= tr:
+			GameState.select("train", "train_%d" % int(t.id), _train_name(t))
+			GameState.popup_requested.emit("train")
+			Audio.play("button")
+			return
+	for p in Galaxy.planets:
+		if w.distance_to(Vector2(p.x, p.y)) <= float(p.radius):
+			GameState.select("planet", "planet_%d" % int(p.id), String(p.name))
+			GameState.popup_requested.emit("planet_detail")
+			Audio.play("button")
+			return
 
 func _train_name(t: Dictionary) -> String:
 	return String(t.get("name", "Train %d" % int(t.id)))

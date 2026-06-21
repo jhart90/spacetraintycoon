@@ -141,6 +141,11 @@ const ENGINE_MAX_SPD := {"engine_constellation": 4.0, "engine_galaxy": 6.0, "eng
 const ENGINE_MAX_CARS := {"engine_constellation": 6, "engine_galaxy": 8, "engine_classJ": 10, "engine_classR": 10, "engine_N700": 10}
 const ENGINE_COSTS := {"engine_constellation": 10000, "engine_galaxy": 20000, "engine_classJ": 50000, "engine_classR": 70000, "engine_N700": 100000}
 const CAR_COST: int = 1000  # non-engine car (build_game.py sim ref)
+# Maintenance / breakdown model (build_game.py:1834-1857).
+const MAINT_DECAY_PER_AU := 0.00001    # maintenance fraction lost per SU in transit
+const REPAIR_COST_PER_MAINT := 600     # credits per car per 1.0 maintenance lost
+const ENGINE_MAINT_DECAY := {"engine_constellation": MAINT_DECAY_PER_AU, "engine_galaxy": MAINT_DECAY_PER_AU * 0.8, "engine_classJ": MAINT_DECAY_PER_AU * 0.6, "engine_classR": MAINT_DECAY_PER_AU * 0.4, "engine_N700": MAINT_DECAY_PER_AU * 0.25}
+const ENGINE_REPAIR_MULT := {"engine_constellation": 1.0, "engine_galaxy": 1.1, "engine_classJ": 1.3, "engine_classR": 1.6, "engine_N700": 2.0}
 const STATION_COST: int = 50000        # _stationBuildCost base (build_game.py:2397)
 const LARGE_STATION_COST: int = 50000  # build_game.py:9961
 # Upgrade build costs (build_game.py UPGRADES, :1239-1264).

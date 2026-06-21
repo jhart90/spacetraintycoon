@@ -106,6 +106,18 @@ func _input(event: InputEvent) -> void:
 	var mb := event as InputEventMouseButton
 	if mb.button_index != MOUSE_BUTTON_LEFT or not mb.pressed:
 		return
+	# Panel double-click → open the row's detail popup (build_game.py panelDblClick).
+	if mb.double_click:
+		var pp := mb.position
+		for k in info_rects.keys():
+			if String(k).begins_with("train_row_") and _hit_ui(k, pp):
+				var tid := int(String(k).trim_prefix("train_row_"))
+				GameState.select("train", "train_%d" % tid, "Train %d" % tid)
+				GameState.popup_requested.emit("train"); get_viewport().set_input_as_handled(); return
+			if String(k).begins_with("station_row_") and _hit_ui(k, pp):
+				var spid := int(String(k).trim_prefix("station_row_"))
+				GameState.select("planet", "planet_%d" % spid, String(_planet_by_id(spid).get("name", "?")))
+				GameState.popup_requested.emit("planet_detail"); get_viewport().set_input_as_handled(); return
 	if _handle_ui_click(mb.position):
 		get_viewport().set_input_as_handled()
 
@@ -120,6 +132,8 @@ func _handle_ui_click(p: Vector2) -> bool:
 	var pw := GameState.panel_w()
 	if _hit_ui("panel_expand", p):
 		GameState.panel_expanded = not GameState.panel_expanded; Audio.play("button"); return true
+	if _hit_ui("topbar_corp", p):
+		GameState.popup_requested.emit("corp"); return true
 	if _hit_ui("topbar_finances", p):
 		GameState.popup_requested.emit("finances"); return true
 	if _hit_ui("gear", p):
@@ -275,7 +289,9 @@ func _draw_top_bar(pw: float) -> void:
 	var s3x := s1w + s2w
 	# Background.
 	draw_rect(Rect2(0, 0, bar_w, TOP_H), Color8(4, 8, 22))
-	info_rects["topbar_finances"] = Rect2(s2x, 0, bar_w - s2x, TOP_H)  # corp/credits → Finances
+	# Corp-name section → Corp dashboard; credits section → Finances (build_game.py).
+	info_rects["topbar_corp"] = Rect2(s2x, 0, s3x - s2x, TOP_H)
+	info_rects["topbar_finances"] = Rect2(s3x, 0, bar_w - s3x, TOP_H)
 	# Section parallelogram fills.
 	_para(0, s1w, slant, Color(0.196, 0.353, 0.686, 0.13))
 	_para(s3x, bar_w - s3x, slant, Color(0.196, 0.353, 0.686, 0.13))
@@ -693,9 +709,23 @@ func _make_radial_tex(star: bool) -> Texture2D:
 
 func _btn_pill(r: Rect2, label: String, fill: Color, text_col: Color) -> void:
 	var hov := r.has_point(get_local_mouse_position())
-	draw_rect(r, fill.lightened(0.18) if hov else fill)
-	draw_rect(r, Color(0.62, 0.82, 1.0, 0.95) if hov else Color(0.314, 0.627, 1.0, 0.8), false, 1.5 if hov else 1.0)
+	var rad := minf(5.0, r.size.y * 0.32)
+	_round_rect(r.position.x, r.position.y, r.size.x, r.size.y, rad, fill.lightened(0.18) if hov else fill)
+	_stroke_round(r, rad, Color(0.62, 0.82, 1.0, 0.95) if hov else Color(0.314, 0.627, 1.0, 0.8), 1.5 if hov else 1.0)
 	_txt_centered(f_orb_b, r.position.x + r.size.x * 0.5, r.position.y + r.size.y * 0.5 + 3.0, label, 8, text_col.lightened(0.2) if hov else text_col, r.size.x)
+
+func _stroke_round(r: Rect2, rad: float, col: Color, w: float) -> void:
+	rad = minf(rad, minf(r.size.x, r.size.y) * 0.5)
+	var p := r.position
+	var s := r.size
+	draw_line(Vector2(p.x + rad, p.y), Vector2(p.x + s.x - rad, p.y), col, w)
+	draw_line(Vector2(p.x + rad, p.y + s.y), Vector2(p.x + s.x - rad, p.y + s.y), col, w)
+	draw_line(Vector2(p.x, p.y + rad), Vector2(p.x, p.y + s.y - rad), col, w)
+	draw_line(Vector2(p.x + s.x, p.y + rad), Vector2(p.x + s.x, p.y + s.y - rad), col, w)
+	draw_arc(p + Vector2(rad, rad), rad, PI, PI * 1.5, 6, col, w)
+	draw_arc(p + Vector2(s.x - rad, rad), rad, PI * 1.5, TAU, 6, col, w)
+	draw_arc(p + Vector2(rad, s.y - rad), rad, PI * 0.5, PI, 6, col, w)
+	draw_arc(p + Vector2(s.x - rad, s.y - rad), rad, 0.0, PI * 0.5, 6, col, w)
 
 func _draw_train_info(tid: int, by: float) -> void:
 	var t := _train_by_id(tid)

@@ -14,6 +14,7 @@ const H := 500.0
 var active := ""
 var state: Dictionary = {}
 var _drag := ""          # slider currently being dragged ("sfx"|"music"|"")
+var _event_queue: Array = []  # queued event-popup states (gold/diamond etc.) shown one-at-a-time
 var view: Node2D         # GalaxyView2D (for consist sprite strips)
 
 # Train builder state.
@@ -56,7 +57,11 @@ func _ready() -> void:
 	GameState.engine_unlocked.connect(func(id: String): _open_unlock("NEW ENGINE UNLOCKED", _disp_name(id), id, true))
 	GameState.car_unlocked.connect(func(id: String): _open_unlock("NEW CAR UNLOCKED", _disp_name(id), id, false))
 	Missions.mission_completed.connect(_on_mission_completed)
+	GameState.first_delivery.connect(_on_first_delivery)
 	Discovery.star_revealed.connect(func(sid: int): _open_event("STAR DISCOVERED", String(Galaxy.stars[sid].name), "Added to the Star Registry [Y]."))
+	Discovery.gold_discovered.connect(func(pid: int): _present_event({"kind": "gold", "planet_id": pid}))
+	Discovery.diamond_discovered.connect(func(pid: int): _present_event({"kind": "diamond", "planet_id": pid}))
+	GameState.upgrade_unlocked.connect(func(uid: String): _present_event({"kind": "upgrade", "upgrade": uid}))
 
 func _disp_name(id: String) -> String:
 	return String(_TT_NAMES.get(id, id.trim_prefix("engine_").trim_prefix("car_").to_upper().replace("_", " ")))
@@ -81,8 +86,10 @@ func _open_event(title: String, head: String, body: String) -> void:
 	state = {"title": title, "head": head, "body": body}
 
 func _on_mission_intro(id: String) -> void:
-	var def: Dictionary = Missions.def_for(id)
-	_open_event("NEW MISSION", String(def.get("name", "?")), String(def.get("details", "")))
+	if active != "":
+		return
+	_open("event")
+	state = {"kind": "new_mission", "id": id}
 
 func _on_popup_requested(name: String) -> void:
 	_open(name)
@@ -121,7 +128,11 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		var k := (event as InputEventKey).keycode
 		if (k == KEY_ESCAPE or k == KEY_X) and active != "":
-			_close(); get_viewport().set_input_as_handled(); return
+			if active == "event":
+				_dismiss_event()
+			else:
+				_close()
+			get_viewport().set_input_as_handled(); return
 		if GameState.gs != "galaxy":
 			return  # popups are galaxy-only; the front-end owns input otherwise
 		var map := {KEY_O: "options", KEY_T: "trains", KEY_R: "routes", KEY_U: "stations", KEY_Y: "registry", KEY_P: "pokedex", KEY_F: "finances", KEY_M: "missions", KEY_L: "leaderboard", KEY_I: "techtree"}
@@ -212,15 +223,20 @@ func _on_click(p: Vector2) -> void:
 		if _hit("quit_no", p):
 			_close(); Audio.play("button"); return
 	elif active == "savemanager":
-		if _hit("sg_save", p):
-			state["save_msg"] = "Game saved." if SaveLoad.save_game() else "Save failed."
+		if _hit("sg_new", p):
+			state["save_msg"] = "Saved." if SaveLoad.save_to_new_slot() else "Save failed."
 			Audio.play("button"); queue_redraw(); return
-		if _hit("sg_load", p):
-			if SaveLoad.load_game():
-				Audio.play("button"); _close(); return
-			state["save_msg"] = "Load failed."; queue_redraw(); return
 		if _hit("sg_back", p):
 			_open("options"); Audio.play("button"); return
+		var saves := SaveLoad.list_saves()
+		for i in saves.size():
+			if _hit("sgload_%d" % i, p):
+				if SaveLoad.load_game(String(saves[i].path)):
+					Audio.play("button"); _close(); return
+				state["save_msg"] = "Load failed."; queue_redraw(); return
+			if _hit("sgdel_%d" % i, p):
+				SaveLoad.delete_save(String(saves[i].path))
+				state["save_msg"] = "Deleted."; Audio.play("button"); queue_redraw(); return
 	elif active == "controls":
 		if _hit("back", p):
 			_open("options"); Audio.play("button"); return
@@ -280,6 +296,13 @@ func _on_click(p: Vector2) -> void:
 				_open("planet_detail"); Audio.play("button"); return
 	elif active == "techtree":
 		_close(); return
+	elif active == "corp":
+		if _hit("corp_ceo_portrait", p):
+			_open("ceohire"); Audio.play("button"); return
+	elif active == "ceohire":
+		for k in _rects.keys():
+			if String(k).begins_with("hire_") and _hit(String(k), p):
+				GameState.hire_ceo(int(String(k).trim_prefix("hire_"))); Audio.play("button"); queue_redraw(); return
 	elif active == "registry" or active == "pokedex":
 		if _hit("regtab_planets", p):
 			_reg_scroll = 0.0; _open("pokedex"); Audio.play("button"); return
@@ -297,7 +320,7 @@ func _on_click(p: Vector2) -> void:
 		if _hit("td_edit", p):
 			_open("trainbuilder"); Audio.play("button"); return
 	elif active == "event":
-		_close()  # any click dismisses
+		_dismiss_event()  # any click dismisses; show next queued event if any
 	elif active == "trainbuilder":
 		for k in _rects.keys():
 			if String(k).begins_with("eng_") and _hit(String(k), p):
@@ -360,16 +383,41 @@ func _draw() -> void:
 		"registry": _draw_registry()
 		"pokedex": _draw_pokedex()
 		"techtree": _draw_tech_tree()
+		"corp": _draw_corp()
+		"ceohire": _draw_ceohire()
 		"finances": _draw_finances()
 		"savemanager": _draw_savemanager()
 		"event": _draw_event()
+
+# Rounded-rect helpers (the original's drawPopupBase / buttons all use roundRect).
+func _fill_round(r: Rect2, rad: float, col: Color) -> void:
+	rad = minf(rad, minf(r.size.x, r.size.y) * 0.5)
+	draw_rect(Rect2(r.position.x + rad, r.position.y, r.size.x - 2.0 * rad, r.size.y), col)
+	draw_rect(Rect2(r.position.x, r.position.y + rad, r.size.x, r.size.y - 2.0 * rad), col)
+	draw_circle(r.position + Vector2(rad, rad), rad, col)
+	draw_circle(r.position + Vector2(r.size.x - rad, rad), rad, col)
+	draw_circle(r.position + Vector2(rad, r.size.y - rad), rad, col)
+	draw_circle(r.position + Vector2(r.size.x - rad, r.size.y - rad), rad, col)
+
+func _stroke_round(r: Rect2, rad: float, col: Color, w: float) -> void:
+	rad = minf(rad, minf(r.size.x, r.size.y) * 0.5)
+	var p := r.position
+	var s := r.size
+	draw_line(Vector2(p.x + rad, p.y), Vector2(p.x + s.x - rad, p.y), col, w)
+	draw_line(Vector2(p.x + rad, p.y + s.y), Vector2(p.x + s.x - rad, p.y + s.y), col, w)
+	draw_line(Vector2(p.x, p.y + rad), Vector2(p.x, p.y + s.y - rad), col, w)
+	draw_line(Vector2(p.x + s.x, p.y + rad), Vector2(p.x + s.x, p.y + s.y - rad), col, w)
+	draw_arc(p + Vector2(rad, rad), rad, PI, PI * 1.5, 7, col, w)
+	draw_arc(p + Vector2(s.x - rad, rad), rad, PI * 1.5, TAU, 7, col, w)
+	draw_arc(p + Vector2(rad, s.y - rad), rad, PI * 0.5, PI, 7, col, w)
+	draw_arc(p + Vector2(s.x - rad, s.y - rad), rad, 0.0, PI * 0.5, 7, col, w)
 
 func _base(pw: float, ph: float, border: Color) -> Vector2:
 	var px := (W - pw) * 0.5
 	var py := (H - ph) * 0.5
 	_rects["_panel"] = Rect2(px, py, pw, ph)
-	draw_rect(Rect2(px, py, pw, ph), Color(0.012, 0.024, 0.078, 0.98))
-	draw_rect(Rect2(px, py, pw, ph), border, false, 2.0)
+	_fill_round(Rect2(px, py, pw, ph), 8.0, Color(0.012, 0.024, 0.078, 0.98))
+	_stroke_round(Rect2(px, py, pw, ph), 8.0, border, 2.0)
 	return Vector2(px, py)
 
 func _esc_hint(px: float, py: float, pw: float) -> void:
@@ -712,38 +760,143 @@ func _rt(font: Font, right_x: float, y: float, text: String, size: int, col: Col
 	draw_string(font, Vector2(right_x - w, y), text, HORIZONTAL_ALIGNMENT_LEFT, -1, size, col)
 
 # Save / load manager (build_game.py save UI).
+# Multi-slot save manager (build_game.py drawSaveManagerPopup): lists every saved
+# .stt slot with Load / Delete, plus a New-Save button.
 func _draw_savemanager() -> void:
-	var pw := 340.0
-	var ph := 220.0
+	var pw := 460.0
+	var ph := 380.0
 	var o := _base(pw, ph, Color(0.314, 0.627, 1.0, 0.7))
 	var px := o.x
 	var py := o.y
-	_ctr(f_orb_b, px + pw * 0.5, py + 22.0, "SAVE / LOAD", 13, Color(0.267, 0.667, 1.0))
+	_ctr(f_orb_b, px + pw * 0.5, py + 22.0, "SAVE MANAGER", 13, Color(0.467, 0.745, 1.0))
 	_esc_hint(px, py, pw)
 	draw_line(Vector2(px, py + 30.0), Vector2(px + pw, py + 30.0), Color(0.157, 0.353, 0.706, 0.35), 1.0)
-	var has_save := FileAccess.file_exists(SaveLoad.SAVE_PATH)
-	_ctr(f_exo, px + pw * 0.5, py + 52.0, "Saved game on file" if has_save else "No saved game yet", 10, Color(0.6, 0.78, 0.6, 0.85) if has_save else Color(0.6, 0.65, 0.8, 0.7))
-	var bw := pw - 60.0
-	var bx := px + 30.0
-	_btn(bx, py + 70.0, bw, 30.0, "SAVE GAME", Color(0.1, 0.42, 0.22, 0.9), Color(0.7, 1.0, 0.78, 0.95))
-	_rects["sg_save"] = Rect2(bx, py + 70.0, bw, 30.0)
-	var lcol := Color(0.078, 0.235, 0.588, 0.92) if has_save else Color(0.13, 0.16, 0.24, 0.7)
-	var ltext := Color(0.667, 0.863, 1.0, 0.95) if has_save else Color(0.45, 0.5, 0.6, 0.6)
-	_btn(bx, py + 108.0, bw, 30.0, "LOAD GAME", lcol, ltext)
-	if has_save:
-		_rects["sg_load"] = Rect2(bx, py + 108.0, bw, 30.0)
-	_btn(bx, py + 152.0, bw, 26.0, "BACK", Color(0.08, 0.14, 0.28, 0.85), Color(0.6, 0.75, 0.95, 0.9))
-	_rects["sg_back"] = Rect2(bx, py + 152.0, bw, 26.0)
+	# NEW SAVE button (top).
+	_btn(px + 16.0, py + 40.0, pw - 32.0, 26.0, "+ NEW SAVE  (current game)", Color(0.071, 0.353, 0.196, 0.9), Color(0.706, 1.0, 0.784, 0.95), 10)
+	_rects["sg_new"] = Rect2(px + 16.0, py + 40.0, pw - 32.0, 26.0)
+	# Slot list.
+	var saves := SaveLoad.list_saves()
+	var ly := py + 76.0
+	var row_h := 32.0
+	if saves.is_empty():
+		_ctr(f_exo, px + pw * 0.5, ly + 30.0, "No saved games yet — click NEW SAVE above.", 11, Color(0.55, 0.65, 0.8, 0.7))
+	for i in saves.size():
+		var sv: Dictionary = saves[i]
+		if ly + row_h > py + ph - 44.0:
+			break
+		var r := Rect2(px + 16.0, ly, pw - 32.0, row_h - 4.0)
+		if _hov(r):
+			draw_rect(r, Color(0.157, 0.314, 0.627, 0.18))
+		elif i % 2 == 0:
+			draw_rect(r, Color(0.059, 0.098, 0.216, 0.4))
+		draw_string(f_exo, Vector2(px + 24.0, ly + 18.0), String(sv.name), HORIZONTAL_ALIGNMENT_LEFT, pw - 180.0, 11, Color(0.78, 0.86, 1.0, 0.92))
+		var ld := Rect2(px + pw - 150.0, ly + 3.0, 66.0, row_h - 10.0)
+		_btn(ld.position.x, ld.position.y, ld.size.x, ld.size.y, "LOAD", Color(0.078, 0.235, 0.588, 0.92), Color(0.706, 0.902, 1.0, 0.95), 9)
+		_rects["sgload_%d" % i] = ld
+		var dl := Rect2(px + pw - 78.0, ly + 3.0, 62.0, row_h - 10.0)
+		_btn(dl.position.x, dl.position.y, dl.size.x, dl.size.y, "DELETE", Color(0.353, 0.094, 0.094, 0.9), Color(1.0, 0.706, 0.706, 0.95), 9)
+		_rects["sgdel_%d" % i] = dl
+		ly += row_h
+	# BACK + status message.
+	_btn(px + pw * 0.5 - 50.0, py + ph - 36.0, 100.0, 26.0, "BACK", Color(0.08, 0.14, 0.28, 0.85), Color(0.6, 0.75, 0.95, 0.9))
+	_rects["sg_back"] = Rect2(px + pw * 0.5 - 50.0, py + ph - 36.0, 100.0, 26.0)
 	var msg := String(state.get("save_msg", ""))
 	if msg != "":
-		_ctr(f_exo, px + pw * 0.5, py + ph - 8.0, msg, 9, Color(0.9, 0.85, 0.5, 0.9))
+		_ctr(f_exo, px + pw * 0.5, py + ph - 44.0, msg, 9, Color(0.9, 0.85, 0.5, 0.9))
 
 # Generic event popup (NEW MISSION / unlocks / discoveries) — title + body + OK.
+func _on_first_delivery(planet_id: int, cargo: String, car_type: String, sd: float) -> void:
+	_present_event({"kind": "first_delivery", "planet_id": planet_id, "cargo": cargo, "car": car_type, "sd": sd})
+
+# Present an event popup now if nothing is open, else queue it (build_game.py
+# uses per-kind pending queues; one shared FIFO is faithful to the one-at-a-time
+# UX). Dismissing an event drains the next via _dismiss_event().
+func _present_event(st: Dictionary) -> void:
+	if active != "":
+		_event_queue.append(st)
+		return
+	_open("event")
+	state = st
+
+func _dismiss_event() -> void:
+	_close()
+	if not _event_queue.is_empty():
+		_open("event")
+		state = _event_queue.pop_front()
+
 func _draw_event() -> void:
 	match String(state.get("kind", "")):
 		"unlock": _draw_event_unlock()
 		"reward": _draw_event_reward()
+		"new_mission": _draw_event_mission()
+		"first_delivery": _draw_event_first_delivery()
+		"gold": _draw_event_deposit(true)
+		"diamond": _draw_event_deposit(false)
+		"upgrade": _draw_event_upgrade()
 		_: _draw_event_generic()
+
+# First-delivery popup (build_game.py drawFirstDeliveryPopup 17278): blue, title +
+# loaded car sprite over a rail + flavour line.
+func _draw_event_first_delivery() -> void:
+	var p := _planet_by_id(int(state.get("planet_id", -1)))
+	var pname := String(p.get("name", "the planet"))
+	var inhabited := float(p.get("population", 0.0)) > 0.0
+	var pw := 400.0
+	var ph := 232.0
+	var o := _base(pw, ph, Color(0.353, 0.706, 1.0, 0.78))
+	var px := o.x
+	var py := o.y
+	var cx := px + pw * 0.5
+	# Title (glowing blue).
+	for off in [Vector2(-1.5, 0), Vector2(1.5, 0), Vector2(0, -1.5), Vector2(0, 1.5)]:
+		_ctr(f_orb_b, cx + off.x, py + 30.0 + off.y, "First Delivery arrives at " + pname, 14, Color(0.165, 0.471, 0.816, 0.5), pw - 30.0)
+	_ctr(f_orb_b, cx, py + 30.0, "First Delivery arrives at " + pname, 14, Color(0.604, 0.839, 1.0), pw - 30.0)
+	# Loaded car sprite over a rail line.
+	var rail_y := py + 130.0
+	draw_line(Vector2(cx - 90.0, rail_y + 2.0), Vector2(cx + 90.0, rail_y + 2.0), Color(0.275, 0.510, 0.824, 0.35), 1.0)
+	if view and view.get("_trains"):
+		view._trains.draw_car_strip(self, Rect2(cx - 75.0, rail_y - 64.0, 150.0, 66.0), [String(state.get("car", "car_passenger"))], [true])
+	# Flavour line.
+	var who := "Citizens" if inhabited else String(GameState.corp_name) + " investors"
+	var cargo_lbl := String(state.get("cargo", "cargo")).replace("_", " ").to_upper()
+	var flavour := "%s rejoice as the first-ever shipment of %s arrives at %s. S.D. %.1f" % [who, cargo_lbl, pname, float(state.get("sd", 0.0))]
+	draw_multiline_string(f_exo, Vector2(px + 22.0, rail_y + 26.0), flavour, HORIZONTAL_ALIGNMENT_CENTER, pw - 44.0, 12, 3, Color(0.808, 0.886, 0.980, 0.92))
+	var ok := Rect2(cx - 55.0, py + ph - 40.0, 110.0, 27.0)
+	_btn(ok.position.x, ok.position.y, 110.0, 27.0, "OKAY!", Color(0.094, 0.314, 0.667, 0.9), Color(0.922, 0.961, 1.0, 0.97), 9)
+	_rects["event_ok"] = ok
+
+# New-mission popup (build_game.py drawNewMissionPopup 16657): green, name +
+# objectives (○) + reward pill + ACCEPT.
+func _draw_event_mission() -> void:
+	var def: Dictionary = Missions.def_for(String(state.get("id", "")))
+	var objs: Array = def.get("objectives", [])
+	var pw := 440.0
+	var ph := 132.0 + objs.size() * 18.0 + (28.0 if int(def.get("reward", 0)) > 0 else 0.0)
+	var o := _base(pw, ph, Color(0.314, 0.784, 0.510, 0.7))
+	var px := o.x
+	var py := o.y
+	var cx := px + pw * 0.5
+	_ctr(f_orb_b, cx, py + 22.0, "NEW MISSION", 10, Color(0.490, 1.0, 0.690, 0.78))
+	# Glowing mission name.
+	for off in [Vector2(-1.5, 0), Vector2(1.5, 0), Vector2(0, -1.5), Vector2(0, 1.5)]:
+		_ctr(f_orb_b, cx + off.x, py + 44.0 + off.y, String(def.get("name", "?")), 14, Color(1.0, 0.878, 0.502, 0.45))
+	_ctr(f_orb_b, cx, py + 44.0, String(def.get("name", "?")), 14, Color(1.0, 0.878, 0.502))
+	draw_line(Vector2(px + 20.0, py + 56.0), Vector2(px + pw - 20.0, py + 56.0), Color(0.235, 0.627, 0.392, 0.4), 1.0)
+	_ctr(f_exo, cx, py + 74.0, "OBJECTIVES", 9, Color(0.471, 0.745, 0.588, 0.7))
+	var oy := py + 92.0
+	for ob in objs:
+		draw_arc(Vector2(px + 36.0, oy - 2.0), 5.0, 0.0, TAU, 14, Color(0.471, 0.627, 0.549, 0.85), 1.2)
+		draw_string(f_exo, Vector2(px + 48.0, oy + 2.0), String(ob.get("text", "")), HORIZONTAL_ALIGNMENT_LEFT, pw - 70.0, 10, Color(0.784, 0.882, 0.824, 0.9))
+		oy += 18.0
+	var rw := int(def.get("reward", 0))
+	if rw > 0:
+		var pill := Rect2(cx - 90.0, oy + 2.0, 180.0, 22.0)
+		_fill_round(pill, 5.0, Color(0.078, 0.353, 0.196, 0.9))
+		_ctr(f_orb_b, cx, oy + 17.0, "REWARD:  + %s CR" % _fmt_cr(rw), 10, Color(0.549, 1.0, 0.706))
+		oy += 28.0
+	var ok := Rect2(cx - 60.0, py + ph - 38.0, 120.0, 28.0)
+	_btn(ok.position.x, ok.position.y, 120.0, 28.0, "ACCEPT", Color(0.071, 0.431, 0.255, 0.88), Color(0.706, 1.0, 0.843, 0.95), 10)
+	_rects["event_ok"] = ok
 
 func _draw_event_generic() -> void:
 	var pw := 420.0
@@ -784,6 +937,232 @@ func _draw_event_unlock() -> void:
 	var ok := Rect2(px + (pw - 100.0) * 0.5, py + ph - 40.0, 100.0, 26.0)
 	_btn(ok.position.x, ok.position.y, 100.0, 26.0, "OKAY!", Color(0.071, 0.431, 0.255, 0.88), Color(0.706, 1.0, 0.843, 0.95), 9)
 	_rects["event_ok"] = ok
+
+# Gold/diamond deposit discovery (build_game.py drawGoldDiscoveryPopup 16469 /
+# drawDiamondDiscoveryPopup 16501): 320×340, amber/blue border, EUREKA! / FOR REAL?
+# title, 2-line sensor message, big car sprite, OKAY.
+func _draw_event_deposit(is_gold: bool) -> void:
+	var pw := 320.0
+	var ph := 340.0
+	var border := Color(1.0, 0.784, 0.118, 0.7) if is_gold else Color(0.314, 0.784, 1.0, 0.7)
+	var o := _base(pw, ph, border)
+	var px := o.x
+	var py := o.y
+	var cx := px + pw * 0.5
+	var title := "EUREKA!" if is_gold else "FOR REAL?"
+	var title_col := Color(1.0, 0.878, 0.251) if is_gold else Color(0.753, 0.941, 1.0)
+	var glow := Color(1.0, 0.667, 0.0, 0.5) if is_gold else Color(0.251, 0.784, 1.0, 0.5)
+	# Glowing title.
+	for off in [Vector2(-1.5, 0), Vector2(1.5, 0), Vector2(0, -1.5), Vector2(0, 1.5)]:
+		_ctr(f_orb_b, cx + off.x, py + 26.0 + off.y, title, 13, glow)
+	_ctr(f_orb_b, cx, py + 26.0, title, 13, title_col)
+	# 2-line sensor message.
+	var lines := ["Your train's sensors have detected a", "significant gold deposit on this planet."] if is_gold else ["Your sensors detected actual diamonds", "buried on this planet. No joke."]
+	for i in lines.size():
+		_ctr(f_exo, cx, py + 44.0 + i * 14.0, String(lines[i]), 9, Color(0.784, 0.863, 1.0, 0.85))
+	# Big car sprite.
+	if view and view.get("_trains"):
+		var spr := "car_gold" if is_gold else "car_diamond"
+		view._trains.draw_car_strip(self, Rect2(px + 30.0, py + 86.0, pw - 60.0, 150.0), [spr], [true])
+	# OKAY button.
+	var fill := Color(0.706, 0.549, 0.039, 0.85) if is_gold else Color(0.078, 0.392, 0.627, 0.85)
+	var txt := Color(1.0, 0.941, 0.627, 0.95) if is_gold else Color(0.784, 0.961, 1.0, 0.95)
+	var ok := Rect2(px + (pw - 100.0) * 0.5, py + ph - 40.0, 100.0, 26.0)
+	_btn(ok.position.x, ok.position.y, 100.0, 26.0, "OKAY!", fill, txt, 9)
+	_rects["event_ok"] = ok
+
+# Per-upgrade copy (build_game.py _UPGRADE_UNLOCK_INFO 17037). Keyed on the port's
+# upgrade ids. station-kind = orbit rings; building-kind = planet + foundry.
+const _UPGRADE_UNLOCK_INFO := {
+	"iron_foundry": {"name": "IRON FOUNDRY", "kind": "iron_foundry", "biome": Color(0.788, 0.647, 0.353),
+		"cost": "10,000 cr", "build_on": "DESERT planets", "build_on_col": Color(0.941, 0.627, 0.251),
+		"enables": "Enables this planet to smelt delivered [Molten Ore] + [Water]\ninto [Iron].",
+		"formula": "1 [Molten Ore]  +  1 [Water]   →   1 [Iron]", "time": "~40 seconds"},
+	"bakery": {"name": "BAKERY", "kind": "bakery", "biome": Color(0.227, 0.624, 0.761),
+		"cost": "15,000 cr", "build_on": "RESORT planets", "build_on_col": Color(0.219, 0.667, 0.941),
+		"enables": "Enables this planet to bake delivered [Grain] into [Cargo].",
+		"formula": "1 [Grain]   →   1 [Cargo]", "time": "~40 seconds"},
+	"glassworks": {"name": "GLASSWORKS", "kind": "glassworks", "biome": Color(0.227, 0.624, 0.761),
+		"cost": "25,000 cr", "build_on": "RESORT planets", "build_on_col": Color(0.219, 0.667, 0.941),
+		"enables": "Enables this planet to melt delivered [Sand] + [Chemical] into [Glass].",
+		"formula": "1 [Sand]  +  1 [Chemical]   →   1 [Glass]", "time": "~40 seconds"},
+	"large_station": {"name": "LARGE STATION", "kind": "station", "rings": 2, "biome": Color(0.533, 0.576, 0.639),
+		"cost": "50,000 cr  +  4 Iron", "build_on": "any planet where a STATION has already been built",
+		"enables": "Enables TRAINS in both LOW and MEDIUM orbits\nto LOAD/UNLOAD simultaneously."},
+	"terminal": {"name": "TERMINAL", "kind": "station", "rings": 3, "biome": Color(0.533, 0.576, 0.639),
+		"cost": "75,000 cr  +  6 Steel", "build_on": "any planet where a LARGE STATION has already been built",
+		"enables": "Enables TRAINS in LOW, MEDIUM, and HIGH orbits to LOAD/UNLOAD simultaneously."},
+}
+
+# Cargo text colour (build_game.py CARGO_TEXT_COLORS 1134), keyed on display name.
+const _CARGO_TEXT_COLORS := {
+	"passengers": Color(0.765, 0.0, 0.063), "livestock": Color(0.714, 0.506, 0.361),
+	"mail": Color(1, 1, 1), "water": Color(0.259, 0.659, 1.0), "ice": Color(0.643, 0.863, 1.0),
+	"sand": Color(0.733, 0.518, 0.349), "molten ore": Color(1.0, 0.353, 0.157),
+	"iron": Color(0.369, 0.384, 0.420), "gold": Color(1.0, 0.820, 0.282),
+	"diamond": Color(0.643, 0.941, 1.0), "hazmat": Color(0.863, 1.0, 0.282),
+	"oil": Color(0.604, 0.659, 0.227), "battery": Color(1.0, 0.843, 0.267),
+	"chemical": Color(0.502, 0.910, 0.376), "flowers": Color(1.0, 0.478, 0.800),
+	"medical": Color(1.0, 0.353, 0.471), "grain": Color(0.831, 0.655, 0.416),
+	"fruit": Color(1.0, 0.478, 0.282), "steel": Color(0.580, 0.659, 0.737),
+	"glass": Color(0.690, 0.910, 0.941), "machinery": Color(0.643, 0.675, 0.706),
+	"cargo": Color(0.690, 0.533, 0.345),
+}
+
+# Upgrade-unlock popup (build_game.py drawUpgradeUnlockPopup 17097): amber, label +
+# glowing name + visual + COST/BUILDABLE ON/ENABLES/formula, OKAY.
+func _draw_event_upgrade() -> void:
+	var info: Dictionary = _UPGRADE_UNLOCK_INFO.get(String(state.get("upgrade", "")), {})
+	if info.is_empty():
+		_draw_event_generic(); return
+	var pw := 340.0
+	var is_station := String(info.get("kind", "")) == "station"
+	# Size to content: count wrapped lines per section (mirrors the draw below).
+	var n_build := _count_lines(f_exo, String(info.get("build_on", "")), 11, pw - 36.0)
+	var n_en := _count_lines(f_exo, String(info.get("enables", "")), 10, pw - 36.0)
+	var n_form := _count_lines(f_exo, String(info.get("formula", "")), 11, pw - 36.0) if info.has("formula") else 0
+	var be := 196.0
+	be += 15.0 + 15.0 + 24.0                 # COST: caption + pill + gap
+	be += 15.0 + 14.0 * n_build + 9.0        # BUILDABLE ON
+	be += 15.0 + 14.0 * n_en                 # ENABLES
+	if info.has("formula"):
+		be += 8.0 + 15.0 * n_form + 13.0     # formula + processing time
+	var ph := be + 64.0
+	var o := _base(pw, ph, Color(0.961, 0.784, 0.157, 0.7))
+	var px := o.x
+	var py := o.y
+	var cx := px + pw * 0.5
+	# Label + glowing name.
+	_ctr(f_orb_b, cx, py + 22.0, "NEW PLANET UPGRADE UNLOCKED", 10, Color(1.0, 0.882, 0.510, 0.78))
+	for off in [Vector2(-1.5, 0), Vector2(1.5, 0), Vector2(0, -1.5), Vector2(0, 1.5)]:
+		_ctr(f_orb_b, cx + off.x, py + 44.0 + off.y, String(info.get("name", "")), 15, Color(1.0, 0.667, 0.125, 0.45))
+	_ctr(f_orb_b, cx, py + 44.0, String(info.get("name", "")), 15, Color(1.0, 0.878, 0.502))
+	# Visual.
+	_draw_upgrade_visual(cx, py + (108.0 if is_station else 125.0), info)
+	# Body sections.
+	var ly := py + 196.0
+	_cap(cx, ly, "COST"); ly += 15.0
+	var ctxt := String(info.get("cost", "-"))
+	var cpw := f_exo.get_string_size(ctxt, HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x + 16.0
+	_fill_round(Rect2(cx - cpw * 0.5, ly - 13.0, cpw, 17.0), 4.0, Color(0.431, 0.071, 0.071, 0.92))
+	_ctr(f_exo, cx, ly - 0.5, ctxt, 11, Color(1, 1, 1, 0.97))
+	ly += 24.0
+	_cap(cx, ly, "BUILDABLE ON"); ly += 15.0
+	ly = _draw_tok_text(cx, ly, String(info.get("build_on", "-")), 11, info.get("build_on_col", Color(0.745, 0.882, 1.0, 0.95)), pw - 36.0, 14.0) + 9.0
+	_cap(cx, ly, "ENABLES"); ly += 15.0
+	ly = _draw_tok_text(cx, ly, String(info.get("enables", "")), 10, Color(0.894, 0.894, 0.914, 0.9), pw - 36.0, 14.0)
+	if info.has("formula"):
+		ly += 8.0
+		ly = _draw_tok_text(cx, ly, String(info.get("formula", "")), 11, Color(1.0, 0.922, 0.627, 0.97), pw - 36.0, 15.0)
+		ly = _draw_tok_text(cx, ly, "Processing time: " + String(info.get("time", "")), 9, Color(0.784, 0.804, 0.843, 0.78), pw - 36.0, 13.0)
+	draw_string(f_exo, Vector2(px + 18.0, ly + 14.0), "Available in the planet UPGRADES panel.", HORIZONTAL_ALIGNMENT_CENTER, pw - 36.0, 9, Color(0.706, 0.725, 0.765, 0.6))
+	var ok := Rect2(cx - 50.0, ly + 24.0, 100.0, 26.0)
+	_btn(ok.position.x, ok.position.y, 100.0, 26.0, "OKAY!", Color(0.588, 0.451, 0.078, 0.9), Color(1.0, 0.961, 0.824, 0.97), 9)
+	_rects["event_ok"] = ok
+
+func _cap(cx: float, y: float, txt: String) -> void:
+	_ctr(f_orb, cx, y, txt, 9, Color(0.588, 0.784, 1.0, 0.65))
+
+# Small upgrade visual: station orbit-rings, or a planet with a foundry building.
+func _draw_upgrade_visual(cx: float, cy: float, info: Dictionary) -> void:
+	var r := 42.0
+	if String(info.get("kind", "")) == "station":
+		var ring_r := [r * 1.3, r * 1.7, r * 2.1]
+		var rings := int(info.get("rings", 2))
+		for i in rings:
+			draw_arc(Vector2(cx, cy), ring_r[i], 0.0, TAU, 48, Color(0.471, 0.706, 1.0, 0.5 - i * 0.12), 1.5)
+		draw_circle(Vector2(cx, cy), r, Color(0.667, 0.706, 0.769))
+		draw_circle(Vector2(cx, cy - r * 0.3), r * 0.55, Color(0.733, 0.769, 0.831, 0.5))
+		draw_arc(Vector2(cx, cy), r, 0.0, TAU, 48, Color(1, 1, 1, 0.12), 1.0)
+		# Station module on top.
+		var my := cy - r
+		draw_rect(Rect2(cx - 7.0, my - 5.0, 14.0, 6.0), Color(0.353, 0.588, 0.902, 0.95))
+		draw_rect(Rect2(cx - 2.5, my - 10.0, 5.0, 5.0), Color(0.588, 0.784, 1.0, 0.95))
+	else:
+		var pr := r * 0.6
+		draw_circle(Vector2(cx, cy), pr, info.get("biome", Color(0.6, 0.6, 0.6)))
+		draw_circle(Vector2(cx, cy), pr * 0.45, Color(0.08, 0.086, 0.110, 0.5))
+		draw_arc(Vector2(cx, cy), pr, 0.0, TAU, 40, Color(1, 1, 1, 0.12), 1.0)
+		# A simple building seated on the surface (the focal element).
+		var bw := 30.0
+		var bx := cx - bw * 0.5
+		var by := cy - pr - 26.0
+		draw_rect(Rect2(bx, by, bw, 28.0), Color(0.235, 0.247, 0.290))
+		draw_rect(Rect2(bx + 5.0, by - 14.0, 7.0, 16.0), Color(0.310, 0.325, 0.376))  # chimney
+		draw_rect(Rect2(bx, by, bw, 28.0), Color(0.490, 0.604, 0.722, 0.7), false, 1.0)
+		# Warm glow at the building mouth (foundry).
+		draw_rect(Rect2(bx + bw * 0.5 - 4.0, by + 14.0, 8.0, 10.0), Color(1.0, 0.557, 0.157, 0.85))
+
+# ── Token-aware centred text (build_game.py _wrapTokC) ───────────────────────
+# Counts wrapped lines of `text` at `maxw` (honours explicit \n).
+func _count_lines(font: Font, text: String, size: int, maxw: float) -> int:
+	var n := 0
+	for seg in text.split("\n"):
+		var line := ""
+		for w in seg.split(" ", false):
+			var t := w if line == "" else line + " " + w
+			if font.get_string_size(t, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x <= maxw:
+				line = t
+			else:
+				if line != "": n += 1
+				line = w
+		if line != "": n += 1
+	return maxi(1, n)
+
+# Draws `text` centred at cx, wrapping at maxw, colouring [Cargo] tokens. Returns
+# the y after the block.
+func _draw_tok_text(cx: float, start_y: float, text: String, size: int, base: Color, maxw: float, lh: float) -> float:
+	var y := start_y
+	var space_w := f_exo.get_string_size(" ", HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
+	for seg in text.split("\n"):
+		var words := _tok_words(seg, base)
+		var line: Array = []
+		var line_w := 0.0
+		for item in words:
+			var ww := f_exo.get_string_size(String(item.w), HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
+			var add := ww + (space_w if not line.is_empty() else 0.0)
+			if line_w + add > maxw and not line.is_empty():
+				_flush_tok_line(cx, y, line, line_w, size, space_w)
+				y += lh; line = []; line_w = 0.0; add = ww
+			line.append(item)
+			line_w += add
+		if not line.is_empty():
+			_flush_tok_line(cx, y, line, line_w, size, space_w)
+			y += lh
+	return y
+
+func _flush_tok_line(cx: float, y: float, line: Array, line_w: float, size: int, space_w: float) -> void:
+	var x := cx - line_w * 0.5
+	for item in line:
+		var w := String(item.w)
+		draw_string(f_exo, Vector2(x, y), w, HORIZONTAL_ALIGNMENT_LEFT, -1, size, item.c)
+		x += f_exo.get_string_size(w, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x + space_w
+
+# Splits text into (word, colour) items, colouring [Cargo] refs by CARGO_TEXT_COLORS.
+func _tok_words(text: String, base: Color) -> Array:
+	var out: Array = []
+	var i := 0
+	var n := text.length()
+	var cur := ""
+	while i < n:
+		var ch := text[i]
+		if ch == "[":
+			for w in cur.split(" ", false):
+				out.append({"w": w, "c": base})
+			cur = ""
+			var j := text.find("]", i)
+			if j < 0: j = n
+			var inner := text.substr(i + 1, j - i - 1)
+			var col: Color = _CARGO_TEXT_COLORS.get(inner.to_lower(), base)
+			for w in inner.split(" ", false):
+				out.append({"w": w, "c": col})
+			i = j + 1
+		else:
+			cur += ch
+			i += 1
+	for w in cur.split(" ", false):
+		out.append({"w": w, "c": base})
+	return out
 
 # Mission reward (build_game.py drawMissionRewardPopup 17185): green, name + reward pill.
 func _draw_event_reward() -> void:
@@ -955,10 +1334,13 @@ func _tb_engine_panel(px: float, py: float, ph: float) -> void:
 		view._trains.draw_car_strip(self, Rect2(up_x + 20.0, py + 32.0, up_w - 40.0, 66.0), [tb_engine], [true])
 	_ctr(f_orb_b, up_x + up_w * 0.5, py + 116.0, String(tb_engine).trim_prefix("engine_").to_upper(), 8, Color(0.706, 0.863, 1.0, 0.92))
 	draw_line(Vector2(up_x + 12.0, py + 124.0), Vector2(up_x + up_w - 12.0, py + 124.0), Color(0.157, 0.314, 0.627, 0.25), 1.0)
-	# Stats.
+	# Stats — incl. MAINT (relative wear, lower = better) + REPAIR (cost mult).
+	var wear := int(round(float(Tuning.ENGINE_MAINT_DECAY.get(tb_engine, Tuning.MAINT_DECAY_PER_AU)) / Tuning.MAINT_DECAY_PER_AU * 100.0))
 	var stats := [
 		["SPD", str(int(Tuning.ENGINE_MAX_SPD.get(tb_engine, 4.0))), Color(0.314, 0.863, 1.0, 0.92)],
 		["COST", _fmt_cr(int(Tuning.ENGINE_COSTS.get(tb_engine, 10000))), Color(1.0, 0.627, 0.314, 0.92)],
+		["MAINT", "%d%% wear" % wear, Color(0.392, 0.863, 0.549, 0.92) if wear <= 60 else Color(1.0, 0.784, 0.314, 0.92)],
+		["REPAIR", "x%.1f" % float(Tuning.ENGINE_REPAIR_MULT.get(tb_engine, 1.0)), Color(0.706, 0.784, 0.941, 0.92)],
 	]
 	var sy := py + 140.0
 	for s in stats:
@@ -1001,11 +1383,10 @@ func _simple_list(title: String, items: Array) -> void:
 # ── Unified TRAINS / ROUTES / STATIONS window (build_game.py _drawWindowTabs) ──
 const _WIN_TABS := [["trains", "TRAINS", "#ffaa80"], ["routes", "ROUTES", "#7eddc8"], ["stations", "STATIONS", "#7ab8ff"]]
 
-func _win_size(tab: String) -> Vector2:
-	match tab:
-		"trains": return Vector2(580.0, 430.0)
-		"routes": return Vector2(620.0, 464.0)
-		_: return Vector2(648.0, 476.0)
+func _win_size(_tab: String) -> Vector2:
+	# All three tabs (TRAINS / ROUTES / STATIONS) share ONE size, like the
+	# original's WIN_PW=648 / WIN_PH=476 — so switching tabs doesn't resize.
+	return Vector2(648.0, 476.0)
 
 func _win_border(tab: String) -> Color:
 	match tab:
@@ -1227,7 +1608,7 @@ func _win_stations(px: float, py: float, pw: float, ph: float) -> void:
 	if stations.is_empty():
 		_ctr(f_exo, px + pw * 0.5, py + 120.0, "No stations built yet.", 12, Color(0.6, 0.72, 0.9, 0.8))
 		return
-	var PANE := 108.0
+	var PANE := 136.0  # original: room for up to 5 supply/5 demand rows
 	var ry := py + 36.0
 	for i in stations.size():
 		var p: Dictionary = stations[i]
@@ -1257,13 +1638,13 @@ func _win_stations(px: float, py: float, pw: float, ph: float) -> void:
 		draw_string(f_orb_b, Vector2(nx, ry + 42.0), "SUPPLY", HORIZONTAL_ALIGNMENT_LEFT, -1, 7, Color(0.353, 0.784, 1.0, 0.78))
 		draw_string(f_orb_b, Vector2(nx + 220.0, ry + 42.0), "DEMAND", HORIZONTAL_ALIGNMENT_LEFT, -1, 7, Color(1.0, 0.667, 0.235, 0.78))
 		var syy := ry + 48.0
-		for e in _pd_sorted_cargo(p, "supply").slice(0, 3):
-			var slx: float = view._trains.draw_cargo_strip(self, nx, syy, 22.0, 18.0, e[0], e[1], 3)
-			draw_string(f_orb_b, Vector2(slx, syy + 13.0), "×%s" % _fmt_tenth(e[1]), HORIZONTAL_ALIGNMENT_LEFT, -1, 8, Color(0.588, 0.843, 1.0, 0.92)); syy += 20.0
+		for e in _pd_sorted_cargo(p, "supply").slice(0, 5):
+			var slx: float = view._trains.draw_cargo_strip(self, nx, syy, 22.0, 17.0, e[0], e[1], 3)
+			draw_string(f_orb_b, Vector2(slx, syy + 12.0), "×%s" % _fmt_tenth(e[1]), HORIZONTAL_ALIGNMENT_LEFT, -1, 8, Color(0.588, 0.843, 1.0, 0.92)); syy += 17.0
 		syy = ry + 48.0
-		for e in _pd_sorted_cargo(p, "demand").slice(0, 3):
-			var dlx: float = view._trains.draw_cargo_strip(self, nx + 220.0, syy, 22.0, 18.0, e[0], e[1], 3)
-			draw_string(f_orb_b, Vector2(dlx, syy + 13.0), "×%s" % _fmt_tenth(e[1]), HORIZONTAL_ALIGNMENT_LEFT, -1, 8, Color(1.0, 0.745, 0.431, 0.92)); syy += 20.0
+		for e in _pd_sorted_cargo(p, "demand").slice(0, 5):
+			var dlx: float = view._trains.draw_cargo_strip(self, nx + 220.0, syy, 22.0, 17.0, e[0], e[1], 3)
+			draw_string(f_orb_b, Vector2(dlx, syy + 12.0), "×%s" % _fmt_tenth(e[1]), HORIZONTAL_ALIGNMENT_LEFT, -1, 8, Color(1.0, 0.745, 0.431, 0.92)); syy += 17.0
 		_rects["winrow_station_%d" % int(p.id)] = Rect2(px, ry, pw, PANE)
 		if i < stations.size() - 1:
 			draw_line(Vector2(px, ry + PANE - 1.0), Vector2(px + pw, ry + PANE - 1.0), Color(0.157, 0.314, 0.627, 0.25), 1.0)
@@ -1272,6 +1653,11 @@ func _win_stations(px: float, py: float, pw: float, ph: float) -> void:
 # ── Train details popup (build_game.py drawTrainPopup) ───────────────────────
 func _draw_train_detail() -> void:
 	var tid := int(state.get("trainIdx", -1))
+	if tid < 0:
+		# Opened via double-click / galaxy — derive from the current selection.
+		var sel: Dictionary = GameState.selected
+		if String(sel.get("kind", "")) == "train":
+			tid = int(String(sel.get("id", "")).trim_prefix("train_"))
 	var t: Dictionary = {}
 	for tt in Transit.trains:
 		if int(tt.id) == tid:
@@ -1315,6 +1701,45 @@ func _draw_train_detail() -> void:
 	var st := _train_status(t)
 	draw_string(f_exo, Vector2(px + 16.0, py + 186.0), "STATUS", HORIZONTAL_ALIGNMENT_LEFT, -1, 8, Color(0.431, 0.667, 0.902, 0.92))
 	draw_string(f_exo, Vector2(px + 80.0, py + 186.0), st[0], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, st[1])
+	var div := Color(0.216, 0.333, 0.549, 0.45)
+	var bar_x := px + 16.0
+	var bar_w := 200.0
+	# ── MAINTENANCE bar (build_game.py:23247) ──
+	draw_line(Vector2(px, py + 210.0), Vector2(px + pw, py + 210.0), div, 1.0)
+	var maint: float = float(t.get("maintenance", 1.0))
+	var mcol := Color(0.314, 0.863, 0.471) if maint >= 0.75 else (Color(1.0, 0.784, 0.235) if maint >= 0.40 else Color(0.863, 0.314, 0.314))
+	draw_string(f_orb_b, Vector2(px + 16.0, py + 228.0), "MAINTENANCE", HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color(0.471, 0.706, 0.902, 0.85))
+	draw_rect(Rect2(bar_x, py + 234.0, bar_w, 8.0), Color(0.039, 0.078, 0.176, 0.8))
+	draw_rect(Rect2(bar_x, py + 234.0, bar_w * maint, 8.0), mcol)
+	draw_string(f_exo, Vector2(bar_x + bar_w + 10.0, py + 242.0), "%d%% · %d SU since service" % [int(round(maint * 100.0)), int(round(float(t.get("distSinceMaint", 0.0))))], HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color(0.6, 0.72, 0.85, 0.8))
+	# ── ENGINE AGE bar (build_game.py:23262) ──
+	var failed := bool(t.get("_engineFailed", false))
+	var born: float = float(t.get("_engineBornSd", GameState.stardate - 15.0))
+	var fail_sd: float = float(t.get("_engineFailureSd", GameState.stardate + 15.0))
+	var life: float = maxf(0.0001, fail_sd - born)
+	var age_frac: float = clampf((fail_sd - GameState.stardate) / life, 0.0, 1.0)
+	var sd_left: float = maxf(0.0, fail_sd - GameState.stardate)
+	var acol := Color(0.314, 0.863, 0.471) if age_frac >= 0.5 else (Color(1.0, 0.784, 0.235) if age_frac >= 0.2 else Color(0.863, 0.314, 0.314))
+	draw_string(f_orb_b, Vector2(px + 16.0, py + 262.0), "ENGINE AGE", HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color(0.471, 0.706, 0.902, 0.85))
+	draw_rect(Rect2(bar_x, py + 268.0, bar_w, 8.0), Color(0.039, 0.078, 0.176, 0.8))
+	draw_rect(Rect2(bar_x, py + 268.0, bar_w * age_frac, 8.0), acol)
+	draw_string(f_exo, Vector2(bar_x + bar_w + 10.0, py + 276.0), "engine failed — replace" if failed else "%.1f SD until breakdown" % sd_left, HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color(0.863, 0.314, 0.314, 0.9) if failed else Color(0.6, 0.72, 0.85, 0.8))
+	# ── FINANCIAL PERFORMANCE (build_game.py:23080) ──
+	draw_line(Vector2(px, py + 290.0), Vector2(px + pw, py + 290.0), div, 1.0)
+	draw_string(f_orb_b, Vector2(px + 16.0, py + 310.0), "FINANCIAL PERFORMANCE", HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color(0.471, 0.706, 0.902, 0.85))
+	var rev := int(t.get("totalRevenue", 0))
+	var cost := int(t.get("totalCosts", 0))
+	var profit := rev - cost
+	var fin := [
+		["REVENUE", "+ %s cr" % _fmt_cr(rev), Color(0.392, 0.863, 0.549)],
+		["COSTS", "- %s cr" % _fmt_cr(cost), Color(0.863, 0.392, 0.392)],
+		["PROFIT", ("- " if profit < 0 else "+ ") + "%s cr" % _fmt_cr(abs(profit)), Color(0.392, 0.902, 0.588) if profit >= 0 else Color(0.902, 0.353, 0.353)],
+	]
+	var fy := py + 332.0
+	for f in fin:
+		draw_string(f_exo, Vector2(px + 24.0, fy), String(f[0]), HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(0.55, 0.68, 0.85, 0.8))
+		_rt(f_orb_b, px + pw - 24.0, fy, String(f[1]), 11, f[2])
+		fy += 22.0
 
 # ── Missions popup ([M], build_game.py drawMissionsPopup) ────────────────────
 # Faithful to build_game.py drawMissionsPopup (480×360, green): glow title +
@@ -2108,12 +2533,175 @@ func _fmt_cr(n: int) -> String:
 			out = "," + out
 	return ("-" if n < 0 else "") + out
 
+# ── Corp dashboard (build_game.py drawCorpPopup 17584) ───────────────────────
+func _draw_corp() -> void:
+	var pw := 570.0
+	var ph := 320.0
+	var o := _base(pw, ph, Color(0.314, 0.549, 1.0, 0.65))
+	var px := o.x
+	var py := o.y
+	# Header band: circular logo + corp name + [ESC].
+	draw_rect(Rect2(px + 1.0, py + 1.0, pw - 2.0, 40.0), Color(0.039, 0.078, 0.176, 0.85))
+	draw_circle(Vector2(px + 28.0, py + 21.0), 13.0, Color(0.157, 0.314, 0.627, 0.9))
+	draw_arc(Vector2(px + 28.0, py + 21.0), 13.0, 0.0, TAU, 24, Color(0.471, 0.706, 1.0, 0.8), 1.5)
+	_ctr(f_orb_b, px + 28.0, py + 25.0, String(GameState.corp_name).substr(0, 2).to_upper(), 11, Color(0.706, 0.863, 1.0))
+	draw_string(f_orb_b, Vector2(px + 50.0, py + 26.0), String(GameState.corp_name), HORIZONTAL_ALIGNMENT_LEFT, pw - 160.0, 15, Color(0.78, 0.88, 1.0))
+	_esc_hint(px, py, pw)
+	# ── Left financials pane: 4×2 labelled grid ──
+	var total_rev := 0.0
+	var total_cost := 0.0
+	for e in GameState.finance_ledger:
+		total_rev += float(e.revenue)
+		total_cost += float(e.cost)
+	var total_purch := 0.0
+	for ple in GameState.purchase_ledger:
+		total_purch += float(ple.amount)
+	var expenses := total_cost + total_purch
+	var profit := total_rev - expenses
+	var corp_value := Leaderboard._corp_value()
+	var liquid := GameState.credits
+	var hard := corp_value - liquid
+	var grid := [
+		["TOTAL REVENUES", "+ " + _fmt_cr(int(total_rev)), Color(0.392, 0.863, 0.549)],
+		["TOTAL EXPENSES", "- " + _fmt_cr(int(expenses)), Color(0.863, 0.392, 0.392)],
+		["TOTAL PROFITS", ("-" if profit < 0 else "+ ") + _fmt_cr(int(abs(profit))), Color(0.392, 0.902, 0.588) if profit >= 0 else Color(0.902, 0.353, 0.353)],
+		["STARDATES ACTIVE", "%.1f" % maxf(0.0, GameState.stardate - Tuning.START_STARDATE), Color(0.745, 0.824, 0.941)],
+		["LIQUID CASH", _fmt_cr(liquid), Color(0.706, 0.863, 1.0)],
+		["HARD ASSETS", _fmt_cr(hard), Color(0.706, 0.863, 1.0)],
+		["DEBTS", _fmt_cr(0), Color(0.6, 0.65, 0.78)],
+		["CORP VALUE", _fmt_cr(corp_value), Color(1.0, 0.843, 0.235)],
+	]
+	var pane_x := px + 16.0
+	var pane_w := 350.0
+	var cell_w := pane_w * 0.5
+	draw_string(f_orb_b, Vector2(pane_x, py + 62.0), "CORPORATE FINANCES", HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color(0.471, 0.706, 1.0, 0.7))
+	for i in grid.size():
+		var col_i := i % 2
+		var row_i := int(i / 2.0)
+		var gx := pane_x + col_i * cell_w
+		var gy := py + 84.0 + row_i * 50.0
+		draw_rect(Rect2(gx, gy, cell_w - 10.0, 44.0), Color(0.039, 0.078, 0.176, 0.5))
+		draw_string(f_exo, Vector2(gx + 8.0, gy + 16.0), String(grid[i][0]), HORIZONTAL_ALIGNMENT_LEFT, cell_w - 18.0, 8, Color(0.471, 0.588, 0.784, 0.7))
+		draw_string(f_orb_b, Vector2(gx + 8.0, gy + 34.0), String(grid[i][1]), HORIZONTAL_ALIGNMENT_LEFT, cell_w - 18.0, 12, grid[i][2])
+	# Vertical divider.
+	draw_line(Vector2(px + 384.0, py + 50.0), Vector2(px + 384.0, py + ph - 14.0), Color(0.196, 0.353, 0.627, 0.35), 1.0)
+	# ── Right CEO pane ──
+	_ctr(f_orb_b, px + 478.0, py + 62.0, "CEO", 9, Color(0.471, 0.706, 1.0, 0.7))
+	var ceo := String(GameState.ceo_name)
+	if ceo != "":
+		var sprite := String(GameState.ceo.get("sprite", "ceo_" + ceo.to_lower()))
+		var tex: Texture2D = load("res://assets/sprites/%s.png" % sprite)
+		var portrait := Rect2(px + 440.0, py + 76.0, 76.0, 76.0)
+		if tex != null:
+			draw_texture_rect(tex, portrait, false)
+		# Portrait is a button → opens the Hire-a-CEO window (when off cooldown).
+		var on_cd := GameState.ceo_cooldown() > 0.001
+		_stroke_round(portrait, 6.0, Color(0.62, 0.82, 1.0, 0.9) if (_hov(portrait) and not on_cd) else Color(0.353, 0.627, 1.0, 0.55), 1.5 if _hov(portrait) else 1.0)
+		if not on_cd:
+			_rects["corp_ceo_portrait"] = portrait
+		_ctr(f_orb_b, px + 478.0, py + 172.0, ceo.to_upper(), 12, Color(0.78, 0.88, 1.0))
+		_ctr(f_exo, px + 478.0, py + 186.0, String(GameState.ceo.get("nickname", "")), 9, Color(0.627, 0.706, 0.863, 0.7), 160.0)
+		var yy := py + 204.0
+		for cargo in GameState.ceo_revenue_mult.keys():
+			var pct := int(round((float(GameState.ceo_revenue_mult[cargo]) - 1.0) * 100.0))
+			if pct > 0:
+				_ctr(f_exo, px + 478.0, yy, "+%d%% %s" % [pct, String(cargo).capitalize()], 9, Color(0.549, 0.863, 0.627, 0.9), 160.0)
+				yy += 16.0
+		_ctr(f_exo, px + 478.0, py + ph - 18.0, "click portrait to hire", 8, Color(0.471, 0.588, 0.784, 0.6), 160.0)
+	else:
+		_ctr(f_exo, px + 478.0, py + 130.0, "No CEO hired", 10, Color(0.5, 0.6, 0.75, 0.7), 160.0)
+
+
+# Hire-a-CEO window (build_game.py drawCeoHirePopup 17882): 700×370, three columns
+# [Current | Candidate 1 | Candidate 2] with portraits, salary/perk pills, HIRE.
+func _draw_ceohire() -> void:
+	var pw := 700.0
+	var ph := 370.0
+	var o := _base(pw, ph, Color(0.235, 0.314, 0.784, 0.7))
+	var px := o.x
+	var py := o.y
+	# Title (glowing) + ESC.
+	for off in [Vector2(-1, 0), Vector2(1, 0), Vector2(0, -1), Vector2(0, 1)]:
+		_ctr(f_orb_b, px + pw * 0.5 + off.x, py + 22.0 + off.y, "HIRE A CEO", 12, Color(0.251, 0.376, 0.878, 0.5))
+	_ctr(f_orb_b, px + pw * 0.5, py + 22.0, "HIRE A CEO", 12, Color(0.627, 0.722, 1.0))
+	_esc_hint(px, py, pw)
+	draw_line(Vector2(px + 6.0, py + 32.0), Vector2(px + pw - 6.0, py + 32.0), Color(0.314, 0.314, 0.784, 0.4), 1.0)
+	var cool := GameState.ceo_cooldown()
+	var on_cool := cool > 0.001
+	if on_cool:
+		_ctr(f_exo, px + pw * 0.5, py + 48.0, "HIRING COOLDOWN: %.2f SD remaining" % cool, 9, Color(1.0, 0.706, 0.235, 0.9))
+	var pad := 14.0
+	var gap := 10.0
+	var pan_w := floorf((pw - pad * 2.0 - gap * 2.0) / 3.0)
+	var pan_y := py + (58.0 if on_cool else 42.0)
+	var pan_h := ph - (pan_y - py) - 14.0
+	# Current CEO.
+	_ceo_col(GameState.ceo, px + pad, pan_y, pan_w, pan_h, true, -1, on_cool)
+	# Candidate columns + HIRE buttons.
+	for ci in mini(2, GameState.ceo_candidates.size()):
+		_ceo_col(GameState.ceo_candidates[ci], px + pad + (pan_w + gap) * (ci + 1), pan_y, pan_w, pan_h, false, ci, on_cool)
+
+func _ceo_col(c: Dictionary, pan_x: float, pan_y: float, pan_w: float, pan_h: float, is_current: bool, idx: int, on_cool: bool) -> void:
+	if c.is_empty():
+		return
+	var pan_cx := pan_x + pan_w * 0.5
+	var pr := Rect2(pan_x, pan_y, pan_w, pan_h)
+	_fill_round(pr, 6.0, Color(0.031, 0.055, 0.157, 0.65) if is_current else Color(0.071, 0.125, 0.345, 0.6))
+	_stroke_round(pr, 6.0, Color(0.235, 0.275, 0.510, 0.45) if is_current else Color(0.275, 0.431, 0.824, 0.55), 1.0)
+	# Role badge.
+	_ctr(f_orb_b, pan_cx, pan_y + 12.0, "CURRENT" if is_current else "AVAILABLE FOR HIRE", 7, Color(0.431, 0.510, 0.765, 0.72) if is_current else Color(0.431, 0.725, 1.0, 0.8))
+	# Portrait.
+	var pw2 := 76.0
+	var p_x := pan_cx - pw2 * 0.5
+	var p_y := pan_y + 20.0
+	var tex: Texture2D = load("res://assets/sprites/%s.png" % String(c.get("sprite", "")))
+	if tex != null:
+		draw_texture_rect(tex, Rect2(p_x, p_y, pw2, pw2), false, Color(1, 1, 1, 0.72) if is_current else Color(1, 1, 1, 1))
+	_stroke_round(Rect2(p_x, p_y, pw2, pw2), 6.0, Color(0.275, 0.353, 0.667, 0.45) if is_current else Color(0.353, 0.627, 1.0, 0.6), 1.0)
+	# Name + nickname.
+	_ctr(f_orb_b, pan_cx, p_y + pw2 + 16.0, String(c.get("name", "")), 11, Color(0.549, 0.647, 0.902, 0.85) if is_current else Color(0.765, 0.863, 1.0, 0.97))
+	_ctr(f_exo, pan_cx, p_y + pw2 + 30.0, String(c.get("nickname", "")), 10, Color(0.471, 0.549, 0.784, 0.62) if is_current else Color(0.627, 0.725, 0.941, 0.7))
+	# Salary pill (red >200K, orange >100K, yellow otherwise).
+	var sal := int(c.get("salary", 0))
+	var sal_txt := "-%s cr/Stardate" % _fmt_cr(sal)
+	var sal_pw := minf(pan_w - 20.0, f_exo.get_string_size(sal_txt, HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x + 16.0)
+	var sal_y := p_y + pw2 + 52.0
+	var bg := Color(0.353, 0.071, 0.071, 0.65) if sal > 200000 else (Color(0.353, 0.204, 0.039, 0.65) if sal > 100000 else Color(0.333, 0.282, 0.031, 0.65))
+	var fg := Color(0.922, 0.373, 0.373, 0.97) if sal > 200000 else (Color(1.0, 0.725, 0.255, 0.97) if sal > 100000 else Color(1.0, 0.902, 0.196, 0.97))
+	if is_current:
+		bg = Color(0.294, 0.078, 0.078, 0.55); fg = Color(0.745, 0.353, 0.353, 0.8)
+	_fill_round(Rect2(pan_cx - sal_pw * 0.5, sal_y - 12.0, sal_pw, 20.0), 4.0, bg)
+	_ctr(f_exo, pan_cx, sal_y + 1.0, sal_txt, 11, fg)
+	# Separator + perk pills.
+	var pk_y := p_y + pw2 + 80.0
+	draw_line(Vector2(pan_x + 10.0, pk_y - 8.0), Vector2(pan_x + pan_w - 10.0, pk_y - 8.0), Color(0.235, 0.314, 0.627, 0.28), 0.6)
+	var perks: Array = c.get("perks", [])
+	for pi in perks.size():
+		var lbl := String(perks[pi])
+		var is_green := pi == 0
+		var tw := f_exo.get_string_size(lbl, HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x
+		var pill_w := minf(pan_w - 20.0, tw + 14.0)
+		_fill_round(Rect2(pan_cx - pill_w * 0.5, pk_y - 12.0, pill_w, 20.0), 4.0, Color(0.098, 0.282, 0.149, 0.62) if is_green else Color(0.098, 0.176, 0.392, 0.62))
+		_ctr(f_exo, pan_cx, pk_y + 1.0, lbl, 11, Color(0.529, 0.961, 0.659, 0.97) if is_green else Color(0.686, 0.843, 1.0, 0.95), pan_w - 16.0)
+		pk_y += 27.0
+	# HIRE button (candidates only).
+	if not is_current:
+		var b := Rect2(pan_cx - 57.0, pan_y + pan_h - 38.0, 114.0, 26.0)
+		if on_cool:
+			_fill_round(b, 4.0, Color(0.110, 0.149, 0.314, 0.55))
+			_ctr(f_orb_b, pan_cx, b.position.y + 17.0, "HIRE", 10, Color(0.275, 0.333, 0.529, 0.65))
+		else:
+			_btn(b.position.x, b.position.y, 114.0, 26.0, "HIRE", Color(0.216, 0.471, 0.902, 0.94), Color(0.882, 0.949, 1.0, 0.97), 10)
+			_rects["hire_%d" % idx] = b
+
 
 # ── small draw helpers ──────────────────────────────────────────────────────
 func _btn(x: float, y: float, w: float, h: float, label: String, fill: Color, text_col: Color, size: int = 10) -> void:
-	var hov := _hov(Rect2(x, y, w, h))
-	draw_rect(Rect2(x, y, w, h), fill.lightened(0.18) if hov else fill)
-	draw_rect(Rect2(x, y, w, h), Color(0.62, 0.82, 1.0, 0.95) if hov else Color(0.314, 0.627, 1.0, 0.8), false, 1.5 if hov else 1.0)
+	var r := Rect2(x, y, w, h)
+	var hov := _hov(r)
+	var rad := minf(6.0, h * 0.32)
+	_fill_round(r, rad, fill.lightened(0.18) if hov else fill)
+	_stroke_round(r, rad, Color(0.62, 0.82, 1.0, 0.95) if hov else Color(0.314, 0.627, 1.0, 0.8), 1.5 if hov else 1.0)
 	_ctr(f_orb_b, x + w * 0.5, y + h * 0.5 + size * 0.36, label, size, text_col.lightened(0.25) if hov else text_col, w)
 
 func _ctr(font: Font, cx: float, cy: float, text: String, size: int, col: Color, width: float = 600.0) -> void:

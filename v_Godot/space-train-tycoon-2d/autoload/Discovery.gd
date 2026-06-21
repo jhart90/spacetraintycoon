@@ -26,6 +26,10 @@ var revealed_star_ids: Dictionary = {}
 
 signal discovery_changed
 signal star_revealed(star_id: int)  # a star newly entered the registry (SFX hook)
+# Gold/diamond deposit surveys (build_game.py trackVisit ~15998): fired the
+# moment the player visits a planet carrying an undiscovered deposit.
+signal gold_discovered(planet_id: int)
+signal diamond_discovered(planet_id: int)
 
 # ── New-game initialisation (build_game.py:35243-35268) ───────────────────
 # Orijen pre-visited (no credit), home star revealed, all home-system planets
@@ -59,6 +63,13 @@ func track_visit(pid: int) -> void:
 		discovered_planet_ids[opid] = true
 	_reveal_star_for_planet(pid)
 	Fog.reveal_orbited(pid)
+	# Gold / diamond deposit survey on visit (build_game.py trackVisit ~15998).
+	if p.get("hasGold", false) and not p.get("goldRevealed", false):
+		p["goldRevealed"] = true
+		gold_discovered.emit(pid)
+	if p.get("hasDiamond", false) and not p.get("diamondRevealed", false):
+		p["diamondRevealed"] = true
+		diamond_discovered.emit(pid)
 	if not visited_planet_ids.has(pid):
 		visited_planet_ids[pid] = true
 		# TODO(Phase 2 / Economy): award the first-visit credit reward. Per

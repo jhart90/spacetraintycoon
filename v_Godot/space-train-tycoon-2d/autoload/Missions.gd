@@ -150,7 +150,9 @@ func _apply_unlocks(id: String) -> void:
 			GameState.unlocked_cars[c] = true
 			GameState.car_unlocked.emit(String(c))
 	for up in u.get("upgrades", []):
-		GameState.unlocked_upgrades[up] = true
+		if not GameState.unlocked_upgrades.has(up):
+			GameState.unlocked_upgrades[up] = true
+			GameState.upgrade_unlocked.emit(String(up))
 	# Newly-unlocked cars may release car-gated mission intros.
 	if u.has("cars"):
 		_try_promote_intros()

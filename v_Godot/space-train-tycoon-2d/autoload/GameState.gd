@@ -20,6 +20,73 @@ var corp_name := "STELLAR TRANSIT CO."
 var ai_difficulty := "normal"
 var ceo_name := ""
 var ceo_revenue_mult: Dictionary = {}  # {cargo: 1.12} — the picked CEO's perks
+# Full CEO model (build_game.py CEO_ROSTER/_genCeoCandidate ~2137). The current
+# CEO + two re-rollable hire candidates + the hiring-cooldown clock.
+var ceo: Dictionary = {}            # {name, sprite, salary, perks:[String,String], mult, nickname}
+var ceo_candidates: Array = []      # up to 2 candidates available for hire
+var ceo_last_hire_sd := -1.0        # SD of last hire; drives the 1.0-SD cooldown
+var _ceo_rng := RandomNumberGenerator.new()
+const _CEO_ROSTER := [["Gigi", "ceo_gigi"], ["Jaemin", "ceo_jaemin"], ["Keonho", "ceo_keonho"], ["Mega", "ceo_mega"]]
+const _CEO_PERK_CARGO := [["Sand", "sand"], ["Water", "water"], ["Molten Ore", "molten_ore"], ["Iron", "iron"], ["Livestock", "livestock"], ["Mail", "mail"], ["Oil", "oil"], ["Battery", "battery"], ["Chemical", "chemical"], ["Passenger", "passengers"], ["Grain", "grain"], ["Fruit", "fruit"]]
+const _CEO_NICKNAMES := {
+	"sand": "\"The Desert Baron\"", "water": "\"The Water Mogul\"", "molten_ore": "\"The Smelter\"",
+	"iron": "\"The Iron Magnate\"", "livestock": "\"The Rancher\"", "mail": "\"The Postmaster\"",
+	"oil": "\"The Oil Baron\"", "battery": "\"The Power Broker\"", "chemical": "\"The Chemist\"",
+	"passengers": "\"The People Person\"",
+}
+
+# Build a fresh CEO candidate (salary + two revenue perks) — mirrors Screens'
+# corp-setup generation so the roster shape is identical.
+func _gen_ceo(cname: String, sprite: String) -> Dictionary:
+	var c1: Array = _CEO_PERK_CARGO[_ceo_rng.randi() % _CEO_PERK_CARGO.size()]
+	var c2: Array = _CEO_PERK_CARGO[_ceo_rng.randi() % _CEO_PERK_CARGO.size()]
+	var v1 := 5 + _ceo_rng.randi() % 20
+	var v2 := 5 + _ceo_rng.randi() % 15
+	return {
+		"name": cname, "sprite": sprite, "salary": 40000 + (_ceo_rng.randi() % 30) * 10000,
+		"perks": ["+%d%% %s Revenue" % [v1, c1[0]], "+%d%% %s Revenue" % [v2, c2[0]]],
+		"mult": {String(c1[1]): 1.0 + v1 / 100.0, String(c2[1]): 1.0 + v2 / 100.0},
+		"nickname": _CEO_NICKNAMES.get(String(c1[1]), "\"The Executive\""),
+	}
+
+# Re-roll the two hire candidates from the roster, excluding the sitting CEO.
+func roll_ceo_candidates() -> void:
+	var cur_sprite := String(ceo.get("sprite", ""))
+	var pool: Array = []
+	for e in _CEO_ROSTER:
+		if String(e[1]) != cur_sprite:
+			pool.append(e)
+	for k in range(pool.size() - 1, 0, -1):
+		var j := _ceo_rng.randi() % (k + 1)
+		var tmp = pool[k]; pool[k] = pool[j]; pool[j] = tmp
+	ceo_candidates = []
+	for ci in mini(2, pool.size()):
+		ceo_candidates.append(_gen_ceo(String(pool[ci][0]), String(pool[ci][1])))
+
+# Install a CEO (from corp-setup or a hire) + refresh the revenue multipliers.
+func set_ceo(c: Dictionary) -> void:
+	ceo = c.duplicate(true)
+	if not ceo.has("nickname"):
+		var k := ""
+		for key in (c.get("mult", {}) as Dictionary).keys():
+			k = String(key); break
+		ceo["nickname"] = _CEO_NICKNAMES.get(k, "\"The Executive\"")
+	ceo_name = String(c.get("name", ""))
+	ceo_revenue_mult = (c.get("mult", {}) as Dictionary).duplicate()
+
+# Hire candidate `idx`: swap in, start the cooldown, re-roll the bench.
+func hire_ceo(idx: int) -> void:
+	if idx < 0 or idx >= ceo_candidates.size():
+		return
+	set_ceo(ceo_candidates[idx])
+	ceo_last_hire_sd = stardate
+	roll_ceo_candidates()
+
+# Remaining hiring cooldown in SD (build_game.py 1.0-SD lock after a hire).
+func ceo_cooldown() -> float:
+	if ceo_last_hire_sd < 0.0:
+		return 0.0
+	return maxf(0.0, 1.0 - (stardate - ceo_last_hire_sd))
 var pending_cam: Dictionary = {}  # {x,y,scale} from a loaded save; GalaxyView applies on enter
 var popup_active := false  # true while a modal popup is open → HUD/galaxy skip input
 var autosave_enabled := true        # Options toggle (build_game.py autosaveEnabled)
@@ -92,8 +159,12 @@ var total_passengers_delivered: int = 0
 
 signal stardate_changed(sd: float)
 signal player_delivered(revenue: int)  # a player car unloaded for revenue (SFX hook)
+signal first_delivery(planet_id: int, cargo: String, car_type: String, sd: float)
+var delivered_planets: Dictionary = {}  # planet ids that have received player cargo
 signal engine_unlocked(id: String)
 signal car_unlocked(id: String)
+# Planet-upgrade type newly unlocked (build_game.py pendingUpgradeUnlocks ~3564).
+signal upgrade_unlocked(id: String)
 
 # Unlock sets (Phase 3 — missions grant these). {key: true}.
 var unlocked_engines: Dictionary = {}
@@ -112,6 +183,7 @@ func start_new_game() -> void:
 	unlocked_upgrades = {}
 	any_cargo_produced = false
 	total_passengers_delivered = 0
+	_ceo_rng.randomize()
 
 func set_speed_idx(idx: int) -> void:
 	game_speed_idx = clampi(idx, 0, Tuning.SPEED_OPTS.size() - 1)
@@ -129,6 +201,15 @@ func _physics_process(delta: float) -> void:
 	var new_floor := int(floor(stardate))
 	if new_floor > prev_floor:
 		corp_value_history[prev_floor] = Leaderboard._corp_value()  # snapshot at the SD boundary
+		# CEO salary tick + bench re-roll (build_game.py SD-tick ~36317).
+		if not ceo.is_empty():
+			var sal := int(ceo.get("salary", 0))
+			if sal > 0:
+				credits = maxi(0, credits - sal)
+				finance_ledger.append({"sd": new_floor, "cargoType": "ceo_salary", "trainName": "CEO", "planetId": -1, "starId": -1, "revenue": 0, "cost": sal})
+				if finance_ledger.size() > FINANCE_LEDGER_CAP:
+					finance_ledger.pop_front()
+			roll_ceo_candidates()
 	Galaxy.advance_orbits(dtG)
 	Economy.accumulate(dtG * Tuning.SD_PER_DTG)  # replenish supply/demand pools
 	Transit.tick(dtG)

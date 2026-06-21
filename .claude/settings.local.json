@@ -275,7 +275,13 @@
       "Bash(bash v_Godot/tools/parity/run_parity.sh 10)",
       "PowerShell(Add-Type -AssemblyName System.Drawing; $img = [System.Drawing.Image]::FromFile\\(\"C:\\\\Users\\\\jackh\\\\Desktop\\\\Claude\\\\Train Game\\\\thumbnail_steam.png\"\\); \"$\\($img.Width\\)x$\\($img.Height\\) \\($\\($img.PixelFormat\\)\\)\"; $img.Dispose\\(\\))",
       "Bash(bash v_Godot/tools/parity/run_parity.sh 6)",
-      "PowerShell(\"removed temp\")"
+      "PowerShell(\"removed temp\")",
+      "PowerShell(python build_game.py)",
+      "Bash(unzip -l spacetraintycoon_itch.zip)",
+      "PowerShell(Compress-Archive -Path index.html,assets -DestinationPath spacetraintycoon_itch.zip -Force; if \\($?\\) { Write-Output \"Built zip:\"; Get-Item spacetraintycoon_itch.zip | Select-Object Name, @{N='MB';E={[math]::Round\\($_.Length/1MB,2\\)}}, LastWriteTime })",
+      "Bash(git rev-list *)",
+      "PowerShell(Copy-Item build_game.py build_game_without_UI.py -Force; if \\($?\\) { Write-Output \"Copied. Lines:\"; \\(Get-Content build_game_without_UI.py | Measure-Object -Line\\).Lines })",
+      "Bash(awk '{print $5, $9}')"
     ]
   },
   "hooks": {

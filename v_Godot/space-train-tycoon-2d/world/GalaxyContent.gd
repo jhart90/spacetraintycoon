@@ -82,11 +82,11 @@ func _draw() -> void:
 		if sp.x + sglow_r < 0.0 or sp.x - sglow_r > Tuning.W or sp.y + sglow_r < 0.0 or sp.y - sglow_r > Tuning.GH:
 			continue
 		_draw_star(gt, sp, sr, s)
-		# High orbit ring (HazMat zone) — faint green (dashes simplified to solid).
-		# Segment count scales with on-screen radius (a small ring needs few segs).
+		# High orbit ring (HazMat zone) — faint green DASHED ring (build_game.py
+		# setLineDash([4,9])).
 		var hor := sr * 1.6
 		if hor > 6.0:
-			draw_arc(sp, hor, 0.0, TAU, clampi(int(hor * 0.5), 16, 48), Color(0.47, 0.86, 0.31, 0.12), 1.0)
+			_dashed_ring(sp, hor, Color(0.47, 0.86, 0.31, 0.12), 1.0)
 
 	# ── Black holes ──
 	for b in Galaxy.black_holes:
@@ -139,9 +139,14 @@ func _draw_star(gt: Texture2D, c: Vector2, r: float, s: Dictionary) -> void:
 	var hi := _hex(String(pal["hi"]))
 	var core := _hex(String(pal["core"]))
 	var edge := _hex(String(pal["edge"]))
+	var glow := _hex(String(pal.get("glow", pal["core"])))
 	var glow_r: float = max(r * 2.8, 8.0)
-	# Wide corona glow.
-	_glow(gt, c, glow_r, Color(core.r, core.g, core.b, 0.8))
+	# Corona — 4-stop falloff (build_game.py 12376-12380: core→glow→glow→clear).
+	# Approximated by a wide GLOW-coloured halo + a tighter CORE-coloured inner
+	# corona, so the mid-corona reads as the palette's distinct glow hue (e.g. a
+	# yellow star's amber halo) rather than a mono-core blur.
+	_glow(gt, c, glow_r, Color(glow.r, glow.g, glow.b, 0.32))
+	_glow(gt, c, glow_r * 0.55, Color(core.r, core.g, core.b, 0.7))
 	# Stellar disc: edge base → core body → hi highlight.
 	var pr: float = max(r, 1.5)
 	draw_circle(c, pr, edge)
@@ -150,6 +155,14 @@ func _draw_star(gt: Texture2D, c: Vector2, r: float, s: Dictionary) -> void:
 
 
 # drawPlanet (build_game.py:12063): pre-glow halo + lit biome disc.
+# Dashed ring (mirrors Canvas setLineDash): short arc dashes (~4px) with ~9px gaps.
+func _dashed_ring(c: Vector2, radius: float, col: Color, width: float) -> void:
+	var nd := clampi(int(TAU * radius / 13.0), 6, 80)
+	var dash_ang: float = minf((4.0 / maxf(radius, 1.0)), TAU / nd * 0.6)
+	for i in nd:
+		var a0 := (float(i) / nd) * TAU
+		draw_arc(c, radius, a0, a0 + dash_ang, 3, col, width)
+
 func _draw_planet(gt: Texture2D, c: Vector2, r: float, p: Dictionary, star_sp: Vector2) -> void:
 	var ty: Dictionary = p.get("type", {})
 	var rim := _rim(ty.get("rim", [136, 136, 136]))
@@ -219,6 +232,10 @@ func _draw_planet(gt: Texture2D, c: Vector2, r: float, p: Dictionary, star_sp: V
 		if sky != null:
 			var chalf := 390.0 * (r / 280.0)
 			draw_texture_rect(sky, Rect2(c - Vector2(chalf, chalf), Vector2(chalf * 2.0, chalf * 2.0)), false)
+	# Player-built upgrade buildings on the surface (foundry / granary / farm /
+	# orchard), build_game.py:28828-28849.
+	if r > 12.0:
+		_draw_upgrade_buildings(c, r, p)
 	# Clouds drift screen-aligned on top of the (rotated) sphere.
 	_draw_clouds(gt, c, r, p)
 	# Station (track ring + towers) when one is built / on alien relics.
@@ -240,8 +257,11 @@ func _draw_black_hole(gt: Texture2D, c: Vector2, sr: float, ts: float) -> void:
 	var disk_inner := sr * 1.08
 	var disk_outer := sr * 1.58
 	var pulse := 0.82 + 0.18 * sin(ts * 0.00072)
-	# Gravitational lensing outer glow (purple).
-	_glow(gt, c, sr * 4.0, Color(0.43, 0.22, 0.90, 0.30))
+	# Gravitational lensing outer glow — 4-stop purple falloff (build_game.py
+	# 28518: bright purple core → dim violet → near-clear). Two layered glows
+	# approximate the radial gradient (was a single flat-alpha blob).
+	_glow(gt, c, sr * 4.0, Color(0.314, 0.157, 0.471, 0.16))
+	_glow(gt, c, sr * 2.0, Color(0.431, 0.216, 0.902, 0.26))
 	# Back half of accretion disk (PI..TAU).
 	_draw_disk_half(c, disk_inner, disk_outer, PI, TAU, pulse)
 	# Event horizon — absolute black.
@@ -439,8 +459,8 @@ func _gen_clouds(p: Dictionary, pid: int) -> Array:
 	return clouds
 
 # drawPlanetClouds (build_game.py:13368) — sphere-projected puffs, back-hemi cull,
-# limb compression, screen-aligned, slow drift. (Atmosphere mask approximated by
-# the puffs' own falloff + depth cull rather than an offscreen destination-in.)
+# limb compression, screen-aligned, slow drift. Atmosphere mask approximated by a
+# per-puff limb taper (full inside r, fade to 0 by r*1.40) + depth cull.
 func _draw_clouds(gt: Texture2D, c: Vector2, r: float, p: Dictionary) -> void:
 	if clouds_off or r < 8.0:  # build_game.py:28791 gates the galaxy call at sr>8
 		return
@@ -465,6 +485,14 @@ func _draw_clouds(gt: Texture2D, c: Vector2, r: float, p: Dictionary) -> void:
 		if al < 0.018:
 			continue
 		var pos := c + Vector2(sin(theta) * shell * cos(phi), -sin(phi) * shell)
+		# Atmosphere taper (build_game.py destination-in mask: full inside r, fade
+		# to 0 by r*1.40) — approximated by fading puff alpha past the limb so
+		# clouds thin toward the edge instead of spilling into space.
+		var dc := pos.distance_to(c)
+		if dc > r:
+			al *= clampf((r * 1.40 - dc) / (r * 0.40), 0.0, 1.0)
+			if al < 0.018:
+				continue
 		var col := ccol
 		col.a = minf(1.0, al)
 		draw_texture_rect(gt, Rect2(pos - Vector2(sw, sh), Vector2(sw * 2.0, sh * 2.0)), false, col)
@@ -620,6 +648,116 @@ func _station_angle(p: Dictionary) -> float:
 # + highlight) and 5 surface towers with windows. Basic station only for now
 # (large/terminal dock-ring + tier-aware tower heights are a follow-up); alien
 # relics use the green palette. ssz = SIZE_R['M']*scale (fixed M-size).
+# ── On-planet upgrade buildings (build_game.py drawFoundry/Granary/Farm/Orchard) ──
+const _FOUNDRY_KINDS := ["iron_foundry", "blast_furnace", "glassworks", "factory", "bakery", "juicery"]
+
+func _draw_upgrade_buildings(c: Vector2, r: float, p: Dictionary) -> void:
+	var ups: Array = p.get("upgrades", [])
+	if ups.is_empty():
+		return
+	var ssz := r
+	var base := _station_angle(p) + PI  # opposite the station's track marker
+	# Agri buildings group together with a small spread; industrial sit apart.
+	var agri: Array = []
+	for u in ups:
+		var us := String(u)
+		if us == "granary" or us == "farm" or us == "orchard":
+			agri.append(us)
+	var spread: Array = [0.0]
+	if agri.size() == 2:
+		spread = [-0.55, 0.55]
+	elif agri.size() >= 3:
+		spread = [-1.15, 0.0, 1.15]
+	for i in agri.size():
+		var a: float = base + float(spread[i % spread.size()])
+		match String(agri[i]):
+			"granary": _bld_granary(c, r, a, ssz)
+			"farm": _bld_farm(c, r, a, ssz)
+			"orchard": _bld_orchard(c, r, a, ssz)
+	# Industrial / processing buildings (foundry variants), spaced opposite agri.
+	var ind_i := 0
+	for u in ups:
+		var us := String(u)
+		if _FOUNDRY_KINDS.has(us):
+			_bld_foundry(c, r, base + PI + ind_i * 0.5 - 0.25, ssz, us)
+			ind_i += 1
+
+func _bld_xform(c: Vector2, r: float, angle: float) -> void:
+	draw_set_transform(c + Vector2(cos(angle) * r, sin(angle) * r), angle + PI * 0.5, Vector2.ONE)
+
+func _bld_foundry(c: Vector2, r: float, angle: float, ssz: float, kind: String) -> void:
+	_bld_xform(c, r, angle)
+	var b1w := ssz * 0.14
+	var b1h := ssz * 0.20
+	draw_rect(Rect2(-b1w * 0.55, -b1h, b1w, b1h), Color(0.282, 0.298, 0.314, 0.95))
+	var b2w := ssz * 0.09
+	var b2h := ssz * 0.13
+	draw_rect(Rect2(-b1w * 0.55 - b2w, -b2h, b2w, b2h), Color(0.4, 0.424, 0.439, 0.9))
+	var stw := ssz * 0.04
+	var sth := ssz * 0.11
+	var stx := b1w * 0.35 - b1w * 0.55
+	draw_rect(Rect2(stx, -b1h - sth, stw, sth), Color(0.188, 0.188, 0.204, 0.95))
+	# Indicator light — alternating per-kind palette.
+	var ph := int(Time.get_ticks_msec() / 500) % 2 == 1
+	var puff_r := maxf(1.5, ssz * 0.028)
+	var ca := Color(1.0, 0.251, 0.063)
+	var cb := Color(0.92, 0.92, 0.92)
+	match kind:
+		"iron_foundry": ca = Color(1.0, 0.376, 0.063); cb = Color(0.267, 0.8, 1.0)
+		"blast_furnace": ca = Color(0.784, 0.816, 0.863); cb = Color(0.376, 0.847, 0.125)
+		"glassworks": ca = Color(0.910, 0.788, 0.416); cb = Color(0.376, 0.847, 0.125)
+		"bakery": ca = Color(0.910, 0.627, 0.251); cb = Color(0.110, 0.102, 0.078)
+		"juicery": ca = Color(0.235, 0.690, 0.329); cb = Color(0.110, 0.102, 0.078)
+	draw_circle(Vector2(stx + stw * 0.5, -b1h - sth - puff_r), puff_r, ca if ph else cb)
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+
+func _bld_granary(c: Vector2, r: float, angle: float, ssz: float) -> void:
+	_bld_xform(c, r, angle)
+	var bw := ssz * 0.13
+	var bh := ssz * 0.19
+	draw_rect(Rect2(-bw * 0.5, -bh, bw, bh), Color(0.686, 0.165, 0.118, 0.95))
+	for i in range(1, 4):
+		var ly := -bh * i / 4.0
+		draw_line(Vector2(-bw * 0.5, ly), Vector2(bw * 0.5, ly), Color(0.51, 0.110, 0.071, 0.65), 0.5)
+	var hw := bw * 1.2
+	var hh := ssz * 0.15
+	draw_colored_polygon(PackedVector2Array([Vector2(-hw * 0.5, -bh), Vector2(hw * 0.5, -bh), Vector2(0, -bh - hh)]), Color(0.086, 0.071, 0.071, 0.97))
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+
+func _bld_farm(c: Vector2, r: float, angle: float, ssz: float) -> void:
+	_bld_xform(c, r, angle)
+	var bw := ssz * 0.17
+	var bh := ssz * 0.16
+	draw_rect(Rect2(-bw * 0.5, -bh, bw, bh), Color(0.659, 0.149, 0.110, 0.95))
+	var rh := ssz * 0.09
+	draw_colored_polygon(PackedVector2Array([Vector2(-bw * 0.56, -bh), Vector2(bw * 0.56, -bh), Vector2(0, -bh - rh)]), Color(0.071, 0.059, 0.059, 0.97))
+	var dw := bw * 0.28
+	var dh := bh * 0.44
+	draw_rect(Rect2(-dw * 0.5, -dh, dw, dh), Color(0.910, 0.886, 0.843, 0.9))
+	draw_line(Vector2(-dw * 0.5, -dh), Vector2(dw * 0.5, 0), Color(0.51, 0.110, 0.078, 0.7), 0.5)
+	draw_line(Vector2(dw * 0.5, -dh), Vector2(-dw * 0.5, 0), Color(0.51, 0.110, 0.078, 0.7), 0.5)
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+
+func _bld_orchard(c: Vector2, r: float, angle: float, ssz: float) -> void:
+	_bld_xform(c, r, angle)
+	var tree_w := ssz * 0.090
+	var trunk_h := ssz * 0.084
+	var trunk_w := ssz * 0.0264
+	var spacing := tree_w * 2.05
+	var total_w := 5.0 * spacing
+	var start_x := -total_w * 0.5
+	var fruit := [Color(1.0, 0.333, 0.2), Color(1.0, 0.6, 0.133), Color(1.0, 0.8, 0.067), Color(0.933, 0.2, 0.467), Color(0.867, 0.133, 0.267), Color(1.0, 0.467, 0.2)]
+	for i in 6:
+		var tx := start_x + i * spacing
+		var canopy_y := -trunk_h - tree_w
+		draw_rect(Rect2(tx - trunk_w * 0.5, -trunk_h, trunk_w, trunk_h), Color(0.353, 0.216, 0.078, 0.95))
+		draw_circle(Vector2(tx, canopy_y), tree_w, Color(0.137, 0.51, 0.176, 0.95))
+		var fc: Color = fruit[i % 6]
+		var fr := ssz * 0.0216
+		for off in [Vector2(-tree_w * 0.38, -tree_w * 0.22), Vector2(0, tree_w * 0.28), Vector2(tree_w * 0.38, -tree_w * 0.22)]:
+			draw_circle(Vector2(tx, canopy_y) + off, fr, fc)
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+
 func _draw_station(c: Vector2, r: float, p: Dictionary) -> void:
 	var is_relic := bool(p.get("isAlienRelic", false))
 	# Rival (AI) stations are tinted ORANGE (build_game.py 28810 sepia+hue-rotate),

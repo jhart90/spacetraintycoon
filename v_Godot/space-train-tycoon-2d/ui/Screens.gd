@@ -47,6 +47,8 @@ const _INTRO_TEXT := [
 var _intro_para := 0
 var _intro_chars := 0.0
 var _intro_cam0 := Vector2.ZERO
+var _intro_shots: Array = []  # cinematic camera shots (build_game.py _buildIntroShots)
+var _intro_elapsed := 0.0
 
 # CEO candidates (build_game.py CEO_ROSTER + _genCeoCandidate).
 const _CEO_ROSTER := [["Gigi", "ceo_gigi"], ["Jaemin", "ceo_jaemin"], ["Keonho", "ceo_keonho"], ["Mega", "ceo_mega"]]
@@ -149,19 +151,83 @@ func _process_intro(delta: float) -> void:
 		if _intro_para >= _INTRO_TEXT.size():
 			_finish_intro()
 			return
-	# Cinematic slow zoom-out drift across the home system behind the text.
+	# Cinematic CAMERA: a sequence of distinct shots over the real galaxy
+	# (build_game.py _buildIntroShots) — Orijen zoom-out opener, planet portrait,
+	# home-system, a pan to a distant system, then a galaxy zoom-out. Replaces the
+	# old sinusoidal wobble.
 	if view:
-		var total := 0.0
-		for p in _INTRO_TEXT:
-			total += float(p.length()) + 110.0
-		var done := 0.0
-		for i in _intro_para:
-			done += float(_INTRO_TEXT[i].length()) + 110.0
-		var prog := clampf((done + _intro_chars) / total, 0.0, 1.0)
-		view.sc = lerpf(Tuning.MAX_SC * 0.5, 0.05, prog)
-		var hs: Dictionary = Galaxy.stars[Galaxy.home_star_id]
-		view.cam = Vector2(float(hs.x) + sin(_t * 0.12) * 900.0, float(hs.y) + cos(_t * 0.09) * 560.0)
-		view._clamp_camera()
+		if _intro_shots.is_empty():
+			_build_intro_shots()
+		_intro_elapsed += delta
+		var t := _intro_elapsed
+		var acc := 0.0
+		var shot: Dictionary = _intro_shots[-1] if not _intro_shots.is_empty() else {}
+		var t_in := 1.0
+		for sh in _intro_shots:
+			if t < acc + float(sh.dur):
+				shot = sh
+				t_in = (t - acc) / float(sh.dur)
+				break
+			acc += float(sh.dur)
+		if not shot.is_empty():
+			var e := _ease_io(clampf(t_in, 0.0, 1.0))
+			view.cam = (shot.p0 as Vector2).lerp(shot.p1 as Vector2, e)
+			view.sc = clampf(lerpf(float(shot.s0), float(shot.s1), e), Tuning.MIN_SC, Tuning.MAX_SC)
+
+func _ease_io(t: float) -> float:
+	return t * t * (3.0 - 2.0 * t)  # smoothstep
+
+func _build_intro_shots() -> void:
+	_intro_shots = []
+	_intro_elapsed = 0.0
+	if Galaxy.planets.is_empty():
+		return
+	var orijen: Dictionary = Galaxy.planets[Galaxy.origen_id]
+	var op := Vector2(float(orijen.x), float(orijen.y))
+	var hs: Dictionary = Galaxy.stars[Galaxy.home_star_id]
+	var hp := Vector2(float(hs.x), float(hs.y))
+	var ss := clampf(220.0 / maxf(float(hs.radius), 50.0), Tuning.MIN_SC, Tuning.MAX_SC * 0.5)
+	# Shot 1 — Orijen zoom-out opener (tight → wide).
+	_intro_shots.append({"p0": op, "p1": op, "s0": Tuning.MAX_SC, "s1": Tuning.MAX_SC * 0.22, "dur": 6.0})
+	# Shot 2 — a planet portrait from the home system.
+	var portrait := _intro_home_planet(["lava", "ocean", "urban", "ancient"])
+	if not portrait.is_empty():
+		var pp := Vector2(float(portrait.x), float(portrait.y))
+		var psc := clampf(90.0 / maxf(float(portrait.radius), 20.0), Tuning.MIN_SC, Tuning.MAX_SC)
+		_intro_shots.append({"p0": pp, "p1": pp, "s0": psc, "s1": psc * 0.82, "dur": 4.5})
+	# Shot 3 — the whole home system around its star.
+	_intro_shots.append({"p0": hp, "p1": hp, "s0": ss, "s1": ss * 0.55, "dur": 4.5})
+	# Shot 4 — slow pan toward a distant star system.
+	var far := _intro_distant_star(hp)
+	var fp := Vector2(float(far.x), float(far.y)) if not far.is_empty() else hp + Vector2(50000.0, -20000.0)
+	_intro_shots.append({"p0": hp, "p1": fp, "s0": ss * 0.45, "s1": ss * 0.45, "dur": 5.0})
+	# Shot 5 — pull all the way out over the galaxy.
+	_intro_shots.append({"p0": fp, "p1": (op + fp) * 0.5, "s0": ss * 0.45, "s1": Tuning.MIN_SC * 6.0, "dur": 6.0})
+
+func _intro_home_planet(biomes: Array) -> Dictionary:
+	var hs: Dictionary = Galaxy.stars[Galaxy.home_star_id]
+	for want in biomes:
+		for pid in hs.get("planetIds", []):
+			if int(pid) < Galaxy.planets.size():
+				var p: Dictionary = Galaxy.planets[int(pid)]
+				if String((p.get("type", {}) as Dictionary).get("id", "")) == String(want):
+					return p
+	return {}
+
+func _intro_distant_star(from: Vector2) -> Dictionary:
+	var best: Dictionary = {}
+	var best_d := 0.0
+	var n := 0
+	for s in Galaxy.stars:
+		var d := from.distance_squared_to(Vector2(float(s.x), float(s.y)))
+		# prefer a fairly-distant-but-not-extreme star (deterministic-ish scan)
+		if d > best_d and d < 9.0e9:
+			best_d = d
+			best = s
+		n += 1
+		if n > 120:
+			break
+	return best
 
 
 func _finish_intro() -> void:
@@ -573,6 +639,20 @@ func _input(event: InputEvent) -> void:
 	for k in _rects.keys():
 		if (_rects[k] as Rect2).has_point(p):
 			_on_click(String(k)); get_viewport().set_input_as_handled(); return
+	# Click anywhere during the intro (not on a button) snap-finishes the typed
+	# paragraph, then advances (build_game.py _introAdvance).
+	if GameState.gs == "intro":
+		_intro_advance(); get_viewport().set_input_as_handled()
+
+func _intro_advance() -> void:
+	var para: String = _INTRO_TEXT[_intro_para]
+	if _intro_chars < float(para.length()):
+		_intro_chars = float(para.length())  # snap-finish typing this paragraph
+	else:
+		_intro_para += 1
+		_intro_chars = 0.0
+		if _intro_para >= _INTRO_TEXT.size():
+			_finish_intro()
 
 func _hov(r: Rect2) -> bool:
 	return r.has_point(_mouse)
@@ -581,7 +661,7 @@ func _on_click(key: String) -> void:
 	Audio.play("button")
 	match key:
 		"play":
-			_intro_para = 0; _intro_chars = 0.0; GameState.set_screen("intro")
+			_intro_para = 0; _intro_chars = 0.0; _intro_shots = []; _intro_elapsed = 0.0; GameState.set_screen("intro")
 		"intro_skip": _finish_intro()
 		"load":
 			if SaveLoad.load_game():
@@ -604,8 +684,8 @@ func _on_click(key: String) -> void:
 			GameState.ai_difficulty = _ai_choice
 			if _ceo_sel < _ceos.size():
 				var ceo: Dictionary = _ceos[_ceo_sel]
-				GameState.ceo_name = String(ceo.name)
-				GameState.ceo_revenue_mult = (ceo.mult as Dictionary).duplicate()
+				GameState.set_ceo(ceo)        # installs name + revenue mult + nickname
+				GameState.roll_ceo_candidates()  # seed the hire bench
 			if _ai_choice != "none":
 				AICorp.init_corp(_ai_choice)
 			_enter_galaxy()

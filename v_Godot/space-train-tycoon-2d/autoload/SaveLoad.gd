@@ -10,12 +10,39 @@ extends Node
 ## NOTE (PLAN §10): old index.html saves are NOT compatible — this is a new format.
 
 const SAVE_PATH := "user://savegame.stt"
+const SAVE_DIR := "user://saves"
 const VERSION := 2
+
+# ── Multi-slot save management (build_game.py save-manager) ──────────────────
+func list_saves() -> Array:
+	var out: Array = []
+	DirAccess.make_dir_recursive_absolute(SAVE_DIR)
+	var d := DirAccess.open(SAVE_DIR)
+	if d:
+		for f in d.get_files():
+			if f.ends_with(".stt"):
+				out.append({"path": SAVE_DIR + "/" + f, "name": f.trim_suffix(".stt").replace("_", " ")})
+	out.sort_custom(func(a, b): return String(a.name) < String(b.name))
+	return out
+
+func save_to_new_slot() -> bool:
+	DirAccess.make_dir_recursive_absolute(SAVE_DIR)
+	var nm := String(GameState.corp_name).strip_edges().replace(" ", "_").replace("/", "-").replace("\\", "-")
+	if nm == "":
+		nm = "save"
+	return save_game("%s/%s_SD%d.stt" % [SAVE_DIR, nm, int(GameState.stardate)])
+
+func delete_save(path: String) -> void:
+	if FileAccess.file_exists(path):
+		DirAccess.remove_absolute(path)
 
 # Save in the original `.stt` interchange format (full galaxy + state), so saves
 # round-trip through the same loader and are compatible with the original game's
 # format. The reduced port sim simply doesn't populate the fields it doesn't model.
 func save_game(path: String = SAVE_PATH) -> bool:
+	var dir := path.get_base_dir()
+	if dir != "" and dir != "user:/" and dir != "res:/":
+		DirAccess.make_dir_recursive_absolute(dir)
 	# Galaxy: serialize planets with `type` collapsed back to {id} (the original
 	# format; the loader rebuilds the full biome dict from the id).
 	var planets := []
@@ -190,6 +217,11 @@ func _load_stt_data(d: Dictionary) -> bool:
 		pd["demandRate"] = Economy.compute_demand_rate(pd)
 		planets.append(pd)
 	Galaxy.planets = planets
+	# Suppress first-delivery popups for planets that already have deliveries.
+	GameState.delivered_planets = {}
+	for p in planets:
+		if float(p.get("passengerDeliveries", 0.0)) > 0.0 or not (p.get("supply", {}) as Dictionary).is_empty():
+			GameState.delivered_planets[int(p.id)] = true
 	var bhs: Array = []
 	for b in g.get("blackHoles", []):
 		var bd: Dictionary = b
