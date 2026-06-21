@@ -28,7 +28,29 @@ camera transform/clamp/pan, the revenue math, the train-consist galaxy sizing, a
 
 ## ✅ FIX PROGRESS (2026-06-21, post-audit)
 
-**Front-end screens — step 3:**
+**Visuals — step 4:**
+- ◐ **V3** — per-biome surface effects added to `GalaxyContent._draw_surface`: **lava volcanoes**
+  (2–4 cones extruding from the rim with a dark-basalt body + glowing lava cap + pulsing crater bloom —
+  the "flat red sphere" is now an active volcanic world), **mountains** (3–6 snow-capped ridge triangles
+  on rocky/ice/ancient rims), and **storm lightning** (animated purple bolt polylines + ambient electric
+  glow on storm planets). Per-planet data is seed-generated + cached like the existing resort/agri/oil
+  surfaces. Lava + mountains screenshot-verified. REMAINING in V3: flower fields (baked, lower priority).
+- ◐ **V4** — **hazmat warning light** added to `TrainsLayer._draw_car`: a pulsing 3-layer yellow glow
+  (outer bloom + halo + mid + white core, quick-on/gradual-fade via sin^0.5) above a FULL hazmat car
+  (build_game.py:29807). Compiles clean; not screenshot-verified (the demo train has no hazmat car).
+  REMAINING in V4: the mission **escort-car backlit glow** — needs the `carEscort` tag set by the
+  Ancient Schematics / Mad Scientist missions, which aren't wired in the port yet.
+
+**Front-end screens — step 3 + typography:**
+- ◐ **U7 / T1 / T2** — intro **narration typography** rebuilt to `_introRenderText`: ported
+  `_find_caps_ranges` so all-caps runs render **bold**, screen-2 italic targets ("inter-galactic
+  domination", "catastrophic demise!") render **italic**, and the closing "The race has begun…" line
+  renders fully bold; text is 15px, vertically centred, single `rgba(0,0,0,0.42)` dim. Built the
+  reusable **italic Exo 2** (synthetic glyph-shear FontVariation) + **bold Exo 2** variants (T1).
+  Replaced the SKIP stub with **SKIP ▶▶ / ◀ QUIT / ♪ mute** controls that proximity-fade (0.25→1.0
+  within 60px); removed the non-original progress dots; fixed the para-3 wording ("is able to re-build"
+  + the `\n` before THE MULTI-VERSE). Screenshot-verified. REMAINING in U7: the 11-shot cinematic
+  camera path (the port's 5-shot sequence still drives the camera) — a separate camera-work pass.
 - ✅ **U5** — **corp-setup** and **AI-select** rebuilt to the faithful panelled spec. Corp-setup:
   full-screen bordered panel, glowing "ESTABLISH YOUR CORPORATION" title, "NAME YOUR CORPORATION:"
   label + name field (click to rename), and the 242×240 CEO cards with portrait + nickname + the three

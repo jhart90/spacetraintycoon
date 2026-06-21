@@ -125,12 +125,21 @@ func _draw() -> void:
 		var star_sp: Vector2 = view._w2s(Vector2(psl.x, psl.y))
 		_draw_planet(gt, pp, pr, p, star_sp)
 
-	# ── Selection ring ──
+	# ── Selection ring (build_game.py:29643): blue planet / gold star / orange
+	# train, at radius+5 with a soft glow. ──
 	var wp: Vector2 = view.selected_world_pos()
 	if wp != Vector2.INF:
 		var sp2: Vector2 = view._w2s(wp)
 		var rr := _selected_screen_radius(sc)
-		draw_arc(sp2, rr * 1.35 + 7.0, 0.0, TAU, 48, Color(1, 1, 0.3, 0.9), 2.0)
+		var kind := String(GameState.selected.get("kind", ""))
+		var rc := Color(0.267, 0.667, 1.0, 0.95)             # planet → #4af
+		if kind == "star":
+			rc = Color(1.0, 0.843, 0.0, 0.95)               # star → #ffd700
+		elif kind == "train":
+			rc = Color(1.0, 0.667, 0.533, 0.95)             # train → #fa8
+		var ring_r := maxf(9.0, rr) + 5.0
+		draw_arc(sp2, ring_r, 0.0, TAU, 56, Color(rc.r, rc.g, rc.b, 0.22), 7.0)  # glow
+		draw_arc(sp2, ring_r, 0.0, TAU, 56, rc, 2.0)
 
 
 # drawStar (build_game.py:12374): corona glow + 3-stop disc (hi→core→edge).
@@ -873,11 +882,13 @@ const _CROP_COLS := [
 
 # Biome surface detail (build_game.py drawPlanet inner passes 12107-12200), drawn
 # planet-local on the lit base. Generated view-side, seeded per planet id.
+const _MTN_BIOMES := ["rocky", "ice", "ancient"]
+
 func _draw_surface(c: Vector2, r: float, p: Dictionary) -> void:
 	if r < 5.0:
 		return
 	var id := String((p.get("type", {}) as Dictionary).get("id", ""))
-	if not ["resort", "agri", "oil"].has(id):
+	if not (["resort", "agri", "oil", "lava", "storm"].has(id) or _MTN_BIOMES.has(id)):
 		return
 	var s := _get_surface(p)
 	if s.is_empty():
@@ -885,6 +896,10 @@ func _draw_surface(c: Vector2, r: float, p: Dictionary) -> void:
 	if id == "resort": _draw_resort(c, r, s)
 	elif id == "agri": _draw_agri(c, r, s)
 	elif id == "oil": _draw_oil(c, r, s)
+	elif id == "lava": _draw_lava(c, r, s)
+	elif id == "storm": _draw_storm(c, r, s)
+	if _MTN_BIOMES.has(id) and s.has("mtn"):
+		_draw_mtn(c, r, s.mtn)
 
 func _get_surface(p: Dictionary) -> Dictionary:
 	var pid := int(p.id)
@@ -897,8 +912,119 @@ func _get_surface(p: Dictionary) -> Dictionary:
 	if id == "resort": d = _gen_resort(rng)
 	elif id == "agri": d = _gen_agri(rng)
 	elif id == "oil": d = _gen_oil(rng)
+	elif id == "lava": d = _gen_lava(rng)
+	elif id == "storm": d = _gen_storm(rng)
+	elif _MTN_BIOMES.has(id): d = {"mtn": _gen_mtn(rng, id)}
 	_surface[pid] = d
 	return d
+
+# ── Lava volcanoes (build_game.py drawPlanet :12396) ────────────────────────
+# Wide cones extruding from the rim toward orbit, each with a glowing lava cap
+# + crater bloom. Drawn outside the disc so they poke out.
+func _gen_lava(rng: RandomNumberGenerator) -> Dictionary:
+	var vols: Array = []
+	for i in 2 + int(rng.randf() * 3.0):
+		vols.append({"a": rng.randf() * TAU, "wHalf": 0.20 + rng.randf() * 0.20, "h": 0.22 + rng.randf() * 0.26, "phase": rng.randf() * TAU})
+	return {"volcanoes": vols}
+
+func _lava_vp(c: Vector2, a: float, wb: float, wt: float, base_r: float, top_r: float, rf: float, lf: float) -> Vector2:
+	var rad := base_r + rf * (top_r - base_r)
+	var w := wb + rf * (wt - wb)
+	var ang := a + lf * w
+	return c + Vector2(cos(ang), sin(ang)) * rad
+
+func _draw_lava(c: Vector2, r: float, s: Dictionary) -> void:
+	var t := Time.get_ticks_msec()
+	for v in s.get("volcanoes", []):
+		var a := float(v.a)
+		var wb := float(v.wHalf)
+		var wt := wb * 0.38
+		var base_r := r
+		var top_r := r + float(v.h) * r
+		var pulse := 0.78 + 0.22 * sin(t * 0.0019 + float(v.phase))
+		var b0 := _lava_vp(c, a, wb, wt, base_r, top_r, 0.0, -1.0)
+		var b1 := _lava_vp(c, a, wb, wt, base_r, top_r, 0.0, 1.0)
+		var t1 := _lava_vp(c, a, wb, wt, base_r, top_r, 1.0, 1.0)
+		var t0 := _lava_vp(c, a, wb, wt, base_r, top_r, 1.0, -1.0)
+		# Cone body (dark basalt, base→summit gradient via vertex colors).
+		var body_lo := Color(0.118, 0.071, 0.059)
+		var body_hi := Color(0.180, 0.078, 0.047)
+		draw_polygon([b0, b1, t1, t0], [body_lo, body_lo, body_hi, body_hi])
+		# Glowing lava cap (upper ~26%).
+		var c0 := _lava_vp(c, a, wb, wt, base_r, top_r, 0.74, -1.0)
+		var c1 := _lava_vp(c, a, wb, wt, base_r, top_r, 0.74, 1.0)
+		var cap_lo := Color(0.745, 0.204, 0.031, 0.5 * pulse)
+		var cap_hi := Color(1.0, 0.804, 0.412, 0.95 * pulse)
+		draw_polygon([c0, c1, t1, t0], [cap_lo, cap_lo, cap_hi, cap_hi])
+		# Crater bloom (concentric glow at the summit).
+		var tc := _lava_vp(c, a, wb, wt, base_r, top_r, 1.0, 0.0)
+		var crater := maxf(1.5, (t1 - t0).length() * 0.5)
+		draw_circle(tc, crater * 1.5, Color(1.0, 0.275, 0.0, 0.18 * pulse))
+		draw_circle(tc, crater * 0.9, Color(1.0, 0.588, 0.176, 0.5 * pulse))
+		draw_circle(tc, crater * 0.45, Color(1.0, 0.961, 0.784, 0.85 * pulse))
+
+# ── Storm lightning (build_game.py drawPlanet :12323) ───────────────────────
+func _gen_storm(rng: RandomNumberGenerator) -> Dictionary:
+	var bolts: Array = []
+	for i in 3 + int(rng.randf() * 3.0):
+		var pts: Array = []
+		var a0 := rng.randf() * TAU
+		var lat0 := -0.5 + rng.randf()
+		var n := 3 + int(rng.randf() * 3.0)
+		for j in n:
+			pts.append({"a": a0 + (rng.randf() - 0.5) * 0.5, "lat": lat0 + (float(j) / n - 0.5) * (0.6 + rng.randf() * 0.5), "r": 0.2 + 0.8 * float(j) / n})
+		bolts.append({"pts": pts, "phase": rng.randf() * 4000.0, "period": 2200.0 + rng.randf() * 2600.0, "dur": 110.0 + rng.randf() * 120.0})
+	return {"bolts": bolts}
+
+func _draw_storm(c: Vector2, r: float, s: Dictionary) -> void:
+	if r <= 8.0:
+		return
+	var t := Time.get_ticks_msec()
+	var any_active := false
+	for bolt in s.get("bolts", []):
+		var bt: float = fmod(t + float(bolt.phase), float(bolt.period))
+		if bt >= float(bolt.dur):
+			continue
+		any_active = true
+		var fa := (1.0 - (bt / float(bolt.dur)) * 0.4) * 0.92
+		var poly: PackedVector2Array = []
+		for bp in bolt.pts:
+			var dep := cos(float(bp.a)) * cos(float(bp.lat) * PI * 0.45)
+			if dep < 0.04:
+				continue
+			poly.append(c + Vector2(sin(float(bp.a)) * cos(float(bp.lat) * PI * 0.45) * float(bp.r) * r, -sin(float(bp.lat) * PI * 0.45) * float(bp.r) * r))
+		if poly.size() >= 2:
+			draw_polyline(poly, Color(0.902, 0.824, 1.0, fa), maxf(0.7, r * 0.022), true)
+	if any_active:
+		draw_circle(c, r, Color(0.784, 0.627, 1.0, 0.10))
+
+# ── Mountains (build_game.py drawPlanet :12370) ─────────────────────────────
+func _gen_mtn(rng: RandomNumberGenerator, id: String) -> Array:
+	var ms: Array = []
+	var base_col := Color(0.40, 0.36, 0.34) if id == "rocky" else (Color(0.78, 0.85, 0.92) if id == "ice" else Color(0.50, 0.44, 0.34))
+	for i in 3 + int(rng.randf() * 4.0):
+		var h := 0.05 + rng.randf() * 0.10
+		var tall := rng.randf() < 0.45
+		ms.append({"a": rng.randf() * TAU, "wHalf": 0.09 + rng.randf() * 0.11, "h": h, "tall": tall, "tipH": h * (0.3 + rng.randf() * 0.3) if tall else 0.0,
+			"col": Color(base_col.r * (0.8 + rng.randf() * 0.3), base_col.g * (0.8 + rng.randf() * 0.3), base_col.b * (0.8 + rng.randf() * 0.3))})
+	return ms
+
+func _draw_mtn(c: Vector2, r: float, ms: Array) -> void:
+	for m in ms:
+		var a := float(m.a)
+		var wh := float(m.wHalf)
+		var peak_r := r + float(m.h) * r
+		var bl := c + Vector2(cos(a - wh), sin(a - wh)) * r
+		var br := c + Vector2(cos(a + wh), sin(a + wh)) * r
+		var pk := c + Vector2(cos(a), sin(a)) * peak_r
+		draw_colored_polygon([bl, br, pk], m.col)
+		if bool(m.tall) and float(m.tipH) > 0.0:
+			var tt := 1.0 - float(m.tipH) / float(m.h)
+			var sn_r := r + tt * float(m.h) * r
+			var sn_w := wh * (1.0 - tt)
+			var sl := c + Vector2(cos(a - sn_w), sin(a - sn_w)) * sn_r
+			var sr := c + Vector2(cos(a + sn_w), sin(a + sn_w)) * sn_r
+			draw_colored_polygon([sl, sr, pk], Color(0.894, 0.957, 1.0, 0.88))
 
 func _blob_pts(rng: RandomNumberGenerator, rx: float, ry: float, rot: float, n: int, rough: float) -> Array:
 	var pts: Array = []

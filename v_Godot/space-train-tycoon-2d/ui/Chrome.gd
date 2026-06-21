@@ -494,13 +494,7 @@ func _draw_stations_panel(px: float, ry0: float, pw: float) -> void:
 		_txt_centered(f_exo, px + pw * 0.5, ry0 + 16.0, "No stations built", 10, Color(0.5, 0.62, 0.85, 0.7), pw)
 
 func _train_status(t: Dictionary) -> Array:
-	if String(t.cargoPhase) == "unloading":
-		return ["UNLOADING", Color(1.0, 0.65, 0.16, 0.92)]
-	if String(t.cargoPhase) == "loading":
-		return ["LOADING", Color(0.24, 0.82, 0.71, 0.92)]
-	if int(t.phase) == Transit.Phase.TRANSIT:
-		return ["IN TRANSIT", Color(1.0, 0.78, 0.24, 0.85)]
-	return ["IN ORBIT", Color(0.24, 0.86, 0.47, 0.85)]
+	return Transit.train_status(t)
 
 
 # ── Bottom info bar (build_game.py §22-§23) ─────────────────────────────────

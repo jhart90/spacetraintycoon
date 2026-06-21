@@ -1490,16 +1490,10 @@ func _tb_engine_panel(px: float, py: float, ph: float) -> void:
 		sy += 15.0
 
 func _train_status_text(t: Dictionary) -> String:
-	if String(t.cargoPhase) == "unloading": return "UNLOADING"
-	if String(t.cargoPhase) == "loading": return "LOADING"
-	if int(t.phase) == Transit.Phase.TRANSIT: return "IN TRANSIT"
-	return "IN ORBIT"
+	return String(Transit.train_status(t)[0])
 
 func _train_status(t: Dictionary) -> Array:
-	if String(t.cargoPhase) == "unloading": return ["UNLOADING", Color(1.0, 0.65, 0.16, 0.92)]
-	if String(t.cargoPhase) == "loading": return ["LOADING", Color(0.24, 0.82, 0.71, 0.92)]
-	if int(t.phase) == Transit.Phase.TRANSIT: return ["IN TRANSIT", Color(1.0, 0.78, 0.24, 0.85)]
-	return ["IN ORBIT", Color(0.24, 0.86, 0.47, 0.85)]
+	return Transit.train_status(t)
 
 # ── Simple list popups (Routes / Stations / Registry / Pokedex) ─────────────
 func _simple_list(title: String, items: Array) -> void:

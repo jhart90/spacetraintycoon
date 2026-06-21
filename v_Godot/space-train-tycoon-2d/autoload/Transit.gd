@@ -71,6 +71,25 @@ func random_angle() -> float:
 
 signal route_rejected(reason: String)  # a hop crosses a star or exceeds engine range
 
+# Faithful status label + color (build_game.py getTrainStatus:13653). The port
+# has no queueing/descending/waiting phases, so those states are absent, but
+# PARKED vs ON-ROUTE and the cargo/transit states match.
+func train_status(t: Dictionary) -> Array:
+	if String(t.get("cargoPhase", "")) == "unloading":
+		return ["UNLOADING", Color(1.0, 0.647, 0.157, 0.92)]
+	if String(t.get("cargoPhase", "")) == "loading":
+		return ["LOADING", Color(0.235, 0.824, 0.706, 0.92)]
+	if t.get("route", null) == null:
+		return ["IN ORBIT / PARKED", Color(0.235, 0.863, 0.471, 0.85)]
+	if int(t.phase) == Phase.TRANSIT:
+		var to_id := int(t.get("toId", -1))
+		if to_id >= 0:
+			var idx := _planet_idx(to_id)
+			if idx >= 0:
+				return ["EN ROUTE → %s" % String(Galaxy.planets[idx].name).to_upper(), Color(1.0, 0.784, 0.235, 0.85)]
+		return ["IN TRANSIT", Color(1.0, 0.784, 0.235, 0.85)]
+	return ["IN ORBIT / ON ROUTE", Color(1.0, 0.784, 0.235, 0.85)]
+
 # True if the segment a→b passes within any star's / black hole's radius
 # (build_game.py segmentBlockedByStar:15100). Returns the blocker name or "".
 func segment_blocked_by_star(ax: float, ay: float, bx: float, by: float) -> String:

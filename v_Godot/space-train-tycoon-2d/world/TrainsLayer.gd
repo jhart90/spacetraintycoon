@@ -345,6 +345,16 @@ func _draw_car(type: String, is_full: bool, world_pos: Vector2, rot: float, ch: 
 	draw_set_transform(sp, rot, Vector2(-1.0, 1.0))  # flip x (sprites face +x)
 	draw_texture_rect(tex, Rect2(draw_x, draw_y, dw, dh), false)
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+	# Hazmat warning light: a pulsing 3-layer yellow glow above a full hazmat car
+	# (build_game.py:29807). Quick-on, gradual-fade pulse via sin^0.5.
+	if type == "car_hazmat" and is_full:
+		var fint := pow(maxf(0.0, sin(Time.get_ticks_msec() * 0.009)), 0.5)
+		var lc := sp + Vector2(sin(rot), -cos(rot)) * vis_h * 0.8
+		var lr := maxf(1.5, 2.5 * sc)
+		draw_circle(lc, lr * 4.0, Color(1.0, 0.8, 0.0, 0.07 * fint))          # outer bloom
+		draw_circle(lc, lr * 2.2, Color(1.0, 0.8, 0.0, 0.15 + 0.40 * fint))  # halo
+		draw_circle(lc, lr, Color(1.0, 0.878, 0.251, 0.5 + 0.5 * fint))      # mid
+		draw_circle(lc, lr * 0.42, Color(1, 1, 1, 0.2 + 0.8 * fint))         # white core
 
 
 func _vf(type: String) -> float:

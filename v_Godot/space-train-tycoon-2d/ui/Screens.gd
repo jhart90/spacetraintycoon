@@ -175,6 +175,8 @@ func _make_title_planet(x: float) -> Dictionary:
 
 
 func _process_intro(delta: float) -> void:
+	if OS.get_cmdline_user_args().has("--introshot"):
+		return  # dev: freeze on a fully-typed paragraph for a screenshot
 	_intro_chars += delta * (1000.0 / 24.0)  # ~24 ms/char (build_game.py)
 	var para: String = _INTRO_TEXT[_intro_para]
 	if _intro_chars >= float(para.length()) + 110.0:  # ~2.6 s linger after typed
@@ -291,6 +293,8 @@ func _draw() -> void:
 # ── INTRO CINEMATIC (build_game.py drawHowToPlay §13) — typed narration over the
 #    galaxy (which renders behind, dimmed), with a SKIP button. ────────────────
 func _draw_intro() -> void:
+	if OS.get_cmdline_user_args().has("--introshot"):
+		_intro_para = 2; _intro_chars = 99999.0
 	draw_rect(Rect2(0, 0, W, H), Color(0, 0, 0, 0.42))  # single cinematic dim (build_game.py 5065)
 	var para: String = _INTRO_TEXT[_intro_para]
 	var n: int = clampi(int(_intro_chars), 0, para.length())

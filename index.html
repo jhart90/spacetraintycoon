@@ -1263,6 +1263,45 @@ const MISSION_DEFS=[
      if(oid==='await_arrival')   return !!m._trainArrivedAtTarget;
      return false;
    }},
+  {id:'earn_first_credits',
+   name:'Earning your first credits',
+   imageType:'car', imageKey:'car_passenger',
+   objectives:[
+     {id:'build_desert_station', text:'Build a STATION on the DESERT PLANET to enable CARGO to be LOADED/UNLOADED there'},
+     {id:'route_pax_to_desert',  text:'Set up a route to deliver [Passengers] from ORIJEN to the DESERT PLANET'},
+     {id:'earn_at_desert',       text:'Earn money when your train UNLOADs [Passengers] at the DESERT PLANET'},
+   ],
+   // NEW MISSION popup display tweaks (the real objectives above are unchanged —
+   // the [M] tracker / missions window still show all three and drive completion):
+   //  • introHideObjs: objective ids hidden in the NEW MISSION popup only.
+   //  • detailsBreaks: render the details one sentence per line (break on each period).
+   introHideObjs:['build_desert_station','earn_at_desert'],
+   detailsBreaks:true,
+   details:"Your corporation can EARN MONEY by delivering CARGO from a planet that supplies it to a planet that demands it. CARGO is automatically LOADED (onto empty train cars) before a train departs orbit, as long as there is supply of that CARGO available. CARGO is automatically UNLOADED (from full train cars) after a train arrives in orbit, as long as there is sufficient demand for that CARGO.",
+   note:"Note: [Passengers] will disembark at any inhabited planet other than the planet they boarded at.",
+   reward:2000, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(!galaxy) return false;
+     const _orijenId=galaxy.origenId;
+     const _orijenP=_orijenId!=null?galaxy.planets[_orijenId]:null;
+     let _desertId=-1;
+     if(_orijenP){
+       for(const _p of galaxy.planets){
+         if(_p.starId===_orijenP.starId && _p.type && _p.type.id==='desert'){ _desertId=_p.id; break; }
+       }
+     }
+     const _desertP=_desertId>=0?galaxy.planets[_desertId]:null;
+     if(oid==='build_desert_station') return !!(_desertP && _desertP.playerBuiltStation);
+     if(oid==='route_pax_to_desert'){
+       // A PLAYER train whose route (real or queued) links ORIJEN and the desert.
+       return trains.some(t=>t.isPlayer && (
+         (t.route       && (t.route.stops||[]).includes(_orijenId)       && (t.route.stops||[]).includes(_desertId)) ||
+         (t.queuedRoute && (t.queuedRoute.stops||[]).includes(_orijenId) && (t.queuedRoute.stops||[]).includes(_desertId))
+       ));
+     }
+     if(oid==='earn_at_desert') return !!m._earnedAtDesert; // set in the unload handler
+     return false;
+   }},
   {id:'create_route',
    name:'Create a 3-planet train route',
    imageType:'route_preview', imageKey:null,
@@ -7615,6 +7654,13 @@ function _processCargoQueue(t, p){
           // race the intro trigger and pop the mission before the player has
           // actually delivered anything.
           if(t.isPlayer) _totalPassengersDelivered++;
+          // "Earning your first credits" (tutorial): obj 3 fires when the player
+          // earns money UNLOADING passengers at the home-system DESERT PLANET.
+          if(t.isPlayer && rev>0 && p.type && p.type.id==='desert'){
+            const _efcMx=missions.find(mx=>mx.id==='earn_first_credits'&&mx.status==='active');
+            const _hpE=galaxy&&galaxy.origenId!=null?galaxy.planets[galaxy.origenId]:null;
+            if(_efcMx && _hpE && p.starId===_hpE.starId) _efcMx._earnedAtDesert=true;
+          }
           // Seeking a Way Home: check if this delivery completes the mission objective
           const _shMx=missions.find(mx=>mx.id==='seeking_home'&&mx.status==='active');
           if(t.isPlayer&&_shMx&&p.id===_shMx.targetPlanetId&&src&&src.id===_shMx.sourcePlanetId) _shMx._rockyDelivered=true;
@@ -16776,7 +16822,7 @@ function drawNewMissionPopup(){
   };
   const _displayObjs=_SUMMARY_OBJS[def.id]
     ? [{id:'__'+def.id+'_summary__', text:_SUMMARY_OBJS[def.id]}]
-    : def.objectives;
+    : (def.introHideObjs ? def.objectives.filter(o=>!def.introHideObjs.includes(o.id)) : def.objectives);
   // ── Pre-measure the right-column content to size the popup snugly so short
   // missions (e.g. create_route) don't leave a big empty gap above the reward /
   // ACCEPT button. Mirrors the draw layout below; capped at 295 so longer
@@ -16788,8 +16834,15 @@ function drawNewMissionPopup(){
     const _mMaxW=pw-114;            // == cMaxW below
     let _mY=62;                     // imgBY(51)+11 offset from the popup top
     if(def.details){
-      const _mdL=_objWrapTokens(_objTokenize(_resolveMissionText(def.details,_mTxtCtx),_mPStyles),_mMaxW,'italic 12px "Exo 2",sans-serif');
-      _mY += (_mdL.length-1)*15 + 22;
+      const _dtTxtM=_resolveMissionText(def.details,_mTxtCtx);
+      // detailsBreaks: one sentence per paragraph (split on each period) with a
+      // blank line between sentences; otherwise a single wrapped block.
+      const _detParasM=def.detailsBreaks ? ((_dtTxtM.match(/[^.]+\.\s*/g)||[_dtTxtM]).map(s=>s.trim()).filter(Boolean)) : [_dtTxtM];
+      for(let _pi=0;_pi<_detParasM.length;_pi++){
+        const _mdL=_objWrapTokens(_objTokenize(_detParasM[_pi],_mPStyles),_mMaxW,'italic 12px "Exo 2",sans-serif');
+        _mY += _mdL.length*15 + (_pi<_detParasM.length-1?15:0);
+      }
+      _mY += 7;
     }
     _mY += 15;                      // OBJECTIVES label row
     ctx.font='12px "Exo 2",sans-serif'; const _mCbW=Math.round(ctx.measureText('○').width)+5;
@@ -16797,11 +16850,15 @@ function drawNewMissionPopup(){
       const _moL=_objWrapTokens(_objTokenize(_resolveMissionText(_o.text,_mTxtCtx),_mPStyles),_mMaxW-_mCbW,'10px "Exo 2",sans-serif');
       _mY += _moL.length*13 + 2;
     }
+    if(def.note){
+      const _ntL=_objWrapTokens(_objTokenize(_resolveMissionText(def.note,_mTxtCtx),_mPStyles),_mMaxW,'italic 10px "Exo 2",sans-serif');
+      _mY += 8 + _ntL.length*13;
+    }
     // Content bottom = lower of the right-column end and the 72px image box
     // (bottom at offset 123). Reward group + button occupy ~95 px below it.
     // Fully content-driven height (clamped only to sane min/max bounds), so
     // every mission popup fits snugly — short ones shrink, long ones grow.
-    _measPh = Math.max(200, Math.min(380, Math.round(Math.max(123,_mY)+95)));
+    _measPh = Math.max(200, Math.min(H-28, Math.round(Math.max(123,_mY)+95)));
   }
   const ph=_measPh;
   const [px,py]=drawPopupBase(pw,ph,'rgba(80,200,130,0.7)');
@@ -16854,12 +16911,18 @@ function drawNewMissionPopup(){
     // font; coloured planet tokens render bold-italic in their biome colour.
     const _dtFontStr='italic 12px "Exo 2",sans-serif';
     const _dtBaseCol='rgba(150,185,220,0.80)';
-    const _dtLines=_objWrapTokens(_objTokenize(_dtTxt,_npPStyles), cMaxW, _dtFontStr);
-    for(let _li=0;_li<_dtLines.length;_li++){
-      _objDrawLine(_dtLines[_li], cX, _rcy, _dtFontStr, _dtBaseCol);
-      if(_li<_dtLines.length-1) _rcy+=_dtLH;
+    // detailsBreaks: render one sentence per paragraph (a full line break after
+    // each period), with a blank line between sentences. Otherwise a single block.
+    const _detParas=def.detailsBreaks ? ((_dtTxt.match(/[^.]+\.\s*/g)||[_dtTxt]).map(s=>s.trim()).filter(Boolean)) : [_dtTxt];
+    for(let _pi=0;_pi<_detParas.length;_pi++){
+      const _dtLines=_objWrapTokens(_objTokenize(_detParas[_pi],_npPStyles), cMaxW, _dtFontStr);
+      for(let _li=0;_li<_dtLines.length;_li++){
+        _objDrawLine(_dtLines[_li], cX, _rcy, _dtFontStr, _dtBaseCol);
+        _rcy+=_dtLH;
+      }
+      if(_pi<_detParas.length-1) _rcy+=_dtLH; // blank line between sentences
     }
-    _rcy+=_dtLH+7; // gap after details before objectives
+    _rcy+=7; // gap after details before objectives
   }
   // OBJECTIVES label
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
@@ -16899,6 +16962,18 @@ function drawNewMissionPopup(){
       _objDrawLine(_objLines[_li],cX+_cbW,_rcy+_li*_objLH,_objFontStr,_baseCol);
     }
     _rcy+=_objRowTotalH;
+  }
+  // Optional italic "Note: …" clarification under the objectives.
+  if(def.note){
+    _rcy+=8;
+    const _ntFontStr='italic 10px "Exo 2",sans-serif';
+    const _ntTxt=_resolveMissionText(def.note,{sourcePlanetId:popupState.sourcePlanetId,targetPlanetId:popupState.targetPlanetId,scientistSourceIds:popupState.scientistSourceIds});
+    const _ntLines=_objWrapTokens(_objTokenize(_ntTxt,_npPStyles),cMaxW,_ntFontStr);
+    ctx.textAlign='left';
+    for(let _li=0;_li<_ntLines.length;_li++){
+      _objDrawLine(_ntLines[_li],cX,_rcy,_ntFontStr,'rgba(140,160,195,0.72)');
+      _rcy+=13;
+    }
   }
   if(def.reward||def.rewardText){
     // Reward pill — same small-rounded-rect treatment as the upgrade
@@ -19858,7 +19933,7 @@ function _drawTutorialChain(stage){
     else if(_elapsed>=FADE_MS+10000) _escA=Math.min(1,(_elapsed-(FADE_MS+10000))/FADE_MS);
     const _eb=popupState.escBounds;
     if(_escA>0 && _eb){
-      _drawBubble(['Press ESC, or CLICK anywhere outside of a window to close it'], {x:_eb.x+_eb.w/2,y:_eb.y+_eb.h}, _escA, {below:true, color:'blue'});
+      _drawBubble(['Press ESC, or CLICK anywhere outside of a window to close it'], {x:_eb.x+_eb.w-7,y:_eb.y+_eb.h*0.5}, _escA, {below:true, color:'blue'});
     }
     return;
   }
@@ -19981,7 +20056,7 @@ function _drawTutorialChain(stage){
       else if(_elapsed>=FADE_MS+10000) _escA2=Math.min(1,(_elapsed-(FADE_MS+10000))/FADE_MS);
       const _eb2=popupState.escBounds;
       if(_escA2>0 && _eb2){
-        _drawBubble(['Press ESC, or CLICK anywhere outside of a window to close it'], {x:_eb2.x+_eb2.w/2,y:_eb2.y+_eb2.h}, _escA2, {below:true, color:'blue'});
+        _drawBubble(['Press ESC, or CLICK anywhere outside of a window to close it'], {x:_eb2.x+_eb2.w-7,y:_eb2.y+_eb2.h*0.5}, _escA2, {below:true, color:'blue'});
       }
     }
     return;
@@ -20034,7 +20109,16 @@ function _drawTutorialChain(stage){
     const _open=(activePopup==='train' && popupState.trainIdx===_ftIdx);
     if(_tutorialFadeOutStartMs===0 && !_open) _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
-    if(r.advanced){ _ftFrameKey=''; _advanceTo('ft_desert_dblclick'); return; }
+    if(r.advanced){
+      // Introduce the "Earning your first credits" mission right BEFORE the
+      // desert double-click guidance; ft_earn_pending waits for the player to
+      // ACCEPT it, then the DESERT-PLANET double-click bubble takes over.
+      _ftFrameKey='';
+      if(!_missionPending('earn_first_credits') && !missions.some(m=>m.id==='earn_first_credits')){
+        pendingMissionIntros.push({defId:'earn_first_credits',readySd:stardate});
+      }
+      _advanceTo('ft_earn_pending'); return;
+    }
     if(_open && _ft){
       // (1) passenger + mail cars — blue bubble ABOVE them, pointing down.
       const _cb=popupState.tdCarBounds||[];
@@ -20061,8 +20145,19 @@ function _drawTutorialChain(stage){
       else if(_elapsed>=FADE_MS+10000) _e3A=Math.min(1,(_elapsed-(FADE_MS+10000))/FADE_MS);
       const _eb=popupState.escBounds;
       if(_e3A>0 && _eb){
-        _drawBubble(['Press ESC, or CLICK anywhere outside a window to close it'], {x:_eb.x+_eb.w/2,y:_eb.y+_eb.h}, _e3A, {below:true, color:'blue'});
+        _drawBubble(['Press ESC, or CLICK anywhere outside a window to close it'], {x:_eb.x+_eb.w-7,y:_eb.y+_eb.h*0.5}, _e3A, {below:true, color:'blue'});
       }
+    }
+    return;
+  }
+  // ── Phase: ft_earn_pending ─────────────────────────────────
+  // Wait for the "Earning your first credits" mission to be ACCEPTED (its
+  // NEW MISSION popup blocks until the player accepts), then run the desert
+  // double-click guidance. If it was somehow already accepted/completed, fall
+  // straight through.
+  if(_tutorialPhase==='ft_earn_pending'){
+    if(missions.some(m=>m.id==='earn_first_credits'&&(m.status==='active'||m.status==='completed'))){
+      _ftFrameKey=''; _advanceTo('ft_desert_dblclick'); return;
     }
     return;
   }
@@ -20119,7 +20214,7 @@ function _drawTutorialChain(stage){
       else if(_elapsed>=FADE_MS+10000) _e3A=Math.min(1,(_elapsed-(FADE_MS+10000))/FADE_MS);
       const _eb=popupState.escBounds;
       if(_e3A>0 && _eb){
-        _drawBubble(['Press ESC, or CLICK anywhere outside a window to close it'], {x:_eb.x+_eb.w/2,y:_eb.y+_eb.h}, _e3A, {below:true, color:'blue'});
+        _drawBubble(['Press ESC, or CLICK anywhere outside a window to close it'], {x:_eb.x+_eb.w-7,y:_eb.y+_eb.h*0.5}, _e3A, {below:true, color:'blue'});
       }
     }
     return;
@@ -20377,7 +20472,7 @@ function _drawTutorialChain(stage){
     if(_blueAlpha>0 && popupState.escBounds){
       const _eb=popupState.escBounds;
       _drawBubble(['Press ESC, or CLICK anywhere outside a window to close it'],
-                  {x:_eb.x+_eb.w/2, y:_eb.y+_eb.h}, _blueAlpha, {below:true, color:'blue'});
+                  {x:_eb.x+_eb.w-7, y:_eb.y+_eb.h*0.5}, _blueAlpha, {below:true, color:'blue'});
     }
     return;
   }
@@ -35598,7 +35693,7 @@ function startGame(){
   _playerDeliveryCount=0; // new game starts with zero successful deliveries logged
   missions=[]; _recomputeMissionTargets();
   _gameStartSd=stardate;
-  pendingMissionIntros=MISSION_DEFS.filter(def=>!def.prerequisite&&def.id!=='visit_planet'&&def.id!=='build_foundry'&&def.id!=='dispose_hazmat'&&def.id!=='lost_colony'&&def.id!=='seeking_home'&&def.id!=='create_route'&&def.id!=='research_royal_car'&&def.id!=='colony_train'&&def.id!=='spread_the_seed'&&def.id!=='famine'&&def.id!=='outbreak'&&def.id!=='stellar_cartography'&&def.id!=='galaxy_census'&&def.id!=='sandstorm_relief'&&def.id!=='bh_research'&&def.id!=='design_better_train'&&def.id!=='buy_second_train'&&def.id!=='galactic_distance'&&def.id!=='corporate_expansion'&&def.id!=='ancient_schematics'&&def.id!=='another_dimension'&&def.id!=='more_scientists').map(def=>({defId:def.id,readySd:_gameStartSd+(def.startsAfter||0)}));
+  pendingMissionIntros=MISSION_DEFS.filter(def=>!def.prerequisite&&def.id!=='earn_first_credits'&&def.id!=='visit_planet'&&def.id!=='build_foundry'&&def.id!=='dispose_hazmat'&&def.id!=='lost_colony'&&def.id!=='seeking_home'&&def.id!=='create_route'&&def.id!=='research_royal_car'&&def.id!=='colony_train'&&def.id!=='spread_the_seed'&&def.id!=='famine'&&def.id!=='outbreak'&&def.id!=='stellar_cartography'&&def.id!=='galaxy_census'&&def.id!=='sandstorm_relief'&&def.id!=='bh_research'&&def.id!=='design_better_train'&&def.id!=='buy_second_train'&&def.id!=='galactic_distance'&&def.id!=='corporate_expansion'&&def.id!=='ancient_schematics'&&def.id!=='another_dimension'&&def.id!=='more_scientists').map(def=>({defId:def.id,readySd:_gameStartSd+(def.startsAfter||0)}));
   financeLedger=[]; _ledgerSummary={totalRevenue:0,totalCost:0,totalInterest:0}; purchaseLedger=[]; corpValueHistory={}; corpStatsHistory={}; aiCorpStatsHistory={}; _financeScrollY=0; _financeBreakdown='stardate'; _financeDropdownOpen=false; _versusMetric='value'; _versusDropdownOpen=false; _corpId=null; _lbBestRanks={};
   loans=[]; _loanCounter=0; _financeTab='financials'; _financeLoanSelected='small'; _financeLoanHover=null; _financeTakeLoanHover=false;
   // Fresh pool of issuer names per game; assign one to each loan tier
