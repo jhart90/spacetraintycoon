@@ -113,6 +113,16 @@ func set_sfx_muted(m: bool) -> void:
 	_apply_volume()
 
 
+var _music_unmute_vol: float = 0.35
+func toggle_music_mute() -> void:
+	if music_vol > 0.0:
+		_music_unmute_vol = music_vol
+		music_vol = 0.0
+	else:
+		music_vol = _music_unmute_vol
+	_apply_volume()
+
+
 func _apply_volume() -> void:
 	var idx := AudioServer.get_bus_index("SFX")
 	if idx >= 0:

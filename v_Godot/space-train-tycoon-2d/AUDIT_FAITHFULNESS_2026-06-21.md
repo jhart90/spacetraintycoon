@@ -28,7 +28,38 @@ camera transform/clamp/pan, the revenue math, the train-consist galaxy sizing, a
 
 ## ✅ FIX PROGRESS (2026-06-21, post-audit)
 
+**Front-end screens — step 3:**
+- ✅ **U5** — **corp-setup** and **AI-select** rebuilt to the faithful panelled spec. Corp-setup:
+  full-screen bordered panel, glowing "ESTABLISH YOUR CORPORATION" title, "NAME YOUR CORPORATION:"
+  label + name field (click to rename), and the 242×240 CEO cards with portrait + nickname + the three
+  labelled pill rows (**SALARY** tier-colored / **ABILITY** blue / **STARTING CREDITS** green), green
+  selection, and the pulsing blue **NEXT ▶** button. AI-select: amber-bordered panel, glowing
+  "SELECT YOUR OPPONENT", the **correct sprite set** (engine_galaxy/car_flowers/car_water_tank/car_sand/
+  car_ore/car_hazmat — 5 of 6 were wrong), per-difficulty fill colors with dark/light text, sprites
+  straddling the top edge, the corner-bleed ✓, and the spurious corp banner removed. Both
+  screenshot-verified. (Remaining step-3 item: U7 intro cinematic.)
+
 **Headline popups — step 2:**
+- ✅ **U2** — Finances `[F]` gained the **file-folder tab strip** (FINANCIALS / LOANS / VS RIVAL, the
+  last only when a rival exists) with click-to-switch. **VS-RIVAL tab** ported from
+  `_drawFinancesVersusTab`: player-vs-rival Corp-Value line chart over the last 10 SD with nice-step Y
+  gridlines, SD X axis, two plotted series + corp-name legend — backed by the real `corp_value_history`
+  and a new `ai_corp_value_history` snapshot recorded each SD boundary. Screenshot-verified. The
+  **LOANS tab** is an honest stub stating loan financing isn't simulated (the original's interest/
+  amortization/tier subsystem is a genuine feature build, not a UI port — deliberately not faked).
+- ✅ **U3** — Corp dashboard restored to the faithful `drawCorpPopup` (570×440): taller frame,
+  two-sub-column financials (P&L + balance sheet; LIQUID ASSETS label fixed, TOTAL DEBTS shows "—"),
+  CEO pane now has the **salary pill** (tier-colored) + **perk pills** (green/blue) + nickname, and the
+  full bottom **EXPLORATION** (8 stats: planets/stars discovered & visited, resource types, gold/diamond
+  patches, phenomena) + **FLEET & OPERATIONS** (8 stats: distance, trains, cars, stations, upgrades,
+  cargo, passengers, hazmat) section. Screenshot-verified — all 16 bottom stats populate from the live
+  Discovery/Transit/ledger data.
+- ◐ **U4** — Train Builder car grid fixed: now shows ALL 23 car types (build_game.py ALL_MID_CARS),
+  unlocked-first, 6 per row, with locked cars greyed + a LOCKED overlay, row-snapped scroll +
+  scrollbar + mouse-wheel — resolving the functional blocker (couldn't reach cars beyond the first 12,
+  and locked cars were invisible). Also added the full engine-details RANGE/ACCEL rows earlier.
+  REMAINING for U4: trainyard cost model (charge only for cars not already owned; needs a trainyard
+  sim) and per-car removal in the preview (currently removes the last car).
 - ✅ **U1** — Missions `[M]` popup rebuilt to the faithful `drawMissionsPopup` structure (480×360):
   status line "N active · N completed", active-first sorted rows with per-row variable height +
   mouse-wheel scroll, 52×52 image box (target glyph + ✓ overlay for completed), ellipsized yellow/grey

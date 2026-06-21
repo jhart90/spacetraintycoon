@@ -37,6 +37,7 @@ var _mouse := Vector2(-1, -1)
 var _fin_breakdown := "stardate"
 var _fin_dd_open := false
 var _fin_scroll := 0.0
+var _fin_tab := "financials"   # "financials" | "loans" | "versus"
 # Registry / Pokedex state (build_game.py pokedexDiscoveredOnly / starRegistryVisitedOnly).
 var _reg_visited_only := false
 var _reg_scroll := 0.0
@@ -255,6 +256,9 @@ func _on_click(p: Vector2) -> void:
 		if _hit("back", p):
 			_open("options"); Audio.play("button"); return
 	elif active == "finances":
+		for tk in ["financials", "loans", "versus"]:
+			if _hit("fintab_%s" % tk, p):
+				_fin_tab = tk; _fin_dd_open = false; _fin_scroll = 0.0; Audio.play("button"); queue_redraw(); return
 		if _fin_dd_open:
 			for ka in _FIN_BD_KEYS:
 				if _hit("fin_opt_%s" % ka, p):
@@ -2614,14 +2618,32 @@ func _draw_finances() -> void:
 	_ctr(f_orb_b, px + pw * 0.5, py + 22.0, "CORPORATE FINANCES", 12, Color(0.502, 1.0, 0.690))
 	_esc_hint(px, py, pw)
 	draw_line(Vector2(px, py + 32.0), Vector2(px + pw, py + 32.0), Color(0.235, 0.706, 0.392, 0.35), 1.0)
-	# Single FINANCIALS folder-tab (LOANS/VS-RIVAL deferred).
+	# ── File-folder tab strip: FINANCIALS / LOANS / (VS RIVAL if a rival exists) ──
+	if _fin_tab == "versus" and not AICorp.active:
+		_fin_tab = "financials"
+	var tabs := [["financials", "FINANCIALS"], ["loans", "LOANS"]]
+	if AICorp.active:
+		tabs.append(["versus", "VS RIVAL"])
 	var tab_y := py + 40.0
 	var tab_h := 22.0
+	var tab_w := 110.0
+	var tab_gap := 6.0
 	var tab_base := tab_y + tab_h
-	draw_rect(Rect2(px + 14.0, tab_y, 110.0, tab_h), Color(0.071, 0.204, 0.125, 0.95))
-	draw_rect(Rect2(px + 14.0, tab_y, 110.0, tab_h), Color(0.471, 0.863, 0.627, 0.85), false, 1.0)
-	_ctr(f_orb_b, px + 69.0, tab_y + 14.0, "FINANCIALS", 10, Color(0.659, 1.0, 0.808))
+	for ti in tabs.size():
+		var tx := px + 14.0 + ti * (tab_w + tab_gap)
+		var act := String(tabs[ti][0]) == _fin_tab
+		var r := Rect2(tx, tab_y, tab_w, tab_h)
+		_fill_round(r, 5.0, Color(0.071, 0.204, 0.125, 0.95) if act else Color(0.031, 0.086, 0.055, 0.78))
+		_stroke_round(r, 5.0, Color(0.471, 0.863, 0.627, 0.85) if act else Color(0.235, 0.549, 0.353, 0.45), 1.0)
+		if act:  # merge the active tab into the body by overdrawing its bottom seam
+			draw_rect(Rect2(tx + 1.0, tab_base - 2.0, tab_w - 2.0, 4.0), Color(0.071, 0.204, 0.125, 0.95))
+		_ctr(f_orb_b, tx + tab_w * 0.5, tab_y + 14.0, String(tabs[ti][1]), 10, Color(0.659, 1.0, 0.808) if act else Color(0.392, 0.706, 0.510, 0.7))
+		_rects["fintab_%s" % String(tabs[ti][0])] = r
 	draw_line(Vector2(px + 12.0, tab_base), Vector2(px + pw - 12.0, tab_base), Color(0.471, 0.863, 0.627, 0.55), 1.0)
+	if _fin_tab == "versus":
+		_fin_versus_tab(px, py, pw, ph, tab_base); return
+	if _fin_tab == "loans":
+		_fin_loans_tab(px, py, pw, ph, tab_base); return
 	var is_sd := _fin_breakdown == "stardate"
 	# BREAKDOWN BY dropdown.
 	var db_x := px + 12.0
@@ -2754,6 +2776,98 @@ func _draw_finances() -> void:
 			draw_string(f_orb_b, Vector2(db_x + lbl_w + 8.0, oy + 13.0), String(_FIN_BD_LABELS[ka]), HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color(0.753, 1.0, 0.816) if act else (Color(0.659, 0.882, 0.722) if ohov else Color(0.549, 0.784, 0.627, 0.8)))
 			_rects["fin_opt_%s" % ka] = Rect2(db_x + lbl_w, oy, db_w, db_h)
 
+# VS-RIVAL tab (build_game.py _drawFinancesVersusTab:18198): player-vs-rival
+# Corp-Value line chart over the last 10 stardates. (The original's 6-metric
+# dropdown needs per-metric history the port doesn't record; Corp Value is
+# backed by the real corp_value_history / ai_corp_value_history snapshots.)
+func _fin_versus_tab(px: float, py: float, pw: float, ph: float, tab_base: float) -> void:
+	var hy := tab_base + 24.0
+	draw_string(f_orb_b, Vector2(px + 14.0, hy), "PLAYER vs RIVAL", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(0.627, 0.882, 0.706, 0.92))
+	_rt(f_exo, px + pw - 14.0, hy, "CORP VALUE · LAST 10 SD", 9, Color(0.392, 0.608, 0.471, 0.7))
+	if not AICorp.active:
+		_ctr(f_exo, px + pw * 0.5, py + ph * 0.5, "No rival corporation in this game.", 11, Color(0.471, 0.667, 0.549, 0.55))
+		return
+	var cur := int(floor(GameState.stardate))
+	var sds: Array = []
+	for s in range(cur - 10, cur + 1):
+		if s >= 0:
+			sds.append(s)
+	var pvals: Array = []
+	var avals: Array = []
+	for s in sds:
+		if s == cur:
+			pvals.append(float(Leaderboard._corp_value()))
+			avals.append(float(AICorp.net_worth()))
+		else:
+			pvals.append(float(GameState.corp_value_history.get(s, 0.0)))
+			avals.append(float(GameState.ai_corp_value_history.get(s, 0.0)))
+	# Chart area + nice-step Y axis.
+	var cx := px + 58.0
+	var cy := hy + 22.0
+	var cw := pw - 78.0
+	var chh := py + ph - cy - 34.0
+	var dmax := 1.0
+	for v in pvals: dmax = maxf(dmax, v)
+	for v in avals: dmax = maxf(dmax, v)
+	dmax *= 1.05
+	var step := _nice_step(dmax, 5)
+	var maxy := maxf(1.0, ceil(dmax / step)) * step
+	var nsteps := maxi(1, int(round(maxy / step)))
+	# Axes + gridlines + Y labels.
+	draw_line(Vector2(cx, cy), Vector2(cx, cy + chh), Color(0.235, 0.549, 0.353, 0.55), 1.0)
+	draw_line(Vector2(cx, cy + chh), Vector2(cx + cw, cy + chh), Color(0.235, 0.549, 0.353, 0.55), 1.0)
+	for ti in range(nsteps + 1):
+		var vy := cy + chh - chh * float(ti) / float(nsteps)
+		_rt(f_exo, cx - 4.0, vy + 3.0, _fmt_compact(step * ti), 8, Color(0.549, 0.784, 0.627, 0.7))
+		draw_line(Vector2(cx, vy), Vector2(cx + cw, vy), Color(0.235, 0.549, 0.353, 0.15), 1.0)
+	# X SD labels.
+	var xstep := (cw / float(sds.size() - 1)) if sds.size() > 1 else 0.0
+	for si in sds.size():
+		_ctr(f_exo, cx + xstep * si, cy + chh + 12.0, "SD %d" % int(sds[si]), 8, Color(0.549, 0.784, 0.627, 0.65), 60.0)
+	# Plot both series.
+	_fin_plot(pvals, cx, cy, chh, xstep, maxy, Color(0.314, 0.706, 1.0, 0.95))
+	_fin_plot(avals, cx, cy, chh, xstep, maxy, Color(1.0, 0.667, 0.235, 0.95))
+	# Legend (corp names) inside the chart, upper-left.
+	var lgx := cx + 8.0
+	var lgy := cy + 8.0
+	draw_rect(Rect2(lgx, lgy, 10.0, 3.0), Color(0.314, 0.706, 1.0))
+	draw_string(f_orb_b, Vector2(lgx + 16.0, lgy + 5.0), String(GameState.corp_name).to_upper(), HORIZONTAL_ALIGNMENT_LEFT, 220.0, 9, Color(0.784, 0.902, 1.0, 0.97))
+	draw_rect(Rect2(lgx, lgy + 14.0, 10.0, 3.0), Color(1.0, 0.667, 0.235))
+	draw_string(f_orb_b, Vector2(lgx + 16.0, lgy + 19.0), String(AICorp.corp_name).to_upper(), HORIZONTAL_ALIGNMENT_LEFT, 220.0, 9, Color(1.0, 0.863, 0.667, 0.97))
+
+func _fin_plot(vals: Array, cx: float, cy: float, chh: float, xstep: float, maxy: float, col: Color) -> void:
+	var pts: PackedVector2Array = []
+	for i in vals.size():
+		pts.append(Vector2(cx + xstep * i, cy + chh - chh * (float(vals[i]) / maxy)))
+	if pts.size() >= 2:
+		draw_polyline(pts, col, 2.0, true)
+	for p in pts:
+		draw_circle(p, 3.0, col)
+
+# Nice axis step 1/2/2.5/5 ×10^n (build_game.py _niceStep:18190).
+func _nice_step(range_v: float, ticks: float) -> float:
+	if range_v <= 0.0:
+		return 1.0
+	var raw := range_v / maxf(1.0, ticks)
+	var mag := pow(10.0, floor(log(raw) / log(10.0)))
+	var n := raw / mag
+	var nice := 1.0 if n <= 1.0 else (2.0 if n <= 2.0 else (2.5 if n <= 2.5 else (5.0 if n <= 5.0 else 10.0)))
+	return nice * mag
+
+func _fmt_compact(v: float) -> String:
+	if v >= 1000000.0:
+		return "%.1fM" % (v / 1000000.0)
+	if v >= 1000.0:
+		return "%dK" % int(v / 1000.0)
+	return str(int(v))
+
+# LOANS tab — the loan subsystem (interest/amortization/tiers) is NOT simulated
+# in this port, so this states that honestly rather than faking a loan UI.
+func _fin_loans_tab(px: float, py: float, pw: float, ph: float, tab_base: float) -> void:
+	_ctr(f_orb_b, px + pw * 0.5, tab_base + 46.0, "LOAN FINANCING", 12, Color(0.471, 0.706, 0.549, 0.8))
+	_ctr(f_exo, px + pw * 0.5, tab_base + 74.0, "Corporate loan financing is not available in this build.", 11, Color(0.549, 0.706, 0.608, 0.75))
+	_ctr(f_exo, px + pw * 0.5, tab_base + 92.0, "Grow the corporation on liquid capital and route revenue.", 10, Color(0.431, 0.588, 0.49, 0.6))
+
 func _fmt_cr(n: int) -> String:
 	var s := str(absi(n))
 	var out := ""
@@ -2768,18 +2882,19 @@ func _fmt_cr(n: int) -> String:
 # ── Corp dashboard (build_game.py drawCorpPopup 17584) ───────────────────────
 func _draw_corp() -> void:
 	var pw := 570.0
-	var ph := 320.0
+	var ph := 440.0
 	var o := _base(pw, ph, Color(0.314, 0.549, 1.0, 0.65))
 	var px := o.x
 	var py := o.y
 	# Header band: circular logo + corp name + [ESC].
-	draw_rect(Rect2(px + 1.0, py + 1.0, pw - 2.0, 40.0), Color(0.039, 0.078, 0.176, 0.85))
-	draw_circle(Vector2(px + 28.0, py + 21.0), 13.0, Color(0.157, 0.314, 0.627, 0.9))
-	draw_arc(Vector2(px + 28.0, py + 21.0), 13.0, 0.0, TAU, 24, Color(0.471, 0.706, 1.0, 0.8), 1.5)
-	_ctr(f_orb_b, px + 28.0, py + 25.0, String(GameState.corp_name).substr(0, 2).to_upper(), 11, Color(0.706, 0.863, 1.0))
-	draw_string(f_orb_b, Vector2(px + 50.0, py + 26.0), String(GameState.corp_name), HORIZONTAL_ALIGNMENT_LEFT, pw - 160.0, 15, Color(0.78, 0.88, 1.0))
+	draw_rect(Rect2(px + 1.0, py + 1.0, pw - 2.0, 38.0), Color(0.012, 0.024, 0.078, 1.0))
+	draw_line(Vector2(px, py + 38.0), Vector2(px + pw, py + 38.0), Color(0.235, 0.392, 0.784, 0.35), 1.0)
+	draw_circle(Vector2(px + 32.0, py + 30.0), 20.0, Color(0.118, 0.235, 0.471, 0.9))
+	draw_arc(Vector2(px + 32.0, py + 30.0), 20.0, 0.0, TAU, 28, Color(0.314, 0.549, 1.0, 0.5), 1.0)
+	_ctr(f_orb_b, px + 32.0, py + 34.0, String(GameState.corp_name).substr(0, 2).to_upper(), 13, Color(0.706, 0.863, 1.0))
+	draw_string(f_orb_b, Vector2(px + 60.0, py + 32.0), String(GameState.corp_name).to_upper(), HORIZONTAL_ALIGNMENT_LEFT, pw - 200.0, 15, Color(0.706, 0.824, 1.0, 0.95))
 	_esc_hint(px, py, pw)
-	# ── Left financials pane: 4×2 labelled grid ──
+	# ── Left financials (two sub-columns: P&L + balance sheet) ──
 	var total_rev := 0.0
 	var total_cost := 0.0
 	for e in GameState.finance_ledger:
@@ -2793,55 +2908,139 @@ func _draw_corp() -> void:
 	var corp_value := Leaderboard._corp_value()
 	var liquid := GameState.credits
 	var hard := corp_value - liquid
-	var grid := [
-		["TOTAL REVENUES", "+ " + _fmt_cr(int(total_rev)), Color(0.392, 0.863, 0.549)],
-		["TOTAL EXPENSES", "- " + _fmt_cr(int(expenses)), Color(0.863, 0.392, 0.392)],
-		["TOTAL PROFITS", ("-" if profit < 0 else "+ ") + _fmt_cr(int(abs(profit))), Color(0.392, 0.902, 0.588) if profit >= 0 else Color(0.902, 0.353, 0.353)],
-		["STARDATES ACTIVE", "%.1f" % maxf(0.0, GameState.stardate - Tuning.START_STARDATE), Color(0.745, 0.824, 0.941)],
-		["LIQUID CASH", _fmt_cr(liquid), Color(0.706, 0.863, 1.0)],
-		["HARD ASSETS", _fmt_cr(hard), Color(0.706, 0.863, 1.0)],
-		["DEBTS", _fmt_cr(0), Color(0.6, 0.65, 0.78)],
-		["CORP VALUE", _fmt_cr(corp_value), Color(1.0, 0.843, 0.235)],
-	]
-	var pane_x := px + 16.0
-	var pane_w := 350.0
-	var cell_w := pane_w * 0.5
-	draw_string(f_orb_b, Vector2(pane_x, py + 62.0), "CORPORATE FINANCES", HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color(0.471, 0.706, 1.0, 0.7))
-	for i in grid.size():
-		var col_i := i % 2
-		var row_i := int(i / 2.0)
-		var gx := pane_x + col_i * cell_w
-		var gy := py + 84.0 + row_i * 50.0
-		draw_rect(Rect2(gx, gy, cell_w - 10.0, 44.0), Color(0.039, 0.078, 0.176, 0.5))
-		draw_string(f_exo, Vector2(gx + 8.0, gy + 16.0), String(grid[i][0]), HORIZONTAL_ALIGNMENT_LEFT, cell_w - 18.0, 8, Color(0.471, 0.588, 0.784, 0.7))
-		draw_string(f_orb_b, Vector2(gx + 8.0, gy + 34.0), String(grid[i][1]), HORIZONTAL_ALIGNMENT_LEFT, cell_w - 18.0, 12, grid[i][2])
-	# Vertical divider.
-	draw_line(Vector2(px + 384.0, py + 50.0), Vector2(px + 384.0, py + ph - 14.0), Color(0.196, 0.353, 0.627, 0.35), 1.0)
-	# ── Right CEO pane ──
-	_ctr(f_orb_b, px + 478.0, py + 62.0, "CEO", 9, Color(0.471, 0.706, 1.0, 0.7))
+	var fx := px + 26.0
+	var fy := py + 66.0
+	var rh := 46.0
+	var fc2 := fx + 172.0
+	var green := Color(0.392, 0.902, 0.549, 0.95)
+	var red := Color(0.902, 0.353, 0.353, 0.95)
+	_corp_stat(fx, fy, "TOTAL REVENUES", _fmt_cr(int(total_rev)), green)
+	_corp_stat(fx, fy + rh, "TOTAL EXPENSES", "-" + _fmt_cr(int(expenses)), red)
+	_corp_stat(fx, fy + rh * 2.0, "TOTAL PROFITS", ("-" if profit < 0 else "") + _fmt_cr(int(abs(profit))), green if profit >= 0 else red)
+	_corp_stat(fx, fy + rh * 3.0, "STARDATES ACTIVE", "%.2f SD" % maxf(0.0, GameState.stardate - Tuning.START_STARDATE), Color(0.725, 0.843, 1.0, 0.92))
+	_corp_stat(fc2, fy, "LIQUID ASSETS", _fmt_cr(liquid), Color(0.725, 0.843, 1.0, 0.92))
+	_corp_stat(fc2, fy + rh, "HARD ASSETS", _fmt_cr(int(hard)), Color(0.725, 0.843, 1.0, 0.92))
+	_corp_stat(fc2, fy + rh * 2.0, "TOTAL DEBTS", "—", Color(0.392, 0.569, 0.843, 0.45))
+	_corp_stat(fc2, fy + rh * 3.0, "CORP VALUE", _fmt_cr(corp_value), Color(1.0, 0.843, 0.235, 0.95))
+	# Vertical divider (financials | CEO).
+	var midx := px + 370.0
+	draw_line(Vector2(midx, py + 42.0), Vector2(midx, py + 238.0), Color(0.235, 0.392, 0.784, 0.28), 1.0)
+	# ── CEO pane (portrait + name + nickname + salary/perk pills) ──
+	var ceo_cx := midx + (pw - (midx - px)) * 0.5
+	_ctr(f_exo, ceo_cx, py + 54.0, "CHIEF EXECUTIVE OFFICER", 9, Color(0.392, 0.569, 0.843, 0.55))
 	var ceo := String(GameState.ceo_name)
 	if ceo != "":
 		var sprite := String(GameState.ceo.get("sprite", "ceo_" + ceo.to_lower()))
 		var tex: Texture2D = load("res://assets/sprites/%s.png" % sprite)
-		var portrait := Rect2(px + 440.0, py + 76.0, 76.0, 76.0)
+		var portrait := Rect2(ceo_cx - 38.0, py + 60.0, 76.0, 76.0)
 		if tex != null:
 			draw_texture_rect(tex, portrait, false)
-		# Portrait is a button → opens the Hire-a-CEO window (when off cooldown).
 		var on_cd := GameState.ceo_cooldown() > 0.001
-		_stroke_round(portrait, 6.0, Color(0.62, 0.82, 1.0, 0.9) if (_hov(portrait) and not on_cd) else Color(0.353, 0.627, 1.0, 0.55), 1.5 if _hov(portrait) else 1.0)
+		_stroke_round(portrait, 6.0, Color(0.62, 0.82, 1.0, 0.9) if (_hov(portrait) and not on_cd) else Color(0.314, 0.549, 1.0, 0.5), 1.5 if _hov(portrait) else 1.0)
 		if not on_cd:
 			_rects["corp_ceo_portrait"] = portrait
-		_ctr(f_orb_b, px + 478.0, py + 172.0, ceo.to_upper(), 12, Color(0.78, 0.88, 1.0))
-		_ctr(f_exo, px + 478.0, py + 186.0, String(GameState.ceo.get("nickname", "")), 9, Color(0.627, 0.706, 0.863, 0.7), 160.0)
-		var yy := py + 204.0
-		for cargo in GameState.ceo_revenue_mult.keys():
-			var pct := int(round((float(GameState.ceo_revenue_mult[cargo]) - 1.0) * 100.0))
-			if pct > 0:
-				_ctr(f_exo, px + 478.0, yy, "+%d%% %s" % [pct, String(cargo).capitalize()], 9, Color(0.549, 0.863, 0.627, 0.9), 160.0)
-				yy += 16.0
-		_ctr(f_exo, px + 478.0, py + ph - 18.0, "click portrait to hire", 8, Color(0.471, 0.588, 0.784, 0.6), 160.0)
+		_ctr(f_orb_b, ceo_cx, py + 150.0, String(GameState.ceo.get("name", ceo)), 11, Color(0.706, 0.824, 1.0, 0.9))
+		_ctr(f_exo, ceo_cx, py + 163.0, String(GameState.ceo.get("nickname", "")), 9, Color(0.588, 0.667, 0.902, 0.62))
+		# Salary pill (tier-colored) + perk pills.
+		var sal := int(GameState.ceo.get("salary", 0))
+		var pill_max := pw - (midx - px) - 22.0
+		var sal_txt := "-%s cr/Stardate" % _fmt_cr(sal)
+		var sal_w := minf(pill_max, f_exo.get_string_size(sal_txt, HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x + 16.0)
+		var sbg := Color(0.353, 0.071, 0.071, 0.65) if sal > 200000 else (Color(0.353, 0.204, 0.039, 0.65) if sal > 100000 else Color(0.333, 0.282, 0.031, 0.65))
+		var sfg := Color(0.922, 0.373, 0.373, 0.97) if sal > 200000 else (Color(1.0, 0.725, 0.255, 0.97) if sal > 100000 else Color(1.0, 0.902, 0.196, 0.97))
+		_fill_round(Rect2(ceo_cx - sal_w * 0.5, py + 175.0, sal_w, 20.0), 4.0, sbg)
+		_ctr(f_exo, ceo_cx, py + 188.0, sal_txt, 11, sfg)
+		var perks: Array = GameState.ceo.get("perks", [])
+		var ppy := py + 207.0
+		for pi in perks.size():
+			var is_green := pi == 0
+			var lbl := String(perks[pi])
+			var pwid := minf(pill_max, f_exo.get_string_size(lbl, HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x + 14.0)
+			_fill_round(Rect2(ceo_cx - pwid * 0.5, ppy, pwid, 20.0), 4.0, Color(0.098, 0.282, 0.149, 0.62) if is_green else Color(0.098, 0.176, 0.392, 0.62))
+			_ctr(f_exo, ceo_cx, ppy + 13.0, lbl, 11, Color(0.529, 0.961, 0.659, 0.97) if is_green else Color(0.686, 0.843, 1.0, 0.95), pill_max)
+			ppy += 24.0
 	else:
-		_ctr(f_exo, px + 478.0, py + 130.0, "No CEO hired", 10, Color(0.5, 0.6, 0.75, 0.7), 160.0)
+		_ctr(f_exo, ceo_cx, py + 130.0, "No CEO hired", 10, Color(0.5, 0.6, 0.75, 0.7))
+	# ── Full-width divider + bottom EXPLORATION / FLEET & OPERATIONS ──
+	draw_line(Vector2(px + 8.0, py + 244.0), Vector2(px + pw - 8.0, py + 244.0), Color(0.235, 0.392, 0.784, 0.3), 1.0)
+	var blx := px + 14.0
+	var brx := px + pw * 0.5 + 8.0
+	var bby := py + 258.0
+	var blh := 20.0
+	# EXPLORATION.
+	var visited_stars := {}
+	for p in Galaxy.planets:
+		if Discovery.visited_planet_ids.has(int(p.id)):
+			visited_stars[int(p.starId)] = true
+	var res_types := {}
+	var gold_patches := 0
+	var diam_patches := 0
+	var relics := 0
+	for p in Galaxy.planets:
+		if not Discovery.discovered_planet_ids.has(int(p.id)):
+			continue
+		for ct in (p.get("supply", {}) as Dictionary).keys():
+			if float(p.supply[ct]) > 0.0 and not (ct == "gold" and not p.get("goldRevealed", false)) and not (ct == "diamond" and not p.get("diamondRevealed", false)):
+				res_types[ct] = true
+		if p.get("isAlienRelic", false):
+			relics += 1
+	for p in Galaxy.planets:
+		if p.get("goldRevealed", false): gold_patches += 1
+		if p.get("diamondRevealed", false): diam_patches += 1
+	draw_string(f_orb_b, Vector2(blx, bby), "EXPLORATION", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.549, 0.706, 1.0, 0.7))
+	_corp_row(blx, bby + blh, "Planets Discovered", str(Discovery.discovered_planet_ids.size()), 160.0)
+	_corp_row(blx, bby + blh * 2.0, "Planets Visited", str(Discovery.visited_planet_ids.size()), 160.0)
+	_corp_row(blx, bby + blh * 3.0, "Stars Discovered", str(Discovery.revealed_star_ids.size()), 160.0)
+	_corp_row(blx, bby + blh * 4.0, "Stars Visited", str(visited_stars.size()), 160.0)
+	_corp_row(blx, bby + blh * 5.0, "Resource Types Found", str(res_types.size()), 160.0)
+	_corp_row(blx, bby + blh * 6.0, "Gold Patches Found", str(gold_patches), 160.0)
+	_corp_row(blx, bby + blh * 7.0, "Diamond Patches Found", str(diam_patches), 160.0)
+	_corp_row(blx, bby + blh * 8.0, "Phenomena Discovered", str(relics + Galaxy.black_holes.size()), 160.0)
+	# FLEET & OPERATIONS.
+	var n_trains := 0
+	var n_cars := 0
+	var total_dist := 0.0
+	for t in Transit.trains:
+		if bool(t.get("isPlayer", false)):
+			n_trains += 1
+			n_cars += (t.cars as Array).filter(func(c): return String(c) != "caboose").size()
+			total_dist += float(t.get("totalDist", 0.0))
+	var n_stations := 0
+	var n_upgrades := 0
+	for p in Galaxy.planets:
+		if p.get("playerBuiltStation", false):
+			n_stations += 1
+		n_upgrades += (p.get("playerBuiltUpgrades", []) as Array).size()
+	var cargo_n := 0
+	var pax_n := 0
+	for e in GameState.finance_ledger:
+		if float(e.revenue) > 0.0:
+			if String(e.cargoType) == "passengers": pax_n += 1
+			else: cargo_n += 1
+	draw_string(f_orb_b, Vector2(brx, bby), "FLEET & OPERATIONS", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.549, 0.706, 1.0, 0.7))
+	_corp_row(brx, bby + blh, "Distance Traveled", _fmt_dist(total_dist), 240.0)
+	_corp_row(brx, bby + blh * 2.0, "Active Trains", str(n_trains), 240.0)
+	_corp_row(brx, bby + blh * 3.0, "Train Cars", str(n_cars), 240.0)
+	_corp_row(brx, bby + blh * 4.0, "Stations Built", str(n_stations), 240.0)
+	_corp_row(brx, bby + blh * 5.0, "Upgrades Installed", str(n_upgrades), 240.0)
+	_corp_row(brx, bby + blh * 6.0, "Cargo Delivered", str(cargo_n), 240.0)
+	_corp_row(brx, bby + blh * 7.0, "Passengers Delivered", str(pax_n), 240.0)
+	_corp_row(brx, bby + blh * 8.0, "Hazmat Incinerated", "0", 240.0)
+
+func _corp_stat(x: float, y: float, lbl: String, val: String, col: Color) -> void:
+	draw_string(f_exo, Vector2(x, y), lbl, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(0.392, 0.569, 0.843, 0.55))
+	draw_string(f_orb_b, Vector2(x, y + 18.0), val, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, col)
+
+func _corp_row(x: float, y: float, lbl: String, val: String, val_w: float) -> void:
+	draw_string(f_exo, Vector2(x, y), lbl, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.392, 0.569, 0.843, 0.52))
+	_rt(f_orb_b, x + val_w, y, val, 13, Color(0.725, 0.843, 1.0, 0.92))
+
+func _fmt_dist(d: float) -> String:
+	if d >= 100000000.0:
+		return _fmt_cr(int(round(d / 1000000.0))) + "M SU"
+	if d >= 1000000.0:
+		return _fmt_cr(int(round(d / 1000.0))) + "k SU"
+	return _fmt_cr(int(round(d))) + " SU"
 
 
 # Hire-a-CEO window (build_game.py drawCeoHirePopup 17882): 700×370, three columns

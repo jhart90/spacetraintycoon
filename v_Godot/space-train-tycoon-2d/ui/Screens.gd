@@ -11,6 +11,9 @@ var view: Node2D  # GalaxyView2D (for biome_tex + the scrolling-train strip)
 var f_exo: Font
 var f_orb: Font
 var f_orb_b: Font
+var f_exo_b: Font    # bold Exo 2 (intro CAPS + closing line)
+var f_exo_i: Font    # italic Exo 2
+var f_exo_bi: Font   # bold italic Exo 2
 
 var _rects: Dictionary = {}
 var _mouse := Vector2(-1, -1)  # live cursor → hover states for title/menu buttons
@@ -30,8 +33,24 @@ const _DIFFS := [
 	["easy", "Easy", "A small regional carrier.", "#9ed86a"],
 	["normal", "Normal", "A solid mid-tier rival.", "#ffcc44"],
 	["hard", "Hard", "An aggressive operator.", "#ff7a4a"],
-	["very_hard", "Very Hard", "A fully optimised empire.", "#e0563c"],
+	["very_hard", "Very Hard", "A fully optimized empire.", "#e0563c"],
 ]
+# Per-difficulty card styling (build_game.py drawAISelect _dbg/_ddark/_dsprite/_dbord :6359).
+const _AI_FILL := {
+	"none": Color(0.608, 0.725, 0.980, 0.86), "very_easy": Color(0.647, 0.922, 0.686, 0.88),
+	"easy": Color(0.196, 0.529, 0.275, 0.90), "normal": Color(0.933, 0.894, 0.204, 0.90),
+	"hard": Color(0.843, 0.282, 0.282, 0.92), "very_hard": Color(0.055, 0.055, 0.078, 0.95),
+}
+const _AI_BORD := {
+	"none": Color(0.333, 0.490, 0.882, 0.70), "very_easy": Color(0.294, 0.765, 0.392, 0.70),
+	"easy": Color(0.255, 0.765, 0.353, 0.65), "normal": Color(0.765, 0.725, 0.110, 0.78),
+	"hard": Color(0.902, 0.353, 0.353, 0.72), "very_hard": Color(0.569, 0.569, 0.686, 0.50),
+}
+const _AI_DARK := {"none": true, "very_easy": true, "easy": false, "normal": true, "hard": false, "very_hard": false}
+const _AI_SPRITE := {
+	"none": "engine_galaxy", "very_easy": "car_flowers", "easy": "car_water_tank",
+	"normal": "car_sand", "hard": "car_ore", "very_hard": "car_hazmat",
+}
 const _CORP_PREFIX := ["DEIMOS", "TRANS-CONTINENTAL", "STELLAR", "ORION", "VEGA", "NOVA", "TITAN", "HELIOS", "ATLAS", "MERIDIAN", "PIONEER", "ZENITH"]
 const _CORP_MID := ["FREIGHT", "SHIPPING", "TRANSIT", "CARGO", "RAIL", "STAR", "CROSSING", "HAULAGE", "LOGISTICS", "TRADE"]
 const _CORP_SUFFIX := ["NETWORK", "CO.", "LINES", "CORP", "INTERSTELLAR", "WORKS", "GUILD", "SYNDICATE"]
@@ -42,7 +61,7 @@ var _ai_choice := "normal"
 const _INTRO_TEXT := [
 	"STARDATE 829.\n\nThirty Stardates have passed since the sudden implosion of the Dutch East Earth Interstellar Trading Company (DEEITC), the once-dominant commercial power whose vast network of trade routes, orbital infrastructure, and wormhole technology bound 1,000s of planets together into a single galactic economy.\n\nIn the aftermath, entire star systems were cut off from one another, industries collapsed, and countless worlds have endured decades of economic isolation.",
 	"Now, a new age of opportunity has begun.\n\nAcross the galaxy, ambitious CORPORATIONs are racing to fill the void left behind. As the newly appointed CEO of one such enterprise, your mission is to reconnect the stars through a new network of SPACE TRAINs...\n\nEstablish profitable trade ROUTEs.\n\nTransport CARGO from worlds of abundance to worlds in need.\n\nRe-BUILD the foundations of interstellar civilization, one star system at a time.",
-	"But commerce alone is not enough. Hidden among the ruins of DEEITC's fallen empire lie the components and knowledge required to reconstruct the legendary WORMHOLE APPARATUS — a colossal device capable of bending space itself.\n\nThe Corporation that re-builds this ancient technology first will unlock access to THE MULTI-VERSE...\n\n...and the secrets within that powered both DEEITC's inter-galactic domination, as well as its catastrophic demise!\n\nThe race has begun. The stars await.",
+	"But commerce alone is not enough. Hidden among the ruins of DEEITC's fallen empire lie the components and knowledge required to reconstruct the legendary WORMHOLE APPARATUS — a colossal device capable of bending space itself.\n\nThe Corporation that is able to re-build this ancient technology first will unlock access to\nTHE MULTI-VERSE...\n\n...and the secrets within that powered both DEEITC's inter-galactic domination, as well as its catastrophic demise!\n\nThe race has begun. The stars await.",
 ]
 var _intro_para := 0
 var _intro_chars := 0.0
@@ -64,6 +83,9 @@ func _ready() -> void:
 	f_exo = load("res://assets/fonts/Exo2-Variable.woff2")
 	f_orb = load("res://assets/fonts/Orbitron-Variable.woff2")
 	f_orb_b = _weight(f_orb, 700)
+	f_exo_b = _weight(f_exo, 700)
+	f_exo_i = _italic(f_exo, false)
+	f_exo_bi = _italic(f_exo, true)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 0xA17E
 	for i in 140:
@@ -90,6 +112,7 @@ func _ready() -> void:
 			"name": entry[0], "sprite": entry[1], "salary": 40000 + (rng.randi() % 30) * 10000,
 			"perks": ["+%d%% %s Revenue" % [v1, c1[0]], "+%d%% %s Revenue" % [v2, c2[0]]],
 			"mult": {String(c1[1]): 1.0 + v1 / 100.0, String(c2[1]): 1.0 + v2 / 100.0},
+			"nickname": String(GameState._CEO_NICKNAMES.get(String(c1[1]), "\"The Executive\"")),
 		})
 	GameState.screen_changed.connect(func(_s): queue_redraw())
 	Leaderboard.changed.connect(func(): if GameState.gs == "leaderboard": queue_redraw())
@@ -99,6 +122,15 @@ func _weight(base: Font, w: int) -> Font:
 	var fv := FontVariation.new()
 	fv.base_font = base
 	fv.variation_opentype = {"wght": w}
+	return fv
+
+# Synthetic italic via a glyph shear (the variable Exo 2 has no italic axis).
+func _italic(base: Font, bold: bool) -> Font:
+	var fv := FontVariation.new()
+	fv.base_font = base
+	if bold:
+		fv.variation_opentype = {"wght": 700}
+	fv.variation_transform = Transform2D(Vector2(1.0, 0.0), Vector2(0.20, 1.0), Vector2.ZERO)
 	return fv
 
 func _gen_corp_name(rng: RandomNumberGenerator) -> String:
@@ -259,22 +291,127 @@ func _draw() -> void:
 # ── INTRO CINEMATIC (build_game.py drawHowToPlay §13) — typed narration over the
 #    galaxy (which renders behind, dimmed), with a SKIP button. ────────────────
 func _draw_intro() -> void:
-	draw_rect(Rect2(0, 0, W, H), Color(0.01, 0.02, 0.05, 0.55))  # cinematic dim
-	# Narration band.
-	draw_rect(Rect2(0, 300.0, W, 150.0), Color(0.01, 0.02, 0.06, 0.55))
+	draw_rect(Rect2(0, 0, W, H), Color(0, 0, 0, 0.42))  # single cinematic dim (build_game.py 5065)
 	var para: String = _INTRO_TEXT[_intro_para]
 	var n: int = clampi(int(_intro_chars), 0, para.length())
-	var shown: String = para.substr(0, n)
-	draw_multiline_string(f_exo, Vector2(W * 0.15, 322.0), shown, HORIZONTAL_ALIGNMENT_CENTER, W * 0.70, 13, -1, Color(0.85, 0.93, 1.0, 0.96))
-	# Paragraph dots.
-	for i in _INTRO_TEXT.size():
-		draw_circle(Vector2(W * 0.5 - 12.0 + i * 12.0, 466.0), 3.0, Color(0.6, 0.82, 1.0, 0.95) if i == _intro_para else Color(0.3, 0.42, 0.62, 0.6))
-	# Skip.
-	var sk := Rect2(W - 110.0, H - 42.0, 92.0, 26.0)
-	_round_rect(sk, 4.0, Color(0.08, 0.16, 0.32, 0.85))
-	draw_rect(sk, Color(0.4, 0.55, 0.82, 0.6), false, 1.0)
-	_ctr(f_exo, sk.position.x + sk.size.x * 0.5, sk.position.y + 17.0, "SKIP  ›", 11, Color(0.8, 0.9, 1.0, 0.92), sk.size.x)
-	_rects["intro_skip"] = sk
+	# Styled narration — 15px Exo 2, vertically centred, CAPS bold + italics +
+	# bold closing line (build_game.py _introRenderText 5080).
+	_draw_styled_intro(para.substr(0, n), W * 0.5, H * 0.5, 640.0, 22.0, Color(0.910, 0.933, 0.980, 0.97), _intro_para)
+	# Proximity-faded controls (baseline 0.25 → 1.0 within 60 px of the cursor).
+	var sk := Rect2(W - 132.0, H - 46.0, 110.0, 28.0)
+	_intro_btn(sk, "SKIP  ▶▶", Color(0.039, 0.094, 0.196), Color(0.314, 0.549, 0.824), Color(0.784, 0.882, 1.0), "intro_skip")
+	var qt := Rect2(22.0, H - 46.0, 90.0, 28.0)
+	_intro_btn(qt, "◀ QUIT", Color(0.078, 0.118, 0.275), Color(0.275, 0.392, 0.627), Color(0.706, 0.804, 1.0), "intro_quit")
+	var mu := Rect2(120.0, H - 46.0, 28.0, 28.0)
+	_intro_btn(mu, "♪" if not _sfx_muted_intro() else "✕", Color(0.078, 0.118, 0.275), Color(0.275, 0.392, 0.627), Color(0.706, 0.804, 1.0), "intro_mute")
+
+func _sfx_muted_intro() -> bool:
+	return Audio.music_vol <= 0.0 if "music_vol" in Audio else false
+
+# Proximity-faded intro button (alpha 0.25 baseline, 1.0 within 60 px).
+func _intro_btn(r: Rect2, label: String, fill: Color, border: Color, text_col: Color, key: String) -> void:
+	var d := r.get_center().distance_to(_mouse)
+	var a := clampf(remap(d, 60.0, 200.0, 1.0, 0.25), 0.25, 1.0)
+	var hov := r.has_point(_mouse)
+	_round_rect(r, 5.0, Color(fill.r, fill.g, fill.b, fill.a * a + (0.15 if hov else 0.0)))
+	draw_rect(r, Color(border.r, border.g, border.b, (0.95 if hov else 0.55) * a), false, 1.0)
+	_ctr(f_orb_b, r.position.x + r.size.x * 0.5, r.position.y + r.size.y * 0.5 + 4.0, label, 11, Color(text_col.r, text_col.g, text_col.b, text_col.a * a), r.size.x)
+	_rects[key] = r
+
+# Render styled intro text: word-wrap, CAPS runs bold, screen-2 italic targets,
+# bold closing line; vertically centred at y_center.
+func _draw_styled_intro(shown: String, cx: float, y_center: float, max_w: float, lh: float, base_col: Color, para_idx: int) -> void:
+	var lines: Array = []
+	for seg in shown.split("\n"):
+		var line := ""
+		for w in seg.split(" "):
+			var t := w if line == "" else line + " " + w
+			if f_exo.get_string_size(t, HORIZONTAL_ALIGNMENT_LEFT, -1, 15).x <= max_w:
+				line = t
+			else:
+				lines.append(line)
+				line = w
+		lines.append(line)
+	var y := y_center - lines.size() * lh * 0.5 + lh
+	for ln in lines:
+		_draw_styled_line(String(ln), cx, y, base_col, para_idx)
+		y += lh
+
+func _draw_styled_line(text: String, cx: float, y: float, base_col: Color, para_idx: int) -> void:
+	if text == "":
+		return
+	var caps := _find_caps_ranges(text)
+	var ital: Array = []
+	var whole_bold := para_idx == 2 and text.begins_with("The race")
+	if para_idx == 2:
+		for tgt in ["inter-galactic domination", "catastrophic demise!"]:
+			var idx := text.find(tgt)
+			if idx >= 0:
+				ital.append([idx, idx + tgt.length()])
+	# Group consecutive chars sharing a style into segments.
+	var segs: Array = []
+	var i := 0
+	while i < text.length():
+		var b := whole_bold or _in_ranges(i, caps)
+		var it := _in_ranges(i, ital)
+		var j := i + 1
+		while j < text.length() and (whole_bold or _in_ranges(j, caps)) == b and _in_ranges(j, ital) == it:
+			j += 1
+		segs.append([text.substr(i, j - i), b, it])
+		i = j
+	var total := 0.0
+	for s in segs:
+		total += _intro_font(s[1], s[2]).get_string_size(String(s[0]), HORIZONTAL_ALIGNMENT_LEFT, -1, 15).x
+	var x := cx - total * 0.5
+	for s in segs:
+		var fnt := _intro_font(s[1], s[2])
+		draw_string(fnt, Vector2(x, y), String(s[0]), HORIZONTAL_ALIGNMENT_LEFT, -1, 15, base_col)
+		x += fnt.get_string_size(String(s[0]), HORIZONTAL_ALIGNMENT_LEFT, -1, 15).x
+
+func _intro_font(bold: bool, ital: bool) -> Font:
+	if bold and ital: return f_exo_bi
+	if ital: return f_exo_i
+	if bold: return f_exo_b
+	return f_exo
+
+func _in_ranges(i: int, ranges: Array) -> bool:
+	for r in ranges:
+		if i >= int(r[0]) and i < int(r[1]):
+			return true
+	return false
+
+# All-caps runs ≥2 chars, joining across single space/hyphen before another
+# upper/digit, digits allowed inside (build_game.py _findAllCapsRanges 5161).
+func _find_caps_ranges(text: String) -> Array:
+	var out: Array = []
+	var i := 0
+	var n := text.length()
+	while i < n:
+		if _is_upper(text[i]):
+			var j := i
+			var has_upper := false
+			while j < n:
+				var ch := text[j]
+				if _is_upper(ch):
+					has_upper = true; j += 1; continue
+				if ch >= "0" and ch <= "9":
+					j += 1; continue
+				if ch == " " or ch == "-":
+					if j + 1 < n and (_is_upper(text[j + 1]) or (text[j + 1] >= "0" and text[j + 1] <= "9")):
+						j += 1; continue
+					break
+				break
+			while j > i and (text[j - 1] == " " or text[j - 1] == "-"):
+				j -= 1
+			if has_upper and (j - i) >= 2:
+				out.append([i, j])
+			i = maxi(j, i + 1)
+		else:
+			i += 1
+	return out
+
+func _is_upper(c: String) -> bool:
+	return c >= "A" and c <= "Z"
 
 
 # ── TITLE (build_game.py drawTitleScreen 4152) ──────────────────────────────
@@ -517,49 +654,99 @@ func _title_btn(r: Rect2, label: String, fill: Color, border: Color, text_col: C
 	_rects[key] = r
 
 
-# ── CORP SETUP (build_game.py drawCorpSetup) ────────────────────────────────
+# Full-screen bordered setup panel shared by corp-setup + AI-select.
+func _setup_panel(border: Color) -> Rect2:
+	var r := Rect2(32.0, 24.0, W - 64.0, H - 80.0)
+	_round_rect(r, 8.0, Color(0.024, 0.039, 0.118, 0.94))
+	draw_rect(r, border, false, 1.5)
+	return r
+
+# Glowing gradient-ish title (the original uses a horizontal canvas gradient;
+# approximated with a colored glow halo + bright core).
+func _glow_title(cx: float, y: float, text: String, size: int, glow: Color, core: Color) -> void:
+	for off in [Vector2(-2, 0), Vector2(2, 0), Vector2(0, -2), Vector2(0, 2), Vector2(-1.5, -1.5), Vector2(1.5, 1.5)]:
+		_ctr(f_orb_b, cx + off.x, y + off.y, text, size, Color(glow.r, glow.g, glow.b, 0.30))
+	_ctr(f_orb_b, cx, y, text, size, core)
+
+# ── CORP SETUP (build_game.py drawCorpSetup :6162) ──────────────────────────
 func _draw_corpsetup() -> void:
-	_ctr(f_orb_b, W * 0.5, 44.0, "FOUND YOUR CORPORATION", 16, Color(1.0, 0.82, 0.31))
-	# Corp name field.
-	var fr := Rect2(W * 0.5 - 220.0, 60.0, 440.0, 32.0)
-	_round_rect(fr, 5.0, Color(0.039, 0.078, 0.196, 0.9))
-	draw_rect(fr, Color(0.314, 0.588, 1.0, 0.6), false, 1.5)
-	_ctr(f_orb_b, W * 0.5, 82.0, GameState.corp_name, 13, Color(0.78, 0.88, 1.0))
-	# Regenerate-name button.
-	var rg := Rect2(W * 0.5 - 65.0, 98.0, 130.0, 20.0)
-	_round_rect(rg, 4.0, Color(0.08, 0.16, 0.34, 0.85))
-	draw_rect(rg, Color(0.314, 0.549, 0.9, 0.5), false, 1.0)
-	_ctr(f_exo, W * 0.5, 112.0, "↻ NEW NAME", 9, Color(0.6, 0.78, 1.0, 0.9), 130.0)
-	_rects["regen"] = rg
-	# CEO picker.
-	_ctr(f_orb_b, W * 0.5, 142.0, "CHOOSE YOUR CEO", 11, Color(1.0, 0.82, 0.31, 0.9))
-	var cw := 220.0
-	var gap := 18.0
-	var total := 3.0 * cw + 2.0 * gap
-	var x0 := (W - total) * 0.5
-	var cy := 152.0
-	var ch := 232.0
+	var pr := _setup_panel(Color(0.235, 0.392, 0.784, 0.48))
+	var px := pr.position.x
+	var py := pr.position.y
+	_glow_title(W * 0.5, py + 42.0, "ESTABLISH YOUR CORPORATION", 26, Color(0.533, 0.667, 1.0), Color(0.882, 0.945, 1.0))
+	draw_line(Vector2(px + 20.0, py + 62.0), Vector2(px + pr.size.x - 20.0, py + 62.0), Color(0.235, 0.392, 0.784, 0.30), 1.0)
+	# Corp name label + field + regenerate.
+	_ctr(f_orb_b, W * 0.5, py + 81.0, "NAME YOUR CORPORATION:", 10, Color(0.510, 0.667, 0.902, 0.82))
+	var fr := Rect2(W * 0.5 - 230.0, py + 88.0, 460.0, 38.0)
+	var fhov := _hov(fr)
+	_round_rect(fr, 5.0, Color(0.110, 0.188, 0.431, 0.90) if fhov else Color(0.047, 0.086, 0.259, 0.90))
+	draw_rect(fr, Color(0.431, 0.667, 1.0, 0.90) if fhov else Color(0.216, 0.373, 0.784, 0.50), false, 1.2)
+	_ctr(f_exo, W * 0.5, py + 113.0, String(GameState.corp_name), 18, Color(0.510, 0.725, 1.0, 0.97))
+	if fhov:
+		var hint := "click to rename"
+		var hw := f_exo.get_string_size(hint, HORIZONTAL_ALIGNMENT_LEFT, -1, 10).x
+		draw_string(f_exo, Vector2(fr.position.x + fr.size.x - 10.0 - hw, fr.position.y + fr.size.y - 10.0), hint, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(0.392, 0.627, 1.0, 0.55))
+	_rects["regen"] = fr  # click the name field to roll a new corp name
+	# CEO selection (left-aligned label).
+	draw_string(f_orb_b, Vector2(px + 30.0, py + 145.0), "SELECT YOUR CEO:", HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(0.510, 0.667, 0.902, 0.82))
+	var cw := 242.0
+	var gap := 22.0
+	var x0 := (W - (3.0 * cw + 2.0 * gap)) * 0.5
+	var cy := py + 150.0
+	var ch := 240.0
+	var sal_bg := [Color(0.333, 0.282, 0.031, 0.68), Color(0.345, 0.216, 0.020, 0.68), Color(0.345, 0.141, 0.016, 0.68)]
+	var sal_tc := [Color(1.0, 0.902, 0.196, 0.97), Color(1.0, 0.745, 0.141, 0.97), Color(1.0, 0.541, 0.086, 0.97)]
 	for ci in _ceos.size():
 		var ceo: Dictionary = _ceos[ci]
 		var cx := x0 + ci * (cw + gap)
+		var cc := cx + cw * 0.5
 		var sel := ci == _ceo_sel
 		var chov := _hov(Rect2(cx, cy, cw, ch)) and not sel
-		_round_rect(Rect2(cx, cy, cw, ch), 6.0, Color(0.078, 0.157, 0.314, 0.85) if sel else (Color(0.059, 0.122, 0.275, 0.85) if chov else Color(0.039, 0.086, 0.196, 0.7)))
-		draw_rect(Rect2(cx, cy, cw, ch), Color(1.0, 0.82, 0.31, 0.9) if sel else (Color(0.392, 0.549, 0.824, 0.7) if chov else Color(0.196, 0.314, 0.549, 0.4)), false, 2.0 if sel else 1.0)
+		_round_rect(Rect2(cx, cy, cw, ch), 8.0, Color(0.039, 0.118, 0.255, 0.90) if sel else (Color(0.055, 0.110, 0.267, 0.82) if chov else Color(0.031, 0.071, 0.196, 0.78)))
+		draw_rect(Rect2(cx, cy, cw, ch), Color(0.216, 0.824, 0.451, 0.85) if sel else (Color(0.314, 0.471, 0.863, 0.65) if chov else Color(0.196, 0.294, 0.627, 0.38)), false, 2.0 if sel else 1.0)
+		# Portrait.
+		var p_y := cy + 12.0
 		var tex: Texture2D = _ceo_tex.get(String(ceo.sprite), null)
 		if tex != null:
-			draw_texture_rect(tex, Rect2(cx + cw * 0.5 - 44.0, cy + 12.0, 88.0, 88.0), false)
-		_ctr(f_orb_b, cx + cw * 0.5, cy + 122.0, String(ceo.name).to_upper(), 13, Color(0.78, 0.9, 1.0) if sel else Color(0.6, 0.74, 0.95, 0.85))
-		_ctr(f_exo, cx + cw * 0.5, cy + 142.0, "Salary: %s cr / SD" % _fmt(int(ceo.salary)), 9, Color(1.0, 0.7, 0.45, 0.8), cw)
-		var perks: Array = ceo.perks
-		_ctr(f_exo, cx + cw * 0.5, cy + 168.0, "• " + String(perks[0]), 9, Color(0.55, 0.86, 0.6, 0.9), cw - 16.0)
-		_ctr(f_exo, cx + cw * 0.5, cy + 186.0, "• " + String(perks[1]), 9, Color(0.55, 0.86, 0.6, 0.9), cw - 16.0)
+			draw_texture_rect(tex, Rect2(cc - 40.0, p_y, 80.0, 80.0), false)
+		draw_rect(Rect2(cc - 40.0, p_y, 80.0, 80.0), Color(0.216, 0.824, 0.451, 0.55) if sel else Color(0.314, 0.510, 0.863, 0.48), false, 1.0)
+		# Name + nickname.
+		_ctr(f_orb_b, cc, p_y + 97.0, String(ceo.name), 11, Color(0.765, 0.863, 1.0, 0.97))
+		_ctr(f_exo, cc, p_y + 111.0, String(ceo.get("nickname", "")), 10, Color(0.580, 0.686, 0.933, 0.70))
+		# 3 labelled pill rows: SALARY / ABILITY / STARTING CREDITS.
+		_cs_pill_row(cx, cw, p_y + 130.0, "SALARY", "-%s cr/Stardate" % _fmt(int(ceo.salary)), sal_bg[ci], sal_tc[ci])
+		_cs_pill_row(cx, cw, p_y + 160.0, "ABILITY", String((ceo.perks as Array)[0]), Color(0.098, 0.608, 1.0, 0.97), Color(0, 0, 0))
+		_cs_pill_row(cx, cw, p_y + 190.0, "STARTING CREDITS", "+%s cr" % _fmt(Tuning.PLAYER_START_CREDITS), Color(0.063, 0.275, 0.165, 0.72), Color(0.471, 0.941, 0.647, 0.97))
 		if sel:
-			_ctr(f_orb_b, cx + cw * 0.5, cy + 218.0, "✓ SELECTED", 9, Color(1.0, 0.82, 0.31))
+			_ctr(f_orb_b, cc, cy + ch - 9.0, "✓ SELECTED", 8, Color(0.216, 0.824, 0.451, 0.92))
 		_rects["ceo_pick_" + str(ci)] = Rect2(cx, cy, cw, ch)
-	# BACK / CONTINUE.
-	_title_btn(Rect2(40.0, H - 50.0, 90.0, 28.0), "← BACK", Color(0.08, 0.14, 0.28, 0.85), Color(0.4, 0.55, 0.8, 0.6), Color(0.7, 0.82, 1.0), "back_title")
-	_title_btn(Rect2(W - 240.0, H - 50.0, 200.0, 28.0), "CONTINUE →", Color(0.086, 0.424, 0.204, 0.92), Color(0.275, 0.706, 0.392, 0.8), Color(0.7, 1.0, 0.78), "to_aiselect")
+	# NEXT (pulsing blue) + BACK.
+	var pulse := 0.6 + 0.4 * sin(Time.get_ticks_msec() * 0.003)
+	var nb := Rect2(W - 172.0, H - 68.0, 140.0, 40.0)
+	var nhov := _hov(nb)
+	_round_rect(nb, 6.0, Color(0.047, 0.118, 0.314, 0.97) if nhov else Color(0.031, 0.086, 0.227, 0.78 + 0.15 * pulse))
+	draw_rect(nb, Color(0.471, 0.784, 1.0, 0.98) if nhov else Color(0.235, 0.627, 1.0, 0.55 + 0.45 * pulse), false, 2.5 if nhov else 2.0)
+	_ctr(f_orb_b, nb.position.x + 70.0, nb.position.y + 26.0, "NEXT  ▶", 14, Color(0.784, 0.918, 1.0) if nhov else Color(0.667, 0.863, 1.0))
+	_rects["to_aiselect"] = nb
+	_title_btn(Rect2(px + 20.0, H - 64.0, 100.0, 36.0), "← BACK", Color(0.078, 0.118, 0.275, 0.70), Color(0.196, 0.294, 0.627, 0.35), Color(0.7, 0.82, 1.0), "back_title")
+
+# One CEO-card pill row: left header + right-anchored truncated pill.
+func _cs_pill_row(cx: float, cw: float, row_cy: float, label: String, pill_text: String, bg: Color, tc: Color) -> void:
+	var pad := 14.0
+	draw_string(f_orb_b, Vector2(cx + pad, row_cy + 3.0), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 7, Color(0.478, 0.596, 0.816, 0.72))
+	var hdr_w := f_orb_b.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 7).x
+	var right_x := cx + cw - pad
+	var max_pw := right_x - (cx + pad + hdr_w + 8.0)
+	var txt := pill_text
+	var pwid := f_exo.get_string_size(txt, HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x + 14.0
+	while txt.length() > 2 and pwid > max_pw:
+		txt = txt.substr(0, txt.length() - 1)
+		pwid = f_exo.get_string_size(txt + "…", HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x + 14.0
+	if txt != pill_text:
+		txt += "…"
+	var pill_x := right_x - pwid
+	_round_rect(Rect2(pill_x, row_cy - 10.0, pwid, 20.0), 4.0, bg)
+	_ctr(f_exo, pill_x + pwid * 0.5, row_cy + 4.0, txt, 11, tc, pwid)
 
 func _fmt(n: int) -> String:
 	var s := str(n)
@@ -573,44 +760,55 @@ func _fmt(n: int) -> String:
 	return out
 
 
-# ── SELECT OPPONENT (build_game.py drawAISelect) ────────────────────────────
+# ── SELECT OPPONENT (build_game.py drawAISelect :6335) ──────────────────────
 func _draw_aiselect() -> void:
-	_ctr(f_orb_b, W * 0.5, 70.0, "SELECT YOUR OPPONENT", 18, Color(1.0, 0.82, 0.31))
-	# Corp name banner.
-	var fr := Rect2(W * 0.5 - 240.0, 96.0, 480.0, 30.0)
-	_round_rect(fr, 4.0, Color(0.039, 0.078, 0.196, 0.85))
-	draw_rect(fr, Color(0.314, 0.588, 1.0, 0.45), false, 1.0)
-	_ctr(f_exo, W * 0.5, 116.0, GameState.corp_name, 11, Color(0.6, 0.76, 1.0, 0.85))
-	# 6 difficulty cards.
-	var cw := 122.0
-	var gap := 8.0
-	var total := 6 * cw + 5 * gap
-	var x0 := (W - total) * 0.5
-	var cy := 150.0
-	var ch := 130.0
+	var pr := _setup_panel(Color(0.784, 0.471, 0.118, 0.48))
+	var px := pr.position.x
+	var py := pr.position.y
+	var pwid := pr.size.x
+	_glow_title(W * 0.5, py + 42.0, "SELECT YOUR OPPONENT", 26, Color(1.0, 0.667, 0.196), Color(1.0, 0.937, 0.745))
+	draw_line(Vector2(px + 20.0, py + 62.0), Vector2(px + pwid - 20.0, py + 62.0), Color(0.784, 0.471, 0.118, 0.30), 1.0)
+	# 6 cards filling the panel, sprites straddling each card's top edge.
+	var inner_pad := 44.0
+	var avail := pwid - inner_pad * 2.0
+	var gap := maxf(10.0, roundf(avail * 0.014))
+	var btn_w := floorf((avail - 5.0 * gap) / 6.0)
+	var sp_h := 64.0
+	var btn_h := 96.0
+	var x0 := (W - (6.0 * btn_w + 5.0 * gap)) * 0.5
+	var cy := py + 150.0
 	for i in _DIFFS.size():
 		var d: Array = _DIFFS[i]
-		var cx := x0 + i * (cw + gap)
-		var sel := String(d[0]) == _ai_choice
-		var col := Color.from_string(String(d[3]), Color.WHITE)
-		var dhov := _hov(Rect2(cx, cy, cw, ch)) and not sel
-		_round_rect(Rect2(cx, cy, cw, ch), 6.0, Color(0.078, 0.157, 0.314, 0.85) if sel else (Color(0.059, 0.122, 0.275, 0.85) if dhov else Color(0.039, 0.086, 0.196, 0.7)))
-		draw_rect(Rect2(cx, cy, cw, ch), col if sel else (Color(col.r, col.g, col.b, 0.6) if dhov else Color(0.196, 0.314, 0.549, 0.4)), false, 2.0 if sel else 1.0)
-		# Mini train/engine icon as the card art.
+		var did := String(d[0])
+		var bx := x0 + i * (btn_w + gap)
+		var sel := did == _ai_choice
+		var dhov := _hov(Rect2(bx, cy, btn_w, btn_h)) and not sel
+		var fill: Color = _AI_FILL[did]
+		var bord: Color = _AI_BORD[did]
+		_round_rect(Rect2(bx, cy, btn_w, btn_h), 7.0, fill if sel else (Color(fill.r, fill.g, fill.b, fill.a * 1.08) if dhov else fill))
+		draw_rect(Rect2(bx, cy, btn_w, btn_h), bord.lightened(0.2) if sel else bord, false, 2.5 if sel else 1.2)
+		# Per-difficulty text color (dark on light cards, light on dark cards).
+		var dark: bool = _AI_DARK[did]
+		var tc := Color(0.031, 0.047, 0.094, 0.95) if dark else Color(0.933, 0.973, 1.0, 0.97)
+		var tcd := Color(0.031, 0.055, 0.125, 0.60) if dark else Color(0.824, 0.902, 1.0, 0.62)
+		# Sprite straddling the top edge.
 		if view and view.get("_trains"):
-			view._trains.draw_car_strip(self, Rect2(cx + 10.0, cy + 14.0, cw - 20.0, 40.0), [_diff_car(i)], [true])
-		_ctr(f_orb_b, cx + cw * 0.5, cy + 78.0, String(d[1]), 11, col)
-		draw_string(f_exo, Vector2(cx + 8.0, cy + 94.0), String(d[2]), HORIZONTAL_ALIGNMENT_CENTER, cw - 16.0, 8, Color(0.6, 0.72, 0.92, 0.7))
+			view._trains.draw_car_strip(self, Rect2(bx + 4.0, cy - sp_h * 0.5, btn_w - 8.0, sp_h), [String(_AI_SPRITE[did])], [true])
+		var lbl_y := cy + sp_h * 0.5 + 15.0
+		_ctr(f_orb_b, bx + btn_w * 0.5, lbl_y, String(d[1]), 11, tc, btn_w)
+		draw_string(f_exo, Vector2(bx + 7.0, lbl_y + 16.0), String(d[2]), HORIZONTAL_ALIGNMENT_CENTER, btn_w - 14.0, 8, tcd)
+		# Selected checkmark bleeding off the top-right corner.
 		if sel:
-			_ctr(f_orb_b, cx + cw * 0.5, cy + 122.0, "✓", 12, col)
-		_rects["diff_" + String(d[0])] = Rect2(cx, cy, cw, ch)
-	# BACK / START GAME.
-	_title_btn(Rect2(40.0, H - 56.0, 90.0, 28.0), "← BACK", Color(0.08, 0.14, 0.28, 0.85), Color(0.4, 0.55, 0.8, 0.6), Color(0.7, 0.82, 1.0), "back_corp")
-	_title_btn(Rect2(W - 240.0, H - 56.0, 200.0, 28.0), "START GAME →", Color(0.086, 0.424, 0.204, 0.92), Color(0.275, 0.706, 0.392, 0.85), Color(0.7, 1.0, 0.78), "start_game")
-
-
-func _diff_car(i: int) -> String:
-	return ["engine_constellation", "car_livestock", "car_water_tank", "car_ore", "car_iron", "car_hazmat"][i]
+			draw_string(f_orb_b, Vector2(bx + btn_w - 18.0, cy + 4.0), "✓", HORIZONTAL_ALIGNMENT_LEFT, -1, 30, Color(1, 1, 1, 0.95))
+		_rects["diff_" + did] = Rect2(bx, cy, btn_w, btn_h)
+	# START GAME (green) + BACK.
+	var cb := Rect2(W - 222.0, H - 64.0, 190.0, 36.0)
+	var chov := _hov(cb)
+	_round_rect(cb, 7.0, Color(0.176, 0.725, 0.392, 0.98) if chov else Color(0.098, 0.569, 0.282, 0.90))
+	draw_rect(cb, Color(0.392, 1.0, 0.647, 0.75) if chov else Color(0.196, 0.784, 0.431, 0.48), false, 1.5)
+	_ctr(f_orb_b, cb.position.x + 95.0, cb.position.y + 23.0, "START GAME", 14, Color(0.863, 1.0, 0.902, 0.98))
+	_rects["start_game"] = cb
+	_title_btn(Rect2(px + 20.0, H - 64.0, 100.0, 36.0), "← BACK", Color(0.078, 0.118, 0.275, 0.70), Color(0.196, 0.294, 0.627, 0.35), Color(0.7, 0.82, 1.0), "back_corp")
 
 
 # ── Input ───────────────────────────────────────────────────────────────────
@@ -663,6 +861,8 @@ func _on_click(key: String) -> void:
 		"play":
 			_intro_para = 0; _intro_chars = 0.0; _intro_shots = []; _intro_elapsed = 0.0; GameState.set_screen("intro")
 		"intro_skip": _finish_intro()
+		"intro_quit": GameState.set_screen("title")
+		"intro_mute": Audio.toggle_music_mute()
 		"load":
 			if SaveLoad.load_game():
 				_enter_galaxy()

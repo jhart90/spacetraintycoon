@@ -3466,6 +3466,15 @@ let _crTrainPreselected=false; // true if a train was already selected when the 
 // orbit, and surfaces a light-red bubble explaining the station upgrade.
 let _firstNonLowOrbitFired=false; // true once the hint has been triggered
 let _orbitHintStartMs=0;          // real-time ms when callout was triggered (0=inactive)
+// First-time "route BLOCKED" education (two flavours: star-in-path / out-of-range).
+// _firstStar/RangeBlockShown PERSIST (once per career); the rest are transient.
+let _firstStarBlockShown=false;   // shown the STAR-block lesson once
+let _firstRangeBlockShown=false;  // shown the RANGE-block lesson once
+let _blockEduStartMs=0;           // real-time ms the block-education session began (0=inactive)
+let _blockEduTrainIdx=-1;         // index into trains[] of the blocked train being taught about
+let _blockEduReason='';           // 'star' | 'range'
+let _blockEduPopupShown=false;    // true once the 7 s-delayed popup has opened
+let _blockEduOkBounds=null;       // OK-button hit-rect in the educational popup
 let _orbitHintPlanetId=-1;        // planet id the callout points at
 let _findOreTimerMs=0;     // real-time ms when create_route mission completed (0=not yet). Now arms the build_foundry intro 10 s later (was Find Molten Ore before that mission was removed).
 let _foundryUnlockSd=0;    // stardate at which the delayed IRON FOUNDRY unlock+popup fires (0=not armed). 20 in-game seconds after create_route completes = stardate+0.02.
@@ -15541,7 +15550,18 @@ function updateTrain(t, dt){
             }
           }
           if(t.isPlayer&&!r._blockedSoundFired){ playSound('breakdown'); r._blockedSoundFired=true; }
-          r.phase='blocked'; r.orbitSpun=0; r._blockedTime=0; return;
+          r.phase='blocked'; r.orbitSpun=0; r._blockedTime=0;
+          // First-time educational moment — distinguish range-block vs star-block.
+          if(t.isPlayer && (!_firstRangeBlockShown || !_firstStarBlockShown) && _blockEduStartMs===0){
+            const _rangeBlk=_segmentRangeBlocked(fromP,toP,t.orbitR,r.arrivalOrbitR,t);
+            if(_rangeBlk && !_firstRangeBlockShown){
+              _firstRangeBlockShown=true; _triggerBlockEdu(t,'range',toP); // frame train + destination
+            } else if(!_rangeBlk && !_firstStarBlockShown){
+              const _blkStar=lt?segmentBlockedByStar(lt.ax,lt.ay,lt.bx,lt.by):null;
+              _firstStarBlockShown=true; _triggerBlockEdu(t,'star',_blkStar); // frame train + blocking star
+            }
+          }
+          return;
         }
         const snapAngle=lt?lt.tanAngle:r.departAngle;
         const k=Math.round((t.angle-snapAngle)/(Math.PI*2));
@@ -21349,6 +21369,138 @@ function _drawMadSciStationHint(){
   ctx.textBaseline='middle';
   _objDrawLineCentered(_toks,_bx+_bW/2,_by+_bH/2,_font,'#fff');
   ctx.textBaseline='alphabetic';
+  ctx.restore();
+}
+
+// ── First-time "route BLOCKED" education ─────────────────────────────────────
+// Frame the camera so all of `pts` ({x,y,r}) fit; if they can't fit even at MIN
+// zoom (e.g. an out-of-range destination is very far), centre on the train instead.
+function _frameBlockEdu(pts, train){
+  let xMin=Infinity,xMax=-Infinity,yMin=Infinity,yMax=-Infinity;
+  for(const p of pts){
+    const rr=p.r||0;
+    xMin=Math.min(xMin,p.x-rr); xMax=Math.max(xMax,p.x+rr);
+    yMin=Math.min(yMin,p.y-rr); yMax=Math.max(yMax,p.y+rr);
+  }
+  const pad=Math.max(xMax-xMin,yMax-yMin)*0.16+140;
+  xMin-=pad;xMax+=pad;yMin-=pad;yMax+=pad;
+  const _vpW=Math.max(60,W-PANEL_W), _vpH=Math.max(60,GH-TOP_H);
+  const _reqSc=Math.min(_vpW/Math.max(1,xMax-xMin), _vpH/Math.max(1,yMax-yMin));
+  if(_reqSc>=MIN_SC){
+    cam.scale=Math.min(MAX_SC,_reqSc);
+    cam.x=(xMin+xMax)/2+PANEL_W/(2*cam.scale);
+    cam.y=(yMin+yMax)/2-TOP_H/(2*cam.scale);
+  } else {
+    const [_tx,_ty]=getTrainCarPos(train,0);
+    const _orb=train.orbitR||200;
+    cam.scale=Math.max(MIN_SC,Math.min(MAX_SC,Math.min(_vpW,_vpH)*0.42/_orb));
+    cam.x=_tx+PANEL_W/(2*cam.scale);
+    cam.y=_ty-TOP_H/(2*cam.scale);
+  }
+  tracking=false;
+  if(typeof clampCamera==='function') clampCamera();
+}
+// Fire the education for a freshly-blocked PLAYER train: select it, frame the
+// camera on the train + the blocker (a star, or the out-of-range destination),
+// and arm the red callout + 7 s-delayed popup. `blocker` is {x,y,radius?} or null.
+function _triggerBlockEdu(t, reason, blocker){
+  const _ti=trains.indexOf(t);
+  if(_ti<0) return;
+  _blockEduStartMs=Date.now(); _blockEduTrainIdx=_ti; _blockEduReason=reason; _blockEduPopupShown=false;
+  sel={type:'car',data:{trainIdx:_ti,carIdx:0,car:t.cars[0]}};
+  routeStops=[]; assignPending=false; routeHerePending=false;
+  const [_tx,_ty]=getTrainCarPos(t,0);
+  const _pts=[{x:_tx,y:_ty,r:(t.orbitR||200)}];
+  if(blocker && blocker.x!=null) _pts.push({x:blocker.x,y:blocker.y,r:(blocker.radius||blocker.r||300)});
+  _frameBlockEdu(_pts, t);
+}
+// Red callout above the blocked train; opens the educational popup 7 s later.
+function _drawBlockEduCallout(){
+  if(gs!=='galaxy'||!galaxy) return;
+  if(_blockEduStartMs===0) return;
+  // Popup was shown and has since been dismissed (OK / ESC / ✕ / outside-click) → end.
+  if(_blockEduPopupShown && activePopup!=='blocked_edu'){ _blockEduStartMs=0; return; }
+  const t=trains[_blockEduTrainIdx];
+  if(!t||!t.isPlayer){ _blockEduStartMs=0; return; }
+  // 7 s after the block, open the educational popup (once, when nothing else is up).
+  if(!_blockEduPopupShown && Date.now()-_blockEduStartMs>=7000 && !activePopup){
+    activePopup='blocked_edu'; popupState={}; _blockEduPopupShown=true; gameSpeedIdx=SPEED_DEFAULT_IDX;
+  }
+  if(activePopup) return; // don't paint the bubble over any popup
+  const [_wx,_wy]=getTrainCarPos(t,0);
+  const [_sx,_sy]=w2s(_wx,_wy);
+  const _txt=(_blockEduReason==='range')
+    ? 'The destination is OUT OF RANGE for this ENGINE!'
+    : 'TRAINS cannot travel directly across a STAR';
+  ctx.save();
+  const _font='10px "Exo 2",sans-serif'; ctx.font=_font;
+  const _toks=_objTokenize(_txt);
+  for(const _tk of _toks){ const w=_tk.text.replace(/[^A-Za-z]/g,''); if(w.length>=2 && w===w.toUpperCase()) _tk.bold=true; }
+  const _tw=_objLineWidth(_toks,_font);
+  const _pad=12,_bH=28,_bR=7,_tailH=10;
+  const _bW=_tw+_pad*2;
+  let _bx=Math.round(_sx-_bW/2);
+  _bx=Math.max(8,Math.min(W-PANEL_W-8-_bW,_bx));
+  let _by=_sy-22-_tailH-_bH-6; let _below=false;
+  if(_by<TOP_H+6){ _by=_sy+22+_tailH; _below=true; if(_by+_bH>GH-6) _by=Math.max(TOP_H+6,GH-6-_bH); }
+  const _tailX=Math.max(_bx+_bR+8,Math.min(_sx,_bx+_bW-_bR-8));
+  _clearTextOverlayRect(_bx-2,_by-2,_bW+4,_bH+4);
+  ctx.shadowColor='rgba(200,40,40,0.6)'; ctx.shadowBlur=9;
+  ctx.fillStyle='rgba(240,70,70,0.97)';
+  ctx.beginPath(); ctx.roundRect(_bx,_by,_bW,_bH,_bR); ctx.fill();
+  ctx.beginPath();
+  if(_below){ ctx.moveTo(_tailX-7,_by); ctx.lineTo(_tailX+7,_by); ctx.lineTo(_tailX,_sy+18); }
+  else { ctx.moveTo(_tailX-7,_by+_bH); ctx.lineTo(_tailX+7,_by+_bH); ctx.lineTo(_tailX,_sy-18); }
+  ctx.closePath(); ctx.fill();
+  ctx.shadowBlur=0; ctx.textBaseline='middle';
+  _objDrawLineCentered(_toks,_bx+_bW/2,_by+_bH/2,_font,'#fff');
+  ctx.textBaseline='alphabetic';
+  ctx.restore();
+}
+// The educational popup: how routes get blocked + the AUTO RE-ROUTE behaviour.
+function drawBlockedEduPopup(){
+  if(activePopup!=='blocked_edu') return;
+  const pw=474, ph=320;
+  const [px,py]=drawPopupBase(pw,ph,'rgba(255,90,90,0.72)');
+  ctx.save();
+  ctx.font='bold 16px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='rgba(255,120,110,0.97)'; ctx.shadowColor='rgba(200,40,40,0.9)'; ctx.shadowBlur=10;
+  ctx.fillText('ROUTE BLOCKED',px+pw/2,py+30); ctx.shadowBlur=0;
+  ctx.textAlign='right'; ctx.font='10px "Exo 2",sans-serif';
+  ctx.fillStyle=popupState.escHover?'rgba(255,255,255,0.92)':'rgba(210,130,130,0.6)';
+  ctx.fillText('[ESC] close',px+pw-10,py+22);
+  popupState.escBounds={x:px+pw-86,y:py+12,w:76,h:14};
+  // Body lines — caps keywords auto-bolded.
+  const _font='12px "Exo 2",sans-serif';
+  const _eduLine=(line,x,y)=>{
+    const toks=_objTokenize(line);
+    for(const tk of toks){ const w=tk.text.replace(/[^A-Za-z]/g,''); if(w.length>=2 && w===w.toUpperCase()) tk.bold=true; }
+    ctx.textAlign='left'; ctx.textBaseline='alphabetic'; ctx.font=_font;
+    _objDrawLine(toks,x,y,_font,'rgba(205,214,230,0.95)');
+  };
+  const _lx=px+28; let _y=py+62;
+  _eduLine('A route segment becomes BLOCKED when either:',_lx,_y); _y+=28;
+  ctx.font=_font; ctx.textAlign='left'; ctx.fillStyle='rgba(255,140,120,0.95)';
+  ctx.fillText('1.',_lx+4,_y); _eduLine('It passes directly across a STAR, or',_lx+24,_y); _y+=22;
+  ctx.font=_font; ctx.fillStyle='rgba(255,140,120,0.95)';
+  ctx.fillText('2.',_lx+4,_y); _eduLine('It is longer than the ENGINE’s RANGE.',_lx+24,_y); _y+=32;
+  for(const ln of [
+    'A train that stays BLOCKED for too long will',
+    'automatically AUTO RE-ROUTE to its destination',
+    'via a MULTI-HOP path — hopping through other',
+    'planets to get around the obstacle.'
+  ]){ _eduLine(ln,_lx,_y); _y+=20; }
+  // GOT IT button
+  const _bw=128,_bh=34,_bx=px+pw/2-_bw/2,_by=py+ph-_bh-18;
+  const _hov=!!popupState.blockEduOkHover;
+  ctx.fillStyle=_hov?'rgba(70,120,220,0.97)':'rgba(40,80,170,0.92)';
+  ctx.beginPath(); ctx.roundRect(_bx,_by,_bw,_bh,5); ctx.fill();
+  ctx.strokeStyle=_hov?'rgba(150,200,255,0.95)':'rgba(90,160,255,0.8)'; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.roundRect(_bx,_by,_bw,_bh,5); ctx.stroke();
+  ctx.fillStyle='rgba(220,235,255,0.98)'; ctx.font='bold 12px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText('GOT IT',_bx+_bw/2,_by+_bh/2+1);
+  ctx.textBaseline='alphabetic';
+  _blockEduOkBounds={x:_bx,y:_by,w:_bw,h:_bh};
   ctx.restore();
 }
 
@@ -30639,6 +30791,7 @@ function drawGalaxy(ts,dt){
   drawMissionRewardPopup();
   drawFirstDeliveryPopup();
   drawRivalFoundedPopup();
+  drawBlockedEduPopup();
   drawAncientMessagePopup();
   drawMissionsPopup();
   drawLeaderboardPopup();
@@ -30679,6 +30832,7 @@ function drawGalaxy(ts,dt){
   drawFinancesPopup();
   _drawVisitHint();
   _drawMadSciStationHint();
+  _drawBlockEduCallout();
   // (_drawOrbitHintCallout moved to the pre-popup callout block above so it
   // renders BEHIND any open popup window.)
   // Supply/Demand hover tooltip drawn LAST so it floats on top of any
@@ -31995,6 +32149,7 @@ canvas.addEventListener('mousemove',e=>{
   if(activePopup==='mission_reward'&&_missionRewardOkBounds){const b=_missionRewardOkBounds; popupState.mrOkHover=cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h; if(popupState.mrOkHover) canvas.style.cursor='pointer';}
   if(activePopup==='first_delivery'&&_firstDeliveryOkBounds){const b=_firstDeliveryOkBounds; popupState.fdOkHover=cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h; if(popupState.fdOkHover) canvas.style.cursor='pointer';}
   if(activePopup==='rival_founded'&&_rivalFoundedOkBounds){const b=_rivalFoundedOkBounds; popupState.rivalOkHover=cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h; if(popupState.rivalOkHover) canvas.style.cursor='pointer';}
+  if(activePopup==='blocked_edu'&&_blockEduOkBounds){const b=_blockEduOkBounds; popupState.blockEduOkHover=cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h; if(popupState.blockEduOkHover) canvas.style.cursor='pointer';}
   if(activePopup==='ancient_message'&&_ancientPopupOkBounds){const b=_ancientPopupOkBounds; popupState.ancientOkHover=cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h; if(popupState.ancientOkHover) canvas.style.cursor='pointer';}
   _quitYesHover=!!(activePopup==='quitconfirm'&&quitConfirmYesBounds&&cp.x>=quitConfirmYesBounds.x&&cp.x<=quitConfirmYesBounds.x+quitConfirmYesBounds.w&&cp.y>=quitConfirmYesBounds.y&&cp.y<=quitConfirmYesBounds.y+quitConfirmYesBounds.h);
   _quitNoHover=!!(activePopup==='quitconfirm'&&quitConfirmNoBounds&&cp.x>=quitConfirmNoBounds.x&&cp.x<=quitConfirmNoBounds.x+quitConfirmNoBounds.w&&cp.y>=quitConfirmNoBounds.y&&cp.y<=quitConfirmNoBounds.y+quitConfirmNoBounds.h);
@@ -32823,6 +32978,14 @@ canvas.addEventListener('mouseup',e=>{
         if(_rivalFoundedOkBounds){const b=_rivalFoundedOkBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
           activePopup=null; popupState={}; return;
         }}
+        return;
+      }
+      // Route-blocked educational popup — GOT IT closes it (ESC / ✕ also close via _fireEsc).
+      if(activePopup==='blocked_edu'){
+        if(_blockEduOkBounds){const b=_blockEduOkBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+          activePopup=null; popupState={}; _blockEduStartMs=0; return;
+        }}
+        if(popupState.escBounds){const eb=popupState.escBounds; if(cp.x>=eb.x&&cp.x<=eb.x+eb.w&&cp.y>=eb.y&&cp.y<=eb.y+eb.h){ _fireEsc(); _blockEduStartMs=0; return; }}
         return;
       }
       // Ancient-world broadcast popup — ACKNOWLEDGED button dequeues and closes
@@ -34592,6 +34755,7 @@ function _buildSaveObject(){
     _foundryConstructedPopupShown, _ironDeliveredToNonDesert,
     _foundryUnlocked, _largeStationUnlocked, _terminalUnlocked, _bakeryUnlocked, _glassworksUnlocked,
     _totalPassengersDelivered, _totalHazmatIncinerated, _anyCargoProduced,
+    _firstStarBlockShown, _firstRangeBlockShown,
     trainyard, financeLedger:_trimmedFinance, _ledgerSummary:_builtLedgerSummary, purchaseLedger, corpValueHistory, corpStatsHistory, aiCorpStatsHistory, _corp, _ceoHireCandidates,
     creditSnapshots, lastCreditSnapshotSd,
     galaxy:{homeStarId:galaxy.homeStarId, origenId:galaxy.origenId, blackHoles:galaxy.blackHoles, colonyTrainDestId:galaxy.colonyTrainDestId??null, faminePlanetId:galaxy.faminePlanetId??null, outbreakPlanetId:galaxy.outbreakPlanetId??null, bhResearchPlanetId:galaxy.bhResearchPlanetId??null, bhResearchPlanetIds:galaxy.bhResearchPlanetIds??[], stars:saveStars, planets:savePlanets, nebulas:(galaxy.nebulas||[]).map(n=>({x:_r5(n.x),y:_r5(n.y),rx:n.rx,ry:n.ry,rot:_r5(n.rot),colorIdx:n.colorIdx,secondaryColorIdx:n.secondaryColorIdx,seed:n.seed,name:n.name}))},
@@ -34815,6 +34979,10 @@ function _restoreFromSave(save){
   _sandstormCheckSd=save._sandstormCheckSd||0; _bhResearchTimerMs=0; _madScientistTimerMs=0; _anotherDimTimerMs=0; // real-time timers: re-arm fresh on load
   _totalPassengersDelivered=save._totalPassengersDelivered||0; _totalHazmatIncinerated=save._totalHazmatIncinerated||0;
   _anyCargoProduced=!!save._anyCargoProduced;
+  // Route-blocked education: persist the once-per-career "seen it" flags; reset the
+  // transient session state so a loaded game never resumes a stale callout/popup.
+  _firstStarBlockShown=!!save._firstStarBlockShown; _firstRangeBlockShown=!!save._firstRangeBlockShown;
+  _blockEduStartMs=0; _blockEduPopupShown=false; _blockEduTrainIdx=-1; _blockEduReason='';
   trainyard=save.trainyard||{}; financeLedger=save.financeLedger||[]; _ledgerSummary=save._ledgerSummary||{totalRevenue:0,totalCost:0,totalInterest:0}; purchaseLedger=save.purchaseLedger||[]; corpValueHistory=save.corpValueHistory||{};
   corpStatsHistory=save.corpStatsHistory||{}; aiCorpStatsHistory=save.aiCorpStatsHistory||{};
   // Migrate old trainyard format {type: count} → {type: [carRecord]} so the
@@ -35423,6 +35591,7 @@ function startGame(){
   pendingMissionIntros=[];
   pendingAncientPopups=[]; _ancientTranslatedWords=new Set();
   _ironCarUnlocked=false; _steelCarUnlocked=false; _glassCarUnlocked=false; _machineryCarUnlocked=false; _hazmatCarUnlocked=false; _royalCarUnlocked=false; _flowersCarUnlocked=false; _medicalCarUnlocked=false; _grainCarUnlocked=false; _livestockCarUnlocked=false; _fruitCarUnlocked=false; _cargoCarUnlocked=false; _cheatUnlockAllCars=false; _totalPassengersDelivered=0; _totalHazmatIncinerated=0; _anyCargoProduced=false;
+  _firstStarBlockShown=false; _firstRangeBlockShown=false; _blockEduStartMs=0; _blockEduPopupShown=false; _blockEduTrainIdx=-1; _blockEduReason='';
   _classJEngineUnlocked=false; _classREngineUnlocked=false; _N700EngineUnlocked=false;
   _steelProdLog=[]; _steelMissionTimerMs=0; _produceIronIntroAtMs=0;
   _sensorUpgradeActive=false; _stationCostDiscount=0; _galaxyCensusTimerMs=0; _sandstormCheckSd=0; _bhResearchTimerMs=0; _madScientistTimerMs=0; _anotherDimTimerMs=0;

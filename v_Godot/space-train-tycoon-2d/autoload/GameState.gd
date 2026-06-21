@@ -134,6 +134,7 @@ func clear_selection() -> void:
 var finance_ledger: Array = []   # {sd, cargoType, trainName, planetId, starId, revenue, cost}
 var purchase_ledger: Array = []  # {sd, amount}
 var corp_value_history: Dictionary = {}  # {sd_floor: corp_value} for the SD-mode CORP VALUE column
+var ai_corp_value_history: Dictionary = {}  # {sd_floor: rival net worth} for the VS-RIVAL chart
 const FINANCE_LEDGER_CAP := 4000
 
 func record_revenue(cargo: String, train_name: String, planet_id: int, star_id: int, revenue: int) -> void:
@@ -232,6 +233,8 @@ func _physics_process(delta: float) -> void:
 	var new_floor := int(floor(stardate))
 	if new_floor > prev_floor:
 		corp_value_history[prev_floor] = Leaderboard._corp_value()  # snapshot at the SD boundary
+		if AICorp.active:
+			ai_corp_value_history[prev_floor] = AICorp.net_worth()
 		# CEO salary tick + bench re-roll (build_game.py SD-tick ~36317).
 		if not ceo.is_empty():
 			var sal := int(ceo.get("salary", 0))
