@@ -29419,15 +29419,15 @@ function drawGalaxy(ts,dt){
   }
   // In-progress route planning segment lines (planet-centre to planet-centre)
   if(routeStops.length>=2){
-    ctx.save(); ctx.setLineDash([2,8]); ctx.lineWidth=1.5;
+    ctx.save(); ctx.setLineDash([3,7]); ctx.lineWidth=3; ctx.lineCap='round';
     // Determine max range of the currently relevant train (for segment colouring)
     const _selTrain=(sel?.type==='car'&&trains[sel.data.trainIdx])||null;
     const _selRange=_selTrain?(ENGINE_MAX_RANGE[_selTrain.cars?.[0]]??Infinity):ENGINE_MAX_RANGE.engine_constellation;
     for(let i=0;i<routeStops.length-1;i++){
       const dist=Math.hypot(routeStops[i+1].x-routeStops[i].x,routeStops[i+1].y-routeStops[i].y);
       const longRange=dist>_selRange;
-      ctx.strokeStyle=longRange?'rgba(255,80,80,0.55)':'rgba(255,245,140,0.28)';
-      ctx.shadowColor=longRange?'rgba(255,60,60,0.95)':'rgba(255,240,80,0.85)';
+      ctx.strokeStyle=longRange?'rgba(255,80,80,0.55)':'rgba(255,217,15,0.62)'; // Simpsons-yellow, brighter
+      ctx.shadowColor=longRange?'rgba(255,60,60,0.95)':'rgba(255,217,15,0.9)';
       ctx.shadowBlur=longRange?18:14;
       const [ax,ay]=w2s(routeStops[i].x,routeStops[i].y);
       const [bx,by]=w2s(routeStops[i+1].x,routeStops[i+1].y);

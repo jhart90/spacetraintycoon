@@ -26,6 +26,36 @@ camera transform/clamp/pan, the revenue math, the train-consist galaxy sizing, a
 
 ---
 
+## ✅ FIX PROGRESS (2026-06-21, post-audit)
+
+**Headline popups — step 2:**
+- ✅ **U1** — Missions `[M]` popup rebuilt to the faithful `drawMissionsPopup` structure (480×360):
+  status line "N active · N completed", active-first sorted rows with per-row variable height +
+  mouse-wheel scroll, 52×52 image box (target glyph + ✓ overlay for completed), ellipsized yellow/grey
+  name, ACTIVE/COMPLETE badge, green REWARD pill + "REWARD" label, italic details, ○/✓ objectives
+  with wrapped text, and the "— COMPLETED —" divider. (Data-limited vs original: no mission-image
+  sprites, deadline badges, or quantified-objective progress bars — the ported sim lacks those fields.)
+  Screenshot-verified.
+
+**Gameplay loop — step 1 of the priority order:**
+- ✅ **G1** — `Discovery.track_visit()` is now CALLED from the Transit arrival site for player
+  trains. Added the first-visit credit reward (1000 home / 2000 other-star / 3000 >100k SU), biome
+  car unlocks (desert→sand, ice→ice, oil→oil, storm→battery, chemical→chemical; agri→grain/livestock/
+  fruit by upgrade), Bakery/Glassworks upgrade unlocks, a "<planet> — VISITED" chat message, and a
+  reward credit-float. Verified headless: visiting P122 fired "+1000 cr", visited 1→2.
+- ◐ **G2** — visit-driven mission intros wired: `create_route` (first non-home visit), `galaxy_census`
+  (15 visited → intro, 50 → objective), and route-assign completes `create_route`. Verified:
+  create_route activates on the visit. REMAINING: the full ~24-trigger graph + granular per-objective
+  `checkObj` ticking (many objectives are coupled to specific UI/build/timer events) is the next pass.
+- ✅ **G3** — trains no longer fly through stars/black holes and can't exceed engine range. Ported
+  `segment_blocked_by_star` (point-to-segment vs star/BH radius) + `route_block_reason` (range +
+  blocking); `Transit.assign_route` refuses a blocked/over-range route and emits `route_rejected` →
+  red chat "couldn't find a viable ROUTE — <reason>". Verified the valid demo route still assigns.
+- ✅ **G4** — SPACE pause (`GameState.toggle_pause` stashes/restores the running speed) + per-stardate
+  autosave to a reserved `Autosave_<corp>.stt` slot when `autosave_enabled`.
+
+---
+
 ## CRITICAL — gameplay loop (highest impact; these change what the player can DO)
 
 - **G1. `track_visit()` is never called** — exploration is dead. Orbiting a new planet does NOT

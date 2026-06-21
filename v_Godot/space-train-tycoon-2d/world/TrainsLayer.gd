@@ -47,6 +47,11 @@ const _BEAM_COLS := {
 func _ready() -> void:
 	_font = ThemeDB.fallback_font
 	Transit.train_delivered.connect(_on_delivered)
+	# First-visit exploration reward float at the visited planet.
+	Discovery.planet_visited.connect(func(pid: int, reward: int):
+		if reward > 0:
+			var p: Dictionary = Galaxy.planets[pid]
+			_floats.append({"pos": Vector2(float(p.x), float(p.y)), "rev": reward, "age": 0.0}))
 
 func _on_delivered(train_id: int, _pid: int, _cargo: String, rev: int) -> void:
 	if rev <= 0:

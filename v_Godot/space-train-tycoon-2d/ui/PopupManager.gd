@@ -40,6 +40,10 @@ var _fin_scroll := 0.0
 # Registry / Pokedex state (build_game.py pokedexDiscoveredOnly / starRegistryVisitedOnly).
 var _reg_visited_only := false
 var _reg_scroll := 0.0
+var _missions_scroll := 0.0
+var _tb_car_scroll := 0   # train-builder car grid scroll, in whole rows
+# All mid-car types in the builder grid (build_game.py ALL_MID_CARS:26868).
+const _ALL_MID_CARS := ["car_passenger", "car_mail", "car_water_tank", "car_ore", "car_livestock", "car_grain", "car_fruit", "car_cargo", "car_royal", "car_sand", "car_chemical", "car_oil", "car_battery", "car_ice", "car_iron", "car_steel", "car_glass", "car_machinery", "car_gold", "car_diamond", "car_hazmat", "car_medical", "car_flowers"]
 
 
 func _ready() -> void:
@@ -106,6 +110,7 @@ func _open(name: String) -> void:
 	if name == "trainbuilder":
 		tb_engine = "engine_constellation"
 		tb_cars = []
+		_tb_car_scroll = 0
 	if name == "leaderboard":
 		Leaderboard.fetch_top(Leaderboard.metric if Leaderboard.metric != "" else "corp_value")
 	GameState.popup_active = true  # HUD/galaxy skip input while modal
@@ -165,6 +170,10 @@ func _input(event: InputEvent) -> void:
 				_reg_scroll = maxf(0.0, _reg_scroll + dir * 40.0); queue_redraw()
 			elif active == "finances":
 				_fin_scroll = maxf(0.0, _fin_scroll + dir * 36.0); queue_redraw()
+			elif active == "missions":
+				_missions_scroll = maxf(0.0, _missions_scroll + dir * 36.0); queue_redraw()
+			elif active == "trainbuilder":
+				_tb_car_scroll = maxi(0, _tb_car_scroll + int(dir)); queue_redraw()
 		get_viewport().set_input_as_handled()
 	elif event is InputEventMouseMotion:
 		var mm := event as InputEventMouseMotion
@@ -1341,20 +1350,42 @@ func _draw_trainbuilder() -> void:
 	draw_string(f_orb_b, Vector2(px + 12.0, py + 130.0), "CARS", HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color(0.549, 0.784, 1.0, 0.8))
 	var at_cap := tb_cars.size() >= car_cap
 	draw_string(f_exo, Vector2(px + 48.0, py + 130.0), "(%d / %d)" % [tb_cars.size(), car_cap], HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color(1.0, 0.588, 0.235, 0.9) if at_cap else Color(0.471, 0.647, 0.863, 0.7))
+	# Full car list, unlocked-first (build_game.py _sortedCars). Locked cars are
+	# shown greyed with a LOCKED overlay so the player sees what's coming.
 	var cars: Array = []
-	for ct in GameState.unlocked_cars.keys():
-		if String(ct) != "caboose":
-			cars.append(String(ct))
+	for ct in _ALL_MID_CARS:
+		if GameState.unlocked_cars.has(ct):
+			cars.append(ct)
+	for ct in _ALL_MID_CARS:
+		if not GameState.unlocked_cars.has(ct):
+			cars.append(ct)
+	var rows_total := int(ceil(cars.size() / 6.0))
+	var VIS_ROWS := 2
+	var max_row_scroll := maxi(0, rows_total - VIS_ROWS)
+	_tb_car_scroll = clampi(_tb_car_scroll, 0, max_row_scroll)
+	var area_y := py + 136.0
 	for i in cars.size():
+		var crow := i / 6 - _tb_car_scroll
+		if crow < 0 or crow >= VIS_ROWS:
+			continue
 		var ccol := i % 6
-		var crow := i / 6
-		if crow > 1:
-			break
 		var bx := px + 12.0 + ccol * (BTN_W + GAP)
-		var by := py + 136.0 + crow * (BTN_H + GAP)
-		_tb_car_btn(bx, by, BTN_W, BTN_H, cars[i], false, not at_cap)
-		if not at_cap:
+		var by := area_y + crow * (BTN_H + GAP)
+		var locked: bool = not GameState.unlocked_cars.has(cars[i])
+		var greyed: bool = at_cap or locked
+		_tb_car_btn(bx, by, BTN_W, BTN_H, cars[i], false, not greyed)
+		if locked:
+			_ctr(f_orb_b, bx + BTN_W * 0.5, by + BTN_H * 0.54, "LOCKED", 7, Color(0.667, 0.686, 0.725, 0.8))
+		elif not at_cap:
 			_rects["addcar_" + cars[i]] = Rect2(bx, by, BTN_W, BTN_H)
+	# Scrollbar (right of the grid).
+	if max_row_scroll > 0:
+		var sb_x := px + pw - 12.0
+		var sb_h := 2.0 * (BTN_H + GAP) - GAP
+		draw_rect(Rect2(sb_x, area_y, 6.0, sb_h), Color(0.059, 0.118, 0.275, 0.5))
+		var thumb_h := sb_h * float(VIS_ROWS) / float(rows_total)
+		var thumb_y := area_y + (float(_tb_car_scroll) / float(max_row_scroll)) * (sb_h - thumb_h)
+		_fill_round(Rect2(sb_x + 1.0, thumb_y, 4.0, thumb_h), 2.0, Color(0.314, 0.549, 1.0, 0.6))
 	draw_line(Vector2(px + 12.0, py + 286.0), Vector2(px + pw - 12.0, py + 286.0), Color(0.216, 0.333, 0.549, 0.45), 1.0)
 	# TRAIN PREVIEW.
 	draw_string(f_orb_b, Vector2(px + 12.0, py + 296.0), "TRAIN PREVIEW  ·  click any car to remove it", HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color(0.353, 0.529, 0.765, 0.65))
@@ -1869,59 +1900,146 @@ func _draw_missions() -> void:
 		_ctr(f_orb_b, px + pw * 0.5 + off.x, py + 23.0 + off.y, "MISSIONS", 12, Color(0.157, 0.784, 0.471, 0.5))
 	_ctr(f_orb_b, px + pw * 0.5, py + 23.0, "MISSIONS", 12, Color(0.549, 0.961, 0.745))
 	_esc_hint(px, py, pw)
-	# Status line.
+	# Status line: "N active · N completed".
 	var n_act := Missions.active.size()
 	var n_done := Missions.completed.size()
 	draw_string(f_exo, Vector2(px + 10.0, py + 23.0), "%d active" % n_act, HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color(0.392, 0.843, 0.588, 0.75))
 	var aw := f_exo.get_string_size("%d active" % n_act, HORIZONTAL_ALIGNMENT_LEFT, -1, 9).x
 	draw_string(f_exo, Vector2(px + 10.0 + aw, py + 23.0), " · %d completed" % n_done, HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color(0.431, 0.439, 0.463, 0.65))
 	draw_line(Vector2(px, py + 32.0), Vector2(px + pw, py + 32.0), Color(0.314, 0.784, 0.510, 0.28), 1.0)
-	var yy := py + 42.0
-	if n_act == 0 and n_done == 0:
-		_ctr(f_exo, px + pw * 0.5, yy + 20.0, "No missions yet.", 11, Color(0.6, 0.72, 0.65, 0.8))
-	# Active cards.
+	# Sorted: active first, then completed.
+	var rows: Array = []
 	for m in Missions.active:
-		var def := Missions.def_for(String(m.id))
-		var objs: Array = m.objectives
-		var card_h := 38.0 + objs.size() * 16.0
-		if yy + card_h > py + ph - 24.0:
-			break
-		draw_rect(Rect2(px + 14.0, yy, pw - 28.0, card_h), Color(0.027, 0.094, 0.055, 0.6))
-		draw_rect(Rect2(px + 14.0, yy, pw - 28.0, card_h), Color(0.235, 0.627, 0.392, 0.4), false, 1.0)
-		draw_string(f_orb_b, Vector2(px + 24.0, yy + 18.0), String(def.get("name", String(m.id))), HORIZONTAL_ALIGNMENT_LEFT, pw - 130.0, 11, Color(1.0, 0.878, 0.502))
-		var rw := int(def.get("reward", 0))
-		if rw > 0:
-			_rt(f_orb_b, px + pw - 24.0, yy + 18.0, "+ %s cr" % _fmt_cr(rw), 9, Color(0.392, 0.863, 0.510))
-		var def_objs: Array = def.get("objectives", [])
-		var oy := yy + 36.0
-		for ob in objs:
-			var done := bool(ob.get("done", false))
-			var otext := ""
-			for d in def_objs:
-				if String(d.get("id", "")) == String(ob.get("id", "")):
-					otext = String(d.get("text", "")); break
-			# ○ / ✓ checkbox glyph.
-			var gc := Color(0.314, 0.863, 0.471, 0.95) if done else Color(0.471, 0.549, 0.627, 0.8)
-			draw_arc(Vector2(px + 31.0, oy + 4.0), 5.0, 0.0, TAU, 14, gc, 1.2)
+		rows.append({"def": Missions.def_for(String(m.id)), "objs": m.objectives, "done": false})
+	var divider_idx := rows.size()
+	for cid in Missions.completed.keys():
+		var cd := Missions.def_for(String(cid))
+		var cobjs: Array = []
+		for oo in cd.get("objectives", []):
+			cobjs.append({"id": oo.id, "done": true})
+		rows.append({"def": cd, "objs": cobjs, "done": true})
+	var list_y := py + 38.0
+	var list_h := ph - 46.0
+	var img_w := 52.0
+	var c_base_x := px + 8.0 + img_w + 10.0   # = px+70
+	var DIV_GAP := 36.0
+	if rows.is_empty():
+		_ctr(f_exo, px + pw * 0.5, list_y + list_h * 0.5, "No missions available.", 11, Color(0.314, 0.667, 0.451, 0.45))
+		return
+	# Per-row heights.
+	var row_h: Array = []
+	for r in rows:
+		var d: Dictionary = r.def
+		var rw := int(d.get("reward", 0)) if d.get("reward", null) != null else 0
+		var c_max_w := pw - (c_base_x - px) - (14.0 if rw == 0 else 118.0)
+		var h := 22.0
+		if String(d.get("details", "")) != "":
+			h += _wrap_lines(f_exo, String(d.details), 12, c_max_w).size() * 14.0 + 4.0
+		for ob in r.objs:
+			h += _wrap_lines(f_exo, _obj_text(d, String(ob.id)), 11, c_max_w - 19.0).size() * 15.0
+		row_h.append(maxf((h + 50.0) if rw > 0 else (h + 14.0), img_w + 16.0))
+	# Cumulative y (with divider gap).
+	var row_y: Array = []
+	var cum := 0.0
+	for i in rows.size():
+		if divider_idx > 0 and divider_idx < rows.size() and i == divider_idx:
+			cum += DIV_GAP * 2.0
+		row_y.append(cum)
+		cum += row_h[i]
+	_missions_scroll = clampf(_missions_scroll, 0.0, maxf(0.0, cum - list_h))
+	# Draw rows (fully-offscreen rows culled; backgrounds clamped to the list area).
+	for i in rows.size():
+		var ry := list_y + float(row_y[i]) - _missions_scroll
+		var rh: float = row_h[i]
+		if ry + rh < list_y or ry > list_y + list_h:
+			continue
+		var r: Dictionary = rows[i]
+		var d: Dictionary = r.def
+		var done: bool = r.done
+		var rw := int(d.get("reward", 0)) if d.get("reward", null) != null else 0
+		var c_max_w := pw - (c_base_x - px) - (14.0 if rw == 0 else 118.0)
+		# Row bg + bottom rule (clipped to the list).
+		var clipped := Rect2(px + 2.0, maxf(ry, list_y), pw - 4.0, minf(ry + rh - 2.0, list_y + list_h) - maxf(ry, list_y))
+		if clipped.size.y > 0.0:
+			draw_rect(clipped, Color(0.078, 0.078, 0.094, 0.52) if done else (Color(0.047, 0.102, 0.078, 0.48) if i % 2 == 0 else Color(0.071, 0.133, 0.102, 0.38)))
+		# Image box (placeholder glyph + ✓ for completed).
+		var ibx := px + 8.0
+		var iby := ry + 6.0
+		if iby >= list_y - img_w and iby <= list_y + list_h:
+			draw_rect(Rect2(ibx, iby, img_w, img_w), Color(0.039, 0.059, 0.118, 0.65))
+			draw_rect(Rect2(ibx, iby, img_w, img_w), Color(0.294, 0.294, 0.322, 0.35) if done else Color(0.314, 0.706, 0.471, 0.45), false, 1.0)
+			var icc := Vector2(ibx + img_w * 0.5, iby + img_w * 0.5)
+			draw_arc(icc, 13.0, 0.0, TAU, 28, Color(0.392, 0.471, 0.51, 0.5) if done else Color(0.314, 0.706, 0.471, 0.6), 1.5)
+			draw_arc(icc, 6.0, 0.0, TAU, 20, Color(0.392, 0.471, 0.51, 0.5) if done else Color(0.392, 0.784, 0.549, 0.6), 1.5)
 			if done:
-				draw_line(Vector2(px + 28.5, oy + 4.0), Vector2(px + 30.5, oy + 6.5), gc, 1.6)
-				draw_line(Vector2(px + 30.5, oy + 6.5), Vector2(px + 34.0, oy + 1.0), gc, 1.6)
-			draw_string(f_exo, Vector2(px + 42.0, oy + 8.0), otext, HORIZONTAL_ALIGNMENT_LEFT, pw - 70.0, 10, Color(0.471, 0.627, 0.510, 0.7) if done else Color(0.745, 0.824, 0.784, 0.88))
-			oy += 16.0
-		yy += card_h + 8.0
-	# Completed section (dimmed) — the port tracks completed as a set of ids.
-	if n_done > 0 and yy < py + ph - 30.0:
-		draw_line(Vector2(px + 14.0, yy), Vector2(px + pw - 14.0, yy), Color(0.235, 0.471, 0.353, 0.3), 1.0)
-		yy += 14.0
-		for cid in Missions.completed.keys():
-			if yy > py + ph - 18.0:
-				break
-			var cd := Missions.def_for(String(cid))
-			draw_arc(Vector2(px + 24.0, yy + 1.0), 5.0, 0.0, TAU, 14, Color(0.314, 0.706, 0.431, 0.7), 1.2)
-			draw_line(Vector2(px + 21.5, yy + 1.0), Vector2(px + 23.5, yy + 3.5), Color(0.314, 0.706, 0.431, 0.7), 1.4)
-			draw_line(Vector2(px + 23.5, yy + 3.5), Vector2(px + 27.0, yy - 2.0), Color(0.314, 0.706, 0.431, 0.7), 1.4)
-			draw_string(f_exo, Vector2(px + 36.0, yy + 5.0), String(cd.get("name", String(cid))), HORIZONTAL_ALIGNMENT_LEFT, pw - 60.0, 10, Color(0.471, 0.549, 0.510, 0.6))
-			yy += 18.0
+				draw_rect(Rect2(ibx, iby, img_w, img_w), Color(0.055, 0.055, 0.071, 0.46))
+				_ctr(f_orb_b, icc.x, icc.y + 6.0, "✓", 18, Color(0.373, 0.392, 0.431, 0.78))
+		# Name (ellipsized) + ACTIVE/COMPLETE badge.
+		var cx := ibx + img_w + 10.0
+		var nm := _ellipsize(f_orb_b, String(d.get("name", "?")), 10, c_max_w)
+		draw_string(f_orb_b, Vector2(cx, ry + 14.0), nm, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(0.412, 0.431, 0.478, 0.78) if done else Color(1.0, 0.863, 0.392, 0.97))
+		var r_edge := px + pw - 22.0
+		_rt(f_orb_b, r_edge, ry + 10.0, "COMPLETE" if done else "ACTIVE", 7, Color(0.333, 0.353, 0.392, 0.65) if done else Color(0.392, 0.843, 0.588, 0.85))
+		# Reward pill + REWARD label.
+		if rw > 0:
+			var rt := "+%s cr" % _fmt_cr(rw)
+			var rpw := f_exo.get_string_size(rt, HORIZONTAL_ALIGNMENT_LEFT, -1, 8).x + 10.0
+			var rpx := r_edge - rpw
+			var rpy := ry + rh - 26.0
+			_rt(f_exo, r_edge, rpy - 4.0, "REWARD", 7, Color(0.282, 0.29, 0.314, 0.42) if done else Color(0.392, 0.784, 0.569, 0.7))
+			_fill_round(Rect2(rpx, rpy, rpw, 12.0), 4.0, Color(0.149, 0.165, 0.149, 0.6) if done else Color(0.071, 0.431, 0.157, 0.95))
+			_ctr(f_exo, rpx + rpw * 0.5, rpy + 9.0, rt, 8, Color(0.588, 0.627, 0.588, 0.7) if done else Color(1, 1, 1, 0.97))
+		# Details (italic-ish) wrapped.
+		var my := ry + 29.0
+		if String(d.get("details", "")) != "":
+			for ln in _wrap_lines(f_exo, String(d.details), 12, c_max_w):
+				draw_string(f_exo, Vector2(cx, my), ln, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(0.267, 0.275, 0.306, 0.5) if done else Color(0.541, 0.635, 0.784, 0.72))
+				my += 14.0
+			my += 4.0
+		# Objectives — ○/✓ + wrapped text.
+		for ob in r.objs:
+			var od := bool(ob.get("done", false))
+			var ocol := Color(0.322, 0.341, 0.384, 0.7) if done else (Color(0.392, 0.824, 0.49, 0.9) if od else Color(0.706, 0.784, 0.922, 0.78))
+			draw_string(f_exo, Vector2(cx, my), "✓" if od else "○", HORIZONTAL_ALIGNMENT_LEFT, -1, 13, ocol)
+			for ln in _wrap_lines(f_exo, _obj_text(d, String(ob.id)), 11, c_max_w - 19.0):
+				draw_string(f_exo, Vector2(cx + 19.0, my), ln, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, ocol)
+				my += 15.0
+	# Completed divider.
+	if divider_idx > 0 and divider_idx < rows.size():
+		var dvy := list_y + float(row_y[divider_idx]) - DIV_GAP - _missions_scroll
+		if dvy > list_y - 4.0 and dvy < list_y + list_h + 4.0:
+			draw_line(Vector2(px + 6.0, dvy), Vector2(px + pw - 6.0, dvy), Color(0.216, 0.627, 0.392, 0.62), 3.0)
+			_ctr(f_orb_b, px + pw * 0.5, dvy + 11.0, "— COMPLETED —", 7, Color(0.216, 0.549, 0.353, 0.58))
+
+# Wrap `text` to lines no wider than maxw (word-greedy, honours \n).
+func _wrap_lines(font: Font, text: String, size: int, maxw: float) -> PackedStringArray:
+	var out: PackedStringArray = []
+	for seg in text.split("\n"):
+		var line := ""
+		for w in seg.split(" ", false):
+			var t := w if line == "" else line + " " + w
+			if font.get_string_size(t, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x <= maxw:
+				line = t
+			else:
+				if line != "": out.append(line)
+				line = w
+		out.append(line)
+	if out.is_empty(): out.append("")
+	return out
+
+func _ellipsize(font: Font, text: String, size: int, maxw: float) -> String:
+	if font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x <= maxw:
+		return text
+	var s := text
+	while s.length() > 4 and font.get_string_size(s + "…", HORIZONTAL_ALIGNMENT_LEFT, -1, size).x > maxw:
+		s = s.substr(0, s.length() - 1)
+	return s + "…"
+
+func _obj_text(def: Dictionary, obj_id: String) -> String:
+	for d in def.get("objectives", []):
+		if String(d.get("id", "")) == obj_id:
+			return String(d.get("text", ""))
+	return ""
 
 # ── Leaderboard ([L], build_game.py drawLeaderboardPopup §2819) ──────────────
 # Faithful port of build_game.py drawLeaderboardPopup (624×414). Renders the

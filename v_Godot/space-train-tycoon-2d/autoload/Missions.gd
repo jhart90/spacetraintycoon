@@ -31,6 +31,10 @@ var _pending_intros: Array = []  # ids queued (car-gated until their car unlocks
 signal mission_introduced(id: String)
 signal mission_completed(id: String, reward: int)
 
+func _ready() -> void:
+	# Visit-driven intro triggers (now that Discovery.track_visit fires).
+	Discovery.planet_visited.connect(_on_planet_visited)
+
 func start_new_game() -> void:
 	active = []
 	completed = {}
@@ -38,6 +42,24 @@ func start_new_game() -> void:
 	# Give the player a first goal (build_foundry's JS trigger is a tutorial
 	# timer; here we surface it at game start so the build-chain is reachable).
 	queue_intro("build_foundry")
+
+# Visit-driven mission triggers (build_game.py trackVisit/updateMissions).
+func _on_planet_visited(pid: int, _reward: int) -> void:
+	var visited := Discovery.visited_planet_ids.size()
+	# create_route: armed on the first visit to a non-home planet (build_game.py:16138).
+	if pid != Galaxy.origen_id:
+		queue_intro("create_route")
+	# galaxy_census: introduced once 15 planets are visited; objective at 50 (L16132).
+	if visited >= 15:
+		queue_intro("galaxy_census")
+	if is_active("galaxy_census") and visited >= 50:
+		mark_objective("galaxy_census", "visit_50_planets")
+
+# create_route completes when the player assigns a route of 3+ stops
+# (the mission's goal; build_game.py marks its objectives via the tutorial chain).
+func on_route_assigned(stops: Array) -> void:
+	if is_active("create_route") and stops.size() >= 3:
+		complete("create_route")
 
 func def_for(id: String) -> Dictionary:
 	for d in Data.MISSION_DEFS:

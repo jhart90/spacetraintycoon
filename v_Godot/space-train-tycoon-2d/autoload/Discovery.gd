@@ -87,10 +87,49 @@ func track_visit(pid: int) -> void:
 		if String(p.type.id) == "ancient":
 			GameState.translate_ancient_words()
 			GameState.ancient_message.emit(pid)
-		# TODO(Phase 2 / Economy): award the first-visit credit reward. Per
-		# memory: reward = dist_from_Orijen > 100000 ? 3000 : (otherStar ? 2000 : 1000),
-		# plus a separate star-discovery reward. Verify against current JS.
+		_award_visit_unlocks(p)
+		# First-visit credit reward (build_game.py:16294): >100k SU from Orijen
+		# → 3000, another star → 2000, home system → 1000.
+		var origen: Dictionary = Galaxy.planets[Galaxy.origen_id]
+		var dist := sqrt(pow(p.x - origen.x, 2.0) + pow(p.y - origen.y, 2.0))
+		var reward := 3000 if dist > 100000.0 else (2000 if int(p.starId) != Galaxy.home_star_id else 1000)
+		GameState.credits = mini(GameState.credits + reward, 999999999)
+		Audio.play("discovery")
+		planet_visited.emit(pid, reward)
 	discovery_changed.emit()
+
+# Biome / agri car + upgrade unlocks on first visit (build_game.py:16239-16292).
+func _award_visit_unlocks(p: Dictionary) -> void:
+	var bio := String(p.type.id)
+	# Biome car — only when this is the FIRST visited planet of this biome.
+	if _BIOME_UNLOCK_CAR.has(bio):
+		var count := 0
+		for op in Galaxy.planets:
+			if visited_planet_ids.has(int(op.id)) and String(op.type.id) == bio:
+				count += 1
+		if count == 1:
+			_unlock_car(String(_BIOME_UNLOCK_CAR[bio]))
+	# Agri: first agri visit unlocks the Bakery upgrade; per-planet upgrade
+	# buildings unlock their food car.
+	if bio == "agri":
+		_unlock_upgrade("bakery")
+		var ups: Array = p.get("upgrades", [])
+		if ups.has("granary"): _unlock_car("car_grain")
+		if ups.has("farm"): _unlock_car("car_livestock")
+		if ups.has("orchard"): _unlock_car("car_fruit")
+	# Sand + Chemical cars discovered → Glassworks upgrade (build_game.py:16290).
+	if GameState.unlocked_cars.has("car_sand") and GameState.unlocked_cars.has("car_chemical"):
+		_unlock_upgrade("glassworks")
+
+func _unlock_car(car: String) -> void:
+	if not GameState.unlocked_cars.has(car):
+		GameState.unlocked_cars[car] = true
+		GameState.car_unlocked.emit(car)
+
+func _unlock_upgrade(up: String) -> void:
+	if not GameState.unlocked_upgrades.has(up):
+		GameState.unlocked_upgrades[up] = true
+		GameState.upgrade_unlocked.emit(up)
 
 func _reveal_star_for_planet(pid: int) -> void:
 	var idx := _planet_idx(pid)

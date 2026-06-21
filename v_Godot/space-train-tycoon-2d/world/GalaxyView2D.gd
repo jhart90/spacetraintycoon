@@ -178,7 +178,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		return  # a modal popup is open — it owns input
 	if event is InputEventKey and event.pressed and not event.echo:
 		var k := (event as InputEventKey).keycode
-		if k == KEY_BRACKETLEFT:
+		if k == KEY_SPACE:
+			GameState.toggle_pause()  # SPACE pause/resume (build_game.py:34374)
+		elif k == KEY_BRACKETLEFT:
 			GameState.set_speed_idx(GameState.game_speed_idx - 1)
 		elif k == KEY_BRACKETRIGHT:
 			GameState.set_speed_idx(GameState.game_speed_idx + 1)

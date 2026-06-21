@@ -208,6 +208,17 @@ func start_new_game() -> void:
 func set_speed_idx(idx: int) -> void:
 	game_speed_idx = clampi(idx, 0, Tuning.SPEED_OPTS.size() - 1)
 
+# SPACE pause: stash the running speed, drop to 0; pressing again restores it
+# (build_game.py _spacePauseResumeIdx, :34374).
+var _pause_resume_idx := -1
+func toggle_pause() -> void:
+	if game_speed_idx == 0:
+		game_speed_idx = _pause_resume_idx if _pause_resume_idx > 0 else Tuning.SPEED_DEFAULT_IDX
+		_pause_resume_idx = -1
+	else:
+		_pause_resume_idx = game_speed_idx
+		game_speed_idx = 0
+
 ## Simulation tick (PLAN §10: sim runs on the autoload; views read in _process).
 func _physics_process(delta: float) -> void:
 	if phase != Phase.GALAXY or Galaxy.planets.is_empty():
@@ -230,6 +241,9 @@ func _physics_process(delta: float) -> void:
 				if finance_ledger.size() > FINANCE_LEDGER_CAP:
 					finance_ledger.pop_front()
 			roll_ceo_candidates()
+		# Per-stardate autosave (build_game.py:3762).
+		if autosave_enabled:
+			SaveLoad.autosave()
 	Galaxy.advance_orbits(dtG)
 	Economy.accumulate(dtG * Tuning.SD_PER_DTG)  # replenish supply/demand pools
 	Transit.tick(dtG)

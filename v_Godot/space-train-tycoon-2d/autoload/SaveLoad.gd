@@ -36,6 +36,14 @@ func delete_save(path: String) -> void:
 	if FileAccess.file_exists(path):
 		DirAccess.remove_absolute(path)
 
+# Per-stardate autosave to a reserved slot (build_game.py autosave ~3762).
+func autosave() -> void:
+	DirAccess.make_dir_recursive_absolute(SAVE_DIR)
+	var nm := String(GameState.corp_name).strip_edges().replace(" ", "_").replace("/", "-").replace("\\", "-")
+	if nm == "":
+		nm = "save"
+	save_game("%s/Autosave_%s.stt" % [SAVE_DIR, nm])
+
 # Save in the original `.stt` interchange format (full galaxy + state), so saves
 # round-trip through the same loader and are compatible with the original game's
 # format. The reduced port sim simply doesn't populate the fields it doesn't model.

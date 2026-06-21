@@ -69,9 +69,56 @@ func build_train(planet_id: int, engine: String, car_types: Array, is_player: bo
 func random_angle() -> float:
 	return Galaxy.random() * TAU
 
+signal route_rejected(reason: String)  # a hop crosses a star or exceeds engine range
+
+# True if the segment a→b passes within any star's / black hole's radius
+# (build_game.py segmentBlockedByStar:15100). Returns the blocker name or "".
+func segment_blocked_by_star(ax: float, ay: float, bx: float, by: float) -> String:
+	var sdx := bx - ax
+	var sdy := by - ay
+	var len2 := sdx * sdx + sdy * sdy
+	for star in Galaxy.stars:
+		var r: float = float(star.radius)
+		var tt := 0.0 if len2 == 0.0 else clampf(((float(star.x) - ax) * sdx + (float(star.y) - ay) * sdy) / len2, 0.0, 1.0)
+		if Vector2(float(star.x) - (ax + tt * sdx), float(star.y) - (ay + tt * sdy)).length() < r:
+			return String(star.name)
+	for bh in Galaxy.black_holes:
+		var br: float = float(bh.radius)
+		var tb := 0.0 if len2 == 0.0 else clampf(((float(bh.x) - ax) * sdx + (float(bh.y) - ay) * sdy) / len2, 0.0, 1.0)
+		if Vector2(float(bh.x) - (ax + tb * sdx), float(bh.y) - (ay + tb * sdy)).length() < br:
+			return "a black hole"
+	return ""
+
+# Validate a route's hops against star-blocking + engine max range
+# (build_game.py transitPathBlocked:15134). Returns "" if all hops are clear,
+# else a human-readable reason for the first blocked hop.
+func route_block_reason(engine: String, stops: Array) -> String:
+	var max_range: float = float(Tuning.ENGINE_MAX_RANGE.get(engine, 1e20))
+	for i in range(stops.size() - 1):
+		var a := _planet_idx(int(stops[i]))
+		var b := _planet_idx(int(stops[i + 1]))
+		if a < 0 or b < 0:
+			continue
+		var pa: Dictionary = Galaxy.planets[a]
+		var pb: Dictionary = Galaxy.planets[b]
+		var d := Vector2(float(pa.x) - float(pb.x), float(pa.y) - float(pb.y)).length()
+		if d > max_range:
+			return "%s is out of range for the %s" % [String(pb.name).to_upper(), String(engine).trim_prefix("engine_").to_upper()]
+		var blk := segment_blocked_by_star(float(pa.x), float(pa.y), float(pb.x), float(pb.y))
+		if blk != "":
+			return "the route to %s is blocked by %s" % [String(pb.name).to_upper(), blk]
+	return ""
+
 ## Assign a repeating route (array of planet ids). Loads at the current stop,
 ## then departs toward the next.
 func assign_route(t: Dictionary, stops: Array) -> void:
+	# Reject routes that fly through a star/black hole or exceed engine range
+	# (the original reroutes via multi-hop; this port has no planner, so it
+	# refuses the route — matching the "couldn't find a viable ROUTE" fallback).
+	var reason := route_block_reason(String(t.get("engine", "engine_galaxy")), stops)
+	if reason != "":
+		route_rejected.emit(reason)
+		return
 	t.route = {"stops": stops.duplicate(), "idx": stops.find(t.planetId)}
 	if t.route.idx < 0:
 		t.route.idx = 0
@@ -81,6 +128,8 @@ func assign_route(t: Dictionary, stops: Array) -> void:
 	t.cargoPhase = ""
 	t.cargoQueue = []
 	t.phase = Phase.ORBIT  # orbit (loading/unloading), then depart tangentially
+	if bool(t.get("isPlayer", false)):
+		Missions.on_route_assigned(stops)
 
 # Transit motion model (build_game.py §6 / code_transit_architecture): trains
 # travel the EXTERNAL COMMON TANGENT between the departure and arrival orbit
@@ -169,6 +218,11 @@ func _arrive(t: Dictionary, tp: Dictionary, ang: float) -> void:
 	var _ocounts: Dictionary = t.get("orbitCounts", {})
 	_ocounts[int(t.planetId)] = int(_ocounts.get(int(t.planetId), 0)) + 1
 	t.orbitCounts = _ocounts
+	# Exploration: a player train entering orbit visits the planet — discovery,
+	# fog reveal, first-visit credit reward + car/upgrade unlocks, mission arming
+	# (build_game.py trackVisit, called at every arrival ~15796).
+	if bool(t.get("isPlayer", false)):
+		Discovery.track_visit(int(t.planetId))
 	if t.route != null:
 		var ix: int = t.route.stops.find(t.planetId)
 		if ix >= 0:

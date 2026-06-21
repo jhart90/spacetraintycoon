@@ -86,6 +86,20 @@ func _ready() -> void:
 				Transit.tick(20.0)
 				AICorp.tick(20.0)
 				Fog.update(20.0 * Tuning.SD_PER_DTG)
+		elif a.begins_with("--check-visit="):
+			var n2 := int(a.split("=")[1])
+			var v0 := Discovery.visited_planet_ids.size()
+			var c0 := GameState.credits
+			var cars0 := GameState.unlocked_cars.size()
+			Discovery.planet_visited.connect(func(pid: int, r: int): print("VISIT ", String(Galaxy.planets[pid].name), " +", r, " cr"))
+			for _i in n2:
+				Galaxy.advance_orbits(20.0); Economy.accumulate(20.0 * Tuning.SD_PER_DTG)
+				Transit.tick(20.0); Fog.update(20.0 * Tuning.SD_PER_DTG)
+			var mids := []
+			for m in Missions.active:
+				mids.append(String(m.id))
+			print("CHECK-VISIT visited %d->%d credits %d->%d cars %d->%d | active missions: %s" % [v0, Discovery.visited_planet_ids.size(), c0, GameState.credits, cars0, GameState.unlocked_cars.size(), str(mids)])
+			get_tree().quit()
 		elif a.begins_with("--test-unlock="):
 			var uid := a.split("=", true, 1)[1]
 			if uid.begins_with("engine_"): GameState.engine_unlocked.emit(uid)

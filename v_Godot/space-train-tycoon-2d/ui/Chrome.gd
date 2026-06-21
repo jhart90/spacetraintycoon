@@ -42,6 +42,8 @@ func _ready() -> void:
 	# Chat-log event wiring (mirrors the JS _chatMsg call sites).
 	Transit.train_delivered.connect(_on_delivered)
 	Discovery.star_revealed.connect(func(sid: int): _push_chat("%s — STAR DISCOVERED" % String(Galaxy.stars[sid].name), Color8(255, 200, 80)))
+	Discovery.planet_visited.connect(func(pid: int, _r: int): _push_chat("%s — VISITED" % String(Galaxy.planets[pid].name), Color8(80, 200, 255)))
+	Transit.route_rejected.connect(func(reason: String): _push_chat("This TRAIN couldn't find a viable ROUTE — %s." % reason, Color8(255, 100, 100)))
 	Missions.mission_introduced.connect(func(id: String): _push_chat("New mission: %s" % String(Missions.def_for(id).get("name", "?")), Color8(120, 200, 255)))
 	Missions.mission_completed.connect(func(id: String, r: int): _push_chat("Mission complete: %s (+%s cr)" % [String(Missions.def_for(id).get("name", "?")), _fmt_cr(r)], Color8(80, 230, 120)))
 
