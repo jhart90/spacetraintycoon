@@ -107,6 +107,11 @@ func _ready() -> void:
 				GameState.set_ceo(GameState._gen_ceo("Gigi", "ceo_gigi"))
 			GameState.roll_ceo_candidates()
 			GameState.popup_requested.emit("ceohire")
+		elif a == "--test-ancient":
+			# Simulate two ancient visits (translates 6 words) then show the popup.
+			GameState.translate_ancient_words()
+			GameState.translate_ancient_words()
+			GameState.ancient_message.emit(Galaxy.origen_id)
 		elif a == "--expand":
 			GameState.panel_expanded = true
 		elif a == "--rival":

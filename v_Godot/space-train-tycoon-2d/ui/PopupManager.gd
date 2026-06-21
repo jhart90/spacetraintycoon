@@ -1429,19 +1429,30 @@ func _tb_engine_panel(px: float, py: float, ph: float) -> void:
 		view._trains.draw_car_strip(self, Rect2(up_x + 20.0, py + 32.0, up_w - 40.0, 66.0), [tb_engine], [true])
 	_ctr(f_orb_b, up_x + up_w * 0.5, py + 116.0, String(tb_engine).trim_prefix("engine_").to_upper(), 8, Color(0.706, 0.863, 1.0, 0.92))
 	draw_line(Vector2(up_x + 12.0, py + 124.0), Vector2(up_x + up_w - 12.0, py + 124.0), Color(0.157, 0.314, 0.627, 0.25), 1.0)
-	# Stats — incl. MAINT (relative wear, lower = better) + REPAIR (cost mult).
-	var wear := int(round(float(Tuning.ENGINE_MAINT_DECAY.get(tb_engine, Tuning.MAINT_DECAY_PER_AU)) / Tuning.MAINT_DECAY_PER_AU * 100.0))
+	# Stats — SPD / ACCEL / RANGE / COST | MAINT / REPAIR (build_game.py
+	# _drawEngineDetailsPanel 26167-26178).
+	var accel := Transit.TRANSIT_ACCEL * float(Transit.ENGINE_ACCEL_MULT.get(tb_engine, 1.0))
+	var rng := int(Tuning.ENGINE_MAX_RANGE.get(tb_engine, 15000))
+	var decay_pct := int(round(float(Tuning.ENGINE_MAINT_DECAY.get(tb_engine, Tuning.MAINT_DECAY_PER_AU)) / Tuning.MAINT_DECAY_PER_AU * 100.0))
+	var maint_col := Color(0.314, 0.863, 0.510, 0.88) if decay_pct <= 60 else (Color(1.0, 0.784, 0.235, 0.88) if decay_pct <= 85 else Color(1.0, 0.471, 0.314, 0.88))
 	var stats := [
-		["SPD", str(int(Tuning.ENGINE_MAX_SPD.get(tb_engine, 4.0))), Color(0.314, 0.863, 1.0, 0.92)],
-		["COST", _fmt_cr(int(Tuning.ENGINE_COSTS.get(tb_engine, 10000))), Color(1.0, 0.627, 0.314, 0.92)],
-		["MAINT", "%d%% wear" % wear, Color(0.392, 0.863, 0.549, 0.92) if wear <= 60 else Color(1.0, 0.784, 0.314, 0.92)],
-		["REPAIR", "x%.1f" % float(Tuning.ENGINE_REPAIR_MULT.get(tb_engine, 1.0)), Color(0.706, 0.784, 0.941, 0.92)],
+		["SPD", "%.1f SU/s" % float(Tuning.ENGINE_MAX_SPD.get(tb_engine, 4.0)), Color(0.314, 0.863, 1.0, 0.92)],
+		["ACCEL", "%.4f SU/s²" % accel, Color(0.471, 1.0, 0.706, 0.88)],
+		["RANGE", "%s SU" % _fmt_cr(rng), Color(1.0, 0.824, 0.314, 0.92)],
+		["COST", "%s cr" % _fmt_cr(int(Tuning.ENGINE_COSTS.get(tb_engine, 10000))), Color(1.0, 0.627, 0.314, 0.92)],
 	]
 	var sy := py + 140.0
 	for s in stats:
 		draw_string(f_orb_b, Vector2(up_x + 14.0, sy), String(s[0]), HORIZONTAL_ALIGNMENT_LEFT, -1, 7, Color(0.392, 0.588, 0.824, 0.75))
 		_rt(f_exo, up_x + up_w - 14.0, sy, String(s[1]), 8, s[2])
-		sy += 16.0
+		sy += 15.0
+	# Divider, then the maintenance pair.
+	draw_line(Vector2(up_x + 14.0, sy - 4.0), Vector2(up_x + up_w - 14.0, sy - 4.0), Color(0.157, 0.314, 0.627, 0.25), 0.8)
+	sy += 6.0
+	for s in [["MAINT", "%d%% base" % decay_pct, maint_col], ["REPAIR", "%.1f×" % float(Tuning.ENGINE_REPAIR_MULT.get(tb_engine, 1.0)), Color(0.784, 0.706, 1.0, 0.88)]]:
+		draw_string(f_orb_b, Vector2(up_x + 14.0, sy), String(s[0]), HORIZONTAL_ALIGNMENT_LEFT, -1, 7, Color(0.392, 0.588, 0.824, 0.75))
+		_rt(f_exo, up_x + up_w - 14.0, sy, String(s[1]), 8, s[2])
+		sy += 15.0
 
 func _train_status_text(t: Dictionary) -> String:
 	if String(t.cargoPhase) == "unloading": return "UNLOADING"
@@ -1566,7 +1577,15 @@ func _win_trains(px: float, py: float, pw: float, ph: float) -> void:
 			var ls: Dictionary = Galaxy.stars[lsid] if lsid >= 0 and lsid < Galaxy.stars.size() else {}
 			loc = "%s · %s" % [String(lp.get("name", "?")), String(ls.get("name", "?"))]
 		draw_string(f_exo, Vector2(px + 10.0, ry + 96.0), loc, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(0.627, 0.784, 1.0, 0.85))
-		draw_string(f_exo, Vector2(px + 10.0, ry + 112.0), "%d cars" % int(t.cars.size()), HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(0.392, 0.588, 0.784, 0.6))
+		# Stat row: cars · Dist · Segments · Most-orbited (build_game.py trains card).
+		var most := "—"
+		var ocounts: Dictionary = t.get("orbitCounts", {})
+		var best := 0
+		for k in ocounts.keys():
+			if int(ocounts[k]) > best:
+				best = int(ocounts[k]); most = String(_planet_by_id(int(k)).get("name", "?")).to_upper()
+		var stat_line := "%d cars   ·   Dist %s SU   ·   Segs %d   ·   Most: %s" % [int(t.cars.size()), _fmt_cr(int(round(float(t.get("totalDist", 0.0))))), int(t.get("segments", 0)), most]
+		draw_string(f_exo, Vector2(px + 10.0, ry + 112.0), stat_line, HORIZONTAL_ALIGNMENT_LEFT, pw - 20.0, 10, Color(0.392, 0.588, 0.784, 0.7))
 		# Route chain.
 		var route := "no route assigned"
 		if t.route != null:

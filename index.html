@@ -6740,6 +6740,45 @@ function _genOilBiome(_R){
   }
   return {id:'oil', bands, glints};
 }
+// Lava biome: generate 1–6 volcanoes that extrude from the planet's RIM toward
+// orbit (like mountains, but with much wider bases). Each is positioned by a rim
+// angle `a`, a height `h` (fraction of r beyond the surface) and a WIDE half
+// angular width `wHalf`; it also carries 0–3 lava streaks (down the slopes) and a
+// set of smoke puffs (the plume). Angles are spread evenly + jittered so they
+// don't pile up. Drawn in drawPlanet (after the sphere clip restore). Seeded by
+// biomeSeed so reloads are identical.
+function _genLavaBiome(_R){
+  _R=_R||Math.random;
+  const _rd=(a,b)=>_R()*(b-a)+a;
+  const _ri=(a,b)=>Math.floor(_rd(a,b+0.999));
+  const volcanoes=[];
+  const N=_ri(1,6);                 // 1–6 volcanoes
+  const base=_R()*Math.PI*2;        // random base rotation
+  for(let i=0;i<N;i++){
+    const a=base + (i/N)*Math.PI*2 + _rd(-0.20,0.20); // evenly spread around the rim + jitter
+    const h=_rd(0.10,0.20);         // summit height beyond the surface (fraction of r)
+    const wHalf=_rd(0.18,0.34);     // WIDE half angular width (mountains: 0.05–0.14)
+    // 0–3 lava streaks running down the slopes.
+    const streaks=[];
+    const ns=_ri(0,3);
+    for(let s=0;s<ns;s++){
+      streaks.push({
+        u:_rd(-0.8,0.8),            // lateral position across the cone base (−1..1)
+        len:_rd(0.45,0.9),         // fraction of the slope it runs down from the crater
+        w:_rd(0.10,0.22),          // thickness as a fraction of the base half-width
+        phase:_R()*Math.PI*2,
+      });
+    }
+    // 4–7 smoke puffs that form the rising plume.
+    const puffs=[];
+    const np=4+_ri(0,3);
+    for(let pI=0;pI<np;pI++){
+      puffs.push({ t:pI/np, drift:_rd(-1,1), sz:_rd(0.5,1.0), phase:_R()*Math.PI*2 });
+    }
+    volcanoes.push({a, h, wHalf, phase:_R()*Math.PI*2, streaks, puffs});
+  }
+  return {id:'lava', volcanoes};
+}
 // Storm planet: generate lightning bolt data for animated rendering
 function _genStormLightning(_R){
   _R=_R||Math.random;
@@ -6811,6 +6850,7 @@ function _attachBiome(p){
   else if(p.type.id==='agri') p.type={...p.type,_b:_genAgriBiome(_R)};
   else if(p.type.id==='oil')  p.type={...p.type,_b:_genOilBiome(_R)};
   else if(p.type.id==='storm') p.type={...p.type,_b:_genStormLightning(_R)};
+  else if(p.type.id==='lava')  p.type={...p.type,_b:_genLavaBiome(_R)};
   // Mountains get a derived seed (XOR with golden ratio constant) so the
   // biome generator and mountain generator don't draw from the same stream.
   const _mtn=generatePlanetMountains(p, _mkRng((p.biomeSeed^0x9e3779b9)>>>0));
@@ -12231,6 +12271,80 @@ function drawPlanet(cx,cy,r,pt,ring,glowMult=4.5,starSx,starSy,skipRing=false,fl
         ctx.beginPath();
         ctx.moveTo(sLx,sLy); ctx.lineTo(sRx,sRy); ctx.lineTo(pkx,pky); ctx.closePath();
         ctx.fillStyle='rgba(228,244,255,0.88)'; ctx.fill();
+      }
+    }
+  }
+  // Lava planet: 1–6 volcanoes — wide cones extruding from the rim toward orbit
+  // (like the mountains above, but with much broader bases), each with a glowing
+  // lava summit, a wispy rising smoke plume, and occasional lava streaks down the
+  // slopes. Drawn AFTER the sphere clip restore so they poke OUT past the disc.
+  if(pt._b&&pt._b.id==='lava'&&r>5){
+    const _vn=Date.now();
+    for(const v of (pt._b.volcanoes||[])){
+      const _pulse=0.78+0.22*Math.sin(_vn*0.0019+v.phase);
+      const wB=v.wHalf, wT=v.wHalf*0.38;     // base / crater half-widths (cone tapers up)
+      const baseR=r, topR=r+v.h*r;
+      // Point on the cone at radial fraction rf (0=surface,1=summit) + lateral lf (−1..1).
+      const vp=(rf,lf)=>{
+        const rad=baseR+rf*(topR-baseR);
+        const w=wB+rf*(wT-wB);
+        const ang=v.a+lf*w;
+        return [cx+rad*Math.cos(ang), cy+rad*Math.sin(ang)];
+      };
+      const [bcx,bcy]=vp(0,0), [tcx,tcy]=vp(1,0);
+      const [b0x,b0y]=vp(0,-1), [b1x,b1y]=vp(0,1), [t1x,t1y]=vp(1,1), [t0x,t0y]=vp(1,-1);
+      // ── Cone body (dark warm basalt) ──
+      ctx.beginPath(); ctx.moveTo(b0x,b0y); ctx.lineTo(b1x,b1y); ctx.lineTo(t1x,t1y); ctx.lineTo(t0x,t0y); ctx.closePath();
+      const bodyG=ctx.createLinearGradient(bcx,bcy,tcx,tcy);
+      bodyG.addColorStop(0,'rgb(30,18,15)');
+      bodyG.addColorStop(0.62,'rgb(20,10,8)');
+      bodyG.addColorStop(1,'rgb(46,20,12)');
+      ctx.fillStyle=bodyG; ctx.fill();
+      // ── Lava streaks down the slopes ──
+      ctx.save(); ctx.lineCap='round';
+      ctx.shadowColor='rgba(255,90,0,0.7)'; ctx.shadowBlur=Math.max(1.5,r*0.05);
+      for(const s of v.streaks){
+        const [s0x,s0y]=vp(0.92, s.u*0.42);
+        const [s1x,s1y]=vp(Math.max(0,1-s.len), s.u);
+        const _sp=0.55+0.45*Math.sin(_vn*0.0022+s.phase);
+        ctx.beginPath(); ctx.moveTo(s0x,s0y); ctx.lineTo(s1x,s1y);
+        ctx.lineWidth=Math.max(0.8, s.w*wB*r*1.3);
+        ctx.strokeStyle=`rgba(255,${(110+70*_sp)|0},25,${(0.5+0.4*_sp).toFixed(3)})`;
+        ctx.stroke();
+      }
+      ctx.restore();
+      // ── Glowing lava summit cap (upper ~26% of the cone) ──
+      const [c0x,c0y]=vp(0.74,-1), [c1x,c1y]=vp(0.74,1);
+      ctx.beginPath(); ctx.moveTo(c0x,c0y); ctx.lineTo(c1x,c1y); ctx.lineTo(t1x,t1y); ctx.lineTo(t0x,t0y); ctx.closePath();
+      const [capBx,capBy]=vp(0.74,0);
+      const capG=ctx.createLinearGradient(capBx,capBy,tcx,tcy);
+      capG.addColorStop(0,`rgba(190,52,8,${(0.5*_pulse).toFixed(3)})`);
+      capG.addColorStop(1,`rgba(255,205,105,${(0.95*_pulse).toFixed(3)})`);
+      ctx.fillStyle=capG; ctx.fill();
+      // ── Crater bloom at the summit ──
+      const craterHalf=Math.max(1,Math.hypot(t1x-t0x,t1y-t0y)/2);
+      const glowG=ctx.createRadialGradient(tcx,tcy,0,tcx,tcy,craterHalf*1.5);
+      glowG.addColorStop(0,`rgba(255,245,200,${(0.9*_pulse).toFixed(3)})`);
+      glowG.addColorStop(0.45,`rgba(255,150,45,${(0.6*_pulse).toFixed(3)})`);
+      glowG.addColorStop(1,'rgba(255,70,0,0)');
+      ctx.beginPath(); ctx.arc(tcx,tcy,craterHalf*1.5,0,Math.PI*2); ctx.fillStyle=glowG; ctx.fill();
+      // ── Smoke plume: wispy puffs rising radially + drifting laterally ──
+      const _rdx=Math.cos(v.a), _rdy=Math.sin(v.a);     // radial (outward)
+      const _tgx=-Math.sin(v.a), _tgy=Math.cos(v.a);    // tangent (lateral)
+      const plumeLen=v.h*r*2.6;
+      for(const pf of v.puffs){
+        const rf=(pf.t + _vn*0.000085) % 1;             // 0 at crater → 1 at plume top
+        const rise=rf*plumeLen;
+        const drift=(pf.drift*(0.4+rf*2.0))*craterHalf + Math.sin(_vn*0.0012+pf.phase)*craterHalf*0.4;
+        const px2=tcx+_rdx*rise+_tgx*drift, py2=tcy+_rdy*rise+_tgy*drift;
+        const sz=craterHalf*(0.9+pf.sz*1.6+rf*3.4);
+        const _a=Math.sin(rf*Math.PI)*0.26*pf.sz;
+        if(_a<=0.01) continue;
+        const puffG=ctx.createRadialGradient(px2,py2,0,px2,py2,sz);
+        puffG.addColorStop(0,`rgba(120,110,108,${_a.toFixed(3)})`);
+        puffG.addColorStop(0.5,`rgba(92,84,82,${(_a*0.6).toFixed(3)})`);
+        puffG.addColorStop(1,'rgba(70,64,62,0)');
+        ctx.beginPath(); ctx.arc(px2,py2,sz,0,Math.PI*2); ctx.fillStyle=puffG; ctx.fill();
       }
     }
   }
@@ -34529,7 +34643,7 @@ function _restoreFromSave(save){
     rp._top4Supply=undefined; rp._top4Demand=undefined; rp._top4Stamp=undefined;
     // Re-attach biome-specific procedural fields that are stripped from saves:
     //   resort/agri/oil → _b (landmasses/swatches); storm → _b (lightning bolts);
-    //   any biome → _mtn (mountain ridges).
+    //   lava → _b (volcanoes); any biome → _mtn (mountain ridges).
     // Without this, resort planets render as featureless ocean (no continents).
     _attachBiome(rp);
     rp.clouds=generatePlanetClouds(rp);

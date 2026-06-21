@@ -30,6 +30,16 @@ signal star_revealed(star_id: int)  # a star newly entered the registry (SFX hoo
 # moment the player visits a planet carrying an undiscovered deposit.
 signal gold_discovered(planet_id: int)
 signal diamond_discovered(planet_id: int)
+# A planet was visited for the first time (build_game.py trackVisit ~16118):
+# chat "<name> — VISITED" + a credit reward float at the planet.
+signal planet_visited(planet_id: int, reward: int)
+
+# Biome → car unlocked on the FIRST visit to a planet of that biome
+# (build_game.py:16239; lava omitted — molten-ore car is unlocked at start).
+const _BIOME_UNLOCK_CAR := {
+	"desert": "car_sand", "ice": "car_ice", "oil": "car_oil",
+	"storm": "car_battery", "chemical": "car_chemical",
+}
 
 # ── New-game initialisation (build_game.py:35243-35268) ───────────────────
 # Orijen pre-visited (no credit), home star revealed, all home-system planets

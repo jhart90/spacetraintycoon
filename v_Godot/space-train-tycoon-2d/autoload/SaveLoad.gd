@@ -90,6 +90,7 @@ func save_game(path: String = SAVE_PATH) -> bool:
 	data["_N700EngineUnlocked"] = GameState.unlocked_engines.has("engine_N700")
 	data["_largeStationUnlocked"] = GameState.unlocked_upgrades.has("large_station")
 	data["_terminalUnlocked"] = GameState.unlocked_upgrades.has("terminal")
+	data["_ancientTranslatedWords"] = GameState.ancient_translated_words.keys()  # build_game.py persists this
 	var carflags := {"_ironCarUnlocked": "car_iron", "_steelCarUnlocked": "car_steel", "_glassCarUnlocked": "car_glass", "_hazmatCarUnlocked": "car_hazmat", "_machineryCarUnlocked": "car_machinery", "_cargoCarUnlocked": "car_cargo", "_livestockCarUnlocked": "car_livestock", "_flowersCarUnlocked": "car_flowers", "_medicalCarUnlocked": "car_medical", "_grainCarUnlocked": "car_grain", "_fruitCarUnlocked": "car_fruit", "_royalCarUnlocked": "car_royal"}
 	for fk in carflags:
 		data[fk] = GameState.unlocked_cars.has(carflags[fk])
@@ -123,7 +124,7 @@ func load_game(path: String = SAVE_PATH) -> bool:
 		if idx < 0 or idx >= Galaxy.planets.size():
 			continue
 		var p: Dictionary = Galaxy.planets[idx]
-		p.orbitAngle = float(pr.orbitAngle)
+		p.orbitAngle = _tf(pr.orbitAngle)
 		p.supply = pr.get("supply", {})
 		p.demand = pr.get("demand", {})
 		p.hasStation = pr.get("hasStation", false)
@@ -133,7 +134,7 @@ func load_game(path: String = SAVE_PATH) -> bool:
 		p.x = star.x + p.orbitRadius * cos(p.orbitAngle)
 		p.y = star.y + p.orbitRadius * sin(p.orbitAngle)
 
-	GameState.stardate = float(data.stardate)
+	GameState.stardate = _tf(data.stardate)
 	GameState.credits = _ti(data.credits)
 	GameState.game_speed_idx = _ti(data.speed)
 	GameState.unlocked_engines = _bool_set(data.unlocked_engines)
@@ -162,7 +163,7 @@ func load_game(path: String = SAVE_PATH) -> bool:
 	AICorp.credits = _ti(data.ai.credits)
 	AICorp.total_revenue = _ti(data.ai.total_revenue)
 	AICorp.home_star_id = _ti(data.ai.home)
-	AICorp._tick_acc = float(data.ai.tick_acc)
+	AICorp._tick_acc = _tf(data.ai.tick_acc)
 	AICorp.corp_name = Tuning.AI_CORP_NAMES.get(AICorp.difficulty, "Rival Corp")
 
 	Transit.trains = []
@@ -194,8 +195,8 @@ func _load_stt_data(d: Dictionary) -> bool:
 	for s in g.get("stars", []):
 		var sd: Dictionary = s
 		sd["id"] = _ti(sd.get("id", 0))
-		sd["radius"] = float(sd.get("radius", 100.0))
-		sd["x"] = float(sd.get("x", 0.0)); sd["y"] = float(sd.get("y", 0.0))
+		sd["radius"] = _tf(sd.get("radius", 100.0))
+		sd["x"] = _tf(sd.get("x", 0.0)); sd["y"] = _tf(sd.get("y", 0.0))
 		sd["planetIds"] = _tia(sd.get("planetIds", []))
 		stars.append(sd)
 	Galaxy.stars = stars
@@ -205,11 +206,11 @@ func _load_stt_data(d: Dictionary) -> bool:
 		var pd: Dictionary = p
 		pd["id"] = _ti(pd.get("id", 0))
 		pd["starId"] = _ti(pd.get("starId", 0))
-		pd["orbitRadius"] = float(pd.get("orbitRadius", 100.0))
-		pd["orbitAngle"] = float(pd.get("orbitAngle", 0.0))
-		pd["orbitSpeed"] = float(pd.get("orbitSpeed", 0.0))
-		pd["radius"] = float(pd.get("radius", 50.0))
-		pd["x"] = float(pd.get("x", 0.0)); pd["y"] = float(pd.get("y", 0.0))
+		pd["orbitRadius"] = _tf(pd.get("orbitRadius", 100.0))
+		pd["orbitAngle"] = _tf(pd.get("orbitAngle", 0.0))
+		pd["orbitSpeed"] = _tf(pd.get("orbitSpeed", 0.0))
+		pd["radius"] = _tf(pd.get("radius", 50.0))
+		pd["x"] = _tf(pd.get("x", 0.0)); pd["y"] = _tf(pd.get("y", 0.0))
 		var ty = pd.get("type", {})
 		pd["type"] = Tuning.ptype(String(ty.id)) if (ty is Dictionary and ty.has("id")) else Tuning.ptype("rocky")
 		pd["isAlienRelic"] = bool(pd.get("isAlienRelic", false))
@@ -220,12 +221,12 @@ func _load_stt_data(d: Dictionary) -> bool:
 	# Suppress first-delivery popups for planets that already have deliveries.
 	GameState.delivered_planets = {}
 	for p in planets:
-		if float(p.get("passengerDeliveries", 0.0)) > 0.0 or not (p.get("supply", {}) as Dictionary).is_empty():
+		if _tf(p.get("passengerDeliveries", 0.0)) > 0.0 or not (p.get("supply", {}) as Dictionary).is_empty():
 			GameState.delivered_planets[int(p.id)] = true
 	var bhs: Array = []
 	for b in g.get("blackHoles", []):
 		var bd: Dictionary = b
-		bd["x"] = float(bd.get("x", 0.0)); bd["y"] = float(bd.get("y", 0.0)); bd["radius"] = float(bd.get("radius", 100.0))
+		bd["x"] = _tf(bd.get("x", 0.0)); bd["y"] = _tf(bd.get("y", 0.0)); bd["radius"] = _tf(bd.get("radius", 100.0))
 		bhs.append(bd)
 	Galaxy.black_holes = bhs
 	Galaxy.home_star_id = _ti(g.get("homeStarId", 0))
@@ -233,7 +234,7 @@ func _load_stt_data(d: Dictionary) -> bool:
 	Galaxy._seed = _ti(d.get("seed", Galaxy._seed))  # restore for harness round-trip
 	# ── Scalars ──
 	GameState.credits = _ti(d.get("credits", 250000))
-	GameState.stardate = float(d.get("stardate", 829.0))
+	GameState.stardate = _tf(d.get("stardate", 829.0))
 	GameState.corp_name = String(d.get("corpName", "STELLAR TRANSIT CO."))
 	GameState.game_speed_idx = clampi(_ti(d.get("gameSpeedIdx", 2)), 0, Tuning.SPEED_OPTS.size() - 1)
 	GameState.total_passengers_delivered = _ti(d.get("_totalPassengersDelivered", 0))
@@ -258,6 +259,9 @@ func _load_stt_data(d: Dictionary) -> bool:
 	GameState.unlocked_upgrades = {}
 	if bool(d.get("_largeStationUnlocked", false)): GameState.unlocked_upgrades["large_station"] = true
 	if bool(d.get("_terminalUnlocked", false)): GameState.unlocked_upgrades["terminal"] = true
+	GameState.ancient_translated_words = {}
+	for wi in (d.get("_ancientTranslatedWords", []) as Array):
+		GameState.ancient_translated_words[int(wi)] = true
 	# ── Discovery (arrays → {id:true}) ──
 	Discovery.discovered_planet_ids = _id_set(d.get("discoveredPlanetIds", []))
 	Discovery.visited_planet_ids = _id_set(d.get("visitedPlanetIds", []))
@@ -302,7 +306,7 @@ func _load_stt_data(d: Dictionary) -> bool:
 	# ── Camera (applied by GalaxyView2D on enter_galaxy via GameState.pending_cam) ──
 	var cam = d.get("cam", null)
 	if cam is Dictionary:
-		GameState.pending_cam = {"x": float(cam.get("x", 0.0)), "y": float(cam.get("y", 0.0)), "scale": float(cam.get("scale", 0.001))}
+		GameState.pending_cam = {"x": _tf(cam.get("x", 0.0)), "y": _tf(cam.get("y", 0.0)), "scale": _tf(cam.get("scale", 0.001))}
 	GameState.phase = GameState.Phase.GALAXY
 	GameState.gs = "galaxy"
 	return true
@@ -348,7 +352,19 @@ func _load_stt_train(t: Dictionary) -> void:
 
 # ── helpers: JSON parses numbers as float; restore ints ────────────────────
 func _ti(v) -> int:
-	return int(round(float(v)))
+	return int(round(_tf(v)))
+
+# Null-/type-safe float coercion. `float(null)` and `float(Dictionary)` throw
+# "Nonexistent 'float' constructor" — guard so a missing/null save field (older
+# or hand-edited .stt files) can't abort the whole load.
+func _tf(v, default := 0.0) -> float:
+	if v is float:
+		return v
+	if v is int:
+		return float(v)
+	if v is String and (v as String).is_valid_float():
+		return (v as String).to_float()
+	return default
 
 func _tia(arr: Array) -> Array:
 	var out := []

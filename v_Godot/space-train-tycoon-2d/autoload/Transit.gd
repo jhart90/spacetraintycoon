@@ -55,6 +55,8 @@ func build_train(planet_id: int, engine: String, car_types: Array, is_player: bo
 		"maintenance": 1.0, "distSinceMaint": 0.0, "totalDist": 0.0,
 		"totalRevenue": 0, "totalCosts": 0, "_engineBornSd": GameState.stardate,
 		"_engineFailureSd": GameState.stardate + 30.0 + Galaxy.random() * 40.0, "_engineFailed": false,
+		# Trains-list window stats (build_game.py:8994).
+		"segments": 0, "orbitCounts": {},
 	}
 	for _i in car_types.size():
 		t.carCargo.append(null)
@@ -161,6 +163,12 @@ func _arrive(t: Dictionary, tp: Dictionary, ang: float) -> void:
 	t._cargoChecked = false  # load/unload car-by-car while orbiting this stop
 	t.cargoPhase = ""
 	t.cargoQueue = []
+	# Per-train stats for the trains-list window (build_game.py orbitCounts/segments
+	# ~8994): each arrival = one completed transit segment + one orbit of this planet.
+	t.segments = int(t.get("segments", 0)) + 1
+	var _ocounts: Dictionary = t.get("orbitCounts", {})
+	_ocounts[int(t.planetId)] = int(_ocounts.get(int(t.planetId), 0)) + 1
+	t.orbitCounts = _ocounts
 	if t.route != null:
 		var ix: int = t.route.stops.find(t.planetId)
 		if ix >= 0:

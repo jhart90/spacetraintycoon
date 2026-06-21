@@ -101,7 +101,7 @@ Status key: ☐ pending · ☑ fixed this pass · ◐ partial
 
 **Pass 6 (done + verified):**
 - ☑ C4 (partial) — **Missions popup** (`[M]`, `_draw_missions`): yellow window, per-mission card (name + reward + objective checkboxes pulling text from the def), completed-count footer. Event popups (unlock/mission/discovery) already handled by `_draw_event`.
-- ◐ C4 remaining (deferred w/ reason): **techtree** `[I]` (no ported tech-tree data), **leaderboard** `[L]` (no ranking data yet), **star popup** (the star info bar already shows full star details faithfully), **quitconfirm** (needs the M6 title screen to return to), **newspaper** (M7), gold/ancient/corp/ceohire event popups (fire on specific game events not yet wired).
+- ☑ C4 remaining — NOW DONE in later passes: **techtree** `[I]` (`_TT_*` data), **leaderboard** `[L]` (real online client), **star popup**, **quitconfirm**, and ALL event popups (gold/diamond/upgrade/ceohire/ancient/first-delivery/corp/mission). Only **newspaper** (M7) remains — see the verified-blocked list at the bottom.
 
 ### Phase C status: all MAJOR surfaces faithful — A (chrome) + B (panel) + C1 (unified window) + C2 (planet detail) + C3 (builder) + missions. Remaining = secondary/M6-M7-dependent popups above.
 
@@ -141,18 +141,23 @@ Status key: ☐ pending · ☑ fixed this pass · ◐ partial
 
 **⚠️ Honesty note (re-audit owed):** prior "faithful / screenshot-verified" claims were made by eyeballing approximations, not by reading build_game.py. The leaderboard proves several surfaces are likely still NOT faithful. Surfaces I now SUSPECT are wrong/fabricated and must be re-checked against the real draw code the same way: **finances popup** (the "RIVAL net worth" / VS-RIVAL bars look invented), star/registry/pokedex popups, planet-detail upgrade list, mission text/styling, title vignettes, tutorial chain. These need a line-by-line pass against build_game.py, NOT another eyeball audit.
 
-**Still simplified vs original (lower priority):**
-- Train-details popup: omits maintenance / engine-age / financial-performance bars (depends on the maintenance/breakdown sim, not in the ported autoloads).
-- Train Builder engine panel: SPD/COST only (no ACCEL/RANGE/MAINT/REPAIR — not in ported sim).
-- Routes window: pre-departure-rule asterisks + per-pane RULES button + N≥6 horizontal scroll (pre-departure rules not in ported sim).
+**Pass 9 (done + screenshot-verified) — sim-unblocked UI completed:**
+- ☑ **Train Builder engine panel** now the full **SPD / ACCEL / RANGE / COST | MAINT / REPAIR** 6-row spec (build_game.py `_drawEngineDetailsPanel` 26167-26178). Added `Tuning.ENGINE_MAX_RANGE`; ACCEL = `Transit.TRANSIT_ACCEL × ENGINE_ACCEL_MULT`. Screenshot-verified.
+- ☑ **Train-details popup** maintenance / engine-age / financial-performance bars — DONE (the maintenance/breakdown sim landed earlier; `_draw_train_detail` renders MAINTENANCE bar, ENGINE AGE bar w/ "SD until breakdown", and FINANCIAL PERFORMANCE revenue/costs/profit). DISCREPANCIES note above was stale.
+- ☑ **Trains-list window** Dist / Segments / Most-orbited stat row — added per-train `segments` + `orbitCounts` counters in `Transit` (incremented on each arrival) + `totalDist`; the card now shows `N cars · Dist N SU · Segs N · Most: PLANET`.
+- ☑ **SaveLoad null-safe load** — `_tf` guards `float(null)`; fixed a crash that aborted loading real `.stt` saves (see "Already fixed" above).
 
-**Genuinely-large remaining work (each warrants its own focused pass):**
-- **Maintenance / breakdown sim** — train aging, repair costs, breakdown events + `breakdown.mp3`. Touches the parity-verified `Transit` autoload; unlocks the train-details maintenance bars + Builder MAINT/REPAIR + routes broken-train red name.
-- **Deep transit phases** — blocked-by-star segment rerouting + queueing/descending orbit phases (port has ORBIT/TRANSIT only; multi-hop + a lightweight outer-orbit stand-in already work).
-- **Newspaper popup** (M7) — large baked-layout UI.
-- **Nebula named-region tiles** — current 7-blob nebula is a working stand-in.
-- **Dyson sphere** — blocked: the ported galaxy generation never sets `hasDysonSphere` (original builds it via a late event, build_game.py:33225), so it'd be invisible until that sim feature exists.
-- **techtree `[I]`** — no ported tech-tree data structure.
+**Still simplified vs original (lower priority):**
+- Routes window: pre-departure-rule asterisks + per-pane RULES button + N≥6 horizontal scroll (pre-departure rules are not in the ported sim).
+
+**Genuinely-large remaining work (each warrants its own focused pass) — VERIFIED-BLOCKED status:**
+- ✅ **Maintenance / breakdown sim** — DONE (train aging, repair costs at stations, breakdown failure SD; unlocked the train-details bars + Builder MAINT/REPAIR).
+- ✅ **techtree `[I]`** — DONE (`_TT_*` node/edge data + `_draw_tech_tree`).
+- ✅ **All event popups** — DONE (engine/car-unlock, mission-reward, new-mission, corp dashboard, first-delivery, gold, diamond, upgrade-unlock, CEO-hire, ancient-message). Only **rival-founded** is N/A (no mid-game trigger; AI corp created at game start).
+- ⛔ **Newspaper popup** (M7) — NOT done. Genuinely large: needs the full `_newsLog` event-stream + the headline/body template catalogs (`_MAJOR_HDLS`/`_MAJOR_BODIES`/`_MINOR_HDLS`/`_MINOR_SNIPS`/`_PAPER_NAMES`), `_newsFill` substitution, snapshot-delta logic, **3** distinct broadsheet layouts (`_drawNewsL0/L1/L2`), and newsprint planet/CEO image rendering (build_game.py 35677 + 36228). Warrants its own dedicated pass; deliberately NOT approximated.
+- ⛔ **Deep transit phases** — blocked-by-star segment rerouting + queueing/descending orbit phases (port has ORBIT/TRANSIT + a lightweight outer-orbit stand-in). Large sim refinement.
+- ⛔ **Dyson sphere** — blocked: the ported galaxy generation never sets `hasDysonSphere` (original builds it via a late event, build_game.py:33225), so rendering it would be invisible until that sim feature exists.
+- ◐ **Nebula named-region tiles** — the current 7-blob nebula is a working stand-in; low-priority polish.
 
 **Phase D — world render fidelity:**
 - ☑ Large station / terminal structures — dock ring at an outer (MED/HIGH) orbit tier (`_draw_station`, build_game.py 13262). Terminal sits further out than Large.

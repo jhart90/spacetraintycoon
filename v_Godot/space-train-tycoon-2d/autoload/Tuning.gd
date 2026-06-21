@@ -146,6 +146,8 @@ const MAINT_DECAY_PER_AU := 0.00001    # maintenance fraction lost per SU in tra
 const REPAIR_COST_PER_MAINT := 600     # credits per car per 1.0 maintenance lost
 const ENGINE_MAINT_DECAY := {"engine_constellation": MAINT_DECAY_PER_AU, "engine_galaxy": MAINT_DECAY_PER_AU * 0.8, "engine_classJ": MAINT_DECAY_PER_AU * 0.6, "engine_classR": MAINT_DECAY_PER_AU * 0.4, "engine_N700": MAINT_DECAY_PER_AU * 0.25}
 const ENGINE_REPAIR_MULT := {"engine_constellation": 1.0, "engine_galaxy": 1.1, "engine_classJ": 1.3, "engine_classR": 1.6, "engine_N700": 2.0}
+# Per-engine maximum route-segment reach in SU (build_game.py:2160).
+const ENGINE_MAX_RANGE := {"engine_constellation": 15000, "engine_galaxy": 25000, "engine_classJ": 40000, "engine_classR": 50000, "engine_N700": 70000}
 const STATION_COST: int = 50000        # _stationBuildCost base (build_game.py:2397)
 const LARGE_STATION_COST: int = 50000  # build_game.py:9961
 # Upgrade build costs (build_game.py UPGRADES, :1239-1264).
