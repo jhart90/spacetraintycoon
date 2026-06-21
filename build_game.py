@@ -1094,7 +1094,7 @@ const CARGO_SHORT      = {passengers:'PSNGR', livestock:'LVSTK', mail:'MAIL', wa
 // text. Looked up case-insensitively keyed on the displayed name (handles both
 // "iron" and "Molten Ore"). Choose the dominant hue of each cargo's sprite.
 const CARGO_TEXT_COLORS = {
-  passengers:'#c30010', livestock:'#b6815c', mail:'#f4b450', water:'#42a8ff',
+  passengers:'#c30010', livestock:'#b6815c', mail:'#4090d0', water:'#42a8ff',
   ice:'#a4dcff', sand:'#bb8459', 'molten ore':'#ff5a28', iron:'#5e626b',
   gold:'#ffd148', diamond:'#a4f0ff', hazmat:'#dcff48', oil:'#9aa83a',
   battery:'#ffd744', chemical:'#80e860', flowers:'#ff7acc', medical:'#ff5a78',
@@ -1322,14 +1322,16 @@ const MISSION_DEFS=[
          if(_p.starId===_orijenP.starId && _p.type && _p.type.id==='desert'){ _desertId=_p.id; break; }
        }
      }
-     // Real (non-temp) ≥2-stop route assigned to any player train? → entire
-     // mission done. Mirrors the old short-circuit so the post-assign frame
-     // doesn't roll any objective back as `routeStops` clears.
+     // Real (non-temp) route visiting 3+ DISTINCT planets on any player train?
+     // → entire mission done. Renamed to "Create a 3-planet train route", so it
+     // requires 3 distinct stops (a 2-stop Orijen↔Desert route — like the one
+     // built in the first-train tutorial — no longer satisfies it). m._routeAssigned
+     // is gated on a 3-planet route at the assign site too.
      const _hasRealRoute=(
        !!m._routeAssigned ||
        trains.some(t=>t.isPlayer && (
-         (t.route       && !t.route.isTempRoute       && (t.route.stops||[]).length>=2) ||
-         (t.queuedRoute && !t.queuedRoute.isTempRoute && (t.queuedRoute.stops||[]).length>=2)
+         (t.route       && !t.route.isTempRoute       && new Set(t.route.stops||[]).size>=3) ||
+         (t.queuedRoute && !t.queuedRoute.isTempRoute && new Set(t.queuedRoute.stops||[]).size>=3)
        ))
      );
      if(_hasRealRoute) return true;
@@ -19732,7 +19734,7 @@ function _drawTutorialChain(stage){
     if(_sdA>0 && _sd){
       _drawHighlightBox(_sd.x,_sd.y,_sd.w,_sd.h,_sdA,3);
       // Bubble sits ABOVE the pane, tail pointing DOWN at it.
-      _drawBubble(['This PLANET supplies CARGO including [Passengers] and [Water],','and demands [Sand], among other things'], {x:_sd.x+_sd.w/2,y:_sd.y}, _sdA, {italicWords:['supplies','demands'], boldWords:['CARGO']});
+      _drawBubble(['This PLANET supplies [Passengers] and [Water],','and demands [Sand], among other things'], {x:_sd.x+_sd.w/2,y:_sd.y}, _sdA, {italicWords:['supplies','demands']});
     }
     // (5) blue [ESC] close hint — fades in 10 s after the phase starts (5 s after (4)).
     let _escA=0;
@@ -19931,7 +19933,7 @@ function _drawTutorialChain(stage){
         const _minX=Math.min(..._abs.map(b=>b.x)), _maxX=Math.max(..._abs.map(b=>b.x+b.w));
         const _ax=(_minX+_maxX)/2, _ay=_abs[0].y;
         _drawHighlightBox(_minX,_ay,_maxX-_minX,_abs[0].h,r.alpha,2);
-        _drawBubble(['This train has cars for carrying [Passengers] and [Mail]'], {x:_ax,y:_ay}, r.alpha, {color:'blue', target:{x:_ax,y:_ay+8}});
+        _drawBubble(['This train has cars for carrying [Passengers] and [Mail]'], {x:_ax,y:_ay}, r.alpha, {target:{x:_ax,y:_ay+8}});
       }
       // (2) +5 s — CARS tow-capacity row, blue bubble BELOW it, pointing up.
       let _c2A=0;
@@ -19939,7 +19941,7 @@ function _drawTutorialChain(stage){
       else if(_elapsed>=FADE_MS+5000) _c2A=Math.min(1,(_elapsed-(FADE_MS+5000))/FADE_MS);
       const _ctb=popupState.tdCarsTextBounds;
       if(_c2A>0 && _ctb){
-        _drawBubble(['The CONSTELLATION ENGINE on this train can tow UP TO 6 CARGO CARS'], {x:_ctb.x+_ctb.w/2,y:_ctb.y+_ctb.h}, _c2A, {below:true, color:'blue'});
+        _drawBubble(['The CONSTELLATION ENGINE on this train can tow UP TO 6 CARGO CARS'], {x:_ctb.x+_ctb.w/2,y:_ctb.y+_ctb.h}, _c2A, {below:true});
       }
       // (3) +10 s — yellow ESC-close hint below the [ESC] label, pointing up.
       let _e3A=0;
@@ -19947,7 +19949,7 @@ function _drawTutorialChain(stage){
       else if(_elapsed>=FADE_MS+10000) _e3A=Math.min(1,(_elapsed-(FADE_MS+10000))/FADE_MS);
       const _eb=popupState.escBounds;
       if(_e3A>0 && _eb){
-        _drawBubble(['Press ESC, or CLICK anywhere outside a window to close it'], {x:_eb.x+_eb.w/2,y:_eb.y+_eb.h}, _e3A, {below:true});
+        _drawBubble(['Press ESC, or CLICK anywhere outside a window to close it'], {x:_eb.x+_eb.w/2,y:_eb.y+_eb.h}, _e3A, {below:true, color:'blue'});
       }
     }
     return;
@@ -30930,8 +30932,11 @@ function assignRouteToTrain(train){
     train.route=tempRoute;
     train.queuedRoute=realRoute;
   }
-  // Flag active create_route mission objective
-  {const _crM=missions.find(mx=>mx.id==='create_route'&&mx.status==='active'); if(_crM) _crM._routeAssigned=true;}
+  // Flag active create_route mission objective — only for a genuine 3-planet
+  // route (matches the renamed "Create a 3-planet train route"). A 2-stop route
+  // (e.g. the first-train tutorial's Orijen↔Desert) must NOT complete it.
+  {const _crM=missions.find(mx=>mx.id==='create_route'&&mx.status==='active');
+   if(_crM && new Set(routeStops.filter(Boolean).map(p=>p.id)).size>=3) _crM._routeAssigned=true;}
   routeStops=[]; sel=null; assignPending=false;
 }
 

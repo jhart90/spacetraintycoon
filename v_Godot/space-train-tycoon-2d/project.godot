@@ -1,0 +1,61 @@
+; Engine configuration file.
+; Space Train Tycoon — faithful Godot 2D recreation.
+; Source of truth: ../../build_game.py (Canvas2D). Sim autoloads copied verbatim
+; from the sibling 3D port; this project rebuilds the view + UI faithfully in 2D.
+
+config_version=5
+
+[application]
+
+config/name="Space Train Tycoon (2D)"
+config/description="Faithful Godot 2D recreation of Space Train Tycoon. Source of truth: ../../build_game.py"
+run/main_scene="res://Main.tscn"
+config/features=PackedStringArray("4.6", "Forward Plus")
+config/icon="res://icon.svg"
+
+[autoload]
+
+Tuning="*res://autoload/Tuning.gd"
+GameState="*res://autoload/GameState.gd"
+Galaxy="*res://autoload/Galaxy.gd"
+Economy="*res://autoload/Economy.gd"
+Transit="*res://autoload/Transit.gd"
+AICorp="*res://autoload/AICorp.gd"
+Missions="*res://autoload/Missions.gd"
+Player="*res://autoload/Player.gd"
+Discovery="*res://autoload/Discovery.gd"
+Fog="*res://autoload/Fog.gd"
+SaveLoad="*res://autoload/SaveLoad.gd"
+Audio="*res://autoload/Audio.gd"
+Leaderboard="*res://autoload/Leaderboard.gd"
+
+[display]
+
+; 900x500 is the LAYOUT coordinate system (matches the JS logical canvas so popup
+; rects/fonts/bars port as literal constants). With stretch mode "canvas_items"
+; the actual vector rendering happens at full WINDOW resolution — NOT 900x500 —
+; so the galaxy is as crisp as the display allows. aspect "keep" preserves the
+; 1.8 framing (faithful to the JS canvas) with letterboxing.
+window/size/viewport_width=900
+window/size/viewport_height=500
+window/size/window_width_override=1920
+window/size/window_height_override=1080
+window/size/resizable=true
+window/stretch/mode="canvas_items"
+window/stretch/aspect="keep"
+; Adaptive V-Sync (2): tears instead of hard-locking to 30fps when the GPU can't
+; sustain the refresh rate — keeps motion smooth at fluctuating framerates.
+window/vsync/vsync_mode=2
+; HiDPI OFF — on a HiDPI display Godot would render at the native (2-4x) pixel
+; count, quadrupling fillrate for no visible gain on a stretched 900x500 game.
+window/dpi/allow_hidpi=false
+
+[rendering]
+
+; MSAA OFF (was 4x). At the user's window resolution 4x MSAA multiplied ALL the
+; alpha overdraw (planet/star glow halos, nebula blobs, clouds, beams) by 4x —
+; the dominant frame cost. The original is a browser canvas (no MSAA); thin arcs
+; use per-call antialiased=true where smoothing matters.
+anti_aliasing/quality/msaa_2d=0
+textures/canvas_textures/default_texture_filter=1
+environment/defaults/default_clear_color=Color(0.02, 0.02, 0.05, 1)

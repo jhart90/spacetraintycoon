@@ -1,0 +1,10 @@
+# Godot editor import cache / transient state
+space-train-tycoon/.godot/
+space-train-tycoon/*.tmp
+# export_presets.cfg IS committed (the project ships export-ready).
+# Build outputs:
+build/
+
+# Cloned third-party MCP server — set up via README (not port source code).
+# node_modules and build artifacts are large and machine-specific.
+tools/godot-mcp-tugcan/
