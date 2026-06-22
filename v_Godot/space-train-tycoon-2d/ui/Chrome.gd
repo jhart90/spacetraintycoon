@@ -421,7 +421,7 @@ func _draw_trains_panel(px: float, ry0: float, pw: float) -> void:
 			var full: Array = [true]
 			for c in t.get("carCargo", []):
 				full.append(c != null)
-			view._trains.draw_car_strip(self, Rect2(px + 8.0, ry + 4.0, pw - 16.0, 30.0), consist, full)
+			view._trains.draw_car_strip(self, Rect2(px + 8.0, ry + 4.0, pw - 16.0, 30.0), consist, full, {"scale": 0.9, "fog_empty": true})
 		# Name + status badge.
 		var nm := String(t.get("name", "TRAIN %d" % tid))
 		_txt(f_orb_b, Vector2(px + 10.0, ry + 50.0), nm, 9, Color(0.627, 0.863, 1.0, 0.95))
@@ -755,7 +755,7 @@ func _draw_train_info(tid: int, by: float) -> void:
 		var full: Array = [true]
 		for c in t.get("carCargo", []):
 			full.append(c != null)
-		view._trains.draw_car_strip(self, Rect2(180.0, by + 14.0, 360.0, 46.0), consist, full)
+		view._trains.draw_car_strip(self, Rect2(180.0, by + 14.0, 360.0, 46.0), consist, full, {"scale": 0.75, "fog_empty": true})
 	# CANCEL ROUTE button (build_game.py:30310) — only when the train is routed.
 	if t.get("route", null) != null:
 		var cr := Rect2(560.0, by + 40.0, 110.0, 18.0)

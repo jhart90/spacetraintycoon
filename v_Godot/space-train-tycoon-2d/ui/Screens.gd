@@ -211,6 +211,12 @@ func _process_intro(delta: float) -> void:
 func _ease_io(t: float) -> float:
 	return t * t * (3.0 - 2.0 * t)  # smoothstep
 
+# Build the cinematic: a 22-second Orijen zoom-out opener (build_game.py:4512)
+# followed by a SHUFFLED pool of portrait pans / star pans / nebula zoom-out /
+# black-hole zoom-in (build_game.py _buildIntroShots:4474). Narration drives the
+# overall length, so the pool is sized to comfortably outlast it.
+const _INTRO_DIRS := [Vector2(1, 0), Vector2(-1, 0), Vector2(0, 1), Vector2(0, -1), Vector2(0.7, 0.7), Vector2(-0.7, 0.7), Vector2(0.7, -0.7), Vector2(-0.7, -0.7)]
+
 func _build_intro_shots() -> void:
 	_intro_shots = []
 	_intro_elapsed = 0.0
@@ -221,46 +227,84 @@ func _build_intro_shots() -> void:
 	var hs: Dictionary = Galaxy.stars[Galaxy.home_star_id]
 	var hp := Vector2(float(hs.x), float(hs.y))
 	var ss := clampf(220.0 / maxf(float(hs.radius), 50.0), Tuning.MIN_SC, Tuning.MAX_SC * 0.5)
-	# Shot 1 — Orijen zoom-out opener (tight → wide).
-	_intro_shots.append({"p0": op, "p1": op, "s0": Tuning.MAX_SC, "s1": Tuning.MAX_SC * 0.22, "dur": 6.0})
-	# Shot 2 — a planet portrait from the home system.
-	var portrait := _intro_home_planet(["lava", "ocean", "urban", "ancient"])
-	if not portrait.is_empty():
-		var pp := Vector2(float(portrait.x), float(portrait.y))
-		var psc := clampf(90.0 / maxf(float(portrait.radius), 20.0), Tuning.MIN_SC, Tuning.MAX_SC)
-		_intro_shots.append({"p0": pp, "p1": pp, "s0": psc, "s1": psc * 0.82, "dur": 4.5})
-	# Shot 3 — the whole home system around its star.
-	_intro_shots.append({"p0": hp, "p1": hp, "s0": ss, "s1": ss * 0.55, "dur": 4.5})
-	# Shot 4 — slow pan toward a distant star system.
-	var far := _intro_distant_star(hp)
-	var fp := Vector2(float(far.x), float(far.y)) if not far.is_empty() else hp + Vector2(50000.0, -20000.0)
-	_intro_shots.append({"p0": hp, "p1": fp, "s0": ss * 0.45, "s1": ss * 0.45, "dur": 5.0})
-	# Shot 5 — pull all the way out over the galaxy.
-	_intro_shots.append({"p0": fp, "p1": (op + fp) * 0.5, "s0": ss * 0.45, "s1": Tuning.MIN_SC * 6.0, "dur": 6.0})
+	var rng := RandomNumberGenerator.new()
+	rng.randomize()
+	# ── Opening (NOT shuffled): Orijen MAX_SC → deep zoom-out over 22 s. ──
+	_intro_shots.append({"p0": op, "p1": op, "s0": Tuning.MAX_SC, "s1": Tuning.MIN_SC, "dur": 22.0})
+	# ── Shuffled pool. ──
+	var pool: Array = []
+	# Planet portraits — partial-on-screen → opposite-edge pan in a random dir.
+	for want in ["lava", "ocean", "urban", "ancient", "resort", "ice"]:
+		var pl := _intro_find_planet(want)
+		if pl.is_empty():
+			continue
+		var ppos := Vector2(float(pl.x), float(pl.y))
+		var psc := clampf(110.0 / maxf(float(pl.radius), 20.0), Tuning.MIN_SC, Tuning.MAX_SC)
+		var half := (Tuning.W * 0.32) / psc
+		var d: Vector2 = _INTRO_DIRS[rng.randi() % _INTRO_DIRS.size()]
+		pool.append({"p0": ppos - d * half, "p1": ppos + d * half, "s0": psc, "s1": psc, "dur": 5.0})
+	# Home system zoom-out.
+	pool.append({"p0": hp, "p1": hp, "s0": ss, "s1": ss * 0.5, "dur": 4.5})
+	# Distant / Dyson star pan.
+	var ds := _intro_dyson_or_distant(hp)
+	if not ds.is_empty():
+		var dsp := Vector2(float(ds.x), float(ds.y))
+		var dsc := clampf(200.0 / maxf(float(ds.radius), 50.0), Tuning.MIN_SC, Tuning.MAX_SC * 0.4)
+		var dpan := (Tuning.W * 0.25) / dsc
+		pool.append({"p0": dsp - Vector2(dpan, dpan * 0.4), "p1": dsp + Vector2(dpan, dpan * 0.4), "s0": dsc, "s1": dsc, "dur": 5.5})
+	# Nebula zoom-out (now that nebulas exist).
+	if not Galaxy.nebulas.is_empty():
+		var nb := _intro_best_nebula()
+		var nbp := Vector2(float(nb.x), float(nb.y))
+		var nsc := clampf((Tuning.W * 0.45) / maxf(float(nb.rx), 5000.0), Tuning.MIN_SC, Tuning.MAX_SC * 0.2)
+		pool.append({"p0": nbp, "p1": nbp, "s0": nsc, "s1": nsc * 0.5, "dur": 5.0})
+	# Black-hole zoom-in.
+	if not Galaxy.black_holes.is_empty():
+		var bh: Dictionary = Galaxy.black_holes[rng.randi() % Galaxy.black_holes.size()]
+		var bhp := Vector2(float(bh.x), float(bh.y))
+		var bclose := clampf(150.0 / maxf(float(bh.radius), 500.0), Tuning.MIN_SC, Tuning.MAX_SC * 0.5)
+		pool.append({"p0": bhp, "p1": bhp, "s0": bclose * 0.4, "s1": bclose, "dur": 5.0})
+	# Fisher-Yates shuffle (random order each playthrough, like the JS).
+	for i in range(pool.size() - 1, 0, -1):
+		var j := rng.randi() % (i + 1)
+		var tmp = pool[i]; pool[i] = pool[j]; pool[j] = tmp
+	for sh in pool:
+		_intro_shots.append(sh)
 
-func _intro_home_planet(biomes: Array) -> Dictionary:
-	var hs: Dictionary = Galaxy.stars[Galaxy.home_star_id]
-	for want in biomes:
-		for pid in hs.get("planetIds", []):
-			if int(pid) < Galaxy.planets.size():
-				var p: Dictionary = Galaxy.planets[int(pid)]
-				if String((p.get("type", {}) as Dictionary).get("id", "")) == String(want):
-					return p
+func _intro_find_planet(biome: String) -> Dictionary:
+	for p in Galaxy.planets:
+		if String((p.get("type", {}) as Dictionary).get("id", "")) == biome:
+			return p
 	return {}
 
-func _intro_distant_star(from: Vector2) -> Dictionary:
+func _intro_dyson_or_distant(from: Vector2) -> Dictionary:
+	for s in Galaxy.stars:
+		if s.get("hasDysonSphere", false):
+			return s
 	var best: Dictionary = {}
 	var best_d := 0.0
 	var n := 0
 	for s in Galaxy.stars:
 		var d := from.distance_squared_to(Vector2(float(s.x), float(s.y)))
-		# prefer a fairly-distant-but-not-extreme star (deterministic-ish scan)
 		if d > best_d and d < 9.0e9:
 			best_d = d
 			best = s
 		n += 1
 		if n > 120:
 			break
+	return best
+
+func _intro_best_nebula() -> Dictionary:
+	# The largest nebula closest to the world centre (build_game.py:4846).
+	var best: Dictionary = {}
+	var best_score := -INF
+	for nb in Galaxy.nebulas:
+		var size: float = float(nb.rx) + float(nb.ry)
+		var dist: float = Vector2(float(nb.x), float(nb.y)).length()
+		var score := size - dist * 0.02
+		if score > best_score:
+			best_score = score
+			best = nb
 	return best
 
 

@@ -241,6 +241,48 @@ func generate(seed: int) -> void:
 	_separate_systems()
 	_place_relics()
 	_gen_nebulas()
+	_assign_mission_roles()
+
+# Pick the mission-role planets at gen (build_game.py:8831-9035). Simplified vs
+# the JS quadrant logic: assign roles to distinct suitable populated planets.
+func _assign_mission_roles() -> void:
+	var cands: Array = []
+	for p in planets:
+		if bool(p.get("isStarter", false)) or bool(p.get("isAlienRelic", false)):
+			continue
+		if int(p.get("population", 0)) <= 0 or int(p.starId) == home_star_id:
+			continue
+		cands.append(p)
+	if cands.size() >= 1:
+		cands[0]["isFaminePlanet"] = true
+	if cands.size() >= 2:
+		cands[1]["isOutbreakPlanet"] = true
+	if cands.size() >= 4:
+		cands[2]["isColonyTrainSource"] = true
+		cands[2]["colonyTrainDestId"] = int(cands[3].id)
+	# Flowers origin: a jungle/desert/resort candidate gets sustained flower supply.
+	for p in cands:
+		var bio := String(p.type.id)
+		if bio in ["jungle", "desert", "resort"] and not p.get("isFaminePlanet", false) and not p.get("isOutbreakPlanet", false) and not p.get("isColonyTrainSource", false):
+			p["isFlowersOrigin"] = true
+			if not p.has("supplyRate"):
+				p["supplyRate"] = {}
+			p.supplyRate["flowers"] = 6.0
+			break
+	# Black-hole research planet: the planet nearest any black hole.
+	if not black_holes.is_empty():
+		var best := -1
+		var best_d := INF
+		for p in planets:
+			if bool(p.get("isStarter", false)):
+				continue
+			for b in black_holes:
+				var d: float = Vector2(float(p.x) - float(b.x), float(p.y) - float(b.y)).length()
+				if d < best_d:
+					best_d = d
+					best = int(p.id)
+		if best >= 0:
+			planets[best]["isBhResearchPlanet"] = true
 
 # Named world-space nebulas (build_game.py _genNebulas:8307): 16 colored regions
 # placed around Orijen, declumped, each with a distinct name + colour pair.

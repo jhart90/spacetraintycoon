@@ -162,6 +162,7 @@ signal stardate_changed(sd: float)
 signal player_delivered(revenue: int)  # a player car unloaded for revenue (SFX hook)
 signal first_delivery(planet_id: int, cargo: String, car_type: String, sd: float)
 var delivered_planets: Dictionary = {}  # planet ids that have received player cargo
+var hazmat_incinerated := 0             # cumulative hazmat units disposed (build_game.py _totalHazmatIncinerated)
 signal engine_unlocked(id: String)
 signal car_unlocked(id: String)
 # Planet-upgrade type newly unlocked (build_game.py pendingUpgradeUnlocks ~3564).
@@ -204,6 +205,7 @@ func start_new_game() -> void:
 	unlocked_upgrades = {}
 	any_cargo_produced = false
 	total_passengers_delivered = 0
+	hazmat_incinerated = 0
 	_ceo_rng.randomize()
 
 func set_speed_idx(idx: int) -> void:
@@ -249,6 +251,7 @@ func _physics_process(delta: float) -> void:
 			SaveLoad.autosave()
 	Galaxy.advance_orbits(dtG)
 	Economy.accumulate(dtG * Tuning.SD_PER_DTG)  # replenish supply/demand pools
+	Economy.update_foundries(dtG)                # refine delivered cargo into outputs
 	Transit.tick(dtG)
 	AICorp.tick(dtG)
 	Fog.update(dtG * Tuning.SD_PER_DTG)

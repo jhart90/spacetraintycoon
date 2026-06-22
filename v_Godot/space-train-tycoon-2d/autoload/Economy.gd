@@ -247,3 +247,83 @@ func accumulate(dt_sd: float) -> void:
 			p.supply[type] = minf(cap, float(p.supply.get(type, 0.0)) + float(sr[type]) * dt_sd)
 		for type in dr:
 			p.demand[type] = minf(cap, float(p.demand.get(type, 0.0)) + float(dr[type]) * dt_sd)
+
+# ── Refining / production (build_game.py foundry intake :7750 + tick :14413) ──
+# Each player-built processing upgrade consumes input cargo (stockpiled on the
+# planet when trains unload it) and produces an output over a timer.
+const CARGO_MAX_SUPPLY := 20.0
+const FOUNDRY_PROD_TIME := 2400.0  # dtG frames (~40 s at 1×)
+const RECIPES := {
+	"iron_foundry": {"in": {"molten_ore": 1.0, "water": 1.0}, "out": "iron", "out_n": 1.0, "time": 2400.0, "by": "hazmat", "by_n": 0.5, "car": "car_iron", "by_car": "car_hazmat"},
+	"blast_furnace": {"in": {"iron": 1.0, "chemical": 1.0}, "out": "steel", "out_n": 1.0, "time": 4800.0, "car": "car_steel"},
+	"glassworks": {"in": {"sand": 1.0, "chemical": 1.0}, "out": "glass", "out_n": 1.0, "time": 2400.0, "car": "car_glass"},
+	"factory": {"in": {"iron": 1.0, "oil": 1.0}, "out": "machinery", "out_n": 1.0, "time": 2400.0, "car": "car_machinery"},
+	"bakery": {"in": {"grain": 1.0}, "out": "cargo", "out_n": 1.0, "time": 2400.0, "car": "car_cargo"},
+	"juicery": {"in": {"fruit": 1.0}, "out": "cargo", "out_n": 1.0, "time": 2400.0, "car": "car_cargo"},
+}
+
+# Called from Transit on a player unload: if this planet has a processing upgrade
+# whose recipe consumes `cargo`, stockpile it (cap 10) in p.upgradeData.
+func foundry_intake(p: Dictionary, cargo: String, units: float) -> void:
+	for up in p.get("upgrades", []):
+		var recipe: Dictionary = RECIPES.get(String(up), {})
+		if recipe.is_empty() or not (recipe.in as Dictionary).has(cargo):
+			continue
+		var ud: Dictionary = p.get("upgradeData", {})
+		var bin: Dictionary = ud.get(String(up), {})
+		bin[cargo] = minf(10.0, float(bin.get(cargo, 0.0)) + units)
+		ud[String(up)] = bin
+		p["upgradeData"] = ud
+		Missions.on_foundry_intake(p, String(up))
+
+# Per-frame production tick (build_game.py updateFoundries).
+func update_foundries(dtG: float) -> void:
+	if dtG <= 0.0:
+		return
+	for p in Galaxy.planets:
+		var built: Array = p.get("playerBuiltUpgrades", [])
+		for up in built:
+			var recipe: Dictionary = RECIPES.get(String(up), {})
+			if recipe.is_empty():
+				continue
+			var ud: Dictionary = p.get("upgradeData", {})
+			var bin: Dictionary = ud.get(String(up), {})
+			var prog := float(bin.get("progress", 0.0))
+			if prog > 0.0:
+				prog -= dtG
+				if prog <= 0.0:
+					bin["progress"] = 0.0
+					for k in (recipe.in as Dictionary):
+						bin[k] = maxf(0.0, float(bin.get(k, 0.0)) - float(recipe.in[k]))
+					if not p.has("supply"):
+						p["supply"] = {}
+					var outc := String(recipe.out)
+					p.supply[outc] = minf(CARGO_MAX_SUPPLY, float(p.supply.get(outc, 0.0)) + float(recipe.out_n))
+					if recipe.has("by"):
+						p.supply[String(recipe.by)] = minf(CARGO_MAX_SUPPLY, float(p.supply.get(String(recipe.by), 0.0)) + float(recipe.by_n))
+					if outc == "iron":
+						p["ironDelivered"] = float(p.get("ironDelivered", 0.0)) + 1.0
+					elif outc == "steel":
+						p["steelDelivered"] = float(p.get("steelDelivered", 0.0)) + 1.0
+					GameState.any_cargo_produced = true
+					_unlock_prod_car(String(recipe.get("car", "")))
+					if recipe.has("by_car") and float(p.supply.get(String(recipe.by), 0.0)) >= 1.0:
+						_unlock_prod_car(String(recipe.by_car))
+					Missions.on_production(p, outc)
+				else:
+					bin["progress"] = prog
+			else:
+				var ready := true
+				for k in (recipe.in as Dictionary):
+					if float(bin.get(k, 0.0)) < float(recipe.in[k]):
+						ready = false; break
+				if ready:
+					bin["progress"] = float(recipe.time)
+			ud[String(up)] = bin
+			p["upgradeData"] = ud
+
+func _unlock_prod_car(car: String) -> void:
+	if car == "" or GameState.unlocked_cars.has(car):
+		return
+	GameState.unlocked_cars[car] = true
+	GameState.car_unlocked.emit(car)

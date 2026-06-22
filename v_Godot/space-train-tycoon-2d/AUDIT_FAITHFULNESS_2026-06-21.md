@@ -28,6 +28,79 @@ camera transform/clamp/pan, the revenue math, the train-consist galaxy sizing, a
 
 ## ✅ FIX PROGRESS (2026-06-21, post-audit)
 
+**SIM build-out — refining / production (unblocks most of G2):**
+- ✅ **Foundry/refining system** ([Economy.gd](autoload/Economy.gd)). Ported the full recipe model
+  (`RECIPES`): iron_foundry (1 molten_ore + 1 water → 1 iron + 0.5 hazmat, ~40 s), blast_furnace
+  (iron + chemical → steel, 2×), glassworks (sand + chemical → glass), factory (iron + oil → machinery),
+  bakery (grain → cargo), juicery (fruit → cargo). `foundry_intake()` (called from Transit on a player
+  unload) stockpiles input cargo on the planet (cap 10); `update_foundries(dtG)` (ticked in
+  GameState._physics_process) advances each player-built processor's timer, consumes inputs, emits the
+  output into the planet's supply (loadable by trains), adds byproducts, increments iron/steelDelivered,
+  sets `any_cargo_produced`, and **unlocks the producing car** (Iron/Steel/Glass/Machinery/Hazmat) on
+  first production. Headless-verified: ore+water → 1 iron + 0.5 hazmat, Iron Car unlocked, anyProduced=true.
+- ✅ This unblocks the keystone mission chain: **build_foundry → produce_iron → upgrade_station**.
+  `produce_iron` objectives now complete via `Missions.on_foundry_intake` (deliver ore+water) +
+  `on_production` (iron smelted); completing it unlocks the Large Station + chains `upgrade_station`.
+  The cargo-refinement tree (iron→steel→machinery, sand+chemical→glass) is now live.
+- ✅ **Generic delivery-objective counter** (`Missions._DELIVER_OBJ` + `on_delivery`): handles the
+  ~11 "deliver N <cargo> to <origen|station|target>" objectives across the mission set (4 iron for
+  upgrade, 20 steel/battery/oil for design_better_train, livestock/medical/sand/chemical/colonists for
+  the relief missions, 50 passengers to Orijen). Counts accumulate per active mission and complete the
+  objective at the threshold. **upgrade_station** now completes (4 iron to a station + large-station
+  upgrade), and the "to target" objectives are ready for when their missions' triggers land.
+- ✅ **buy_second_train** wired (queued when build_foundry completes; UI-step objectives via
+  `on_window_opened` (trains/builder) + `on_train_built` (2+ iron cars) + `deliver_iron_orijen` via the
+  delivery counter). **Verified headless**: the full chain build_foundry → produce_iron → upgrade_station
+  completes, with buy_second_train surfaced (`--test-missions`).
+- ✅ **Mission-role missions** (famine / outbreak / lost_colony). `Galaxy._assign_mission_roles()` flags a
+  famine + outbreak target planet at gen; `queue_intro(id, target)` threads a `targetPlanetId` through to
+  the active mission; `Missions._on_planet_visited` fires the visit-triggers (famine/outbreak on visiting
+  the flagged planet, lost_colony on a relic → nearest other relic) and completes visit-objectives
+  (`visit_relic_target`) when the target is reached. **Verified headless** (`--test-roles`): visiting the
+  famine planet + delivering 10 livestock completes famine; outbreak + 4 medical completes outbreak.
+  Completable mission set is now **10**: build_foundry, produce_iron, upgrade_station, buy_second_train,
+  create_route, galaxy_census, research_royal_car, famine, outbreak, lost_colony.
+- ✅ **More missions** (no gen role needed): **stellar_cartography** (visit a planet in 5 distinct star
+  systems — distinct-`starId` count), **galactic_distance** (a single delivery whose source→dest trip
+  > 15,000 SU — checked at the Transit unload site), and **seeking_home** (visit a rocky planet → ferry
+  1 passenger to a far rocky world via `_far_rocky` + the delivery counter). **Verified headless**
+  (`--test-roles`): famine, outbreak, stellar_cartography, galactic_distance, seeking_home all complete.
+  **Completable mission set is now 13** of ~25.
+- ✅ **Hazmat incineration loop + dispose_hazmat.** The port's iron-foundry already emits a hazmat
+  byproduct + unlocks `car_hazmat`; added the disposal side: hazmat (waste, no demand) now incinerates
+  when a hazmat car reaches ANY non-source planet (`Transit._start_cargo_ops` bypasses the demand gate
+  for hazmat), incrementing `GameState.hazmat_incinerated`; `dispose_hazmat` is queued when an iron
+  foundry is built (car-gated on `car_hazmat`) and completes at 2 units. The corp-dashboard "Hazmat
+  Incinerated" stat now reads the real counter (was hardcoded 0). Also wired **sandstorm_relief**
+  (desert visit → clear 10 sand by delivering it anywhere). **Verified headless** (`--test-roles`):
+  dispose_hazmat completes. **Completable mission set is now 15** of ~25. The remaining ~7 each need a
+  bespoke system (flower-seeding tracker, multi-step colony_train, steel+Class-J design_better_train,
+  escort-cargo + research-timer missions).
+
+
+**Cleanup — small remaining items:**
+- ✅ **T3 (mission text styling)** — added a left-aligned token renderer (`_draw_tok_left`) and routed the
+  **NEW-MISSION popup** and the **missions-list `[M]` objectives** through it: `[Cargo]` refs now render
+  in their cargo colour (e.g. Molten Ore orange, Water blue), and the NEW-MISSION popup's **italic
+  details paragraph is restored** (was omitted entirely) with content-sized height. Screenshot-verified.
+  (Remaining: the in-HUD mission tracker in Chrome still renders plain — it has no token renderer there.)
+- ✅ **`draw_car_strip` scale + fog** — added `opts` to the strip renderer: `scale` (0.9 panel rows /
+  0.8 train-detail / 0.75 info-bar) and `fog_empty` (milky-pale dim on mid empty cars). Wired into the
+  panel rows, trains-list rows, train-detail, and the selected-train info-bar strip (was all 100%, no fog).
+
+**MODERATE cluster — step 6:**
+- ✅ **Train-status labels** — a single shared `Transit.train_status()` now returns the faithful
+  `getTrainStatus` labels (IN ORBIT / PARKED, IN ORBIT / ON ROUTE, EN ROUTE → <dest>, LOADING,
+  UNLOADING) with matching colors; Chrome + PopupManager both call it (was just IN ORBIT / IN TRANSIT).
+- ✅ **Selection ring** — added the grey orbit ring on a selected planet (port has one orbit tier, not
+  the JS LOW/MED/HIGH set). Per-kind colors (blue planet / gold star / orange train) + glow were already
+  correct (audit was stale there).
+- ✅ **Fog reveal radii** — applied the missing JS multipliers: star-system reveals ×2.2, breadcrumb
+  ×1.2, orbited-planet ×1.1 (3300). Reveal holes are now the right size (were ~½).
+- (Verified already-done, audit was stale): **credit floats** (9px Exo 2 + up/down arrow + red-for-loss),
+  the **CANCEL ROUTE button** in the train info bar (drawn + wired to un-route), and the **train info bar**
+  (color square + real name + status + consist strip).
+
 **Visuals — step 4:**
 - ✅ **V1** — **Dyson sphere** built (was flagged "blocked", but it's actually a player-built
   megastructure, not a random event). `GalaxyContent._draw_dyson()` renders the faithful
@@ -58,6 +131,16 @@ camera transform/clamp/pan, the revenue math, the train-consist galaxy sizing, a
   (build_game.py:29807). Compiles clean; not screenshot-verified (the demo train has no hazmat car).
   REMAINING in V4: the mission **escort-car backlit glow** — needs the `carEscort` tag set by the
   Ancient Schematics / Mad Scientist missions, which aren't wired in the port yet.
+
+**Intro cinematic camera — last large piece:**
+- ✅ **U7 (camera)** — rebuilt `_build_intro_shots` to the faithful `_buildIntroShots` shape: a
+  **22-second Orijen MAX_SC → deep zoom-out opener** (was a 6 s tight→wide), then a **shuffled pool**
+  of shots — planet portraits (partial-on-screen → opposite-edge pan in one of 8 random directions),
+  a home-system zoom-out, a **Dyson/distant star pan** (prefers a Dyson star), a **nebula zoom-out**
+  (largest-nearest, now that nebulas exist), and a **black-hole zoom-in**. Pool order is Fisher-Yates
+  shuffled each playthrough; total runtime comfortably outlasts the narration. Screenshot-verified
+  (Orijen framed at MAX_SC with the bold "STARDATE 829." narration + QUIT/SKIP). This completes U7
+  (narration typography was done earlier).
 
 **Front-end screens — step 3 + typography:**
 - ◐ **U7 / T1 / T2** — intro **narration typography** rebuilt to `_introRenderText`: ported

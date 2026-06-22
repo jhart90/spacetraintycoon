@@ -20308,8 +20308,12 @@ function _drawTutorialChain(stage){
   // ── Phase: ft_route_desert (galaxy) ────────────────────────
   if(_tutorialPhase==='ft_route_desert'){
     const _dId=_ftDesertId(); const _dp=_dId>=0?galaxy.planets[_dId]:null;
-    // Rollback if Orijen got cleared from the route (player clicked elsewhere).
-    if(_tutorialFadeOutStartMs===0 && galaxy.origenId!=null && routeStops.length>0 && !routeStops.some(p=>p&&p.id===galaxy.origenId)){ _advanceTo('ft_route_orijen'); return; }
+    // Roll back to the "select ORIJEN" step whenever ORIJEN is no longer the route
+    // anchor — i.e. the player DE-SELECTED it (clicked empty space, clearing
+    // routeStops to empty) or selected something else. Mirrors ft_route_orijen's
+    // _oriPicked test (the old `routeStops.length>0` form missed the empty case).
+    const _oriPicked=(galaxy.origenId!=null) && (routeStops.some(p=>p&&p.id===galaxy.origenId) || (sel&&sel.type==='planet'&&sel.data&&sel.data.id===galaxy.origenId));
+    if(_tutorialFadeOutStartMs===0 && !_oriPicked){ _advanceTo('ft_route_orijen'); return; }
     const _twoStops=routeStops.length>=2 && _dId>=0 && routeStops.some(p=>p&&p.id===_dId) && routeStops.some(p=>p&&p.id===galaxy.origenId);
     if(_tutorialFadeOutStartMs===0 && _twoStops) _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();

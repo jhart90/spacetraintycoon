@@ -113,6 +113,7 @@ func build_train(planet_id: int, engine: String, cars: Array) -> Dictionary:
 	GameState.credits -= cost
 	GameState.record_purchase(cost)
 	var t := Transit.build_train(planet_id, engine, cars, true)
+	Missions.on_train_built(cars)  # buy_second_train "purchase 2+ iron cars" objective
 	_ok("Train built (%d cars)" % cars.size())
 	return t
 

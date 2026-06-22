@@ -277,15 +277,20 @@ func _car_path_pos(t: Dictionary, off: float) -> Array:
 # Public: draw a consist as a SCREEN-SPACE strip fitted into `rect` (for the
 # HUD panel rows / info bar / train builder — §20.4). `cars` includes the engine
 # at [0]; `full` is per-car loaded state. Draws onto the passed CanvasItem.
-func draw_car_strip(canvas: CanvasItem, rect: Rect2, cars: Array, full: Array) -> void:
+func draw_car_strip(canvas: CanvasItem, rect: Rect2, cars: Array, full: Array, opts: Dictionary = {}) -> void:
 	if cars.is_empty():
 		return
+	# opts.scale (0.9/0.8/0.75 from the various callers) shrinks sprites within the
+	# strip; opts.fog_empty dims mid EMPTY cars (build_game.py _drawTrainCarStrip).
+	var user_scale := float(opts.get("scale", 1.0))
+	var fog_empty := bool(opts.get("fog_empty", false))
 	var ch := rect.size.y / 1.7
 	var draws: Array = []
 	var total := 0.0
 	for i in cars.size():
 		var type := String(cars[i])
-		var sprite := type if (i < full.size() and bool(full[i])) else _empty_sprite(type)
+		var is_full := i < full.size() and bool(full[i])
+		var sprite := type if is_full else _empty_sprite(type)
 		var m := _get_metric(sprite)
 		if m.tex == null:
 			continue
@@ -293,17 +298,21 @@ func draw_car_strip(canvas: CanvasItem, rect: Rect2, cars: Array, full: Array) -
 		var sd := vis_h / maxf(0.001, float(m.h_frac) * float(m.H))
 		var dw := float(m.W) * sd
 		var dh := float(m.H) * sd
-		draws.append({"tex": m.tex, "dw": dw, "dh": dh, "bot": float(m.bot_frac), "adv": dw * 0.72 + 2.0})
+		var ec := type == "caboose" or type.begins_with("engine_")
+		draws.append({"tex": m.tex, "dw": dw, "dh": dh, "bot": float(m.bot_frac), "adv": dw * 0.72 + 2.0, "empty": not is_full and not ec})
 		total += dw * 0.72 + 2.0
 	if total <= 0.0:
 		return
-	var s := minf(1.0, rect.size.x / total)
+	var s := minf(1.0, rect.size.x / total) * user_scale
 	var baseline := rect.position.y + rect.size.y * 0.86
 	var x := rect.position.x + 2.0
 	for d in draws:
 		var dw: float = d.dw * s
 		var dh: float = d.dh * s
-		canvas.draw_texture_rect(d.tex, Rect2(x, baseline - d.bot * dh, dw, dh), false)
+		# Empty-car fogging: milky pale + faded (approximates the JS brightness/
+		# saturate/opacity filter, which Godot modulate can't fully reproduce).
+		var mod := Color(1.5, 1.5, 1.55, 0.45) if (fog_empty and d.empty) else Color(1, 1, 1, 1)
+		canvas.draw_texture_rect(d.tex, Rect2(x, baseline - d.bot * dh, dw, dh), false, mod)
 		x += d.adv * s
 
 

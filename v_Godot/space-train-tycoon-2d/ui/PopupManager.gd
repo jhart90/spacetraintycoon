@@ -108,6 +108,7 @@ func _open(name: String) -> void:
 	active = name
 	state = {}
 	_drag = ""
+	Missions.on_window_opened(name)  # tutorial-mission UI-step objectives
 	if name == "trainbuilder":
 		tb_engine = "engine_constellation"
 		tb_cars = []
@@ -899,7 +900,15 @@ func _draw_event_mission() -> void:
 	var def: Dictionary = Missions.def_for(String(state.get("id", "")))
 	var objs: Array = def.get("objectives", [])
 	var pw := 440.0
-	var ph := 132.0 + objs.size() * 18.0 + (28.0 if int(def.get("reward", 0)) > 0 else 0.0)
+	# Size to content: details paragraph + per-objective wrapped line counts.
+	var details := String(def.get("details", ""))
+	var det_lines := _count_lines(f_exo, details, 11, pw - 56.0) if details != "" else 0
+	var det_h := (det_lines * 15 + 10) if details != "" else 0
+	var obj_h := 0
+	for ob in objs:
+		obj_h += _count_lines(f_exo, String(ob.get("text", "")), 10, pw - 70.0) * 14 + 6
+	var rw := int(def.get("reward", 0))
+	var ph := float(100 + det_h + 24 + obj_h + (28 if rw > 0 else 0) + 44)
 	var o := _base(pw, ph, Color(0.314, 0.784, 0.510, 0.7))
 	var px := o.x
 	var py := o.y
@@ -910,13 +919,15 @@ func _draw_event_mission() -> void:
 		_ctr(f_orb_b, cx + off.x, py + 44.0 + off.y, String(def.get("name", "?")), 14, Color(1.0, 0.878, 0.502, 0.45))
 	_ctr(f_orb_b, cx, py + 44.0, String(def.get("name", "?")), 14, Color(1.0, 0.878, 0.502))
 	draw_line(Vector2(px + 20.0, py + 56.0), Vector2(px + pw - 20.0, py + 56.0), Color(0.235, 0.627, 0.392, 0.4), 1.0)
-	_ctr(f_exo, cx, py + 74.0, "OBJECTIVES", 9, Color(0.471, 0.745, 0.588, 0.7))
-	var oy := py + 92.0
+	var oy := py + 72.0
+	# Details paragraph (tokenised — [Cargo] refs coloured).
+	if details != "":
+		oy = _draw_tok_text(cx, oy + 8.0, details, 11, Color(0.541, 0.667, 0.831, 0.78), pw - 56.0, 15.0) + 8.0
+	_ctr(f_exo, cx, oy, "OBJECTIVES", 9, Color(0.471, 0.745, 0.588, 0.7))
+	oy += 18.0
 	for ob in objs:
-		draw_arc(Vector2(px + 36.0, oy - 2.0), 5.0, 0.0, TAU, 14, Color(0.471, 0.627, 0.549, 0.85), 1.2)
-		draw_string(f_exo, Vector2(px + 48.0, oy + 2.0), String(ob.get("text", "")), HORIZONTAL_ALIGNMENT_LEFT, pw - 70.0, 10, Color(0.784, 0.882, 0.824, 0.9))
-		oy += 18.0
-	var rw := int(def.get("reward", 0))
+		draw_arc(Vector2(px + 36.0, oy + 2.0), 5.0, 0.0, TAU, 14, Color(0.471, 0.627, 0.549, 0.85), 1.2)
+		oy = _draw_tok_left(px + 48.0, oy + 6.0, String(ob.get("text", "")), 10, Color(0.784, 0.882, 0.824, 0.9), pw - 70.0, 14.0) + 4.0
 	if rw > 0:
 		var pill := Rect2(cx - 90.0, oy + 2.0, 180.0, 22.0)
 		_fill_round(pill, 5.0, Color(0.078, 0.353, 0.196, 0.9))
@@ -1165,6 +1176,23 @@ func _flush_tok_line(cx: float, y: float, line: Array, line_w: float, size: int,
 		var w := String(item.w)
 		draw_string(f_exo, Vector2(x, y), w, HORIZONTAL_ALIGNMENT_LEFT, -1, size, item.c)
 		x += f_exo.get_string_size(w, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x + space_w
+
+# Left-aligned token-aware wrapped text (mission objectives / details). Returns
+# the y after the block.
+func _draw_tok_left(x0: float, start_y: float, text: String, size: int, base: Color, maxw: float, lh: float) -> float:
+	var y := start_y
+	var space_w := f_exo.get_string_size(" ", HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
+	for seg in text.split("\n"):
+		var cx := x0
+		for item in _tok_words(seg, base):
+			var w := String(item.w)
+			var ww := f_exo.get_string_size(w, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
+			if cx + ww > x0 + maxw and cx > x0:
+				cx = x0; y += lh
+			draw_string(f_exo, Vector2(cx, y), w, HORIZONTAL_ALIGNMENT_LEFT, -1, size, item.c)
+			cx += ww + space_w
+		y += lh
+	return y
 
 # Splits text into (word, colour) items, colouring [Cargo] refs by CARGO_TEXT_COLORS.
 func _tok_words(text: String, base: Color) -> Array:
@@ -1606,7 +1634,7 @@ func _win_trains(px: float, py: float, pw: float, ph: float) -> void:
 		var full: Array = [true]
 		for c in t.get("carCargo", []):
 			full.append(c != null)
-		view._trains.draw_car_strip(self, Rect2(px + 10.0, ry + 32.0, pw - 20.0, 50.0), consist, full)
+		view._trains.draw_car_strip(self, Rect2(px + 10.0, ry + 32.0, pw - 20.0, 50.0), consist, full, {"scale": 0.9, "fog_empty": true})
 		# Location + car count.
 		var loc := "in transit"
 		if int(t.get("planetId", -1)) >= 0:
@@ -1834,7 +1862,7 @@ func _draw_train_detail() -> void:
 	var full: Array = [true]
 	for c in t.get("carCargo", []):
 		full.append(c != null)
-	view._trains.draw_car_strip(self, Rect2(px + 14.0, py + 52.0, pw - 28.0, 42.0), consist, full)
+	view._trains.draw_car_strip(self, Rect2(px + 14.0, py + 52.0, pw - 28.0, 42.0), consist, full, {"scale": 0.8, "fog_empty": true})
 	_rt(f_orb_b, px + pw - 16.0, py + 90.0, "EDIT TRAIN", 9, Color(0.588, 0.765, 0.922, 0.72))
 	_rects["td_edit"] = Rect2(px + 14.0, py + 52.0, pw - 28.0, 42.0)
 	draw_line(Vector2(px, py + 104.0), Vector2(px + pw, py + 104.0), Color(0.216, 0.333, 0.549, 0.45), 1.0)
@@ -2008,9 +2036,8 @@ func _draw_missions() -> void:
 			var od := bool(ob.get("done", false))
 			var ocol := Color(0.322, 0.341, 0.384, 0.7) if done else (Color(0.392, 0.824, 0.49, 0.9) if od else Color(0.706, 0.784, 0.922, 0.78))
 			draw_string(f_exo, Vector2(cx, my), "✓" if od else "○", HORIZONTAL_ALIGNMENT_LEFT, -1, 13, ocol)
-			for ln in _wrap_lines(f_exo, _obj_text(d, String(ob.id)), 11, c_max_w - 19.0):
-				draw_string(f_exo, Vector2(cx + 19.0, my), ln, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, ocol)
-				my += 15.0
+			# Tokenised so [Cargo] refs render in their cargo colour.
+			my = _draw_tok_left(cx + 19.0, my, _obj_text(d, String(ob.id)), 11, ocol, c_max_w - 19.0, 15.0)
 	# Completed divider.
 	if divider_idx > 0 and divider_idx < rows.size():
 		var dvy := list_y + float(row_y[divider_idx]) - DIV_GAP - _missions_scroll
@@ -3040,7 +3067,7 @@ func _draw_corp() -> void:
 	_corp_row(brx, bby + blh * 5.0, "Upgrades Installed", str(n_upgrades), 240.0)
 	_corp_row(brx, bby + blh * 6.0, "Cargo Delivered", str(cargo_n), 240.0)
 	_corp_row(brx, bby + blh * 7.0, "Passengers Delivered", str(pax_n), 240.0)
-	_corp_row(brx, bby + blh * 8.0, "Hazmat Incinerated", "0", 240.0)
+	_corp_row(brx, bby + blh * 8.0, "Hazmat Incinerated", str(GameState.hazmat_incinerated), 240.0)
 
 func _corp_stat(x: float, y: float, lbl: String, val: String, col: Color) -> void:
 	draw_string(f_exo, Vector2(x, y), lbl, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(0.392, 0.569, 0.843, 0.55))

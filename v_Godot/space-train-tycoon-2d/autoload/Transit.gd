@@ -415,7 +415,9 @@ func _start_cargo_ops(t: Dictionary, p: Dictionary) -> void:
 		if cargo == null:
 			continue
 		var units := _car_units(String(t.cars[i]))
-		if float(demand.get(cargo, 0.0)) < 0.5 * units:
+		# Hazmat is waste — it incinerates at ANY non-source planet regardless of
+		# demand (build_game.py disposes it into the nearest star).
+		if String(cargo) != "hazmat" and float(demand.get(cargo, 0.0)) < 0.5 * units:
 			continue
 		if int(t.carSrc[i]) == int(p.id):  # never unload at the source planet
 			continue
@@ -478,12 +480,23 @@ func _process_cargo_queue(t: Dictionary, p: Dictionary) -> void:
 					GameState.total_passengers_delivered += 1
 				GameState.player_delivered.emit(rev)
 				Missions.on_delivery(cargo, p.id)
+				# Hazmat disposal: each incinerated car counts toward dispose_hazmat.
+				if cargo == "hazmat":
+					GameState.hazmat_incinerated += 1
+					Missions.on_hazmat_incinerated()
 			elif AICorp.active:
 				AICorp.credits += rev
 				AICorp.total_revenue += rev
 			train_delivered.emit(t.id, p.id, cargo, rev)
 			if p.has("demand"):
 				p.demand[cargo] = maxf(0.0, float(p.demand.get(cargo, 0.0)) - _car_units(String(t.cars[i])))
+			# Refining intake: stockpile this cargo if a processing upgrade here
+			# consumes it (build_game.py:7750).
+			if t.isPlayer:
+				Economy.foundry_intake(p, String(cargo), _car_units(String(t.cars[i])))
+				# galactic_distance: source→destination trip length.
+				if not src.is_empty():
+					Missions.on_long_delivery(Vector2(float(src.x) - float(p.x), float(src.y) - float(p.y)).length())
 			t.carCargo[i] = null
 			t.carSrc[i] = -1
 		t.cargoQueue.pop_front()

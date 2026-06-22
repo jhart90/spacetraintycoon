@@ -83,6 +83,7 @@ func _ready() -> void:
 			for _i in n:
 				Galaxy.advance_orbits(20.0)
 				Economy.accumulate(20.0 * Tuning.SD_PER_DTG)
+				Economy.update_foundries(20.0)
 				Transit.tick(20.0)
 				AICorp.tick(20.0)
 				Fog.update(20.0 * Tuning.SD_PER_DTG)
@@ -93,7 +94,7 @@ func _ready() -> void:
 			var cars0 := GameState.unlocked_cars.size()
 			Discovery.planet_visited.connect(func(pid: int, r: int): print("VISIT ", String(Galaxy.planets[pid].name), " +", r, " cr"))
 			for _i in n2:
-				Galaxy.advance_orbits(20.0); Economy.accumulate(20.0 * Tuning.SD_PER_DTG)
+				Galaxy.advance_orbits(20.0); Economy.accumulate(20.0 * Tuning.SD_PER_DTG); Economy.update_foundries(20.0)
 				Transit.tick(20.0); Fog.update(20.0 * Tuning.SD_PER_DTG)
 			var mids := []
 			for m in Missions.active:
@@ -116,6 +117,142 @@ func _ready() -> void:
 			Discovery.diamond_discovered.emit(Galaxy.origen_id)
 		elif a.begins_with("--test-upgrade="):
 			GameState.upgrade_unlocked.emit(a.split("=", true, 1)[1])
+		elif a == "--test-foundry":
+			var dp := -1
+			for i in Galaxy.planets.size():
+				if String(Galaxy.planets[i].type.id) == "desert":
+					dp = i; break
+			if dp >= 0:
+				var p: Dictionary = Galaxy.planets[dp]
+				p.hasStation = true
+				p["upgrades"] = ["iron_foundry"]
+				p["playerBuiltUpgrades"] = ["iron_foundry"]
+				Economy.foundry_intake(p, "molten_ore", 1.0)
+				Economy.foundry_intake(p, "water", 1.0)
+				var iron0 := float((p.get("supply", {}) as Dictionary).get("iron", 0.0))
+				var cars0 := GameState.unlocked_cars.size()
+				for _i in 200:
+					Economy.update_foundries(20.0)
+				print("FOUNDRY iron %.1f->%.1f hazmat=%.1f cars %d->%d iron_car=%s hazmat_car=%s anyProduced=%s" % [iron0, float(p.supply.get("iron", 0.0)), float(p.supply.get("hazmat", 0.0)), cars0, GameState.unlocked_cars.size(), GameState.unlocked_cars.has("car_iron"), GameState.unlocked_cars.has("car_hazmat"), GameState.any_cargo_produced])
+			get_tree().quit()
+		elif a == "--test-missions":
+			Missions.start_new_game()
+			var dp2 := -1
+			for i in Galaxy.planets.size():
+				if String(Galaxy.planets[i].type.id) == "desert":
+					dp2 = i; break
+			if dp2 >= 0:
+				var p2: Dictionary = Galaxy.planets[dp2]
+				p2.hasStation = true
+				p2["upgrades"] = ["iron_foundry"]
+				p2["playerBuiltUpgrades"] = ["iron_foundry"]
+				Missions.on_station_built(p2)              # build_foundry obj 1
+				Missions.on_upgrade_built(p2, "iron_foundry")  # → completes build_foundry → produce_iron + buy_second_train
+				Economy.foundry_intake(p2, "molten_ore", 1.0)  # produce_iron obj 1
+				Economy.foundry_intake(p2, "water", 1.0)
+				for _i in 200:
+					Economy.update_foundries(20.0)         # smelt iron → completes produce_iron → upgrade_station
+				for _i in 4:
+					Missions.on_delivery("iron", dp2)      # upgrade_station obj 1 (4 iron to a station)
+				GameState.unlocked_upgrades["large_station"] = true
+				Missions.on_large_station_built(p2)        # → completes upgrade_station
+				var act := []
+				for m in Missions.active:
+					act.append(String(m.id))
+				print("MISSIONS completed=%s active=%s" % [str(Missions.completed.keys()), str(act)])
+			get_tree().quit()
+		elif a == "--test-roles":
+			Missions.start_new_game()
+			GameState.unlocked_cars["car_livestock"] = true
+			GameState.unlocked_cars["car_medical"] = true
+			var fam := -1
+			var outb := -1
+			for p in Galaxy.planets:
+				if bool(p.get("isFaminePlanet", false)): fam = int(p.id)
+				if bool(p.get("isOutbreakPlanet", false)): outb = int(p.id)
+			if fam >= 0:
+				Discovery.visited_planet_ids[fam] = true
+				Missions._on_planet_visited(fam, 0)            # trigger famine
+				for _i in 10:
+					Missions.on_delivery("livestock", fam)     # 10 livestock → completes famine
+			if outb >= 0:
+				Discovery.visited_planet_ids[outb] = true
+				Missions._on_planet_visited(outb, 0)           # trigger outbreak
+				for _i in 4:
+					Missions.on_delivery("medical", outb)      # 4 medical → completes outbreak
+			# stellar_cartography: visit planets in 5 distinct star systems.
+			var seen_sys := {}
+			for p in Galaxy.planets:
+				if seen_sys.has(int(p.starId)):
+					continue
+				seen_sys[int(p.starId)] = true
+				Discovery.visited_planet_ids[int(p.id)] = true
+				Missions._on_planet_visited(int(p.id), 0)
+				if seen_sys.size() >= 6:
+					break
+			# galactic_distance: a long delivery.
+			Missions.on_long_delivery(20000.0)
+			# seeking_home: visit a rocky planet → ferry 1 passenger to the target.
+			var rocky := -1
+			for p in Galaxy.planets:
+				if String(p.type.id) == "rocky":
+					rocky = int(p.id); break
+			if rocky >= 0:
+				Discovery.visited_planet_ids[rocky] = true
+				Missions._on_planet_visited(rocky, 0)
+				var shm := Missions._find_active("seeking_home")
+				if not shm.is_empty():
+					Missions.on_delivery("passengers", int(shm.targetPlanetId))
+			# dispose_hazmat: foundry built → hazmat car unlocked → incinerate 2.
+			GameState.unlocked_cars["car_hazmat"] = true
+			Missions.on_upgrade_built({"type": {"id": "desert"}}, "iron_foundry")
+			GameState.hazmat_incinerated += 1; Missions.on_hazmat_incinerated()
+			GameState.hazmat_incinerated += 1; Missions.on_hazmat_incinerated()
+			print("ROLES fam=%d outbreak=%d completed=%s" % [fam, outb, str(Missions.completed.keys())])
+			get_tree().quit()
+		elif a == "--test-missions3":
+			Missions.start_new_game()
+			for c in ["car_steel", "car_battery", "car_oil", "car_chemical", "car_passenger", "car_flowers", "car_cargo", "car_medical", "car_livestock", "car_sand"]:
+				GameState.unlocked_cars[c] = true
+			var og := Galaxy.origen_id
+			var bh := -1
+			var anc := -1
+			var colsrc := -1
+			var coldest := -1
+			var flowers := -1
+			for p in Galaxy.planets:
+				if bool(p.get("isBhResearchPlanet", false)): bh = int(p.id)
+				if String(p.type.id) == "ancient" and anc < 0: anc = int(p.id)
+				if bool(p.get("isColonyTrainSource", false)): colsrc = int(p.id); coldest = int(p.get("colonyTrainDestId", -1))
+				if bool(p.get("isFlowersOrigin", false)): flowers = int(p.id)
+			Missions.on_production({}, "steel")                                  # design_better_train
+			for _i in 20: Missions.on_delivery("steel", og)
+			for _i in 20: Missions.on_delivery("battery", og)
+			for _i in 20: Missions.on_delivery("oil", og)
+			if bh >= 0:
+				Discovery.visited_planet_ids[bh] = true; Missions._on_planet_visited(bh, 0)
+				for _i in 5: Missions.on_delivery("chemical", bh)                # bh_research → another_dimension
+			if Missions.is_active("another_dimension"):
+				Missions._another_dim_start = GameState.stardate - 1.0; Missions._process(0.0)
+			if Missions.is_active("more_scientists"):
+				for _i in 3: Missions.on_delivery("passengers", bh)              # more_scientists
+			if anc >= 0:
+				Discovery.visited_planet_ids[anc] = true; Missions._on_planet_visited(anc, 0)
+				Missions.on_delivery("cargo", og)                               # ancient_schematics
+			Missions.on_large_station_built({})                                 # mad_scientist
+			Missions.on_delivery("passengers", og)
+			if colsrc >= 0:
+				Discovery.visited_planet_ids[colsrc] = true; Missions._on_planet_visited(colsrc, 0)
+				for _i in 5: Missions.on_delivery("passengers", coldest)        # colony_train
+			if flowers >= 0:
+				Discovery.visited_planet_ids[flowers] = true; Missions._on_planet_visited(flowers, 0)
+				var fn := 0
+				for p in Galaxy.planets:
+					if String(p.type.id) in ["jungle", "desert", "resort"] and int(p.id) != flowers:
+						Missions.on_delivery("flowers", int(p.id)); fn += 1       # spread_the_seed
+						if fn >= 10: break
+			print("MISSIONS3 completed=%s" % str(Missions.completed.keys()))
+			get_tree().quit()
 		elif a == "--test-dyson":
 			if not Galaxy.stars.is_empty():
 				Galaxy.stars[Galaxy.home_star_id].hasDysonSphere = true

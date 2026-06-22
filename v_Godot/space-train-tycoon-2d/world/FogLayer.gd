@@ -75,7 +75,8 @@ class _MaskDrawer extends Node2D:
 		var sc: float = view.sc
 		var stamp: Texture2D = layer._stamp
 		# Breadcrumb reveals — bucketed by world cell to drop redundant stamps.
-		var rev := Fog.REVEAL_R * sc
+		# ×1.2 matches the JS stamp diameter (sr*2.4 → radius 1.2·sr).
+		var rev := Fog.REVEAL_R * 1.2 * sc
 		var seen := {}
 		var cell := maxf(Fog.GRID, Fog.REVEAL_R * 0.5)
 		for pt in Fog.points:
@@ -86,15 +87,15 @@ class _MaskDrawer extends Node2D:
 				continue
 			seen[key] = true
 			_stamp_at(view._w2s(Vector2(pt.x, pt.y)), rev, stamp)
-		# Visited-star-system reveals.
+		# Visited-star-system reveals (JS draws revR*2 with a gradient out to ×1.1).
 		for srv in Fog.star_reveals:
-			_stamp_at(view._w2s(Vector2(srv.x, srv.y)), float(srv.r) * sc, stamp)
-		# Live orbited-planet reveals.
+			_stamp_at(view._w2s(Vector2(srv.x, srv.y)), float(srv.r) * 2.2 * sc, stamp)
+		# Live orbited-planet reveals (JS 3000 out to ×1.1 = 3300).
 		for pid in Fog.orbited:
 			var p: Dictionary = Galaxy.planets[int(pid)] if int(pid) < Galaxy.planets.size() else {}
 			if p.is_empty():
 				continue
-			_stamp_at(view._w2s(Vector2(p.x, p.y)), 3000.0 * sc, stamp)
+			_stamp_at(view._w2s(Vector2(p.x, p.y)), 3300.0 * sc, stamp)
 
 	func _stamp_at(sp: Vector2, r: float, stamp: Texture2D) -> void:
 		if r < 1.0:
