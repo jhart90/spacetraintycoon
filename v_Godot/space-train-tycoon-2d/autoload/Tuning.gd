@@ -98,6 +98,7 @@ const SD_PER_DTG: float = 0.01 / 600.0
 const CLOUD_SPEED: float = 0.000070   # build_game.py:1798
 const START_STARDATE: float = 829.0   # _corp.foundingStardate
 const PLAYER_START_CREDITS: int = 250000  # build_game.py:909
+const DYSON_SPHERE_COST: int = 1000000    # build_game.py:2482 (player-built star megastructure)
 
 # ── Orbit / motion constants ──────────────────────────────────────────────
 const ORB_SPD: float = 0.004  # build_game.py:1031

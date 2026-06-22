@@ -21991,6 +21991,43 @@ function updateMissions(dtSd){
   }
 }
 
+// Progress data for a quantified ("do X N times") objective → {cur,max,label,pct?}
+// or null for objectives without a count. Shared by the [M] Missions window AND
+// the on-screen Mission Objectives Tracker so both stay in sync.
+function _mObjProgress(m,objId){
+    if(objId==='deliver_20_livestock') return {cur:m._famineDeliveries||0,   max:10, label:'Food delivered'};
+    if(objId==='deliver_4_medical')    return {cur:m._medicalDeliveries||0,  max:4,  label:'Supplies delivered'};
+    if(objId==='deliver_50_to_origen') return {cur:m._origenPassengersCount||0, max:50, label:'Passengers delivered'};
+    if(objId==='deliver_flowers_10')   return galaxy?{cur:Math.min(galaxy.planets.filter(p=>p.flowerUnlocked&&!p.isFlowersOrigin).length,10), max:10, label:'Planets seeded'}:null;
+    if(objId==='incinerate_hazmat')    return {cur:Math.min((_totalHazmatIncinerated-(m.hazmatIncineratedSnapshot||0)),2), max:2, label:'Hazmat incinerated'};
+    if(objId==='visit_5_systems')      return galaxy?{cur:Math.min(new Set(galaxy.planets.filter(p=>visitedPlanetIds.has(p.id)&&!m.visitedSnapshot?.has(p.id)).map(p=>p.starId)).size,5), max:5, label:'Systems visited'}:null;
+    if(objId==='deliver_10_sand')      return {cur:Math.min(m._sandDeliveries||0,10), max:10, label:'Sand removed'};
+    if(objId==='visit_50_planets')     return {cur:Math.min(visitedPlanetIds.size,50), max:50, label:'Planets visited'};
+    // count only the player's own stations/trains (mirrors corporate_expansion checkObj).
+    if(objId==='stations_7')           return galaxy?{cur:Math.min(galaxy.planets.filter(p=>p.playerBuiltStation||p.isStarter).length,7), max:7, label:'Stations built'}:null;
+    if(objId==='trains_profitable_1sd'){
+      let _pn=0;
+      for(const t of trains){
+        if(!t.isPlayer||!t._revLog||!t._revLog.length) continue;
+        while(t._revLog.length&&stardate-t._revLog[0].sd>1.0) t._revLog.shift();
+        let _net=0;
+        for(const _e of t._revLog) _net+=_e.rev;
+        if(_net>0) _pn++;
+      }
+      return {cur:Math.min(_pn,5), max:5, label:'Profitable trains'};
+    }
+    if(objId==='deliver_5_chemical')   return {cur:Math.min(m._chemicalDeliveries||0,5), max:5, label:'Chemical delivered'};
+    if(objId==='wait_research'){
+      // Hidden 2.0-SD research countdown shown only as a % bar.
+      const _sd0=m._researchStartSd!=null?m._researchStartSd:stardate;
+      const _frac=Math.max(0,Math.min(1,(stardate-_sd0)/2.0));
+      return {cur:Math.floor(_frac*100), max:100, label:'Research progress', pct:true};
+    }
+    if(objId==='deliver_10_steel_home')   return {cur:Math.min(m._homeSteelDelivered  ||0,20), max:20, label:'Steel delivered'};
+    if(objId==='deliver_10_battery_home') return {cur:Math.min(m._homeBatteryDelivered||0,20), max:20, label:'Batteries delivered'};
+    if(objId==='deliver_10_oil_home')     return {cur:Math.min(m._homeOilDelivered    ||0,20), max:20, label:'Oil delivered'};
+    return null;
+}
 function drawMissionsPopup(){
   if(activePopup!=='missions') return;
   const pw=480,ph=360;
@@ -22038,47 +22075,6 @@ function drawMissionsPopup(){
   const _mCbW=Math.round(ctx.measureText('○').width)+5;
 
   // --- Progress-bar helper: returns {cur,max,label} for quantified objectives, else null ---
-  const _mObjProgress=(m,objId)=>{
-    if(objId==='deliver_20_livestock') return {cur:m._famineDeliveries||0,   max:10, label:'Food delivered'};
-    if(objId==='deliver_4_medical')    return {cur:m._medicalDeliveries||0,  max:4,  label:'Supplies delivered'};
-    if(objId==='deliver_50_to_origen') return {cur:m._origenPassengersCount||0, max:50, label:'Passengers delivered'};
-    if(objId==='deliver_flowers_10')   return galaxy?{cur:Math.min(galaxy.planets.filter(p=>p.flowerUnlocked&&!p.isFlowersOrigin).length,10), max:10, label:'Planets seeded'}:null;
-    if(objId==='incinerate_hazmat')    return {cur:Math.min((_totalHazmatIncinerated-(m.hazmatIncineratedSnapshot||0)),2), max:2, label:'Hazmat incinerated'};
-    if(objId==='visit_5_systems')      return galaxy?{cur:Math.min(new Set(galaxy.planets.filter(p=>visitedPlanetIds.has(p.id)&&!m.visitedSnapshot?.has(p.id)).map(p=>p.starId)).size,5), max:5, label:'Systems visited'}:null;
-    if(objId==='deliver_10_sand')      return {cur:Math.min(m._sandDeliveries||0,10), max:10, label:'Sand removed'};
-    if(objId==='visit_50_planets')     return {cur:Math.min(visitedPlanetIds.size,50), max:50, label:'Planets visited'};
-    // Must mirror the corporate_expansion checkObj filters above (lines ~577-578):
-    // count only the player's own stations and trains — `p.hasStation` alone
-    // would include alien-relic stations, and the trains filter without
-    // `t.isPlayer` would include the AI rival's fleet.
-    if(objId==='stations_7')           return galaxy?{cur:Math.min(galaxy.planets.filter(p=>p.playerBuiltStation||p.isStarter).length,7), max:7, label:'Stations built'}:null;
-    if(objId==='trains_profitable_1sd'){
-      // Match the rolling-window NET-profit logic from checkObj above —
-      // count trains where revenue earned exceeds maintenance costs across
-      // the last 1 SD (sum of {sd,rev} entries in _revLog > 0).
-      let _pn=0;
-      for(const t of trains){
-        if(!t.isPlayer||!t._revLog||!t._revLog.length) continue;
-        while(t._revLog.length&&stardate-t._revLog[0].sd>1.0) t._revLog.shift();
-        let _net=0;
-        for(const _e of t._revLog) _net+=_e.rev;
-        if(_net>0) _pn++;
-      }
-      return {cur:Math.min(_pn,5), max:5, label:'Profitable trains'};
-    }
-    if(objId==='deliver_5_chemical')   return {cur:Math.min(m._chemicalDeliveries||0,5), max:5, label:'Chemical delivered'};
-    if(objId==='wait_research'){
-      // Hidden 2.0-SD research countdown shown only as a % bar (the exact
-      // duration is deliberately not surfaced to the player).
-      const _sd0=m._researchStartSd!=null?m._researchStartSd:stardate;
-      const _frac=Math.max(0,Math.min(1,(stardate-_sd0)/2.0));
-      return {cur:Math.floor(_frac*100), max:100, label:'Research progress', pct:true};
-    }
-    if(objId==='deliver_10_steel_home')   return {cur:Math.min(m._homeSteelDelivered  ||0,20), max:20, label:'Steel delivered'};
-    if(objId==='deliver_10_battery_home') return {cur:Math.min(m._homeBatteryDelivered||0,20), max:20, label:'Batteries delivered'};
-    if(objId==='deliver_10_oil_home')     return {cur:Math.min(m._homeOilDelivered    ||0,20), max:20, label:'Oil delivered'};
-    return null;
-  };
   const PROG_H=20; // px added per objective that has a progress bar (label+bar+margins)
   // --- Pre-compute per-row heights (needs font measuring) ---
   // cMaxW must leave room for the reward pill (right-anchored).
@@ -30613,6 +30609,25 @@ function drawGalaxy(ts,dt){
             _objDrawLine(_toks,_mtX+(li===0?0:6),_rowBottom+8+li*_mtLH,_trkFontStr,_trkCol);
           }
           _rowBottom+=_trkLines.length*_mtLH;
+          // Quantified objective → mini progress bar (label + bar) under the
+          // objective text, mirroring the [M] Missions window's bars.
+          const _trkProg=_mObjProgress(m,_obj.id);
+          if(_trkProg){
+            const _pct=Math.max(0,Math.min(1,_trkProg.cur/Math.max(1,_trkProg.max)));
+            const _pgX=_mtX+6, _pgW=Math.min(_mtW-12,150);
+            const _pgLblY=_rowBottom+8;
+            ctx.font='7px "Exo 2",sans-serif'; ctx.textAlign='left';
+            ctx.fillStyle=_hov?'rgba(205,222,250,0.92)':'rgba(170,196,232,0.72)';
+            ctx.fillText(_trkProg.pct?(_trkProg.label+': '+_trkProg.cur+'%'):(_trkProg.label+': '+_trkProg.cur+' / '+_trkProg.max),_pgX,_pgLblY+4);
+            const _pgBarY=_pgLblY+7;
+            ctx.fillStyle='rgba(18,30,22,0.62)'; ctx.fillRect(_pgX,_pgBarY,_pgW,4);
+            if(_pct>0){
+              ctx.fillStyle=_pct>=0.75?'rgba(140,220,140,0.85)':_pct>=0.4?'rgba(200,210,80,0.82)':'rgba(120,195,245,0.82)';
+              ctx.fillRect(_pgX,_pgBarY,Math.max(2,Math.round(_pgW*_pct)),4);
+            }
+            ctx.strokeStyle='rgba(65,100,75,0.42)'; ctx.lineWidth=1; ctx.strokeRect(_pgX,_pgBarY,_pgW,4);
+            _rowBottom+=16; // label line + bar block
+          }
         }
         _missionTrackerBounds.push({x:_mtX-2,y:_nameY-2,w:_mtW+4,h:(_rowBottom-_nameY)+4,missionIdx:_mi});
         _mtCursorY=_rowBottom+_mtGap;

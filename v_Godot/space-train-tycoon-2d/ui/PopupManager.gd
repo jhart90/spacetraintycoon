@@ -329,6 +329,15 @@ func _on_click(p: Vector2) -> void:
 		if _hit("reg_visited", p):
 			_reg_visited_only = not _reg_visited_only; _reg_scroll = 0.0; Audio.play("button"); queue_redraw(); return
 	elif active == "star":
+		if _hit("dyson_build", p):
+			var ssid := int(String(GameState.selected.get("id", "")).trim_prefix("star_"))
+			if ssid >= 0 and ssid < Galaxy.stars.size() and not Galaxy.stars[ssid].get("hasDysonSphere", false) and GameState.credits >= Tuning.DYSON_SPHERE_COST:
+				GameState.credits -= Tuning.DYSON_SPHERE_COST
+				GameState.record_purchase(Tuning.DYSON_SPHERE_COST)
+				Galaxy.stars[ssid].hasDysonSphere = true
+				Audio.play("purchase")
+				queue_redraw()
+			return
 		for k in _rects.keys():
 			if String(k).begins_with("starplanet_") and _hit(String(k), p):
 				var ppid := int(String(k).trim_prefix("starplanet_"))
@@ -2205,6 +2214,18 @@ func _draw_star_popup() -> void:
 				draw_texture_rect(bt, Rect2(Vector2(stx - 14.0, py + 176.0), Vector2(28.0, 28.0)), false)
 			_ctr(f_exo, stx, py + 218.0, String(pp.get("name", "?")).substr(0, 8), 8, Color(0.7, 0.82, 1.0, 0.75), 56.0)
 		stx += 58.0
+	# Dyson sphere construction (build_game.py star-detail :33760).
+	var dyson_y := py + ph - 36.0
+	if bool(s.get("hasDysonSphere", false)):
+		draw_string(f_orb_b, Vector2(px + 16.0, dyson_y + 17.0), "★ DYSON SPHERE ACTIVE", HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color(0.588, 0.824, 1.0, 0.9))
+	else:
+		var afford := GameState.credits >= Tuning.DYSON_SPHERE_COST
+		var db := Rect2(px + pw - 206.0, dyson_y, 190.0, 26.0)
+		_btn(db.position.x, db.position.y, 190.0, 26.0, "CONSTRUCT DYSON · %s cr" % _fmt_cr(Tuning.DYSON_SPHERE_COST),
+			Color(0.078, 0.235, 0.471, 0.92) if afford else Color(0.094, 0.118, 0.176, 0.7),
+			Color(0.706, 0.882, 1.0, 0.95) if afford else Color(0.451, 0.510, 0.608, 0.7), 8)
+		if afford:
+			_rects["dyson_build"] = db
 
 # ── Quit confirm (build_game.py drawQuitConfirmPopup 17512): 390×110, 3 buttons.
 func _draw_quitconfirm() -> void:

@@ -116,6 +116,9 @@ func _ready() -> void:
 			Discovery.diamond_discovered.emit(Galaxy.origen_id)
 		elif a.begins_with("--test-upgrade="):
 			GameState.upgrade_unlocked.emit(a.split("=", true, 1)[1])
+		elif a == "--test-dyson":
+			if not Galaxy.stars.is_empty():
+				Galaxy.stars[Galaxy.home_star_id].hasDysonSphere = true
 		elif a == "--test-ceohire":
 			if GameState.ceo.is_empty():
 				GameState.set_ceo(GameState._gen_ceo("Gigi", "ceo_gigi"))

@@ -25,6 +25,7 @@ var _night_tex: Texture2D  # shared night-side shadow overlay
 const _SPHERE_TEX_N := 256
 # View-side biome surface detail (resort islands / agri fields / oil bands).
 var _surface: Dictionary = {}
+var _neb_font: Font  # Exo 2 for nebula name labels (lazy-loaded)
 
 # View-side cosmetic cloud data, generated lazily & seeded per planet id
 # (decoupled from the sim, which skipped cosmetic RNG). {planet_id: Array}.
@@ -74,6 +75,9 @@ func _draw() -> void:
 	var sc: float = view.sc
 	var ts := float(Time.get_ticks_msec())
 
+	# ── Named nebulas (world-space, behind everything) ──
+	_draw_nebulas(gt, sc)
+
 	# ── Stars (before planets so planets appear in front) ──
 	for s in Galaxy.stars:
 		var sp: Vector2 = view._w2s(Vector2(s.x, s.y))
@@ -82,6 +86,8 @@ func _draw() -> void:
 		if sp.x + sglow_r < 0.0 or sp.x - sglow_r > Tuning.W or sp.y + sglow_r < 0.0 or sp.y - sglow_r > Tuning.GH:
 			continue
 		_draw_star(gt, sp, sr, s)
+		if s.get("hasDysonSphere", false):
+			_draw_dyson(sp, sr, sc)
 		# High orbit ring (HazMat zone) — faint green DASHED ring (build_game.py
 		# setLineDash([4,9])).
 		var hor := sr * 1.6
@@ -137,6 +143,14 @@ func _draw() -> void:
 			rc = Color(1.0, 0.843, 0.0, 0.95)               # star → #ffd700
 		elif kind == "train":
 			rc = Color(1.0, 0.667, 0.533, 0.95)             # train → #fa8
+		else:
+			# Grey orbit ring for the selected planet (where its trains orbit —
+			# the port has one orbit tier, not the JS LOW/MED/HIGH set).
+			var pid := int(String(GameState.selected.get("id", "")).trim_prefix("planet_"))
+			if pid >= 0 and pid < Galaxy.planets.size():
+				var orb := Transit._orbit_radius_for(Galaxy.planets[pid]) * sc
+				if orb > 6.0:
+					draw_arc(sp2, orb, 0.0, TAU, 64, Color(0.627, 0.627, 0.647, 0.30), 0.8)
 		var ring_r := maxf(9.0, rr) + 5.0
 		draw_arc(sp2, ring_r, 0.0, TAU, 56, Color(rc.r, rc.g, rc.b, 0.22), 7.0)  # glow
 		draw_arc(sp2, ring_r, 0.0, TAU, 56, rc, 2.0)
@@ -1025,6 +1039,161 @@ func _draw_mtn(c: Vector2, r: float, ms: Array) -> void:
 			var sl := c + Vector2(cos(a - sn_w), sin(a - sn_w)) * sn_r
 			var sr := c + Vector2(cos(a + sn_w), sin(a + sn_w)) * sn_r
 			draw_colored_polygon([sl, sr, pk], Color(0.894, 0.957, 1.0, 0.88))
+
+# ── Dyson sphere (build_game.py drawDysonSphere:12622) ──────────────────────
+# A Fibonacci-distributed shell of 220 lit hexagonal panels rotating slowly
+# around the Y axis. Back panels behind the star disc are culled (the JS uses an
+# even-odd clip; centre-cull is a close approximation).
+const _DYSON_PANELS := 220
+
+func _draw_dyson(c: Vector2, r: float, sc: float) -> void:
+	if r < 4.0:
+		return
+	var train_h := maxf(2.0, 28.0 * sc)
+	var sphere_r := maxf(r * 1.05, r * 1.40 - 1.5 * train_h)
+	var hex_r := sphere_r * 0.072
+	var rot := Time.get_ticks_msec() * 0.00006
+	var c_r := cos(rot)
+	var s_r := sin(rot)
+	var phi := PI * (3.0 - sqrt(5.0))  # golden angle
+	# Build + Y-rotate the panel normals.
+	var panels: Array = []
+	for i in _DYSON_PANELS:
+		var y0 := 1.0 - (float(i) / float(_DYSON_PANELS - 1)) * 2.0
+		var rd := sqrt(maxf(0.0, 1.0 - y0 * y0))
+		var theta := phi * i
+		var px := cos(theta) * rd
+		var pz := sin(theta) * rd
+		panels.append({"nx": px * c_r + pz * s_r, "ny": y0, "nz": -px * s_r + pz * c_r})
+	panels.sort_custom(func(a, b): return a.nz < b.nz)  # painter order
+	var stroke_w := maxf(0.5, hex_r * 0.09)
+	for p in panels:
+		var nx: float = p.nx
+		var ny: float = p.ny
+		var nz: float = p.nz
+		var cxn := nx * sphere_r
+		var cyn := ny * sphere_r
+		# Back panels behind the star disc → cull (approximates the even-odd clip).
+		if nz < 0.0 and Vector2(cxn, cyn).length() < r:
+			continue
+		# Tangent basis at the panel centre.
+		var ux := 0.0
+		var uy := 1.0
+		var uz := 0.0
+		if absf(ny) > 0.96:
+			ux = 1.0; uy = 0.0; uz = 0.0
+		var up_dot := ux * nx + uy * ny + uz * nz
+		var tx := ux - up_dot * nx
+		var ty := uy - up_dot * ny
+		var tz := uz - up_dot * nz
+		var t_len := maxf(0.0001, sqrt(tx * tx + ty * ty + tz * tz))
+		tx /= t_len; ty /= t_len; tz /= t_len
+		var bx := ny * tz - nz * ty
+		var by := nz * tx - nx * tz
+		var hex: PackedVector2Array = []
+		for v in 6:
+			var ang := v * (PI / 3.0)
+			var ca := cos(ang) * hex_r
+			var sa := sin(ang) * hex_r
+			hex.append(c + Vector2(cxn + ca * tx + sa * bx, cyn + ca * ty + sa * by))
+		var diffuse := maxf(0.0, nz)
+		var bright := (0.32 + 0.55 * diffuse) if nz > 0.0 else (0.20 + 0.20 * (1.0 + nz))
+		draw_colored_polygon(hex, Color((58.0 + 110.0 * bright) / 255.0, (78.0 + 110.0 * bright) / 255.0, (108.0 + 105.0 * bright) / 255.0, 0.93))
+		var outline := hex.duplicate()
+		outline.append(hex[0])
+		draw_polyline(outline, Color(0.882, 0.922, 1.0, 0.5 * bright + 0.18), stroke_w, true)
+		if diffuse > 0.86:
+			draw_colored_polygon(hex, Color(1, 1, 1, 0.42 * (diffuse - 0.86) / 0.14))
+
+# ── Named world-space nebulas (build_game.py _drawNebulas:8443 + names:8408) ──
+# Each nebula is a cluster of soft tinted radial blobs (the JS bakes these into a
+# canvas; here they're drawn live with the shared glow texture). Overall 0.55
+# translucency so they read as background atmosphere. Name labels above ~150px.
+func _draw_nebulas(gt: Texture2D, sc: float) -> void:
+	if Galaxy.nebulas.is_empty():
+		return
+	if _neb_font == null:
+		_neb_font = load("res://assets/fonts/Exo2-Variable.woff2")
+	for n in Galaxy.nebulas:
+		var sp: Vector2 = view._w2s(Vector2(n.x, n.y))
+		var sw := float(n.rx) * 2.0 * sc
+		var sh := float(n.ry) * 2.0 * sc
+		if sw < 2.0 or sh < 2.0:
+			continue
+		var bmax := Vector2(sw, sh).length() * 0.5
+		if sp.x + bmax < 0.0 or sp.x - bmax > Tuning.W or sp.y + bmax < 0.0 or sp.y - bmax > Tuning.GH:
+			continue
+		if not n.has("_blobs"):
+			n["_blobs"] = _gen_nebula_blobs(n)
+		var rot: float = round(float(n.rot) / (PI * 0.5)) * (PI * 0.5)
+		var cosr := cos(rot)
+		var sinr := sin(rot)
+		for bl in n._blobs:
+			var lx: float = float(bl.x) * float(n.rx)
+			var ly: float = float(bl.y) * float(n.ry)
+			var bsp: Vector2 = view._w2s(Vector2(float(n.x) + lx * cosr - ly * sinr, float(n.y) + lx * sinr + ly * cosr))
+			var br: float = float(bl.r) * float(n.rx) * sc
+			if br < 0.5:
+				continue
+			var col: Color = bl.col
+			col.a = col.a * 0.55
+			draw_texture_rect(gt, Rect2(bsp - Vector2(br, br), Vector2(br * 2.0, br * 2.0)), false, col)
+		# Name label.
+		var min_dim := minf(sw, sh)
+		if min_dim >= 150.0 and sp.x > -100.0 and sp.x < Tuning.W + 100.0 and sp.y > -40.0 and sp.y < Tuning.GH + 40.0:
+			var fa := clampf((min_dim - 150.0) / 110.0, 0.0, 1.0)
+			var fs := int(clampf(min_dim * 0.03, 7.0, 12.0))
+			var label := (String(n.name) + " Nebula").to_upper()
+			var lw := _neb_font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
+			draw_string(_neb_font, Vector2(sp.x - lw * 0.5, sp.y + fs * 0.35), label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color(0.804, 0.804, 0.824, 0.62 * fa))
+
+func _gen_nebula_blobs(n: Dictionary) -> Array:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = int(n.seed)
+	var pal: Array = Galaxy.NEBULA_PALETTE
+	var pri: Array = pal[int(n.colorIdx) % pal.size()]
+	var sec: Array = pal[int(n.secColorIdx) % pal.size()]
+	var blobs: Array = []
+	# Secondary halo (broad central wash).
+	blobs.append({"x": 0.0, "y": 0.0, "r": 0.95, "col": _hsl(sec[0], sec[1], sec[2] + 8, 0.22)})
+	# Secondary cloud.
+	for i in 8 + int(rng.randf() * 7.0):
+		blobs.append({"x": (rng.randf() - 0.5) * 0.85, "y": (rng.randf() - 0.5) * 0.85, "r": 0.18 + rng.randf() * 0.45,
+			"col": _hsl(sec[0] + (rng.randf() - 0.5) * 36.0, clampf(sec[1] + (rng.randf() - 0.5) * 18.0, 20, 92), clampf(sec[2] + (rng.randf() - 0.5) * 18.0 + 8.0, 14, 60), 0.16 + rng.randf() * 0.18)})
+	# Main cloud.
+	for i in 14 + int(rng.randf() * 9.0):
+		blobs.append({"x": (rng.randf() - 0.5) * 0.70, "y": (rng.randf() - 0.5) * 0.70, "r": 0.12 + rng.randf() * 0.46,
+			"col": _hsl(pri[0] + (rng.randf() - 0.5) * 36.0, clampf(pri[1] + (rng.randf() - 0.5) * 18.0, 20, 92), clampf(pri[2] + (rng.randf() - 0.5) * 18.0 + 10.0, 14, 60), 0.16 + rng.randf() * 0.24)})
+	# Bright knots.
+	for i in 3 + int(rng.randf() * 4.0):
+		blobs.append({"x": (rng.randf() - 0.5) * 0.50, "y": (rng.randf() - 0.5) * 0.50, "r": 0.05 + rng.randf() * 0.12,
+			"col": _hsl(pri[0] + (rng.randf() - 0.5) * 30.0, 75, 78, 0.42)})
+	# Dark dust lanes (approximate via dark over-blobs).
+	for i in 1 + int(rng.randf() * 3.0):
+		blobs.append({"x": (rng.randf() - 0.5) * 0.60, "y": (rng.randf() - 0.5) * 0.60, "r": 0.14 + rng.randf() * 0.18, "col": Color(0.035, 0.020, 0.055, 0.30)})
+	return blobs
+
+# HSL (h 0-360, s/l 0-100) → Color. Godot has from_hsv but not from_hsl.
+func _hsl(h: float, s: float, l: float, a: float) -> Color:
+	h = fmod(h, 360.0)
+	if h < 0.0:
+		h += 360.0
+	s = clampf(s, 0.0, 100.0) / 100.0
+	l = clampf(l, 0.0, 100.0) / 100.0
+	var cc := (1.0 - absf(2.0 * l - 1.0)) * s
+	var hp := h / 60.0
+	var x := cc * (1.0 - absf(fmod(hp, 2.0) - 1.0))
+	var m := l - cc * 0.5
+	var rr := 0.0
+	var gg := 0.0
+	var bb := 0.0
+	if hp < 1.0: rr = cc; gg = x
+	elif hp < 2.0: rr = x; gg = cc
+	elif hp < 3.0: gg = cc; bb = x
+	elif hp < 4.0: gg = x; bb = cc
+	elif hp < 5.0: rr = x; bb = cc
+	else: rr = cc; bb = x
+	return Color(rr + m, gg + m, bb + m, a)
 
 func _blob_pts(rng: RandomNumberGenerator, rx: float, ry: float, rot: float, n: int, rough: float) -> Array:
 	var pts: Array = []

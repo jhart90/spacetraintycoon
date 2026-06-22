@@ -28,6 +28,7 @@ var _metrics: Dictionary = {}
 const _FLOAT_LIFE := 1.5
 var _floats: Array = []  # {pos:Vector2(world), rev:int, age:float}
 var _font: Font
+var _font_exo: Font
 
 # Cargo beam particles (build_game.py:7854 _spawnCargoBeam / _BEAM_COLS). While a
 # car loads/unloads, particles stream between the planet surface and the car top,
@@ -46,6 +47,7 @@ const _BEAM_COLS := {
 
 func _ready() -> void:
 	_font = ThemeDB.fallback_font
+	_font_exo = load("res://assets/fonts/Exo2-Variable.woff2")
 	Transit.train_delivered.connect(_on_delivered)
 	# First-visit exploration reward float at the visited planet.
 	Discovery.planet_visited.connect(func(pid: int, reward: int):
@@ -175,14 +177,26 @@ func _train_by_id(tid: int) -> Dictionary:
 			return t
 	return {}
 
+# Credit floats (build_game.py _drawCreditFloats:8052): 9px Exo 2, an up/down
+# triangle arrow, green for gains / red for losses, rising + fading.
 func _draw_floats() -> void:
 	for f in _floats:
 		var frac: float = float(f.age) / _FLOAT_LIFE
 		var sp: Vector2 = view._w2s(f.pos)
 		sp.y -= 45.0 * frac  # rise
-		var a := 1.0 if frac < 0.55 else (1.0 - (frac - 0.55) / 0.45)
-		var txt := "+%s cr" % _commas(int(f.rev))
-		draw_string(_font, Vector2(sp.x - 60.0, sp.y), txt, HORIZONTAL_ALIGNMENT_CENTER, 120.0, 13, Color(0.4, 1.0, 0.5, a))
+		var a := (1.0 if frac < 0.55 else (1.0 - (frac - 0.55) / 0.45)) * 0.92
+		var rev := int(f.rev)
+		var neg := rev < 0
+		var col := Color(0.878, 0.251, 0.251, a) if neg else Color(0.251, 0.878, 0.376, a)
+		var txt := ("-" if neg else "+") + "%s cr" % _commas(abs(rev))
+		var tw := _font_exo.get_string_size(txt, HORIZONTAL_ALIGNMENT_LEFT, -1, 9).x
+		var ar := 4.5
+		var ax := sp.x - (tw + ar * 2.0 + 4.0) * 0.5  # centre arrow+gap+text
+		if neg:
+			draw_colored_polygon([Vector2(ax, sp.y - 7.0), Vector2(ax + ar * 2.0, sp.y - 7.0), Vector2(ax + ar, sp.y - 7.0 + ar)], col)
+		else:
+			draw_colored_polygon([Vector2(ax, sp.y - 3.0), Vector2(ax + ar * 2.0, sp.y - 3.0), Vector2(ax + ar, sp.y - 3.0 - ar)], col)
+		draw_string(_font_exo, Vector2(ax + ar * 2.0 + 4.0, sp.y), txt, HORIZONTAL_ALIGNMENT_LEFT, -1, 9, col)
 
 func _commas(n: int) -> String:
 	var s := str(n)

@@ -163,6 +163,14 @@ func _handle_ui_click(p: Vector2) -> bool:
 					GameState.route_stops.append(pid)  # multi-stop: add to the route
 					Audio.play("button")
 		return true
+	if _hit_ui("cancel_route", p):
+		var sel2: Dictionary = GameState.selected
+		if String(sel2.get("kind", "")) == "train":
+			var ct := _train_by_id(int(String(sel2.get("id", "")).trim_prefix("train_")))
+			if not ct.is_empty():
+				ct.route = null  # un-route the train (build_game.py cancelRoute)
+				Audio.play("button")
+		return true
 	if _hit_ui("mission_tracker", p):
 		GameState.popup_requested.emit("missions"); return true
 	if _hit_ui("add_train", p):
@@ -727,9 +735,13 @@ func _draw_train_info(tid: int, by: float) -> void:
 	var t := _train_by_id(tid)
 	if t.is_empty():
 		return
-	_txt(f_orb_b, Vector2(16.0, by + 22.0), "TRAIN %d" % tid, 14, Color(0.85, 0.93, 1.0, 0.95))
+	# Color square + real train name (build_game.py:30251).
+	var sqc := Color.from_string(String(t.get("color", "#44aaff")), Color(0.27, 0.67, 1.0))
+	draw_rect(Rect2(14.0, by + 9.0, 13.0, 13.0), sqc)
+	draw_rect(Rect2(14.0, by + 9.0, 13.0, 13.0), Color(1, 1, 1, 0.25), false, 1.0)
+	_txt(f_orb_b, Vector2(34.0, by + 22.0), String(t.get("name", "TRAIN %d" % tid)), 14, Color(1.0, 0.667, 0.533, 0.95))
 	var st := _train_status(t)
-	_txt(f_exo, Vector2(16.0, by + 42.0), st[0], 10, st[1])
+	_txt(f_exo, Vector2(34.0, by + 42.0), st[0], 10, st[1])
 	var loaded := 0
 	for c in t.get("carCargo", []):
 		if c != null:
@@ -744,6 +756,14 @@ func _draw_train_info(tid: int, by: float) -> void:
 		for c in t.get("carCargo", []):
 			full.append(c != null)
 		view._trains.draw_car_strip(self, Rect2(180.0, by + 14.0, 360.0, 46.0), consist, full)
+	# CANCEL ROUTE button (build_game.py:30310) — only when the train is routed.
+	if t.get("route", null) != null:
+		var cr := Rect2(560.0, by + 40.0, 110.0, 18.0)
+		var crh := _hov_k("cancel_route")
+		draw_rect(cr, Color(0.392, 0.078, 0.078, 0.95) if crh else Color(0.275, 0.063, 0.063, 0.85))
+		draw_rect(cr, Color(0.902, 0.353, 0.353, 0.9) if crh else Color(0.706, 0.235, 0.235, 0.6), false, 1.0)
+		_txt_centered(f_orb_b, cr.position.x + cr.size.x * 0.5, cr.position.y + 13.0, "CANCEL ROUTE", 8, Color(1.0, 0.706, 0.706, 0.95), cr.size.x)
+		info_rects["cancel_route"] = cr
 
 func _btn_bar(r: Rect2, label: String, fill: Color, text_col: Color) -> void:
 	draw_rect(r, fill)

@@ -29,6 +29,24 @@ camera transform/clamp/pan, the revenue math, the train-consist galaxy sizing, a
 ## ✅ FIX PROGRESS (2026-06-21, post-audit)
 
 **Visuals — step 4:**
+- ✅ **V1** — **Dyson sphere** built (was flagged "blocked", but it's actually a player-built
+  megastructure, not a random event). `GalaxyContent._draw_dyson()` renders the faithful
+  `drawDysonSphere`: a Fibonacci-distributed shell of **220 lit hexagonal panels** rotating slowly
+  around the Y axis, painter-sorted, with per-panel diffuse lighting + specular highlight + rim stroke;
+  back panels behind the star disc are culled (approximating the JS even-odd clip). Wired the
+  player-build flow: a **CONSTRUCT DYSON · 1,000,000 cr** button in the star-detail popup (greyed until
+  affordable) → deducts credits, sets `star.hasDysonSphere`, plays the purchase SFX; shows
+  "★ DYSON SPHERE ACTIVE" once built. Persists through save/load (the star dict round-trips).
+  Screenshot-verified — Gigi Prime wears the full hex shell.
+- ◐ **V2** — **world-space named nebulas** built. `Galaxy._gen_nebulas()` generates 16 colored nebula
+  regions around Orijen (placement + declumping + distinct names from a 66-name pool + a 5-band HSL
+  palette with distinct primary/secondary colors, all from the seeded RNG so saves stay deterministic).
+  `GalaxyContent._draw_nebulas()` renders each as a seed-generated cluster of soft tinted radial blobs
+  (secondary halo + secondary cloud + main cloud + bright knots + dark dust lanes) at 0.55 translucency,
+  cam-scaled, rotated to 90°, with an uppercase "X NEBULA" label that fades in above ~150px on-screen.
+  Screenshot-verified (colored named cloud regions across the galaxy, was a flat dark backdrop). Loaded
+  saves get them too (load regenerates from seed). REMAINING in V2: the screen-space tiling nebula sheet
+  with home-quadrant blend (still the 7-blob stand-in in ScreenBackground).
 - ◐ **V3** — per-biome surface effects added to `GalaxyContent._draw_surface`: **lava volcanoes**
   (2–4 cones extruding from the rim with a dark-basalt body + glowing lava cap + pulsing crater bloom —
   the "flat red sphere" is now an active volcanic world), **mountains** (3–6 snow-capped ridge triangles
@@ -198,7 +216,25 @@ camera transform/clamp/pan, the revenue math, the train-consist galaxy sizing, a
 
 ---
 
-## MODERATE (high-value, scoped fixes)
+## ✅ MODERATE cluster — fix progress (2026-06-21)
+- ✅ **Train-status labels** unified into one faithful `Transit.train_status()` (build_game.py
+  getTrainStatus): UNLOADING / LOADING / **IN ORBIT / PARKED** (no route) / **IN ORBIT / ON ROUTE** /
+  **EN ROUTE → DEST** — with the original colors. Chrome panel, info bar, and all popups now share it.
+  (Queueing/descending/waiting states still absent — those phases aren't in the port's transit.)
+- ✅ **Selection-ring color** now matches the selection kind: **blue** planet (#4af) / **gold** star
+  (#ffd700) / **orange** train (#fa8), at radius+5 with a soft glow (was one yellow `*1.35+7` ring for
+  everything). (Grey orbit-tier rings still omitted — need per-planet orbit-radius data.)
+- ✅ **Credit floats** rebuilt to the faithful style: **9px Exo 2**, an up/down **triangle arrow**, and
+  **red for losses / green for gains** (was 13px fallback-font, green-only, no arrow). (Screen-space
+  purchase/loan floats still only fire on delivery + visit reward — the `spawnCreditFloatScreen` call
+  sites aren't wired yet.)
+
+- ✅ **Selected-train info bar** now shows the **color square + real train name** (was "TRAIN 0") and a
+  red **CANCEL ROUTE** button (with hover) that un-routes the train — the original's key interaction
+  (build_game.py:30310) was entirely missing. (The route strip / speed bar / coords / Seg% line are
+  still simplified.)
+
+## MODERATE (remaining)
 
 - Train-status labels wrong/truncated — port emits only LOADING/UNLOADING/IN TRANSIT/IN ORBIT; missing
   `/ PARKED`, `/ ON ROUTE`, QUEUEING, DESCENDING, WAITING FOR CARGO/DEMAND. `Chrome.gd:494` vs `13598`.

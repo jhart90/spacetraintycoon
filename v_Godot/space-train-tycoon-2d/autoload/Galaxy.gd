@@ -27,6 +27,20 @@ extends Node
 var stars: Array = []        # {id,x,y,size,radius,colorName,name,planetIds[]}
 var planets: Array = []      # {id,starId,orbitRadius,orbitAngle,orbitSpeed,_initialOrbitAngle,x,y,size,radius,type,name,isStarter,hasStation,isAlienRelic}
 var black_holes: Array = []  # {x,y,radius}
+var nebulas: Array = []      # {x,y,rx,ry,rot,colorIdx,secColorIdx,seed,name} (build_game.py _genNebulas)
+
+# 5 base colour bands (HSL h,s,l) — deep purple/red/pink/blue/yellow.
+const NEBULA_PALETTE := [[268, 62, 32], [0, 70, 30], [328, 62, 34], [220, 72, 34], [45, 62, 36]]
+const NEBULA_NAME_POOL := [
+	"Carina", "Orion", "Eagle", "Crab", "Helix", "Veil", "Tarantula", "Horsehead",
+	"Phoenix", "Serpent", "Drake", "Ghost", "Wolf", "Lotus", "Storm", "Spire",
+	"Crystal", "Mirror", "Ember", "Echo", "Whisper", "Halo", "Crown", "Anvil",
+	"Forge", "Garden", "Bloom", "Spectre", "Phantom", "Shroud", "Crescent", "Beacon",
+	"Vault", "Talon", "Wing", "Lantern", "Cinder", "Vortex", "Cradle", "Pyre",
+	"Cascade", "Glimmer", "Quasar", "Argent", "Verdant", "Vermilion", "Azure", "Obsidian",
+	"Aurora", "Borealis", "Aether", "Empyrean", "Hyperion", "Sigil", "Arcanum", "Solstice",
+	"Equinox", "Zenith", "Nadir", "Penumbra", "Umbra", "Astra", "Lumen", "Radiant", "Dusk", "Dawn",
+]
 var home_star_id: int = 0
 var origen_id: int = 0       # the starter planet's id
 var _seed: int = 0
@@ -104,6 +118,7 @@ func generate(seed: int) -> void:
 	stars = []
 	planets = []
 	black_holes = []
+	nebulas = []
 	var pid := 0
 	var W: float = Tuning.WORLD_W
 	var H: float = Tuning.WORLD_H
@@ -225,6 +240,69 @@ func generate(seed: int) -> void:
 
 	_separate_systems()
 	_place_relics()
+	_gen_nebulas()
+
+# Named world-space nebulas (build_game.py _genNebulas:8307): 16 colored regions
+# placed around Orijen, declumped, each with a distinct name + colour pair.
+func _gen_nebulas() -> void:
+	if origen_id < 0 or origen_id >= planets.size():
+		return
+	var ox: float = planets[origen_id].x
+	var oy: float = planets[origen_id].y
+	var pal_n := NEBULA_PALETTE.size()
+	var smnx := -Tuning.WORLD_W + 5000.0
+	var smxx := Tuning.WORLD_W - 5000.0
+	var smny := -Tuning.WORLD_H + 5000.0
+	var smxy := Tuning.WORLD_H - 5000.0
+	var pool := NEBULA_NAME_POOL.duplicate()
+	for k in range(pool.size() - 1, 0, -1):
+		var j := int(random() * (k + 1))
+		var tmp = pool[k]; pool[k] = pool[j]; pool[j] = tmp
+	var name_idx := 0
+	while nebulas.size() < 16:
+		var a := random() * TAU
+		var r := 40000.0 + random() * 280000.0
+		var pri := int(random() * pal_n)
+		var sec := int(random() * (pal_n - 1))
+		if sec >= pri:
+			sec += 1
+		var size_mult := 2.0 if random() < 0.5 else 1.0
+		nebulas.append({
+			"x": clampf(ox + cos(a) * r, smnx, smxx),
+			"y": clampf(oy + sin(a) * r, smny, smxy),
+			"rx": (7500.0 + random() * 17500.0) * size_mult,
+			"ry": (7500.0 + random() * 17500.0) * size_mult,
+			"rot": float(int(random() * 4)) * (PI * 0.5),
+			"colorIdx": pri, "secColorIdx": sec,
+			"seed": int(random() * 2147483646.0) + 1, "name": String(pool[name_idx % pool.size()]),
+		})
+		name_idx += 1
+	# Light declump: relocate the most-crowded nebula a few times.
+	var cluster_r := 70000.0
+	for _pass in 6:
+		var worst := -1
+		var worst_n := 1
+		for i in nebulas.size():
+			var cnt := 0
+			for jj in nebulas.size():
+				if jj != i and Vector2(nebulas[jj].x - nebulas[i].x, nebulas[jj].y - nebulas[i].y).length() < cluster_r:
+					cnt += 1
+			if cnt > worst_n:
+				worst_n = cnt; worst = i
+		if worst < 0:
+			break
+		for _try in 50:
+			var a2 := random() * TAU
+			var r2 := 40000.0 + random() * 280000.0
+			var nx := clampf(ox + cos(a2) * r2, smnx, smxx)
+			var ny := clampf(oy + sin(a2) * r2, smny, smxy)
+			var far := true
+			for b in nebulas.size():
+				if b != worst and Vector2(nebulas[b].x - nx, nebulas[b].y - ny).length() < cluster_r:
+					far = false; break
+			if far:
+				nebulas[worst].x = nx; nebulas[worst].y = ny
+				break
 
 # Per-planet economy generation (build_game.py 8498-8534, JS RNG order:
 # population → desert-fix → gold → diamond → devLevel → agri → supply/demand →
