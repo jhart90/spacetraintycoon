@@ -73,9 +73,22 @@ camera transform/clamp/pan, the revenue math, the train-consist galaxy sizing, a
   foundry is built (car-gated on `car_hazmat`) and completes at 2 units. The corp-dashboard "Hazmat
   Incinerated" stat now reads the real counter (was hardcoded 0). Also wired **sandstorm_relief**
   (desert visit → clear 10 sand by delivering it anywhere). **Verified headless** (`--test-roles`):
-  dispose_hazmat completes. **Completable mission set is now 15** of ~25. The remaining ~7 each need a
-  bespoke system (flower-seeding tracker, multi-step colony_train, steel+Class-J design_better_train,
-  escort-cargo + research-timer missions).
+  dispose_hazmat completes. **Completable mission set is now 15** of ~25.
+- ✅ **G2 COMPLETE — the entire mission graph now plays through.** Wired the final 8:
+  **design_better_train** (steel produced → deliver 20 steel/battery/oil to Orijen → Class J + Class R),
+  **bh_research** (visit the black-hole research planet → 5 chemical → chains the research arc),
+  **another_dimension** (research-wait timer, `Missions._process`), **more_scientists** (3 passengers to
+  the outpost), **ancient_schematics** (visit ancient → ferry cargo to Orijen), **mad_scientist** (large
+  station → ferry scientist to Orijen → Class J), **colony_train** (visit source → ferry colonists to
+  the dest, which becomes a 541-pop colony), and **spread_the_seed** (visit a flowers-origin world →
+  unlock the Flowers Car + seed 10 flower-capable planets). New machinery: `Galaxy._assign_mission_roles`
+  flags colony source/dest + black-hole-research + flowers-origin planets (the last with sustained flower
+  `supplyRate`); an `_ESCORT` table collapses pickup→deliver flows to a delivery count that completes the
+  whole mission; a flower distinct-planet tracker; and the bh_research → another_dimension →
+  more_scientists chain. **Verified headless** (`--test-missions3`): all 8 complete. **Completable
+  mission set is now 23 of ~26** — every active mission in `MISSION_DEFS` (the only unwired ones are
+  dormant/removed like `visit_planet`). Escort missions collapse the multi-step pickup→deliver to a
+  delivery count (no exact-source check) — a documented simplification.
 
 
 **Cleanup — small remaining items:**

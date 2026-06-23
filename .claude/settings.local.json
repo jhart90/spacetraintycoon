@@ -281,7 +281,9 @@
       "PowerShell(Compress-Archive -Path index.html,assets -DestinationPath spacetraintycoon_itch.zip -Force; if \\($?\\) { Write-Output \"Built zip:\"; Get-Item spacetraintycoon_itch.zip | Select-Object Name, @{N='MB';E={[math]::Round\\($_.Length/1MB,2\\)}}, LastWriteTime })",
       "Bash(git rev-list *)",
       "PowerShell(Copy-Item build_game.py build_game_without_UI.py -Force; if \\($?\\) { Write-Output \"Copied. Lines:\"; \\(Get-Content build_game_without_UI.py | Measure-Object -Line\\).Lines })",
-      "Bash(awk '{print $5, $9}')"
+      "Bash(awk '{print $5, $9}')",
+      "Bash(grep -viE \"_drawBubble|console|//\")",
+      "Bash(awk 'NR>=19070 && NR<=19560' build_game.py)"
     ]
   },
   "hooks": {

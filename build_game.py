@@ -19674,6 +19674,9 @@ function _drawTutorialChain(stage){
       const _bw2=new Set(opts.boldWords.map(_wordKey));
       for(const _tk of _lineToks) for(const _t of _tk) if(_bw2.has(_wordKey(_t.text))) _t.bold=true;
     }
+    // Always bold the action words 'CLICK' and 'SHIFT+CLICK' in every bubble
+    // (punctuation-insensitive: "CLICK,"→click, "SHIFT+CLICK"→shiftclick).
+    for(const _tk of _lineToks) for(const _t of _tk){ const _k=_wordKey(_t.text); if(_k==='click'||_k==='shiftclick') _t.bold=true; }
     let _maxW=0;
     for(const _tk of _lineToks){ const _w=_objLineWidth(_tk,_bubbleFont); if(_w>_maxW) _maxW=_w; }
     const _pad=12, _lh=15, _bH=Math.max(28,lines.length*_lh+10), _bR=7, _tailH=10;
