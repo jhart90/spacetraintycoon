@@ -685,13 +685,16 @@ function playSound(id){
 // any interruption) and avoids GitHub raw's rate-limits / missing Range support.
 const _MUSIC_BASE='assets/';
 const _MUSIC_TRACKS=[
-  {file:'a.o.huge_01_last_train_home.mp3',      title:'Last Train Home'},
-  {file:'a.o.huge_02_interstellar_segment.mp3', title:'Interstellar Segment'},
-  {file:'a.o.huge_03_star_depot_groove.mp3',    title:'Star Depot Groove'},
-  {file:'a.o.huge_04_neon_katsu_sandwich.mp3',  title:'Neon Katsu Sandwich'},
-  {file:'a.o.huge_05_lunar_save_point.mp3',     title:'Lunar Save Point'},
-  {file:'a.o.huge_06_nebulosa_amistosa.mp3',    title:'Nebulosa Amistosa'},
-  {file:'a.o.huge_07_midnight_cargo_run.mp3',   title:'Midnight Cargo Run'},
+  {file:'01_a.o.huge_last_train_home.mp3',      title:'Last Train Home',      artist:'a.o.huge'},
+  {file:'02_a.o.huge_interstellar_segment.mp3', title:'Interstellar Segment', artist:'a.o.huge'},
+  {file:'03_a.o.huge_star_depot_groove.mp3',    title:'Star Depot Groove',    artist:'a.o.huge'},
+  {file:'04_a.o.huge_neon_katsu_sandwich.mp3',  title:'Neon Katsu Sandwich',  artist:'a.o.huge'},
+  {file:'05_attention_junction.mp3',            title:'Junction',             artist:'Attention'},
+  {file:'06_attention_fast_track.mp3',          title:'Fast Track',           artist:'Attention'},
+  {file:'07_a.o.huge_lunar_save_point.mp3',     title:'Lunar Save Point',     artist:'a.o.huge'},
+  {file:'08_a.o.huge_nebulosa_amistosa.mp3',    title:'Nebulosa Amistosa',    artist:'a.o.huge'},
+  {file:'09_a.o.huge_midnight_cargo_run.mp3',   title:'Midnight Cargo Run',   artist:'a.o.huge'},
+  {file:'10_attention_cosmos.mp3',              title:'Cosmos',               artist:'Attention'},
 ];
 const _soundtrack=new Audio();
 _soundtrack.volume=0.35; // 0..1 MUSIC volume (Options slider 0-100 ÷ 100)
@@ -802,8 +805,9 @@ let _optsMuteBtnBounds=null, _optsMuteBtnHover=false;       // MUSIC mute
 let _optsSfxMuteBtnBounds=null, _optsSfxMuteBtnHover=false; // SOUND EFFECTS mute
 let _optsPrevBtnBounds=null, _optsPrevBtnHover=false;
 let _optsNextBtnBounds=null, _optsNextBtnHover=false;
+let _optsMusicProgressBounds=null; // click-to-seek hit area on the music progress bar
 let _optsSfxSliderBounds=null, _optsMusicSliderBounds=null; // volume slider hit-tracks
-let _optsSliderDrag=null;                                   // 'sfx' | 'music' | null (active drag)
+let _optsSliderDrag=null;                                   // 'sfx' | 'music' | 'seek' | null (active drag; cleared on mouseup)
 
 // ── name edit overlay ────────────────────────────────────────
 const nameEditEl=document.getElementById('name-edit');
@@ -22588,6 +22592,9 @@ function _handleOptionsPopupClick(cp){
   if(_onSlider(_optsMusicSliderBounds)){ const b=_optsMusicSliderBounds; _optsSliderDrag='music'; _soundtrack.volume=Math.max(0,Math.min(1,(cp.x-b.x)/b.w)); return true; }
   if(_in(_optsPrevBtnBounds)){ _musicPrev(); return true; }
   if(_in(_optsNextBtnBounds)){ _musicNext(); return true; }
+  // Click/drag anywhere on the progress bar → seek to that timestamp; the drag
+  // is released on mouseup (which clears _optsSliderDrag).
+  if(_onSlider(_optsMusicProgressBounds)){ const b=_optsMusicProgressBounds; _optsSliderDrag='seek'; const _dur=_soundtrack.duration; if(isFinite(_dur)&&_dur>0){ _soundtrack.currentTime=Math.max(0,Math.min(1,(cp.x-b.x)/b.w))*_dur; } return true; }
   // Consume any other click inside the (opaque) popup frame so it can't fall
   // through to the title-screen buttons or the galaxy behind it.
   const _opw=300, _oph=448-((popupState.noSave)?36:0), _opx=(W-_opw)/2, _opy=(H-_oph)/2;
@@ -22814,6 +22821,8 @@ function drawOptionsPopup(){
     ctx.strokeStyle='rgba(80,140,210,0.55)'; ctx.lineWidth=1;
     ctx.beginPath(); ctx.roundRect(_spBarX,_spBarY,_spBarW,_spBarH,2); ctx.stroke();
     ctx.restore();
+    // Click-to-seek hit area (taller than the thin visual bar for easy clicking).
+    _optsMusicProgressBounds={x:_spBarX,y:_spBarY-5,w:_spBarW,h:_spBarH+10};
     // ── Timestamp m:ss — tiny, above the bar, follows the fill edge ──
     {
       const _ct=isFinite(_soundtrack.currentTime)?Math.max(0,_soundtrack.currentTime):0;
@@ -22891,7 +22900,7 @@ function drawOptionsPopup(){
     // Sits close under the title (gap tightened ~2/3 vs the original +10 offset).
     ctx.font='7px "Exo 2",sans-serif'; ctx.textAlign='center';
     ctx.fillStyle='rgba(255,214,70,0.9)';
-    ctx.fillText('a.o.huge',_titleCx,_titleY+7);
+    ctx.fillText((_trk&&_trk.artist?_trk.artist:'a.o.huge'),_titleCx,_titleY+7);
   }
   // Clear cheat-button bounds — they belong to the (separate) cheats popup now.
   popupState.addCreditsBtnBounds=null;
@@ -32309,6 +32318,7 @@ canvas.addEventListener('mousemove',e=>{
     // even if the cursor strays off the track horizontally/vertically.
     if(_optsSliderDrag==='sfx'&&_optsSfxSliderBounds){ const b=_optsSfxSliderBounds; _sfxVol=Math.max(0,Math.min(1,(cp.x-b.x)/b.w)); canvas.style.cursor='pointer'; }
     else if(_optsSliderDrag==='music'&&_optsMusicSliderBounds){ const b=_optsMusicSliderBounds; _soundtrack.volume=Math.max(0,Math.min(1,(cp.x-b.x)/b.w)); canvas.style.cursor='pointer'; }
+    else if(_optsSliderDrag==='seek'&&_optsMusicProgressBounds){ const b=_optsMusicProgressBounds; const _dur=_soundtrack.duration; if(isFinite(_dur)&&_dur>0){ _soundtrack.currentTime=Math.max(0,Math.min(1,(cp.x-b.x)/b.w))*_dur; } canvas.style.cursor='pointer'; }
     _optsPrevBtnHover=!!(_optsPrevBtnBounds&&cp.x>=_optsPrevBtnBounds.x&&cp.x<=_optsPrevBtnBounds.x+_optsPrevBtnBounds.w&&cp.y>=_optsPrevBtnBounds.y&&cp.y<=_optsPrevBtnBounds.y+_optsPrevBtnBounds.h);
     _optsNextBtnHover=!!(_optsNextBtnBounds&&cp.x>=_optsNextBtnBounds.x&&cp.x<=_optsNextBtnBounds.x+_optsNextBtnBounds.w&&cp.y>=_optsNextBtnBounds.y&&cp.y<=_optsNextBtnBounds.y+_optsNextBtnBounds.h);
     const _ctlbb=popupState.controlsBtnBounds;
@@ -32548,7 +32558,7 @@ canvas.addEventListener('mousemove',e=>{
   clampCamera();
 });
 canvas.addEventListener('mouseup',e=>{
-  // End any active volume-slider drag (Options SOUND panes).
+  // End any active Options drag (SFX/Music volume sliders or the music seek bar).
   if(_optsSliderDrag){ _optsSliderDrag=null; drag=false; return; }
   // End any active scrollbar drag — and skip the rest of the click cascade
   // so the underlying popup doesn't see a phantom click on whatever was
