@@ -283,7 +283,8 @@
       "PowerShell(Copy-Item build_game.py build_game_without_UI.py -Force; if \\($?\\) { Write-Output \"Copied. Lines:\"; \\(Get-Content build_game_without_UI.py | Measure-Object -Line\\).Lines })",
       "Bash(awk '{print $5, $9}')",
       "Bash(grep -viE \"_drawBubble|console|//\")",
-      "Bash(awk 'NR>=19070 && NR<=19560' build_game.py)"
+      "Bash(awk 'NR>=19070 && NR<=19560' build_game.py)",
+      "Bash(grep -nA1 \"ctx.shadowBlur=0;\" build_game.py)"
     ]
   },
   "hooks": {

@@ -19067,6 +19067,14 @@ function _maybeStartMissionTip(){
     _missionTipPending=false;
   }
 }
+// Tokenise a plain callout string with CLICK / SHIFT+CLICK auto-bolded — for the
+// few callouts that render via fillText instead of _drawBubble. Draw the result
+// with _objDrawLineCentered (which honours each token's bold flag).
+function _calloutBoldTokens(txt){
+  const _toks=_objTokenize(txt);
+  for(const _t of _toks){ const _k=_t.text.toLowerCase().replace(/[^a-z0-9]/g,''); if(_k==='click'||_k==='shiftclick') _t.bold=true; }
+  return _toks;
+}
 function _drawMissionTip(){
   if(!_missionTipStartMs) return;
   const _elpMs=Date.now()-_missionTipStartMs;
@@ -19250,9 +19258,8 @@ function _drawBuyTrainHintCallout(){
   // Downward tail from bubble bottom to just above the hint text.
   ctx.beginPath(); ctx.moveTo(_tailX-7,_by+_bH); ctx.lineTo(_tailX+7,_by+_bH); ctx.lineTo(_tailX,_tipY); ctx.closePath(); ctx.fill();
   ctx.shadowBlur=0;
-  ctx.fillStyle='#1a1308';
-  ctx.textAlign='center'; ctx.textBaseline='middle';
-  ctx.fillText(_txt,_bx+_bW/2,_by+_bH/2);
+  ctx.textBaseline='middle';
+  _objDrawLineCentered(_calloutBoldTokens(_txt),_bx+_bW/2,_by+_bH/2,'10px "Exo 2",sans-serif','#1a1308');
   ctx.textBaseline='alphabetic';
   ctx.restore();
 }
@@ -19397,9 +19404,8 @@ function _drawSpeedTip(){
   ctx.beginPath(); ctx.roundRect(_bx,_by,_bW,_bH,_bR); ctx.fill();
   ctx.beginPath(); ctx.moveTo(_tailX-7,_by+_bH); ctx.lineTo(_tailX+7,_by+_bH); ctx.lineTo(_tailX,_tipY); ctx.closePath(); ctx.fill();
   ctx.shadowBlur=0;
-  ctx.fillStyle='#000000';
-  ctx.textAlign='center'; ctx.textBaseline='middle';
-  ctx.fillText(_txt,_bx+_bW/2,_by+_bH/2);
+  ctx.textBaseline='middle';
+  _objDrawLineCentered(_calloutBoldTokens(_txt),_bx+_bW/2,_by+_bH/2,'9px "Exo 2",sans-serif','#000000');
   ctx.textBaseline='alphabetic';
   ctx.restore();
 }
@@ -19499,9 +19505,8 @@ function _drawBuyTrainPlusHintCallout(){
   // Upward tail: base along the bubble's top edge, point pokes UP at the +
   ctx.beginPath(); ctx.moveTo(_tailX-7,_by); ctx.lineTo(_tailX+7,_by); ctx.lineTo(_tailX,_tipY); ctx.closePath(); ctx.fill();
   ctx.shadowBlur=0;
-  ctx.fillStyle='#1a1308';
-  ctx.textAlign='center'; ctx.textBaseline='middle';
-  ctx.fillText(_txt,_bx+_bW/2,_by+_bH/2);
+  ctx.textBaseline='middle';
+  _objDrawLineCentered(_calloutBoldTokens(_txt),_bx+_bW/2,_by+_bH/2,'10px "Exo 2",sans-serif','#1a1308');
   ctx.textBaseline='alphabetic';
   ctx.restore();
 }
