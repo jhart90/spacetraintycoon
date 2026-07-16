@@ -284,7 +284,10 @@
       "Bash(awk '{print $5, $9}')",
       "Bash(grep -viE \"_drawBubble|console|//\")",
       "Bash(awk 'NR>=19070 && NR<=19560' build_game.py)",
-      "Bash(grep -nA1 \"ctx.shadowBlur=0;\" build_game.py)"
+      "Bash(grep -nA1 \"ctx.shadowBlur=0;\" build_game.py)",
+      "PowerShell($b=\"C:\\\\Users\\\\jackh\\\\Desktop\\\\Claude\\\\Train Game\"; foreach\\($p in \"assets.json\",\"sounds\",\"fonts\",\"assets\"\\){ $f=Join-Path $b $p; if\\(Test-Path $f\\){ if\\(\\(Get-Item $f\\).PSIsContainer\\){ $s=\\(Get-ChildItem $f -Recurse -File | Measure-Object Length -Sum\\).Sum; \"$p \\(dir\\): {0:N0} bytes / {1:N2} MB\" -f $s,\\($s/1MB\\) } else { $s=\\(Get-Item $f\\).Length; \"$p \\(file\\): {0:N0} bytes / {1:N2} MB\" -f $s,\\($s/1MB\\) } } else { \"$p : MISSING\" } })",
+      "PowerShell($b=\"C:\\\\Users\\\\jackh\\\\Desktop\\\\Claude\\\\Train Game\"; Get-ChildItem \\(Join-Path $b \"sounds\"\\) -File -ErrorAction SilentlyContinue | Sort-Object Length -Descending | Select-Object Name,@{n='KB';e={\"{0:N1}\" -f \\($_.Length/1KB\\)}} | Format-Table -AutoSize | Out-String; \"---FONTS---\"; Get-ChildItem \\(Join-Path $b \"fonts\"\\) -File -ErrorAction SilentlyContinue | Select-Object Name,@{n='KB';e={\"{0:N1}\" -f \\($_.Length/1KB\\)}} | Format-Table -AutoSize | Out-String; \"---ASSETS DIR \\(soundtracks\\)---\"; Get-ChildItem \\(Join-Path $b \"assets\"\\) -File -ErrorAction SilentlyContinue | Select-Object Name,@{n='KB';e={\"{0:N1}\" -f \\($_.Length/1KB\\)}} | Format-Table -AutoSize | Out-String)",
+      "Bash(awk -F: '$1 > 21698 {print; c++} c>=3{exit}')"
     ]
   },
   "hooks": {
