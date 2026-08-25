@@ -215,11 +215,15 @@ canvas.style.imageRendering = 'auto'; // some browsers default to 'pixelated' fo
 //
 // DPR is recomputed in fitCanvas() (it depends on window size) and is a
 // `let` so the ctx→tctx mirroring closures, which read it live, always use
-// the current value. Capped at 6 to bound memory (900·6 × 500·6 × 4B ≈
-// 65 MB worst case); 4K lands around 4.3.
+// the current value. Capped at 3: every overlay cost (the full-bitmap clear
+// each frame, every fillText raster, every _getTextBM bitmap) scales with
+// DPR², and beyond ~2.5-3× the sharpness gain is imperceptible while the
+// pixel cost keeps growing quadratically — a 4K screen used to land ~4.3,
+// paying ~2× the pixel work of the cap for no visible benefit. Memory at
+// the cap: 900·3 × 500·3 × 4B ≈ 16 MB.
 function _computeDPR(){
   const _s = Math.min(window.innerWidth/W, window.innerHeight/H);
-  return Math.max(1, Math.min(6, _s * (window.devicePixelRatio || 1)));
+  return Math.max(1, Math.min(3, _s * (window.devicePixelRatio || 1)));
 }
 let DPR = _computeDPR();
 const tCanvas = document.createElement('canvas');
@@ -5471,7 +5475,10 @@ function _drawCutsceneBg(ts){
     drawStar(sx,sy,sr,s.color,!!s.hasDysonSphere);
     if(sr>5){
       ctx.save();
-      const fs=Math.min(13,Math.max(10,sr*.14+9));
+      // Integer font size: fs feeds the _getTextBM cache key, and a raw
+      // float of the zoom level busts the cache for every label on every
+      // frame of a zoom (one offscreen-canvas rasterise per label per frame).
+      const fs=Math.round(Math.min(13,Math.max(10,sr*.14+9)));
       ctx.font=fs+'px "Exo 2",sans-serif'; ctx.textAlign='center';
       ctx.fillStyle='rgba(255,230,150,0.85)';
       _smoothTextMode=true; ctx.fillText(s.name,sx,sy+sr+14); _smoothTextMode=false;
@@ -5557,7 +5564,9 @@ function _drawCutsceneBg(ts){
     // Planet name label (zoomed-in enough to be readable).
     if(sr>13){
       ctx.save();
-      const fs=Math.min(14,Math.max(10,sr*.38));
+      // Integer font size — same _getTextBM cache-key reasoning as the star
+      // labels above.
+      const fs=Math.round(Math.min(14,Math.max(10,sr*.38)));
       ctx.font=fs+'px "Exo 2",sans-serif'; ctx.textAlign='center';
       ctx.textBaseline='top';
       ctx.fillStyle='rgba(170,205,255,0.8)';
@@ -8075,23 +8084,40 @@ function _updateCargoParticles(dtG){
     if(p.life<=0) cargoParticles.splice(i,1);
   }
 }
+// Pre-baked cargo-particle sprites: one tiny offscreen per (col,glow) pair,
+// baked with the exact arc + shadowBlur the per-particle path used to issue
+// live. A shadowed fill() re-rasterises the blur on EVERY call — the
+// fillStyle batching below never saved that — so with ~90 live particles per
+// docked train the old path ran thousands of blur passes per frame. A plain
+// drawImage of the baked sprite is a straight blit. Keyspace is bounded by
+// the ~10 cargo colours + fallback, so the cache stays tiny.
+const _particleSpriteCache=new Map();
+const _PART_SPR_R=10; // half-size: 1.8px dot + 6px blur halo fits inside 10px
+function _particleSprite(col,glow){
+  const key=col+'|'+glow;
+  let c=_particleSpriteCache.get(key);
+  if(!c){
+    c=document.createElement('canvas');
+    c.width=c.height=_PART_SPR_R*2;
+    const pc=c.getContext('2d');
+    pc.fillStyle=col; pc.shadowColor=glow; pc.shadowBlur=6;
+    pc.beginPath(); pc.arc(_PART_SPR_R,_PART_SPR_R,1.8,0,Math.PI*2); pc.fill();
+    _particleSpriteCache.set(key,c);
+  }
+  return c;
+}
 function _drawCargoParticles(){
   if(!cargoParticles.length) return;
   ctx.save();
-  ctx.shadowBlur=6;
-  let lastCol=null;
+  let lastCol=null,_spr=null;
   for(const p of cargoParticles){
     const [sx,sy]=w2s(p.x,p.y);
     if(sx<-4||sx>W+4||sy<-4||sy>GH+4) continue;
     const t=1-p.life/p.maxLife;
     const fa=t<0.15?t/0.15:t>0.72?(1-t)/0.28:1;
-    if(p.col!==lastCol){
-      lastCol=p.col;
-      ctx.fillStyle=p.col;
-      ctx.shadowColor=p.glow;
-    }
+    if(p.col!==lastCol){ lastCol=p.col; _spr=_particleSprite(p.col,p.glow); }
     ctx.globalAlpha=fa*0.85;
-    ctx.beginPath(); ctx.arc(sx,sy,1.8,0,Math.PI*2); ctx.fill();
+    ctx.drawImage(_spr,sx-_PART_SPR_R,sy-_PART_SPR_R);
   }
   ctx.restore();
 }
@@ -13433,19 +13459,26 @@ function drawOrchardBuilding(sx,sy,sr,angle,ssz){
   ctx.restore();
 }
 // ── station draw ─────────────────────────────────────────────
-function drawPlanetStation(sx,sy,sr,angle,ssz,isAlienRelic=false,isLarge=false,largeMedR=null,isTerminal=false,largeHighR=null,largeLowR=null){
+function drawPlanetStation(sx,sy,sr,angle,ssz,isAlienRelic=false,isLarge=false,largeMedR=null,isTerminal=false,largeHighR=null,largeLowR=null,aiTint=false){
   // Terminal supersedes Large Station: when isTerminal is true, the Large-Station
   // path is suppressed and the Terminal path takes over (dock ring at HIGH orbit,
   // five towers reaching LOW / MED / HIGH respectively).
   if(isTerminal) isLarge=false;
   // sr  = actual planet screen radius — controls WHERE the ring sits and where buildings are rooted
   // ssz = fixed visual size (always M-planet equivalent) — controls HOW BIG everything looks
-  const _tieCol  =isAlienRelic?'#1a3520':'#2a3a55';
-  const _railCol =isAlienRelic?'#2a7a38':'#4a6a9a';
-  const _railHi  =isAlienRelic?'#60b865':'#8ab0d0';
-  const _bldgFill=isAlienRelic?'rgba(75,210,105,0.88)':'rgba(160,220,255,0.88)';
-  const _bldgStr =isAlienRelic?'rgba(35,175,75,0.55)':'rgba(70,160,255,0.55)';
-  const _winCol  =isAlienRelic?'rgba(155,255,135,0.85)':'rgba(255,255,180,0.85)';
+  // aiTint swaps the palette to the rival corp's orange. This used to be done
+  // at the call site with ctx.filter='sepia(1) hue-rotate(...)', but a canvas
+  // filter forces an offscreen compositing pass around every AI-station draw,
+  // every frame — direct fill colors cost nothing extra.
+  const _tieCol  =isAlienRelic?'#1a3520':aiTint?'#55402a':'#2a3a55';
+  const _railCol =isAlienRelic?'#2a7a38':aiTint?'#a06a30':'#4a6a9a';
+  const _railHi  =isAlienRelic?'#60b865':aiTint?'#dca868':'#8ab0d0';
+  const _bldgFill=isAlienRelic?'rgba(75,210,105,0.88)':aiTint?'rgba(255,200,130,0.88)':'rgba(160,220,255,0.88)';
+  const _bldgStr =isAlienRelic?'rgba(35,175,75,0.55)':aiTint?'rgba(255,150,50,0.55)':'rgba(70,160,255,0.55)';
+  const _winCol  =isAlienRelic?'rgba(155,255,135,0.85)':aiTint?'rgba(255,235,170,0.85)':'rgba(255,255,180,0.85)';
+  const _dockTie =aiTint?'rgba(255,175,80,0.30)':'rgba(80,180,255,0.30)';
+  const _dockRing=aiTint?'rgba(240,145,55,0.40)':'rgba(60,140,240,0.40)';
+  const _dockHi  =aiTint?'rgba(255,215,150,0.22)':'rgba(140,220,255,0.22)';
   ctx.save();
   // spread: scale angular offsets so arc-length between buildings matches M-planet reference
   const spread=ssz/Math.max(sr,0.1);
@@ -13481,12 +13514,12 @@ function drawPlanetStation(sx,sy,sr,angle,ssz,isAlienRelic=false,isLarge=false,l
     if(_dockR&&_dockR>sr+2){
       const _or1=_dockR*0.97, _or2=_or1+Math.max(1.0,ssz*0.04);
       const nT2=Math.max(4,Math.min(64,Math.round(sr*0.45)));
-      ctx.strokeStyle='rgba(80,180,255,0.30)'; ctx.lineWidth=Math.max(0.4,ssz*0.02);
+      ctx.strokeStyle=_dockTie; ctx.lineWidth=Math.max(0.4,ssz*0.02);
       for(let i=0;i<nT2;i++){const a=(i/nT2)*Math.PI*2+angle,ca=Math.cos(a),sa=Math.sin(a);ctx.beginPath();ctx.moveTo(sx+(_or1-0.5)*ca,sy+(_or1-0.5)*sa);ctx.lineTo(sx+(_or2+0.5)*ca,sy+(_or2+0.5)*sa);ctx.stroke();}
-      ctx.strokeStyle='rgba(60,140,240,0.40)'; ctx.lineWidth=Math.max(0.5,ssz*0.018);
+      ctx.strokeStyle=_dockRing; ctx.lineWidth=Math.max(0.5,ssz*0.018);
       ctx.beginPath(); ctx.arc(sx,sy,_or1,0,Math.PI*2); ctx.stroke();
       ctx.beginPath(); ctx.arc(sx,sy,_or2,0,Math.PI*2); ctx.stroke();
-      ctx.strokeStyle='rgba(140,220,255,0.22)'; ctx.lineWidth=Math.max(0.2,ssz*0.008);
+      ctx.strokeStyle=_dockHi; ctx.lineWidth=Math.max(0.2,ssz*0.008);
       ctx.beginPath(); ctx.arc(sx,sy,_or1,0,Math.PI*2); ctx.stroke();
     }
     let buildings;
@@ -29161,7 +29194,12 @@ function drawGalaxy(ts,dt){
     }
     if(sr>5){
       ctx.save();
-      const fs=Math.min(13,Math.max(10,sr*.14+9));
+      // Integer font size: fs is part of the _getTextBM cache key (via the
+      // font string). Left as a raw float it changes every frame while the
+      // camera zooms, so EVERY visible star label misses the bitmap cache
+      // every frame — an offscreen canvas alloc + rasterise per label per
+      // frame, exactly during the motion the smooth path exists to serve.
+      const fs=Math.round(Math.min(13,Math.max(10,sr*.14+9)));
       ctx.font=`${fs}px "Exo 2",sans-serif`; ctx.textAlign='center';
       ctx.fillStyle='rgba(255,230,150,0.85)'; _smoothTextMode=true; ctx.fillText(s.name,sx,sy+sr+14); _smoothTextMode=false;
       ctx.restore();
@@ -29331,12 +29369,10 @@ function drawGalaxy(ts,dt){
     );
     if(p.aiHasStation){
       // AI station rendered with the same large-station + terminal geometry
-      // as the player's, then tinted via canvas filter to the AI's orange
-      // palette. Mirrors the player drawPlanetStation call above (including
-      // the tier radii for the large/terminal towers) so an AI-owned Large
-      // Station looks structurally identical, just orange.
-      ctx.save();
-      ctx.filter='sepia(1) hue-rotate(-10deg) saturate(2.5) brightness(1.1)';
+      // as the player's, in the rival corp's orange palette (aiTint param).
+      // Mirrors the player drawPlanetStation call above (including the tier
+      // radii for the large/terminal towers) so an AI-owned Large Station
+      // looks structurally identical, just orange.
       drawPlanetStation(
         sx,sy,sr,
         (p.aiStationAngle!==undefined?p.aiStationAngle:Math.PI*0.65),
@@ -29346,10 +29382,9 @@ function drawGalaxy(ts,dt){
         (p.hasLargeStation||p.hasTerminal)?ORBIT_TIERS[p.size]['MED']*cam.scale:null,
         p.hasTerminal||false,
         p.hasTerminal?ORBIT_TIERS[p.size]['HIGH']*cam.scale:null,
-        (p.hasLargeStation||p.hasTerminal)?ORBIT_TIERS[p.size]['LOW']*cam.scale:null
+        (p.hasLargeStation||p.hasTerminal)?ORBIT_TIERS[p.size]['LOW']*cam.scale:null,
+        true // aiTint
       );
-      ctx.filter='none';
-      ctx.restore();
     }
     if(sr>2){
       // Bulk structure draw: gate the whole block on sr>2, then do a single
@@ -29391,7 +29426,9 @@ function drawGalaxy(ts,dt){
     }
     if(sr>13){
       ctx.save();
-      const fs=Math.min(14,Math.max(10,sr*.38));
+      // Integer font size — same _getTextBM cache-key reasoning as the star
+      // labels above.
+      const fs=Math.round(Math.min(14,Math.max(10,sr*.38)));
       ctx.font=`${fs}px "Exo 2",sans-serif`; ctx.textAlign='center';
       // textBaseline='top' makes the y-coord we pass to fillText the TOP
       // edge of the label box (rather than the alphabetic baseline, which
