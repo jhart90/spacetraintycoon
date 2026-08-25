@@ -215,11 +215,15 @@ canvas.style.imageRendering = 'auto'; // some browsers default to 'pixelated' fo
 //
 // DPR is recomputed in fitCanvas() (it depends on window size) and is a
 // `let` so the ctx→tctx mirroring closures, which read it live, always use
-// the current value. Capped at 6 to bound memory (900·6 × 500·6 × 4B ≈
-// 65 MB worst case); 4K lands around 4.3.
+// the current value. Capped at 3: every overlay cost (the full-bitmap clear
+// each frame, every fillText raster, every _getTextBM bitmap) scales with
+// DPR², and beyond ~2.5-3× the sharpness gain is imperceptible while the
+// pixel cost keeps growing quadratically — a 4K screen used to land ~4.3,
+// paying ~2× the pixel work of the cap for no visible benefit. Memory at
+// the cap: 900·3 × 500·3 × 4B ≈ 16 MB.
 function _computeDPR(){
   const _s = Math.min(window.innerWidth/W, window.innerHeight/H);
-  return Math.max(1, Math.min(6, _s * (window.devicePixelRatio || 1)));
+  return Math.max(1, Math.min(3, _s * (window.devicePixelRatio || 1)));
 }
 let DPR = _computeDPR();
 const tCanvas = document.createElement('canvas');
@@ -511,7 +515,56 @@ let _smoothTextMode = false;
     // Blit so the bitmap's pen lands exactly at (x, y).
     tctx.drawImage(e.canvas, x - e.penX, y - e.penY, e.w, e.h);
   }
+  // In fullscreen the keyboard's Escape is awkward to reach (it exits
+  // fullscreen), so the game treats X as the universal Escape alias — see the
+  // keydown handler. To match, every drawn "[ESC]" hint label is rewritten to
+  // "[X]" while fullscreen. Cheap: the indexOf check short-circuits the vast
+  // majority of text draws, and _isFullscreen() only runs when the token is
+  // actually present. (_isFullscreen is a hoisted function declaration.)
+  function _escLabelSwap(t){
+    if(typeof t!=='string' || t.indexOf('[ESC]')<0) return t;
+    return _isFullscreen() ? t.split('[ESC]').join('[X]') : t;
+  }
+  // Lighten an rgb/rgba colour string toward white (and bump alpha a touch) so
+  // the ✕ close glyph reads a little brighter than the dim label it replaces.
+  // Non-rgb styles (hex, named) pass through unchanged.
+  function _lightenStyle(s){
+    if(typeof s!=='string') return s;
+    const m=s.match(/^rgba?\(([^)]+)\)/i);
+    if(!m) return s;
+    const p=m[1].split(',').map(v=>parseFloat(v));
+    if(p.length<3||p.some(v=>isNaN(v))) return s;
+    const k=0.34;
+    const r=Math.round(p[0]+(255-p[0])*k), g=Math.round(p[1]+(255-p[1])*k), b=Math.round(p[2]+(255-p[2])*k);
+    const a=Math.min(1,(p.length>=4?p[3]:1)+0.20);
+    return 'rgba('+r+','+g+','+b+','+a+')';
+  }
+  // Draw the ✕ close glyph onto the HD overlay in place of a "[ESC] close"
+  // label — a bigger, bolder, slightly-lighter, more-recognisable close button.
+  // Reconstructs the RIGHT EDGE of where the label would have sat (from the
+  // caller's font + textAlign) so the glyph always lands in the popup's top-
+  // right corner regardless of whether the caller right- or left-aligned it.
+  // The caller's existing escBounds hit-rect is left untouched (a generous
+  // corner click target).
+  function _drawCloseGlyph(x, y){
+    _syncTextState(); // mirror caller font/fill/align/baseline onto tctx
+    const _align=tctx.textAlign||'start';
+    let _rightX=x;
+    if(_align==='left'||_align==='start'){ _rightX=x+tctx.measureText('[ESC] close').width; }
+    else if(_align==='center'){ _rightX=x+tctx.measureText('[ESC] close').width/2; }
+    const _f=tctx.font, _fs=tctx.fillStyle, _al=tctx.textAlign;
+    tctx.textAlign='right';
+    tctx.font='bold 14px "Exo 2",sans-serif';
+    tctx.fillStyle=_lightenStyle(_fs);
+    tctx.fillText('✕', _rightX, y);
+    tctx.font=_f; tctx.fillStyle=_fs; tctx.textAlign=_al;
+  }
   ctx.fillText = function(text, x, y, maxWidth){
+    // Universal close affordance: render every "[ESC] close" label as a bold ✕
+    // glyph in the popup's top-right corner. Intercepted BEFORE _escLabelSwap so
+    // it applies in fullscreen too; the caller's escBounds hit-rect is untouched.
+    if(text==='[ESC] close'){ _drawCloseGlyph(x, y); return; }
+    text=_escLabelSwap(text);
     _syncTextState();
     if(_smoothTextMode){ _drawTextViaBM(text, x, y, 0); return; }
     // Default: direct, native, full-DPR rasterisation → sharpest possible.
@@ -519,6 +572,7 @@ let _smoothTextMode = false;
     else tctx.fillText(text, x, y);
   };
   ctx.strokeText = function(text, x, y, maxWidth){
+    text=_escLabelSwap(text);
     _syncTextState();
     if(_smoothTextMode){ _drawTextViaBM(text, x, y, 1); return; }
     if(maxWidth!==undefined) tctx.strokeText(text, x, y, maxWidth);
@@ -675,6 +729,7 @@ function _initAudioCtx(){
   }catch(e){ _audioCtx=false; return false; }
 }
 function playSound(id){
+  if(_sfxMuted||_sfxVol<=0) return; // SFX muted or volume at 0 → silent
   const _ctx=(_audioCtx===null)?_initAudioCtx():_audioCtx;
   if(_ctx){
     if(_ctx.state==='suspended') _ctx.resume().catch(()=>{});
@@ -682,7 +737,7 @@ function playSound(id){
     if(_buf){
       try{
         const _s=_ctx.createBufferSource(); _s.buffer=_buf;
-        const _g=_ctx.createGain(); _g.gain.value=0.45;
+        const _g=_ctx.createGain(); _g.gain.value=_sfxVol;
         _s.connect(_g); _g.connect(_ctx.destination); _s.start(0);
         return;
       }catch(e){}
@@ -690,7 +745,8 @@ function playSound(id){
     // Buffer not decoded yet → fall through to the HTMLAudio fallback this once.
   }
   let a=_sfxFallback[id];
-  if(!a){ const v=SOUNDS[id]; if(!v) return; a=new Audio(v); a.volume=0.45; _sfxFallback[id]=a; }
+  if(!a){ const v=SOUNDS[id]; if(!v) return; a=new Audio(v); _sfxFallback[id]=a; }
+  a.volume=_sfxVol;
   try{ a.currentTime=0; a.play().catch(()=>{}); }catch(e){}
 }
 // ── soundtrack ───────────────────────────────────────────────
@@ -703,17 +759,22 @@ function playSound(id){
 // any interruption) and avoids GitHub raw's rate-limits / missing Range support.
 const _MUSIC_BASE='assets/';
 const _MUSIC_TRACKS=[
-  {file:'a.o.huge_01_last_train_home.mp3',      title:'Last Train Home'},
-  {file:'a.o.huge_02_interstellar_segment.mp3', title:'Interstellar Segment'},
-  {file:'a.o.huge_03_star_depot_groove.mp3',    title:'Star Depot Groove'},
-  {file:'a.o.huge_04_neon_katsu_sandwich.mp3',  title:'Neon Katsu Sandwich'},
-  {file:'a.o.huge_05_lunar_save_point.mp3',     title:'Lunar Save Point'},
-  {file:'a.o.huge_06_nebulosa_amistosa.mp3',    title:'Nebulosa Amistosa'},
-  {file:'a.o.huge_07_midnight_cargo_run.mp3',   title:'Midnight Cargo Run'},
+  {file:'01_a.o.huge_last_train_home.mp3',      title:'Last Train Home',      artist:'a.o.huge'},
+  {file:'02_a.o.huge_interstellar_segment.mp3', title:'Interstellar Segment', artist:'a.o.huge'},
+  {file:'03_a.o.huge_star_depot_groove.mp3',    title:'Star Depot Groove',    artist:'a.o.huge'},
+  {file:'04_a.o.huge_neon_katsu_sandwich.mp3',  title:'Neon Katsu Sandwich',  artist:'a.o.huge'},
+  {file:'05_attention_junction.mp3',            title:'Junction',             artist:'Attention'},
+  {file:'06_attention_fast_track.mp3',          title:'Fast Track',           artist:'Attention'},
+  {file:'07_a.o.huge_lunar_save_point.mp3',     title:'Lunar Save Point',     artist:'a.o.huge'},
+  {file:'08_a.o.huge_nebulosa_amistosa.mp3',    title:'Nebulosa Amistosa',    artist:'a.o.huge'},
+  {file:'09_a.o.huge_midnight_cargo_run.mp3',   title:'Midnight Cargo Run',   artist:'a.o.huge'},
+  {file:'10_attention_cosmos.mp3',              title:'Cosmos',               artist:'Attention'},
 ];
 const _soundtrack=new Audio();
-_soundtrack.volume=0.35;
+_soundtrack.volume=0.35; // 0..1 MUSIC volume (Options slider 0-100 ÷ 100)
 let _musicMuted=false;
+let _sfxMuted=false;     // Sound-Effects mute (separate Options pane)
+let _sfxVol=0.45;        // 0..1 SFX master gain (Options slider 0-100 ÷ 100)
 let _musicIdx=0, _musicStarted=false;
 function _loadMusicTrack(i){
   _musicIdx=((i%_MUSIC_TRACKS.length)+_MUSIC_TRACKS.length)%_MUSIC_TRACKS.length;
@@ -738,16 +799,29 @@ function _tryPlaySoundtrack(){
   // browsers (the "audio resets every click" report) — the guard avoids it.
   if(_soundtrack.paused) _soundtrack.play().catch(()=>{});
 }
+// Force the soundtrack to (re)start playing if it has somehow been stopped —
+// used by the Options mute / prev / next controls. Playtesters reported the
+// music occasionally stops; this guarantees these explicit user actions kick it
+// back on. Resumes the shared audio context, re-loads the track source if the
+// element lost it, and unconditionally calls play() (unless muted).
+function _forceMusicPlay(){
+  if(_musicMuted) return;
+  _musicEnsureStarted();
+  try{ const _c=_initAudioCtx(); if(_c&&_c.state==='suspended') _c.resume().catch(()=>{}); }catch(_e){}
+  if(!_soundtrack.src) _loadMusicTrack(_musicIdx);
+  const _p=_soundtrack.play();
+  if(_p&&_p.catch) _p.catch(()=>{});
+}
 function _toggleMusicMute(){
   _musicMuted=!_musicMuted;
   if(_musicMuted){ _soundtrack.pause(); }
-  else { _musicEnsureStarted(); _soundtrack.play().catch(()=>{}); }
+  else { _forceMusicPlay(); }  // unmute → force playback back on
 }
 // Next: immediately load + play the next track in fixed order.
 function _musicNext(){
   _musicEnsureStarted();
   _loadMusicTrack(_musicIdx+1);
-  if(!_musicMuted) _soundtrack.play().catch(()=>{});
+  _forceMusicPlay();
 }
 // Prev: restart current track if >5s elapsed, otherwise skip to previous track.
 function _musicPrev(){
@@ -757,12 +831,57 @@ function _musicPrev(){
   } else {
     _loadMusicTrack(_musicIdx-1);
   }
-  if(!_musicMuted) _soundtrack.play().catch(()=>{});
+  _forceMusicPlay();
 }
 let _muteBtnBounds=null, _muteBtnHover=false;
-let _optsMuteBtnBounds=null, _optsMuteBtnHover=false;
+// Title-screen fullscreen toggle (left of the mute button).
+let _fsBtnBounds=null, _fsBtnHover=false;
+// Title-screen SETTINGS (gear) button — opens the Options window (no Save Game).
+let _settingsBtnBounds=null, _settingsBtnHover=false;
+function _isFullscreen(){
+  return !!(document.fullscreenElement||document.webkitFullscreenElement||document.mozFullScreenElement||document.msFullscreenElement);
+}
+function _toggleFullscreen(){
+  try{
+    if(_isFullscreen()){
+      const _ex=document.exitFullscreen||document.webkitExitFullscreen||document.mozCancelFullScreen||document.msExitFullscreen;
+      if(_ex) _ex.call(document);
+    } else {
+      const _el=document.documentElement;
+      const _rq=_el.requestFullscreen||_el.webkitRequestFullscreen||_el.mozRequestFullScreen||_el.msRequestFullscreen;
+      if(_rq) _rq.call(_el);
+    }
+  }catch(_e){}
+}
+// Stroke the fullscreen corner-bracket glyph centred at (cx,cy), half-size hh.
+// EXPAND (corners at the outer edges) when windowed; COMPRESS (corners pulled to
+// the centre) when already fullscreen. Used by the title screen + Options popup.
+function _drawFullscreenGlyph(cx,cy,hh,col,lw){
+  ctx.save();
+  ctx.strokeStyle=col; ctx.lineWidth=lw||2; ctx.lineCap='round'; ctx.lineJoin='round';
+  const _L=hh*0.62;
+  ctx.beginPath();
+  if(!_isFullscreen()){
+    ctx.moveTo(cx-hh,cy-hh+_L); ctx.lineTo(cx-hh,cy-hh); ctx.lineTo(cx-hh+_L,cy-hh);
+    ctx.moveTo(cx+hh-_L,cy-hh); ctx.lineTo(cx+hh,cy-hh); ctx.lineTo(cx+hh,cy-hh+_L);
+    ctx.moveTo(cx-hh,cy+hh-_L); ctx.lineTo(cx-hh,cy+hh); ctx.lineTo(cx-hh+_L,cy+hh);
+    ctx.moveTo(cx+hh-_L,cy+hh); ctx.lineTo(cx+hh,cy+hh); ctx.lineTo(cx+hh,cy+hh-_L);
+  } else {
+    ctx.moveTo(cx-hh,cy-hh+_L); ctx.lineTo(cx-hh+_L,cy-hh+_L); ctx.lineTo(cx-hh+_L,cy-hh);
+    ctx.moveTo(cx+hh,cy-hh+_L); ctx.lineTo(cx+hh-_L,cy-hh+_L); ctx.lineTo(cx+hh-_L,cy-hh);
+    ctx.moveTo(cx-hh,cy+hh-_L); ctx.lineTo(cx-hh+_L,cy+hh-_L); ctx.lineTo(cx-hh+_L,cy+hh);
+    ctx.moveTo(cx+hh,cy+hh-_L); ctx.lineTo(cx+hh-_L,cy+hh-_L); ctx.lineTo(cx+hh-_L,cy+hh);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+let _optsMuteBtnBounds=null, _optsMuteBtnHover=false;       // MUSIC mute
+let _optsSfxMuteBtnBounds=null, _optsSfxMuteBtnHover=false; // SOUND EFFECTS mute
 let _optsPrevBtnBounds=null, _optsPrevBtnHover=false;
 let _optsNextBtnBounds=null, _optsNextBtnHover=false;
+let _optsMusicProgressBounds=null; // click-to-seek hit area on the music progress bar
+let _optsSfxSliderBounds=null, _optsMusicSliderBounds=null; // volume slider hit-tracks
+let _optsSliderDrag=null;                                   // 'sfx' | 'music' | 'seek' | null (active drag; cleared on mouseup)
 
 // ── name edit overlay ────────────────────────────────────────
 const nameEditEl=document.getElementById('name-edit');
@@ -810,7 +929,7 @@ function getCP(e){
 }
 
 // ── title constants ──────────────────────────────────────────
-const GAME_VERSION = 'v0.4.4'; // shown bottom-left of the title screen
+const GAME_VERSION = 'v0.4.6'; // shown bottom-left of the title screen
 const CAR_MID = ['car_passenger','car_royal','car_water_tank','car_cargo','car_livestock','car_mail','car_ice','car_sand','car_ore','car_iron','car_hazmat','car_oil','car_battery','car_chemical'];
 const CAR_W=112, CAR_H=80, RAIL_Y=H*0.68;
 const T_PALS = [
@@ -826,11 +945,14 @@ const T_PALS = [
 const BAR_H    = 72;
 const TOP_H    = 28;
 const GH       = H - BAR_H;
-const PANEL_W  = 185;
+const PANEL_W_BASE = 185;
+let   PANEL_W  = 185;   // live width of the right UI panel; doubles in expanded mode
+let   _panelExpanded = false; // true → panel rendered at 2× width (Trains/Stations tabs)
 const AI_CORP_COLOR='#e89320';
 const AI_CORP_RGB=[232,147,32];
 const AI_TICK_INTERVALS={very_easy:22,easy:13,normal:7,hard:3.5,very_hard:1.8};
 const AI_START_CREDITS={very_easy:250000,easy:300000,normal:400000,hard:500000,very_hard:750000};
+const PLAYER_START_CREDITS=250000; // credits the player begins each new game with (shown on the corp-setup CEO cards)
 // User spec: no theoretical maximum. AI grows uncapped at every difficulty.
 const AI_MAX_TRAINS={very_easy:Infinity,easy:Infinity,normal:Infinity,hard:Infinity,very_hard:Infinity};
 const AI_MAX_STATIONS={very_easy:Infinity,easy:Infinity,normal:Infinity,hard:Infinity,very_hard:Infinity};
@@ -841,6 +963,21 @@ const SIZE_R   = {XS:24, S:48, M:96, L:192, XL:288, XXL:432};
 
 const WORLD_W  = 204800;
 const WORLD_H  = 153600;
+// ── v0.4.7 Zeta Quadrant world extension ─────────────────────────────────
+// The Zeta Quadrant occupies a band of space EAST of the Alpha galaxy,
+// separated by an impassable void (beyond every engine's range — the ignited
+// black-hole portal is the only crossing). The world's east camera bound is
+// extended only when the portal ignites (`_applyZetaWorldExtent`), so the
+// pre-ignition game is bit-for-bit identical to v0.4.6 behavior.
+const ZETA_VOID_W = 40000;                       // impassable buffer band
+const ZETA_W      = 200000;                      // Zeta band width
+const ZETA_X0     = WORLD_W + ZETA_VOID_W;       // Zeta west edge (244,800)
+const ZETA_X1     = ZETA_X0 + ZETA_W;            // Zeta east edge (444,800)
+let   WORLD_E_X   = WORLD_W;                     // live east camera bound
+function _applyZetaWorldExtent(){ WORLD_E_X = ZETA_X1; }
+function _regionOfX(x){ return x > WORLD_W + ZETA_VOID_W*0.5 ? 'zeta' : 'alpha'; }
+const PORTAL_PROXY_ALPHA = 60000;  // starProxyMap id: black-hole portal (Alpha side)
+const PORTAL_PROXY_ZETA  = 60001;  // starProxyMap id: exit portal (Zeta side)
 
 // ── Google Analytics custom-event helper ─────────────────────────────────
 // Sends events directly to GA4's Measurement Protocol via fetch(), bypassing
@@ -982,6 +1119,38 @@ const CAR_CARGO_TYPE = {
   car_glass:    'glass',
   car_machinery:'machinery',
   car_cargo:    'cargo',
+  // ── Project Helios (mid-game) cargo cars ──
+  car_uranium:  'uranium',
+  car_helium3:  'helium3',
+  car_solar:    'solar_panel',
+  car_supercon: 'superconductor',
+  car_truss:    'truss',
+  car_reactor:  'reactor_core',
+  // ── Zeta Quadrant (endgame) cargo cars ──
+  car_aetherium:'aetherium',
+  car_titanium: 'titanium',
+  car_biomass:  'biomass',
+  car_artifact: 'artifact',
+  car_titanplate:'titanium_plate',
+  car_warpsteel:'warpsteel',
+  // ── Military cars: the "cargo" they load is their ammo / shield fuel.
+  // 1 unit loaded = 1 full magazine (see _WEAPON_STATS). They never unload
+  // for revenue except at Defense Battery planets (demand floor there).
+  car_cannon:   'cannon_shell',
+  car_laser:    'plasma_cell',
+  car_shield:   'aegis_gel',
+};
+// Military car classification — used by the builder (armory-only purchase),
+// cargo ops (no revenue unload except defense-battery restock) and combat.
+const MILITARY_CARS=new Set(['car_cannon','car_laser','car_shield']);
+const WEAPON_CARS=new Set(['car_cannon','car_laser']);
+// Per-military-car combat stats. mag = shots (or shield charges) granted by
+// loading ONE unit of the matching ammo cargo. range in world units (SU).
+// cdFrames = per-car fire cooldown in dtG frame-units (240 ≈ 4 s at 1×).
+const _WEAPON_STATS={
+  car_cannon:{mag:6, range:1200, dmg:2, cdFrames:240, kind:'cannon'},
+  car_laser: {mag:8, range:2000, dmg:1, cdFrames:90,  kind:'laser'},
+  car_shield:{mag:6, range:0,    dmg:0, cdFrames:0,   kind:'shield'},
 };
 // Fractional cargo units per operation (all others default to 1.0)
 const CAR_CARGO_UNITS = {car_royal: 0.5};
@@ -1009,21 +1178,53 @@ const CARGO_BASE_RATE = {
   glass:      {car_glass:5500},
   machinery:  {car_machinery:9500},
   cargo:      {car_cargo:1800},
+  // Project Helios tier
+  uranium:        {car_uranium:14000},
+  helium3:        {car_helium3:10000},
+  solar_panel:    {car_solar:12000},
+  superconductor: {car_supercon:16000},
+  truss:          {car_truss:15000},
+  reactor_core:   {car_reactor:28000},
+  // Zeta Quadrant tier
+  aetherium:      {car_aetherium:15000},
+  titanium:       {car_titanium:9000},
+  biomass:        {car_biomass:3500},
+  artifact:       {car_artifact:22000},
+  titanium_plate: {car_titanplate:14000},
+  warpsteel:      {car_warpsteel:35000},
+  // Military consumables (revenue only at Defense Battery restock stops)
+  cannon_shell:   {car_cannon:10000},
+  plasma_cell:    {car_laser:16000},
+  aegis_gel:      {car_shield:13000},
 };
 // Which car sprite represents each cargo type in UI
-const CARGO_CAR_SPRITE = {passengers:'car_passenger', livestock:'car_livestock', mail:'car_mail', water:'car_water_tank', ice:'car_ice', sand:'car_sand', molten_ore:'car_ore', iron:'car_iron', gold:'car_gold', diamond:'car_diamond', hazmat:'car_hazmat', oil:'car_oil', battery:'car_battery', chemical:'car_chemical', flowers:'car_flowers', medical:'car_medical', grain:'car_grain', fruit:'car_fruit', steel:'car_steel', glass:'car_glass', machinery:'car_machinery', cargo:'car_cargo'};
-const CARGO_LABEL      = {passengers:'PASSENGERS', livestock:'LIVESTOCK', mail:'MAIL', water:'WATER', ice:'ICE', sand:'SAND', molten_ore:'MOLTEN ORE', iron:'IRON', gold:'GOLD', diamond:'DIAMOND', hazmat:'HAZMAT', oil:'OIL', battery:'BATTERY', chemical:'CHEMICAL', flowers:'FLOWERS', medical:'MEDICAL', grain:'GRAIN', fruit:'FRUIT', steel:'STEEL', glass:'GLASS', machinery:'MACHINERY', cargo:'CARGO', ceo_salary:'CEO SALARY', maintenance:'MAINTENANCE'};
-const CARGO_SHORT      = {passengers:'PSNGR', livestock:'LVSTK', mail:'MAIL', water:'WATER', ice:'ICE', sand:'SAND', molten_ore:'ORE', iron:'IRON', gold:'GOLD', diamond:'DMND', hazmat:'HAZMT', oil:'OIL', battery:'BATT', chemical:'CHEM', flowers:'FLWRS', medical:'MEDCL', grain:'GRAIN', fruit:'FRUIT', steel:'STEEL', glass:'GLASS', machinery:'MACH', cargo:'CARGO'};
+const CARGO_CAR_SPRITE = {passengers:'car_passenger', livestock:'car_livestock', mail:'car_mail', water:'car_water_tank', ice:'car_ice', sand:'car_sand', molten_ore:'car_ore', iron:'car_iron', gold:'car_gold', diamond:'car_diamond', hazmat:'car_hazmat', oil:'car_oil', battery:'car_battery', chemical:'car_chemical', flowers:'car_flowers', medical:'car_medical', grain:'car_grain', fruit:'car_fruit', steel:'car_steel', glass:'car_glass', machinery:'car_machinery', cargo:'car_cargo',
+  uranium:'car_uranium', helium3:'car_helium3', solar_panel:'car_solar', superconductor:'car_supercon', truss:'car_truss', reactor_core:'car_reactor',
+  aetherium:'car_aetherium', titanium:'car_titanium', biomass:'car_biomass', artifact:'car_artifact', titanium_plate:'car_titanplate', warpsteel:'car_warpsteel',
+  cannon_shell:'car_cannon', plasma_cell:'car_laser', aegis_gel:'car_shield'};
+const CARGO_LABEL      = {passengers:'PASSENGERS', livestock:'LIVESTOCK', mail:'MAIL', water:'WATER', ice:'ICE', sand:'SAND', molten_ore:'MOLTEN ORE', iron:'IRON', gold:'GOLD', diamond:'DIAMOND', hazmat:'HAZMAT', oil:'OIL', battery:'BATTERY', chemical:'CHEMICAL', flowers:'FLOWERS', medical:'MEDICAL', grain:'GRAIN', fruit:'FRUIT', steel:'STEEL', glass:'GLASS', machinery:'MACHINERY', cargo:'CARGO', ceo_salary:'CEO SALARY', maintenance:'MAINTENANCE',
+  uranium:'URANIUM', helium3:'HELIUM-3', solar_panel:'SOLAR PANELS', superconductor:'SUPERCONDUCTORS', truss:'TRUSSES', reactor_core:'REACTOR CORES',
+  aetherium:'AETHERIUM', titanium:'TITANIUM', biomass:'BIOMASS', artifact:'ARTIFACTS', titanium_plate:'TITANIUM PLATE', warpsteel:'WARPSTEEL',
+  cannon_shell:'CANNON SHELLS', plasma_cell:'PLASMA CELLS', aegis_gel:'AEGIS GEL'};
+const CARGO_SHORT      = {passengers:'PSNGR', livestock:'LVSTK', mail:'MAIL', water:'WATER', ice:'ICE', sand:'SAND', molten_ore:'ORE', iron:'IRON', gold:'GOLD', diamond:'DMND', hazmat:'HAZMT', oil:'OIL', battery:'BATT', chemical:'CHEM', flowers:'FLWRS', medical:'MEDCL', grain:'GRAIN', fruit:'FRUIT', steel:'STEEL', glass:'GLASS', machinery:'MACH', cargo:'CARGO',
+  uranium:'URAN', helium3:'HE-3', solar_panel:'SOLAR', superconductor:'SPCON', truss:'TRUSS', reactor_core:'REACT',
+  aetherium:'AETHR', titanium:'TITAN', biomass:'BIOMS', artifact:'ARTFT', titanium_plate:'PLATE', warpsteel:'WARP',
+  cannon_shell:'SHELL', plasma_cell:'PLASM', aegis_gel:'AEGIS'};
 // Text-color map for resource / cargo names rendered inline in objective
 // text. Looked up case-insensitively keyed on the displayed name (handles both
 // "iron" and "Molten Ore"). Choose the dominant hue of each cargo's sprite.
 const CARGO_TEXT_COLORS = {
-  passengers:'#e8c8a4', livestock:'#b6815c', mail:'#f4b450', water:'#42a8ff',
-  ice:'#a4dcff', sand:'#dcc080', 'molten ore':'#ff5a28', iron:'#d2d2d2',
+  passengers:'#c30010', livestock:'#b6815c', mail:'#ffffff', water:'#42a8ff',
+  ice:'#a4dcff', sand:'#bb8459', 'molten ore':'#ff5a28', iron:'#5e626b',
   gold:'#ffd148', diamond:'#a4f0ff', hazmat:'#dcff48', oil:'#9aa83a',
   battery:'#ffd744', chemical:'#80e860', flowers:'#ff7acc', medical:'#ff5a78',
   grain:'#d4a76a', fruit:'#ff7a48', steel:'#94a8bc', glass:'#b0e8f0',
   machinery:'#a4acb4', cargo:'#b08858',
+  uranium:'#aaff00', 'helium-3':'#ffbb55', 'solar panels':'#55b8ff',
+  superconductors:'#9070ff', trusses:'#a8c4dc', 'reactor cores':'#40e0c0',
+  aetherium:'#ff50e0', titanium:'#70c8e8', biomass:'#a8e030',
+  artifacts:'#40ff90', 'titanium plate':'#b8e0ff', warpsteel:'#b070ff',
+  'cannon shells':'#ffb060', 'plasma cells':'#ff70ff', 'aegis gel':'#70ffd8',
 };
 function _cargoTextColor(name){
   if(!name) return null;
@@ -1042,17 +1243,43 @@ const _MISSION_PLANET_STYLES = [
   {re:/^desert\s+planet\b/i, up:'DESERT PLANET', color:'#f0a040'}, // desert biome (hi)
   {re:/^orijen\b/i,          up:'ORIJEN',        color:'#38aaf0'}, // resort ocean (hi)
 ];
-function _objTokenize(text){
+// Build dynamic planet-name styles for a mission so its REAL planet names
+// (source / target / scientist sources, substituted in by _resolveMissionText)
+// get the SAME uppercase + bold treatment as the static ORIJEN style, but tinted
+// to the planet's biome colour. Orijen is skipped — the static entry keeps its
+// fixed resort-ocean blue. `ref` is any object carrying the planet ids
+// (sourcePlanetId / targetPlanetId / scientistSourceIds), e.g. a mission or ctx.
+function _missionPlanetStyles(ref){
+  if(!ref||!galaxy) return null;
+  const _ids=[];
+  if(ref.sourcePlanetId!=null) _ids.push(ref.sourcePlanetId);
+  if(ref.targetPlanetId!=null) _ids.push(ref.targetPlanetId);
+  if(Array.isArray(ref.scientistSourceIds)) for(const _s of ref.scientistSourceIds) if(_s!=null) _ids.push(_s);
+  if(!_ids.length) return null;
+  const _out=[], _seen=new Set();
+  for(const _id of _ids){
+    const _p=_gp(_id); if(!_p||!_p.name) continue;
+    if(/^orijen$/i.test(_p.name)) continue;        // static entry owns ORIJEN
+    const _key=_p.name.toLowerCase(); if(_seen.has(_key)) continue; _seen.add(_key);
+    const _esc=_p.name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'); // escape for regex
+    _out.push({re:new RegExp('^'+_esc+'\\b','i'), name:_p.name, up:_p.name.toUpperCase(), color:(_p.type&&_p.type.hi)||'#9ab0d0'});
+  }
+  return _out.length?_out:null;
+}
+function _objTokenize(text, extraStyles){
   const out=[]; let i=0, cur='';
   const flush=()=>{ if(cur){ for(const w of cur.split(/\s+/)) if(w) out.push({text:w,color:null}); cur=''; } };
   const _isWord=(c)=>c!==undefined && /[A-Za-z0-9]/.test(c); // matches regex \b (so "ORIJEN's" still colours ORIJEN)
+  // Static styles first (ORIJEN / LAVA PLANET / DESERT PLANET keep fixed colours),
+  // then any per-mission dynamic planet names tinted to their biome.
+  const _styles=extraStyles&&extraStyles.length?_MISSION_PLANET_STYLES.concat(extraStyles):_MISSION_PLANET_STYLES;
   while(i<text.length){
     // Planet-name phrases → uppercased + coloured (one coloured token per word
     // so the wrapper can still break the phrase across lines). Word-boundary
     // checked on BOTH sides so e.g. "DESERTED" or a mid-word match never hits.
     if(!_isWord(text[i-1])){
       let hit=null;
-      for(const ps of _MISSION_PLANET_STYLES){
+      for(const ps of _styles){
         const m=ps.re.exec(text.slice(i));
         if(m && !_isWord(text[i+m[0].length])){ hit={ps,len:m[0].length}; break; }
       }
@@ -1102,7 +1329,7 @@ function _objDrawLine(line,x,y,fontStr,baseColor){
   for(let i=0;i<line.length;i++){
     const tok=line[i];
     if(i>0) cx+=spaceW;
-    ctx.font = tok.color ? ('bold '+fontStr) : fontStr;
+    ctx.font = ((tok.color||tok.bold)?'bold ':'')+(tok.italic?'italic ':'')+fontStr;
     ctx.fillStyle = tok.color || baseColor;
     ctx.fillText(tok.text,cx,y);
     cx+=ctx.measureText(tok.text).width;
@@ -1117,7 +1344,7 @@ function _objLineWidth(line,fontStr){
   for(let i=0;i<line.length;i++){
     const tok=line[i];
     if(i>0) w+=spaceW;
-    ctx.font = tok.color ? ('bold '+fontStr) : fontStr;
+    ctx.font = ((tok.color||tok.bold)?'bold ':'')+(tok.italic?'italic ':'')+fontStr;
     w+=ctx.measureText(tok.text).width;
   }
   return w;
@@ -1155,12 +1382,65 @@ const UPGRADES=[
    eligibleBiomes:['agri'],preBuiltBiomes:[]},
   {id:'orchard',label:'ORCHARD',desc:'Grows and exports fresh fruit.',cost:10000,
    eligibleBiomes:['agri'],preBuiltBiomes:[]},
+  // ── v0.4.7 Project Helios (mid-game) industry ──
+  {id:'gas_siphon',label:'GAS SIPHON',desc:'Siphons helium-3 from the storm layer.',cost:30000,
+   eligibleBiomes:['storm'],preBuiltBiomes:[]},
+  {id:'panel_fab',label:'PANEL FABRICATOR',desc:'Assembles glass and batteries into solar panels.',cost:35000,
+   eligibleBiomes:['resort','urban'],preBuiltBiomes:[]},
+  {id:'cryo_forge',label:'CRYO FORGE',desc:'Freezes gold and batteries into superconductors.',cost:40000,
+   eligibleBiomes:['ice'],preBuiltBiomes:[]},
+  {id:'orbital_shipyard',label:'ORBITAL SHIPYARD',desc:'Welds steel and machinery into support trusses.',cost:50000,
+   eligibleBiomes:['urban'],preBuiltBiomes:[]},
+  {id:'reactor_assembly',label:'REACTOR ASSEMBLY',desc:'Builds reactor cores from uranium, steel and helium-3.',cost:60000,
+   eligibleBiomes:['lava'],preBuiltBiomes:[]},
+  // ── v0.4.7 Zeta Quadrant (endgame) industry ──
+  {id:'titan_mill',label:'TITAN MILL',desc:'Refines titanium and chemicals into armor plate.',cost:45000,
+   eligibleBiomes:['obsidian'],preBuiltBiomes:[]},
+  {id:'munitions_works',label:'MUNITIONS WORKS',desc:'Presses steel and chemicals into cannon shells.',cost:40000,
+   eligibleBiomes:['rocky','urban'],preBuiltBiomes:[]},
+  {id:'plasma_refinery',label:'PLASMA REFINERY',desc:'Charges aetherium and batteries into plasma cells.',cost:55000,
+   eligibleBiomes:['crystal'],preBuiltBiomes:[]},
+  {id:'bioforge',label:'BIOFORGE',desc:'Cultures biomass, water and chemicals into aegis gel.',cost:50000,
+   eligibleBiomes:['fungal'],preBuiltBiomes:[]},
+  {id:'xenoforge',label:'XENOFORGE',desc:'Fuses titanium plate, aetherium and superconductors into warpsteel.',cost:100000,
+   eligibleBiomes:['urban'],preBuiltBiomes:[]},
   // Repair Drones — universal upgrade available at every station planet. Placed last in the
   // UPGRADES array so it naturally sorts to the bottom of the upgrades pane (the `shown`
   // list filter preserves array order).
   {id:'repair_drones',label:'REPAIR DRONES',desc:'Reduces train maintenance costs by -25% at this planet.',cost:10000,
    eligibleBiomes:[],preBuiltBiomes:[],universal:true},
+  // ── v0.4.7 military (universal, gated on the Zeta military arc) ──
+  {id:'armory',label:'ARMORY',desc:'Assembles military train cars from delivered components.',cost:60000,
+   eligibleBiomes:[],preBuiltBiomes:[],universal:true},
+  {id:'defense_battery',label:'DEFENSE BATTERY',desc:'Station cannon — fires stocked cannon shells at hostile trains.',cost:30000,
+   eligibleBiomes:[],preBuiltBiomes:[],universal:true},
 ];
+// ── v0.4.7 generic refinery recipe table ─────────────────────────────────
+// Drives the generic intake + production tick for every new Helios / Zeta
+// refinery (the six original refineries keep their bespoke blocks in
+// updateFoundries). in: {cargo: units consumed per cycle}, out: cargo
+// produced (1 unit/cycle), tm: production time as a multiple of
+// FOUNDRY_PROD_TIME, car/label: first-player-production car unlock.
+const V47_RECIPES=[
+  {id:'panel_fab',        inputs:['glass','battery'],                 out:'solar_panel',    tm:1, car:'car_solar',     label:'Solar Panel Car',     chatCol:'rgba(85,184,255,1)'},
+  {id:'cryo_forge',       inputs:['gold','battery'],                  out:'superconductor', tm:2, car:'car_supercon',  label:'Superconductor Car',  chatCol:'rgba(144,112,255,1)'},
+  {id:'orbital_shipyard', inputs:['steel','machinery'],               out:'truss',          tm:2, car:'car_truss',     label:'Truss Car',           chatCol:'rgba(168,196,220,1)'},
+  {id:'reactor_assembly', inputs:['uranium','steel','helium3'],       out:'reactor_core',   tm:3, car:'car_reactor',   label:'Reactor Core Car',    chatCol:'rgba(64,224,192,1)'},
+  {id:'titan_mill',       inputs:['titanium','chemical'],             out:'titanium_plate', tm:1, car:'car_titanplate',label:'Titanium Plate Car',  chatCol:'rgba(184,224,255,1)'},
+  {id:'munitions_works',  inputs:['steel','chemical'],                out:'cannon_shell',   tm:1, car:null,            label:null,                  chatCol:'rgba(255,176,96,1)'},
+  {id:'plasma_refinery',  inputs:['aetherium','battery'],             out:'plasma_cell',    tm:1, car:null,            label:null,                  chatCol:'rgba(255,112,255,1)'},
+  {id:'bioforge',         inputs:['biomass','water','chemical'],      out:'aegis_gel',      tm:1, car:null,            label:null,                  chatCol:'rgba(112,255,216,1)'},
+  {id:'xenoforge',        inputs:['titanium_plate','aetherium','superconductor'], out:'warpsteel', tm:3, car:'car_warpsteel', label:'Warpsteel Car', chatCol:'rgba(176,112,255,1)'},
+];
+// Armory assembly recipes — consume component bins, output a military CAR
+// into the trainyard (not planet supply). First recipe with a full component
+// set wins each cycle; deliver components selectively to steer output.
+const ARMORY_RECIPES=[
+  {car:'car_shield', comps:{titanium_plate:3, glass:1, aegis_gel:2},      label:'Shield Car'},
+  {car:'car_cannon', comps:{steel:4, machinery:2, titanium_plate:2},      label:'Cannon Car'},
+  {car:'car_laser',  comps:{titanium_plate:2, superconductor:2, aetherium:2}, label:'Laser Car'},
+];
+const ARMORY_BIN_KEYS=['steel','machinery','titanium_plate','superconductor','aetherium','glass','aegis_gel'];
 const MISSION_DEFS=[
   {id:'visit_planet',
    name:'Visit a 2nd planet',
@@ -1193,8 +1473,47 @@ const MISSION_DEFS=[
      if(oid==='await_arrival')   return !!m._trainArrivedAtTarget;
      return false;
    }},
+  {id:'earn_first_credits',
+   name:'Earning your first credits',
+   imageType:'car', imageKey:'car_passenger',
+   objectives:[
+     {id:'build_desert_station', text:'Build a STATION on the DESERT PLANET to enable CARGO to be LOADED/UNLOADED there'},
+     {id:'route_pax_to_desert',  text:'Set up a route to deliver [Passengers] from ORIJEN to the DESERT PLANET'},
+     {id:'earn_at_desert',       text:'Earn money when your train UNLOADs [Passengers] at the DESERT PLANET'},
+   ],
+   // NEW MISSION popup display tweaks (the real objectives above are unchanged —
+   // the [M] tracker / missions window still show all three and drive completion):
+   //  • introHideObjs: objective ids hidden in the NEW MISSION popup only.
+   //  • detailsBreaks: render the details one sentence per line (break on each period).
+   introHideObjs:['build_desert_station','earn_at_desert'],
+   detailsBreaks:true,
+   details:"Your corporation can EARN MONEY by delivering CARGO from a planet that supplies it to a planet that demands it. CARGO is automatically LOADED (onto empty train cars) before a train departs orbit, as long as there is supply of that CARGO available. CARGO is automatically UNLOADED (from full train cars) after a train arrives in orbit, as long as there is sufficient demand for that CARGO.",
+   note:"Note: [Passengers] will disembark at any inhabited planet other than the planet they boarded at.",
+   reward:2000, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(!galaxy) return false;
+     const _orijenId=galaxy.origenId;
+     const _orijenP=_orijenId!=null?galaxy.planets[_orijenId]:null;
+     let _desertId=-1;
+     if(_orijenP){
+       for(const _p of galaxy.planets){
+         if(_p.starId===_orijenP.starId && _p.type && _p.type.id==='desert'){ _desertId=_p.id; break; }
+       }
+     }
+     const _desertP=_desertId>=0?galaxy.planets[_desertId]:null;
+     if(oid==='build_desert_station') return !!(_desertP && _desertP.playerBuiltStation);
+     if(oid==='route_pax_to_desert'){
+       // A PLAYER train whose route (real or queued) links ORIJEN and the desert.
+       return trains.some(t=>t.isPlayer && (
+         (t.route       && (t.route.stops||[]).includes(_orijenId)       && (t.route.stops||[]).includes(_desertId)) ||
+         (t.queuedRoute && (t.queuedRoute.stops||[]).includes(_orijenId) && (t.queuedRoute.stops||[]).includes(_desertId))
+       ));
+     }
+     if(oid==='earn_at_desert') return !!m._earnedAtDesert; // set in the unload handler
+     return false;
+   }},
   {id:'create_route',
-   name:'Create a repeating train route',
+   name:'Create a 3-planet train route',
    imageType:'route_preview', imageKey:null,
    objectives:[
      {id:'sel_lava_start', text:'CLICK on the LAVA PLANET (or a TRAIN orbiting that planet) to select a starting point for your ROUTE'},
@@ -1203,7 +1522,7 @@ const MISSION_DEFS=[
      {id:'shift_loop',     text:'SHIFT+CLICK on the LAVA PLANET to complete the LOOP ROUTE'},
      {id:'assign_route',   text:'ASSIGN this ROUTE to a TRAIN'},
    ],
-   details:"A repeating route keeps your trains busy automatically — no need to redirect them after each delivery.",
+   details:"EARN CREDITS by delivering cargo from planets that supply it to planets that demand it, on a repeating route.",
    reward:2000, timeLimit:null,
    checkObj:(oid,m)=>{
      if(!galaxy) return false;
@@ -1220,14 +1539,16 @@ const MISSION_DEFS=[
          if(_p.starId===_orijenP.starId && _p.type && _p.type.id==='desert'){ _desertId=_p.id; break; }
        }
      }
-     // Real (non-temp) ≥2-stop route assigned to any player train? → entire
-     // mission done. Mirrors the old short-circuit so the post-assign frame
-     // doesn't roll any objective back as `routeStops` clears.
+     // Real (non-temp) route visiting 3+ DISTINCT planets on any player train?
+     // → entire mission done. Renamed to "Create a 3-planet train route", so it
+     // requires 3 distinct stops (a 2-stop Orijen↔Desert route — like the one
+     // built in the first-train tutorial — no longer satisfies it). m._routeAssigned
+     // is gated on a 3-planet route at the assign site too.
      const _hasRealRoute=(
        !!m._routeAssigned ||
        trains.some(t=>t.isPlayer && (
-         (t.route       && !t.route.isTempRoute       && (t.route.stops||[]).length>=2) ||
-         (t.queuedRoute && !t.queuedRoute.isTempRoute && (t.queuedRoute.stops||[]).length>=2)
+         (t.route       && !t.route.isTempRoute       && new Set(t.route.stops||[]).size>=3) ||
+         (t.queuedRoute && !t.queuedRoute.isTempRoute && new Set(t.queuedRoute.stops||[]).size>=3)
        ))
      );
      if(_hasRealRoute) return true;
@@ -1270,7 +1591,7 @@ const MISSION_DEFS=[
      return false;
    }},
   {id:'buy_second_train',
-   name:'Buy a 2nd train',
+   name:'Buy an Iron-delivery Train',
    imageType:'car', imageKey:'engine_galaxy',
    objectives:[
      {id:'open_trains',          text:'Press "T" to open the "Trains" window'},
@@ -1305,18 +1626,32 @@ const MISSION_DEFS=[
    name:'Produce Iron',
    imageType:'car', imageKey:'car_iron',
    prerequisite:'build_foundry',
+   // Two real objectives drive the [M] tracker + Missions window (the NEW MISSION
+   // popup still shows ONE summarised line — see _SUMMARY_OBJS). Obj 2's seconds
+   // count down LIVE — see _objDisplayText / _smeltSecondsRemaining.
    objectives:[
-     {id:'produce_iron_obj', text:'Produce [Iron] by delivering both [Molten Ore] and [Water] to a FOUNDRY'},
+     {id:'deliver_ore_water', text:'Deliver both [Molten Ore] and [Water] to a DESERT PLANET with a FOUNDRY'},
+     {id:'wait_smelt',        text:'Wait 40 seconds for the FOUNDRY to SMELT IRON'},
    ],
    details:'Put your new foundry to work smelting raw ore into refined iron.',
    reward:10000, timeLimit:null,
    checkObj:(oid,m)=>{
-     // Complete as soon as ANY foundry has ever produced ≥1 unit of iron
-     // (_ironCarUnlocked latches true on the first foundry smelt). Dropping the
-     // old !ironUnlockedSnapshot guard means that if the player had already
-     // produced iron BEFORE accepting this mission, it auto-completes the
-     // instant it's accepted (the pre-completed-objective path picks it up).
-     if(oid==='produce_iron_obj') return _ironCarUnlocked;
+     // Obj 1: both inputs have reached a player foundry (smelting in progress, or
+     //        both inputs stocked and about to start, or iron already produced).
+     if(oid==='deliver_ore_water'){
+       if(_ironCarUnlocked) return true;
+       return !!(galaxy&&galaxy.planets.some(p=>{
+         if(p.aiHasStation) return false;
+         if(!(p.upgrades||[]).includes('iron_foundry')) return false;
+         const _fd=p.upgradeData&&p.upgradeData.iron_foundry;
+         return !!_fd&&((_fd.progress||0)>0||((_fd.ore||0)>=1&&(_fd.water||0)>=1));
+       }));
+     }
+     // Obj 2: the foundry has finished smelting ≥1 unit of iron. _ironCarUnlocked
+     // latches true on the first smelt — so overall completion timing is unchanged
+     // from the old single-objective version (and a pre-smelted foundry auto-
+     // completes the mission the instant it's accepted).
+     if(oid==='wait_smelt') return _ironCarUnlocked;
      return false;
    }},
   {id:'upgrade_station',
@@ -1324,10 +1659,10 @@ const MISSION_DEFS=[
    imageType:'station_large', imageKey:null,
    prerequisite:'produce_iron',
    objectives:[
-     {id:'deliver_4_iron_for_upgrade', text:'Deliver 4 [Iron] to a planet with a station you’d like to upgrade'},
-     {id:'upgrade_to_large_station',   text:'Upgrade a Station to a Large Station'},
+     {id:'deliver_4_iron_for_upgrade', text:'Deliver 4 [Iron] to a planet with a STATION you’d like to upgrade'},
+     {id:'upgrade_to_large_station',   text:'Upgrade a STATION to a LARGE STATION'},
    ],
-   details:'Stations only allow one train (in low orbit) to load or unload at a time, while a Large Station can accommodate trains in two orbits.',
+   details:'STATIONS only allow one train (in LOW ORBIT) to load or unload at a time, while a LARGE STATION can accommodate trains in two orbits.',
    reward:50000, timeLimit:null,
    checkObj:(oid,m)=>{
      if(oid==='deliver_4_iron_for_upgrade')
@@ -1653,7 +1988,319 @@ const MISSION_DEFS=[
      const _srcId=m.scientistSourceIds[_idx];
      return _srcId!=null && m._scientistsDelivered.includes(_srcId);
    }},
+  {id:'helios_directive',
+   name:'The Helios Directive',
+   imageType:'dyson', imageKey:null,
+   objectives:[
+     {id:'survey_sites', text:'Visit a planet in each of the 3 HELIOS CONSTRUCTION SITE star systems marked on your map'},
+   ],
+   details:"The deciphered Ancient Schematics describe the Black Hole as a dormant PORTAL — and the blueprint to open it: THREE DYSON SPHERES built around the stars nearest the Black Hole, each beaming stellar power into the event horizon. Your scientists have marked the three construction sites on your star map. Project HELIOS begins now.",
+   reward:50000, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='survey_sites'){
+       if(!galaxy||!Array.isArray(galaxy.heliosSites)||galaxy.heliosSites.length<3) return false;
+       return galaxy.heliosSites.every(hs=>{
+         const _st=galaxy.stars[hs.starId];
+         return _st&&_st.planetIds&&_st.planetIds.some(pid=>visitedPlanetIds.has(pid));
+       });
+     }
+     return false;
+   }},
+  {id:'helios_groundbreak',
+   name:'Ground Breaking',
+   imageType:'station_large', imageKey:null,
+   prerequisite:'helios_directive',
+   objectives:[
+     {id:'depot_steel', text:'Deliver 10 [Steel] to any HELIOS CONSTRUCTION DEPOT'},
+     {id:'depot_glass', text:'Deliver 10 [Glass] to any HELIOS CONSTRUCTION DEPOT'},
+   ],
+   details:"Three CONSTRUCTION DEPOTS have come online at the Helios sites — pre-built stations that accept component deliveries. Prove out your supply lines by delivering base materials to the ground crews.",
+   reward:40000, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='depot_steel') return (m._depotSteel||0)>=10;
+     if(oid==='depot_glass') return (m._depotGlass||0)>=10;
+     return false;
+   }},
+  {id:'helios_frame',
+   name:'Helios Frame',
+   imageType:'car', imageKey:'car_truss',
+   prerequisite:'helios_groundbreak',
+   objectives:[
+     {id:'build_shipyard',  text:'Build an ORBITAL SHIPYARD on an URBAN planet with a LARGE STATION'},
+     {id:'deliver_trusses', text:'Deliver 40 [Trusses] to the FRAME construction depot at {TARGET}'},
+   ],
+   details:"The first sphere is the skeleton: a lattice of SUPPORT TRUSSES welded from STEEL and MACHINERY at an Orbital Shipyard. Feed the metallurgy chain — lava ore, desert foundries, rocky blast furnaces, urban factories — and raise the frame.",
+   reward:150000, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='build_shipyard') return !!(galaxy&&galaxy.planets.some(p=>(p.playerBuiltUpgrades||[]).includes('orbital_shipyard')));
+     if(oid==='deliver_trusses'){ const _dp=_heliosDepot('frame'); return !!_dp&&(_dp.dysonDelivered?.truss||0)>=40; }
+     return false;
+   }},
+  {id:'helios_mirror',
+   name:'Helios Mirror',
+   imageType:'car', imageKey:'car_solar',
+   prerequisite:'helios_groundbreak',
+   objectives:[
+     {id:'build_panelfab',  text:'Build a PANEL FABRICATOR on a RESORT or URBAN planet'},
+     {id:'deliver_panels',  text:'Deliver 40 [Solar Panels] to the MIRROR construction depot at {TARGET}'},
+   ],
+   details:"The second sphere is the skin: a mirror shell of SOLAR PANELS pressed from GLASS and BATTERY cells. Desert sand and chemical feedstock become glass at your glassworks; storm worlds supply the batteries.",
+   reward:150000, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='build_panelfab') return !!(galaxy&&galaxy.planets.some(p=>(p.playerBuiltUpgrades||[]).includes('panel_fab')));
+     if(oid==='deliver_panels'){ const _dp=_heliosDepot('mirror'); return !!_dp&&(_dp.dysonDelivered?.solar_panel||0)>=40; }
+     return false;
+   }},
+  {id:'helios_heart',
+   name:'Helios Heart',
+   imageType:'car', imageKey:'car_reactor',
+   prerequisite:'helios_groundbreak',
+   objectives:[
+     {id:'build_cryo',       text:'Build a CRYO FORGE on an ICE planet'},
+     {id:'build_siphon',     text:'Build a GAS SIPHON on a STORM planet'},
+     {id:'deliver_supercon', text:'Deliver 25 [Superconductors] to the HEART construction depot at {TARGET}'},
+     {id:'deliver_cores',    text:'Deliver 15 [Reactor Cores] to the HEART construction depot at {TARGET}'},
+   ],
+   details:"The third sphere is the power core: SUPERCONDUCTORS frozen from GOLD and BATTERY at an ice-world Cryo Forge, and REACTOR CORES assembled from URANIUM, STEEL and HELIUM-3 on a lava world. The rarest chain — and the one that makes the portal possible.",
+   reward:200000, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='build_cryo')   return !!(galaxy&&galaxy.planets.some(p=>(p.playerBuiltUpgrades||[]).includes('cryo_forge')));
+     if(oid==='build_siphon') return !!(galaxy&&galaxy.planets.some(p=>(p.playerBuiltUpgrades||[]).includes('gas_siphon')));
+     if(oid==='deliver_supercon'){ const _dp=_heliosDepot('heart'); return !!_dp&&(_dp.dysonDelivered?.superconductor||0)>=25; }
+     if(oid==='deliver_cores'){ const _dp=_heliosDepot('heart'); return !!_dp&&(_dp.dysonDelivered?.reactor_core||0)>=15; }
+     return false;
+   }},
+  {id:'helios_ignition',
+   name:'Ignition',
+   imageType:'blackhole', imageKey:null,
+   objectives:[
+     {id:'wait_alignment', text:'Wait while the three Dyson Spheres align their power beams on the Black Hole'},
+   ],
+   details:"All three spheres are complete. Your scientists are aligning their combined output on the event horizon — enough energy to tear the ancient portal open. Nobody knows exactly what is on the other side. Stand by.",
+   reward:null, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='wait_alignment') return m._alignStartSd!=null && (stardate-m._alignStartSd)>=1.0;
+     return false;
+   }},
+  // ═══════════ v0.4.7 ZETA QUADRANT campaign (Z0–Z9) ═══════════
+  {id:'zeta_threshold',
+   name:'Threshold',
+   imageType:'blackhole', imageKey:null,
+   objectives:[
+     {id:'first_transit', text:'Route a TRAIN through the PORTAL into the ZETA QUADRANT'},
+     {id:'survey_zeta',   text:'Visit planets in 3 different ZETA star systems'},
+     {id:'return_home',   text:'Bring a train that crossed over BACK through the portal'},
+   ],
+   details:"The portal is open. Whatever the ancients built it for, it now belongs to your rail network — if your trains can survive the crossing. Send one through, chart what lies beyond, and prove the passage works both ways.",
+   reward:100000, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='first_transit') return !!(galaxy&&galaxy.planets.some(p=>p&&p.isZeta&&visitedPlanetIds.has(p.id)))||trains.some(t=>t.isPlayer&&!t._destroyed&&t._visitedZeta);
+     if(oid==='survey_zeta'){
+       if(!galaxy) return false;
+       const _sysSet=new Set();
+       for(const p of galaxy.planets){ if(p&&p.isZeta&&visitedPlanetIds.has(p.id)) _sysSet.add(p.starId); }
+       return _sysSet.size>=3;
+     }
+     if(oid==='return_home') return trains.some(t=>t.isPlayer&&!t._destroyed&&t._visitedZeta&&(()=>{const q=_gp(t.planetId);return q&&_regionOfX(q.x)==='alpha';})());
+     return false;
+   }},
+  {id:'zeta_foothold',
+   name:'Foothold',
+   imageType:'car', imageKey:'car_aetherium',
+   prerequisite:'zeta_threshold',
+   objectives:[
+     {id:'build_zeta_station',    text:'Build a STATION on a planet in the ZETA QUADRANT'},
+     {id:'deliver_aetherium_home',text:'Deliver 10 [Aetherium] from the Zeta Quadrant to ORIJEN'},
+   ],
+   details:"The Zeta Quadrant is rich in resources Alpha has never seen — AETHERIUM crystal alone is worth a fortune back home. Establish a permanent foothold and open the first cross-portal trade lane. Your scans also show green trains moving between the hive worlds. They are watching you.",
+   reward:150000, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='build_zeta_station') return !!(galaxy&&galaxy.planets.some(p=>p&&p.isZeta&&p.playerBuiltStation));
+     if(oid==='deliver_aetherium_home') return (m._aetherHome||0)>=10;
+     return false;
+   }},
+  {id:'zeta_shields',
+   name:'Shields Up',
+   imageType:'car', imageKey:'car_shield',
+   prerequisite:'zeta_foothold',
+   objectives:[
+     {id:'build_titanmill', text:'Build a TITAN MILL on an OBSIDIAN planet'},
+     {id:'build_bioforge',  text:'Build a BIOFORGE on a FUNGAL planet'},
+     {id:'build_armory',    text:'Build an ARMORY at a LARGE STATION'},
+     {id:'field_shield',    text:'Deploy a charged SHIELD CAR on a train in the ZETA QUADRANT'},
+   ],
+   details:"The Combine's warning shot made their position clear: your trains cross their space unarmored at their own risk. Your engineers propose a defense first — TITANIUM PLATE armor and AEGIS GEL shielding, assembled into a SHIELD CAR at a new Armory.",
+   reward:100000, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='build_titanmill') return !!(galaxy&&galaxy.planets.some(p=>(p.playerBuiltUpgrades||[]).includes('titan_mill')));
+     if(oid==='build_bioforge')  return !!(galaxy&&galaxy.planets.some(p=>(p.playerBuiltUpgrades||[]).includes('bioforge')));
+     if(oid==='build_armory')    return !!(galaxy&&galaxy.planets.some(p=>(p.playerBuiltUpgrades||[]).includes('armory')));
+     if(oid==='field_shield')    return trains.some(t=>{
+       if(!t.isPlayer||t._destroyed) return false;
+       const q=_gp(t.planetId); if(!q||_regionOfX(q.x)!=='zeta') return false;
+       return _trainShieldCharges(t)>0;
+     });
+     return false;
+   }},
+  {id:'zeta_cannon',
+   name:'Return Fire',
+   imageType:'car', imageKey:'car_cannon',
+   prerequisite:'zeta_shields',
+   objectives:[
+     {id:'build_munitions',  text:'Build a MUNITIONS WORKS on a ROCKY or URBAN planet'},
+     {id:'assemble_cannon',  text:'Assemble a CANNON CAR at an ARMORY'},
+     {id:'destroy_raider',   text:'Destroy a COMBINE train'},
+   ],
+   details:"Shields keep your freight alive; they don't stop the raids. Time to shoot back. CANNON SHELLS press from STEEL and CHEMICAL at a Munitions Works — feed the Armory a cannon's worth of components and hunt down one of their patrols.",
+   reward:120000, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='build_munitions') return !!(galaxy&&galaxy.planets.some(p=>(p.playerBuiltUpgrades||[]).includes('munitions_works')));
+     if(oid==='assemble_cannon') return !!_cannonCarUnlocked;
+     if(oid==='destroy_raider')  return _combineKills>(m._killBase||0);
+     return false;
+   }},
+  {id:'zeta_laser',
+   name:'Coherent Light',
+   imageType:'car', imageKey:'car_laser',
+   prerequisite:'zeta_cannon',
+   objectives:[
+     {id:'build_plasma',    text:'Build a PLASMA REFINERY on a CRYSTAL planet'},
+     {id:'assemble_laser',  text:'Assemble a LASER CAR at an ARMORY'},
+     {id:'win_skirmish',    text:'Destroy 2 more COMBINE trains'},
+   ],
+   details:"Cannons hit hard but slow. The Combine's patrols dance around them at range. AETHERIUM charged into PLASMA CELLS powers a LASER CAR that out-ranges everything they field. Light them up.",
+   reward:150000, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='build_plasma')   return !!(galaxy&&galaxy.planets.some(p=>(p.playerBuiltUpgrades||[]).includes('plasma_refinery')));
+     if(oid==='assemble_laser') return !!_laserCarUnlocked;
+     if(oid==='win_skirmish')   return _combineKills>=(m._killBase||0)+2;
+     return false;
+   }},
+  {id:'zeta_escort',
+   name:'Escort Duty',
+   imageType:'route_preview', imageKey:null,
+   prerequisite:'zeta_laser',
+   objectives:[
+     {id:'protected_run', text:'Complete 4 revenue deliveries in the ZETA QUADRANT without losing a single car'},
+   ],
+   details:"War or no war, the freight must flow. Keep your Zeta trade lanes running under armed escort — four clean deliveries in a row. One disabled car resets the count.",
+   reward:150000, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='protected_run') return (m._zetaDeliv||0)>=4;
+     return false;
+   }},
+  {id:'zeta_sweep',
+   name:'Patrol Sweep',
+   imageType:'car', imageKey:'engine_vex',
+   prerequisite:'zeta_escort',
+   objectives:[
+     {id:'sweep_patrols', text:'Destroy 3 COMBINE trains'},
+   ],
+   details:"Their patrol network is the fist inside the glove. Break it. Your engineers are itching to tear down one of those salvaged drives — bring them three wrecks and they'll rebuild you an engine no human yard has ever produced.",
+   reward:100000, rewardText:'The VEX INTERCEPTOR engine', timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='sweep_patrols') return _combineKills>=(m._killBase||0)+3;
+     return false;
+   }},
+  {id:'zeta_raid',
+   name:'The Combine Strikes Back',
+   imageType:'station_relic', imageKey:null,
+   prerequisite:'zeta_sweep',
+   objectives:[
+     {id:'repel_raid', text:'Destroy the 2 COMBINE raiders attacking your Zeta station'},
+   ],
+   details:"They've had enough. Two raider groups are inbound on your busiest Zeta station. Arm your trains, stock the DEFENSE BATTERY with shells, and hold the line.",
+   reward:250000, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='repel_raid') return _combineKills>=(m._killBase||0)+2;
+     return false;
+   }},
+  {id:'zeta_supply_raid',
+   name:'Supply Raid',
+   imageType:'car', imageKey:'car_titanplate',
+   prerequisite:'zeta_raid',
+   objectives:[
+     {id:'kill_convoy', text:'Destroy the armored COMBINE munitions convoy'},
+   ],
+   details:"Intelligence puts a heavily-shielded munitions convoy on the move between hive worlds. It is the spine of their war effort — stacked shields, cannon escorts, the works. Bring a mixed fleet and enough ammunition to grind those shields down.",
+   reward:200000, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='kill_convoy') return trains.some(t=>t&&t._isConvoyTarget&&t._destroyed);
+     return false;
+   }},
+  {id:'zeta_flagship',
+   name:'The Flagship',
+   imageType:'car', imageKey:'engine_vex',
+   prerequisite:'zeta_supply_raid',
+   objectives:[
+     {id:'kill_flagship', text:'Destroy the VRX SOVEREIGN — the Combine flagship'},
+   ],
+   details:"The VRX SOVEREIGN has left The Spire: fourteen cars of shields, cannons and lasers, hunting your network. Destroy it and the Combine breaks. This is the war's last stop.",
+   reward:500000, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='kill_flagship') return trains.some(t=>t&&t._isFlagship&&t._destroyed);
+     return false;
+   }},
+  {id:'zeta_armistice',
+   name:'Armistice',
+   imageType:'car', imageKey:'car_artifact',
+   objectives:[
+     {id:'deliver_envoys', text:'Deliver 3 diplomatic envoys (3 units of [Passengers]) from ORIJEN to THE SPIRE at {TARGET}'},
+   ],
+   details:"Your steady trade with the hive worlds has done what no cannon could: the Combine is willing to talk. Carry three envoys to The Spire and end this war at a negotiating table instead of a battlefield.",
+   reward:500000, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='deliver_envoys') return (m._envoysDelivered||0)>=3;
+     return false;
+   }},
+  {id:'zeta_singularity',
+   name:'The Singularity Engine',
+   imageType:'car', imageKey:'engine_singularity',
+   objectives:[
+     {id:'build_xenoforge',   text:'Build the XENOFORGE on an URBAN planet'},
+     {id:'deliver_warpsteel', text:'Deliver 10 [Warpsteel] to ORIJEN'},
+   ],
+   details:"With the Combine conflict resolved, their metallurgy is finally yours to study. The XENOFORGE fuses TITANIUM PLATE, AETHERIUM and SUPERCONDUCTORS into WARPSTEEL — and ten ingots of it, delivered to Orijen, become the hull of the most advanced engine ever built.",
+   reward:null, rewardText:'The SINGULARITY engine', timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='build_xenoforge')   return !!(galaxy&&galaxy.planets.some(p=>(p.playerBuiltUpgrades||[]).includes('xenoforge')));
+     if(oid==='deliver_warpsteel') return (m._warpHome||0)>=10;
+     return false;
+   }},
+  {id:'zeta_bounty',
+   name:'Bounty: Rogue Raider',
+   imageType:'car', imageKey:'car_cannon',
+   objectives:[
+     {id:'kill_bounty', text:'Hunt down and destroy the marked COMBINE raider within 2.0 stardates'},
+   ],
+   details:"A rogue Combine raider has been hitting neutral shipping near your Zeta lanes. There's a standing bounty for whoever puts it down — and your trains are the only ones out there with guns.",
+   reward:60000, timeLimit:2.0,
+   checkObj:(oid,m)=>{
+     if(oid==='kill_bounty') return trains.some(t=>t&&t._isBountyTarget&&t._bountyMissionSd===m.acceptedSd&&t._destroyed);
+     return false;
+   }},
 ];
+// Missions whose core deliverable requires a specific train car. The mission
+// intro is HELD (kept queued in pendingMissionIntros) until that car is
+// unlocked — e.g. "Outbreak" can't appear before the Medical Supplies car is
+// unlocked, "Ancient Schematics" before the Cargo car, "Famine" before the
+// Livestock car, etc. Each required car has an independent unlock path (planet
+// visit / industry chain), so holding the intro never deadlocks.
+const _MISSION_REQUIRED_CAR={
+  dispose_hazmat:'car_hazmat',
+  spread_the_seed:'car_flowers',
+  famine:'car_livestock',
+  outbreak:'car_medical',
+  sandstorm_relief:'car_sand',
+  bh_research:'car_chemical',
+  ancient_schematics:'car_cargo',
+};
+// True if the mission has no car requirement, or its required car is unlocked.
+// _carTypeUnlocked is defined later in the file but only called at runtime.
+function _missionCarGateOk(defId){
+  const _rc=_MISSION_REQUIRED_CAR[defId];
+  return !_rc || _carTypeUnlocked(_rc);
+}
 const MAINT_DECAY_PER_AU   = 0.00001; // maintenance fraction lost per SU in transit (constellation base)
 const REPAIR_COST_PER_MAINT = 600;     // credits per car per 1.0 maintenance fraction lost (constellation base)
 const CLOUD_SPEED      = 0.000070; // rad/frame-unit — slow atmospheric drift
@@ -1672,24 +2319,28 @@ const CAR_ORB_H = 28;   // radial footprint (height)
 const CAR_ORB_GAP = 53;
 
 // ── Per-engine properties (keyed by car type string) ─────────
-//   Order: constellation → galaxy → classJ → classR → N700
-const ENGINE_COSTS       = {engine_constellation:10000, engine_galaxy:20000, engine_classJ:50000, engine_classR:70000, engine_N700:100000};
-const ENGINE_MAX_SPD     = {engine_constellation:4,     engine_galaxy:6,     engine_classJ:8,     engine_classR:10,    engine_N700:20};
-const ENGINE_ACCEL_RATE  = {engine_constellation:TRANSIT_ACCEL*1, engine_galaxy:TRANSIT_ACCEL*2, engine_classJ:TRANSIT_ACCEL*4, engine_classR:TRANSIT_ACCEL*8, engine_N700:TRANSIT_ACCEL*12};
-const ENGINE_MAINT_DECAY = {engine_constellation:MAINT_DECAY_PER_AU, engine_galaxy:MAINT_DECAY_PER_AU*0.8, engine_classJ:MAINT_DECAY_PER_AU*0.6, engine_classR:MAINT_DECAY_PER_AU*0.4, engine_N700:MAINT_DECAY_PER_AU*0.25};
-const ENGINE_REPAIR_MULT = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.3,   engine_classR:1.6,   engine_N700:2.0};
+//   Order: constellation → galaxy → classJ → classR → N700 → helios → vex → singularity
+// Helios (mid-game, Project Helios reward): solar-sail hybrid — fastest yet,
+// very cheap to run, 12-car capacity. Vex Interceptor (endgame, salvaged
+// Combine drive): warship engine, +25% weapon fire rate (see combat system).
+// Singularity (post-campaign, built from Warpsteel): the ultimate engine.
+const ENGINE_COSTS       = {engine_constellation:10000, engine_galaxy:20000, engine_classJ:50000, engine_classR:70000, engine_N700:100000, engine_helios:160000, engine_vex:220000, engine_singularity:400000};
+const ENGINE_MAX_SPD     = {engine_constellation:4,     engine_galaxy:6,     engine_classJ:8,     engine_classR:10,    engine_N700:20,     engine_helios:24,     engine_vex:30,     engine_singularity:36};
+const ENGINE_ACCEL_RATE  = {engine_constellation:TRANSIT_ACCEL*1, engine_galaxy:TRANSIT_ACCEL*2, engine_classJ:TRANSIT_ACCEL*4, engine_classR:TRANSIT_ACCEL*8, engine_N700:TRANSIT_ACCEL*12, engine_helios:TRANSIT_ACCEL*14, engine_vex:TRANSIT_ACCEL*16, engine_singularity:TRANSIT_ACCEL*20};
+const ENGINE_MAINT_DECAY = {engine_constellation:MAINT_DECAY_PER_AU, engine_galaxy:MAINT_DECAY_PER_AU*0.8, engine_classJ:MAINT_DECAY_PER_AU*0.6, engine_classR:MAINT_DECAY_PER_AU*0.4, engine_N700:MAINT_DECAY_PER_AU*0.25, engine_helios:MAINT_DECAY_PER_AU*0.2, engine_vex:MAINT_DECAY_PER_AU*0.3, engine_singularity:MAINT_DECAY_PER_AU*0.15};
+const ENGINE_REPAIR_MULT = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.3,   engine_classR:1.6,   engine_N700:2.0,   engine_helios:2.2,   engine_vex:2.4,   engine_singularity:2.6};
 // gap engine→car[1] (world units). Set per-engine for a slight ~1-world-unit
 // visible gap between the engine's rear and the first car: spacing =
 // engineHalfWidth + carHalfWidth(~26) + 1. Engine half-widths come from the
 // de-stretched sizes at _GAL_SCALE=1.5 (Constellation ~24.5 … Class R ~42.9,
 // the longest). So the wider/longer engines keep proportionally bigger gaps
 // while every engine→car coupling shows the same ~1-unit slit.
-const ENGINE_ORB_GAP     = {engine_constellation:52, engine_galaxy:53, engine_classJ:55, engine_classR:70, engine_N700:63};
+const ENGINE_ORB_GAP     = {engine_constellation:52, engine_galaxy:53, engine_classJ:55, engine_classR:70, engine_N700:63, engine_helios:63, engine_vex:70, engine_singularity:63};
 // Per-engine visible-height tier for galaxy view (multiplied into the
 // base engine body height). Modest progression so bigger engines read as
 // bigger without the very-wide Class R / N700 sprites ballooning. Caboose
 // and regular cars don't use this (fixed fractions in the draw loop).
-const ENGINE_GALAXY_H_TIER = {engine_constellation:1.0, engine_galaxy:1.05, engine_classJ:1.10, engine_classR:1.06, engine_N700:1.16};
+const ENGINE_GALAXY_H_TIER = {engine_constellation:1.0, engine_galaxy:1.05, engine_classJ:1.10, engine_classR:1.06, engine_N700:1.16, engine_helios:1.16, engine_vex:1.06, engine_singularity:1.16};
 // Galaxy-view train render scale (the draw loop multiplies each sprite's
 // base height fraction by this) and the desired VISIBLE gap (world units)
 // between adjacent units. _carOffset uses per-sprite half-widths so the
@@ -1906,14 +2557,18 @@ function _drawTrainCarStrip(c2, train, stripX, stripY, stripW, stripH, opts){
 // + car_mail_empty sources are now 1254×1254 squares with content aspect
 // ~2.06 — essentially identical to car_passenger — so matching its
 // multipliers gives identical visual proportions in every view.
-const ENGINE_ORB_W_MULT  = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.2,   engine_classR:1.235, engine_N700:1.4,  car_passenger:1.05, car_mail:1.05}; // visual width scale in world view
-const ENGINE_VIZ_W_MULT  = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.2,   engine_classR:1.235, engine_N700:1.4,  car_passenger:1.05, car_mail:1.05}; // visual width scale in UI strips/builder
+const ENGINE_ORB_W_MULT  = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.2,   engine_classR:1.235, engine_N700:1.4,  engine_helios:1.4, engine_vex:1.235, engine_singularity:1.4,  car_passenger:1.05, car_mail:1.05}; // visual width scale in world view
+const ENGINE_VIZ_W_MULT  = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.2,   engine_classR:1.235, engine_N700:1.4,  engine_helios:1.4, engine_vex:1.235, engine_singularity:1.4,  car_passenger:1.05, car_mail:1.05}; // visual width scale in UI strips/builder
 // Asset values for corporation net-worth calculation
 const CAR_ASSET_VALUE = {
   engine_constellation:10000, engine_galaxy:20000, engine_classJ:50000, engine_classR:70000, engine_N700:100000,
+  engine_helios:160000, engine_vex:220000, engine_singularity:400000,
   car_passenger:5000, car_royal:10000, car_water_tank:8000, car_cargo:4000, car_livestock:6000,
   car_mail:4000, car_ice:9000, car_sand:5000, car_ore:8000, car_iron:10000, car_hazmat:7000,
   car_oil:9000, car_battery:11000, car_chemical:9000, car_gold:30000, car_diamond:45000, car_flowers:7000, car_medical:8000, caboose:3000,
+  car_uranium:12000, car_helium3:9000, car_solar:10000, car_supercon:14000, car_truss:12000, car_reactor:20000,
+  car_aetherium:14000, car_titanium:9000, car_biomass:5000, car_artifact:18000, car_titanplate:12000, car_warpsteel:25000,
+  car_cannon:25000, car_laser:30000, car_shield:28000,
 };
 const STATION_ASSET_VALUE = 50000;
 const UPGRADE_ASSET_VALUE = 10000;
@@ -1979,21 +2634,24 @@ function _genCeoCandidate(rosterEntry){
   return {ceoName:rosterEntry.name,ceoSprite:rosterEntry.sprite,logoSprite:'logo_placeholder',
           salary,primaryPerk:perks.primaryPerk,secondaryPerk:perks.secondaryPerk};
 }
-const ENGINE_VIZ_H_MULT  = {engine_constellation:1.000, engine_galaxy:0.957, engine_classJ:0.983, engine_classR:1.460, engine_N700:1.217, car_passenger:1.05}; // visual height multiplier — equalises opaque height across all engines
-const ENGINE_MAX_RANGE   = {engine_constellation:15000, engine_galaxy:25000, engine_classJ:40000, engine_classR:50000, engine_N700:70000};
+const ENGINE_VIZ_H_MULT  = {engine_constellation:1.000, engine_galaxy:0.957, engine_classJ:0.983, engine_classR:1.460, engine_N700:1.217, engine_helios:1.217, engine_vex:1.460, engine_singularity:1.217, car_passenger:1.05}; // visual height multiplier — equalises opaque height across all engines
+const ENGINE_MAX_RANGE   = {engine_constellation:15000, engine_galaxy:25000, engine_classJ:40000, engine_classR:50000, engine_N700:70000, engine_helios:100000, engine_vex:90000, engine_singularity:150000};
 // Per-engine hard cap on mid cars (between engine and caboose). Constellation
 // and Galaxy are the small/starter engines and are capped tighter than the
 // later engines, which use the default of 10. Lookup uses engine type string;
 // `_engMaxCars(null)` returns the global default so the builder still works
 // before an engine is selected.
-const ENGINE_MAX_CARS    = {engine_constellation:6, engine_galaxy:8, engine_classJ:10, engine_classR:10, engine_N700:10};
+const ENGINE_MAX_CARS    = {engine_constellation:6, engine_galaxy:8, engine_classJ:10, engine_classR:10, engine_N700:10, engine_helios:12, engine_vex:10, engine_singularity:14};
 function _engMaxCars(engineType){ return ENGINE_MAX_CARS[engineType] ?? 10; }
 
 // ── Planet development level system ──────────────────────────
 // Cumulative weighted-cargo score required to reach each level (index = level)
 const DEV_LEVEL_THRESHOLDS=[0,500,5000,10000,50000,100000,200000,500000,800000,1200000,2000000];
 // Economic weight of one cargo unit toward a planet's development score
-const DEV_CARGO_VALUES={passengers:200,livestock:150,mail:80,water:60,ice:80,sand:50,molten_ore:180,iron:250,gold:800,diamond:1200,hazmat:0,oil:220,battery:300,chemical:160,flowers:180,medical:200,steel:320,glass:220,machinery:420,cargo:100};
+const DEV_CARGO_VALUES={passengers:200,livestock:150,mail:80,water:60,ice:80,sand:50,molten_ore:180,iron:250,gold:800,diamond:1200,hazmat:0,oil:220,battery:300,chemical:160,flowers:180,medical:200,steel:320,glass:220,machinery:420,cargo:100,
+  uranium:600,helium3:400,solar_panel:500,superconductor:650,truss:600,reactor_core:900,
+  aetherium:650,titanium:400,biomass:150,artifact:900,titanium_plate:600,warpsteel:1200,
+  cannon_shell:400,plasma_cell:650,aegis_gel:500};
 // Supply/demand/population multiplier per dev level
 function _devMult(lv){return[1.0,1.15,1.35,1.6,1.95,2.4,2.95,3.65,4.5,5.5,7.0][Math.max(0,Math.min(10,lv))];}
 
@@ -2078,12 +2736,34 @@ const PTYPES = [
   // disc reads as a "weathered classical world" before the ruin silhouettes
   // even render. 2× rarer than urban → 4× rarer than every other biome.
   {id:'ancient',base:'#a89060', hi:'#d8b878', rim:[230,200,140]},
+  // ── v0.4.7 Zeta Quadrant exclusive biomes ──
+  // CRYSTAL — faceted aetherium-crystal worlds (magenta/cyan shards).
+  {id:'crystal', base:'#8a1878', hi:'#ff50e0', rim:[255,110,230]},
+  // OBSIDIAN — black glassy volcanic worlds veined with glowing teal fissures.
+  {id:'obsidian',base:'#101418', hi:'#2a3a44', rim:[90,200,230]},
+  // FUNGAL — pale spore-forest worlds; biomass supply.
+  {id:'fungal',  base:'#5a6a28', hi:'#a8c05a', rim:[190,220,120]},
+  // HIVE — the Combine's teeming alien city-worlds (green glow, huge demand).
+  {id:'hive',    base:'#123a20', hi:'#39e060', rim:[80,255,140]},
 ];
 // Per-biome relative frequency for galaxy generation. Default is 1.0; Urban
 // is 0.5 (= 2× rarer than every other biome). Ancient is 0.25 (= 2× rarer than
 // urban, 4× rarer than baseline). _pickBiomeWeighted() consults this map and
 // falls back to 1.0 for any biome not listed.
-const BIOME_WEIGHTS = {urban:0.5, ancient:0.25};
+// Zeta-exclusive biomes are weight-0 here so Alpha generation never rolls
+// them; generateZetaQuadrant uses its own _ZETA_BIOME_WEIGHTS table.
+const BIOME_WEIGHTS = {urban:0.5, ancient:0.25, crystal:0, obsidian:0, fungal:0, hive:0};
+const _ZETA_BIOME_WEIGHTS = {urban:0.4, ancient:0.2, crystal:0.9, obsidian:0.9, fungal:0.9, hive:0};
+function _pickBiomeWeightedZeta(){
+  let total=0;
+  for(const pt of PTYPES) total+=(_ZETA_BIOME_WEIGHTS[pt.id]??1.0);
+  let r=Math.random()*total;
+  for(const pt of PTYPES){
+    r-=(_ZETA_BIOME_WEIGHTS[pt.id]??1.0);
+    if(r<=0) return pt;
+  }
+  return PTYPES[0];
+}
 function _pickBiomeWeighted(){
   let total=0;
   for(const pt of PTYPES) total+=(BIOME_WEIGHTS[pt.id]??1.0);
@@ -2104,6 +2784,7 @@ const TRAIN_COLORS = [
 
 const CAR_LABELS = {
   engine_constellation:'CONSTELLATION', engine_galaxy:'GALAXY', engine_classJ:'CLASS J', engine_classR:'CLASS R', engine_N700:'N700',
+  engine_helios:'HELIOS', engine_vex:'VEX INTERCEPTOR', engine_singularity:'SINGULARITY',
   car_passenger:'PASSENGER CAR', car_royal:'ROYAL CAR',
   car_water_tank:'WATER TANK', car_cargo:'CARGO CAR',
   car_livestock:'LIVESTOCK CAR', car_mail:'MAIL CAR', car_hazmat:'HAZMAT CAR', caboose:'CABOOSE',
@@ -2122,7 +2803,73 @@ const CAR_LABELS = {
   car_fruit:    'FRUIT CAR',
   car_steel:    'STEEL CAR',
   car_glass:    'GLASS CAR',
-  car_machinery:'MACHINERY CAR'
+  car_machinery:'MACHINERY CAR',
+  car_uranium:  'URANIUM CAR',
+  car_helium3:  'HELIUM-3 TANKER',
+  car_solar:    'SOLAR PANEL CAR',
+  car_supercon: 'SUPERCONDUCTOR CAR',
+  car_truss:    'TRUSS CAR',
+  car_reactor:  'REACTOR CORE CAR',
+  car_aetherium:'AETHERIUM CAR',
+  car_titanium: 'TITANIUM CAR',
+  car_biomass:  'BIOMASS CAR',
+  car_artifact: 'ARTIFACT CAR',
+  car_titanplate:'TITANIUM PLATE CAR',
+  car_warpsteel:'WARPSTEEL CAR',
+  car_cannon:   'CANNON CAR',
+  car_laser:    'LASER CAR',
+  car_shield:   'SHIELD CAR'
+};
+// Short flavour quips shown in the train-builder hover tooltip. [Cargo] tokens
+// pick up their resource colour via _objTokenize (same as mission/objective text).
+const _BUILDER_QUIPS = {
+  engine_constellation:'The most basic engine.',
+  engine_galaxy:'A faster engine with greater range.',
+  engine_classJ:'A powerful, efficient mid-tier engine.',
+  engine_classR:'A high-speed heavy-duty engine.',
+  engine_N700:'The fastest engine out there.',
+  engine_helios:'Solar-sail hybrid. Fast, long-ranged, cheap to run.',
+  engine_vex:'Salvaged Combine drive. Its weapons fire +25% faster.',
+  engine_singularity:'Warpsteel-hulled. The ultimate engine.',
+  car_passenger:'Carries [Passengers] between worlds.',
+  car_royal:'Carries VIP [Passengers] in luxury.',
+  car_livestock:'Carries [Livestock] from AGRICULTURAL PLANETS.',
+  car_mail:'Carries [Mail] between populated worlds.',
+  car_water_tank:'Carries [Water] from OCEAN PLANETS.',
+  car_ice:'Carries [Ice] from ICE PLANETS.',
+  car_sand:'Carries [Sand] from DESERT PLANETS.',
+  car_ore:'Carries [Molten Ore] from LAVA PLANETS.',
+  car_iron:'Carries [Iron] produced at FOUNDRIES.',
+  car_gold:'Carries valuable [Gold] ore.',
+  car_diamond:'Carries precious [Diamond].',
+  car_hazmat:'Hauls [Hazmat] off for safe disposal.',
+  car_oil:'Carries [Oil] pumped from wells.',
+  car_battery:'Carries charged [Battery] cells.',
+  car_chemical:'Carries [Chemical] from CHEMICAL PLANETS.',
+  car_flowers:'Carries fragrant [Flowers].',
+  car_medical:'Carries [Medical] supplies where needed.',
+  car_grain:'Carries [Grain] from AGRICULTURAL PLANETS.',
+  car_fruit:'Carries [Fruit] from AGRICULTURAL PLANETS.',
+  car_steel:'Carries [Steel] forged in BLAST FURNACES.',
+  car_glass:'Carries [Glass] made in GLASSWORKS.',
+  car_machinery:'Carries [Machinery] built in FACTORIES.',
+  car_cargo:'Carries general [Cargo].',
+  car_uranium:'Carries radioactive [Uranium] ore.',
+  car_helium3:'Carries [Helium-3] siphoned from STORM PLANETS.',
+  car_solar:'Carries [Solar Panels] from PANEL FABRICATORS.',
+  car_supercon:'Carries [Superconductors] from CRYO FORGES.',
+  car_truss:'Carries [Trusses] from ORBITAL SHIPYARDS.',
+  car_reactor:'Carries [Reactor Cores] from REACTOR ASSEMBLIES.',
+  car_aetherium:'Carries [Aetherium] from CRYSTAL PLANETS.',
+  car_titanium:'Carries [Titanium] from OBSIDIAN PLANETS.',
+  car_biomass:'Carries [Biomass] from FUNGAL PLANETS.',
+  car_artifact:'Carries priceless alien [Artifacts].',
+  car_titanplate:'Carries [Titanium Plate] from TITAN MILLS.',
+  car_warpsteel:'Carries [Warpsteel] from the XENOFORGE.',
+  car_cannon:'Fires [Cannon Shells] at enemy trains. Assembled at an ARMORY.',
+  car_laser:'Fires [Plasma Cells] at long range. Assembled at an ARMORY.',
+  car_shield:'Projects a shield over the train. Fueled by [Aegis Gel]. Assembled at an ARMORY.',
+  caboose:'A required final car on every train. Purely aesthetic.',
 };
 
 // Maps car type → empty-state sprite key (only for types that have one).
@@ -2151,13 +2898,146 @@ const CAR_EMPTY_SPRITES = {
   car_steel:      'car_flat_empty',
   car_glass:      'car_glass_empty',
   car_machinery:  'car_flat_empty',
+  // Derived (tinted) car types — empty sprites are tinted copies of their
+  // base car's empty sprite, registered by _registerDerivedSprites().
+  car_uranium:    'car_uranium_empty',
+  car_helium3:    'car_helium3_empty',
+  car_solar:      'car_solar_empty',
+  car_supercon:   'car_supercon_empty',
+  car_truss:      'car_flat_empty',
+  car_reactor:    'car_flat_empty',
+  car_aetherium:  'car_aetherium_empty',
+  car_titanium:   'car_titanium_empty',
+  car_biomass:    'car_biomass_empty',
+  car_artifact:   'car_flat_empty',
+  car_titanplate: 'car_flat_empty',
+  car_warpsteel:  'car_flat_empty',
+  car_cannon:     'car_cannon_empty',
+  car_laser:      'car_laser_empty',
+  car_shield:     'car_shield_empty',
 };
 function getCarSprite(carType, isFull){
   if(!isFull && CAR_EMPTY_SPRITES[carType]) return CAR_EMPTY_SPRITES[carType];
   return carType;
 }
+// ── Derived (tinted) sprite registry ─────────────────────────────────────
+// v0.4.7: Project Helios + Zeta Quadrant add 15 car types and 3 engines.
+// Until dedicated art exists, each is a TINTED COPY of an existing sprite,
+// baked ONCE at init into an offscreen canvas and registered in imgs[] under
+// its own name (with .complete/.naturalWidth stamped on so the mip cache and
+// every drawImage path treat it exactly like a loaded image). The SPRITE_*
+// metric tables are copied from the base sprite so all sizing/spacing math
+// works unchanged. To swap in real art later: add the PNG to assets.json
+// under the same name — registration below skips any name already bundled.
+const DERIVED_SPRITES={
+  car_uranium:   {base:'car_chemical',  tint:'#aaff00', a:0.42},
+  car_helium3:   {base:'car_oil',       tint:'#ffbb55', a:0.50},
+  car_solar:     {base:'car_glass',     tint:'#55b8ff', a:0.42},
+  car_supercon:  {base:'car_battery',   tint:'#9070ff', a:0.48},
+  car_truss:     {base:'car_steel',     tint:'#8fb8d8', a:0.38},
+  car_reactor:   {base:'car_machinery', tint:'#40e0c0', a:0.45},
+  car_aetherium: {base:'car_diamond',   tint:'#ff50e0', a:0.45},
+  car_titanium:  {base:'car_iron',      tint:'#70c8e8', a:0.45},
+  car_biomass:   {base:'car_grain',     tint:'#a8e030', a:0.45},
+  car_artifact:  {base:'car_gold',      tint:'#40ff90', a:0.48},
+  car_titanplate:{base:'car_steel',     tint:'#b8e0ff', a:0.42},
+  car_warpsteel: {base:'car_steel',     tint:'#b070ff', a:0.48},
+  car_cannon:    {base:'car_machinery', tint:'#e05040', a:0.48, overlay:'cannon'},
+  car_laser:     {base:'car_machinery', tint:'#ff60c0', a:0.48, overlay:'laser'},
+  car_shield:    {base:'car_water_tank',tint:'#40d0ff', a:0.48, overlay:'shield'},
+  engine_helios:      {base:'engine_N700',   tint:'#ffcc44', a:0.40},
+  engine_vex:         {base:'engine_classR', tint:'#50e080', a:0.44},
+  engine_singularity: {base:'engine_N700',   tint:'#a060ff', a:0.44},
+  // Tinted EMPTY variants (base = the base car's empty-state sprite).
+  car_uranium_empty:  {base:'car_chemical_empty', tint:'#aaff00', a:0.42},
+  car_helium3_empty:  {base:'car_oil_empty',      tint:'#ffbb55', a:0.50},
+  car_solar_empty:    {base:'car_glass_empty',    tint:'#55b8ff', a:0.42},
+  car_supercon_empty: {base:'car_battery_empty',  tint:'#9070ff', a:0.48},
+  car_aetherium_empty:{base:'car_diamond_empty',  tint:'#ff50e0', a:0.45},
+  car_titanium_empty: {base:'car_flat_empty',     tint:'#70c8e8', a:0.32},
+  car_biomass_empty:  {base:'car_grain_empty',    tint:'#a8e030', a:0.45},
+  car_cannon_empty:   {base:'car_flat_empty',     tint:'#e05040', a:0.38, overlay:'cannon'},
+  car_laser_empty:    {base:'car_flat_empty',     tint:'#ff60c0', a:0.38, overlay:'laser'},
+  car_shield_empty:   {base:'car_water_tank_empty',tint:'#40d0ff', a:0.40},
+};
+// Simple painted markers so the three military cars read as weapons at a
+// glance even with placeholder tints. Baked into the derived canvas once —
+// zero per-frame cost.
+function _paintMilitaryOverlay(g,w,h,kind,tint){
+  g.save();
+  g.globalCompositeOperation='source-over';
+  g.globalAlpha=1.0;
+  const cx=w*0.5;
+  if(kind==='cannon'){
+    g.fillStyle='#2a2e36';
+    g.beginPath(); g.arc(cx, h*0.42, w*0.075, 0, Math.PI*2); g.fill();
+    g.strokeStyle='#3a4048'; g.lineWidth=w*0.045; g.lineCap='round';
+    g.beginPath(); g.moveTo(cx, h*0.42); g.lineTo(cx-w*0.16, h*0.16); g.stroke();
+    g.strokeStyle=tint; g.lineWidth=w*0.018;
+    g.beginPath(); g.moveTo(cx, h*0.42); g.lineTo(cx-w*0.16, h*0.16); g.stroke();
+  } else if(kind==='laser'){
+    g.fillStyle='#2a2e36';
+    g.fillRect(cx-w*0.03, h*0.18, w*0.06, h*0.26);
+    g.fillStyle=tint;
+    g.beginPath();
+    g.moveTo(cx, h*0.10); g.lineTo(cx+w*0.075, h*0.22); g.lineTo(cx-w*0.075, h*0.22);
+    g.closePath(); g.fill();
+  } else if(kind==='shield'){
+    g.strokeStyle=tint; g.globalAlpha=0.65; g.lineWidth=w*0.02;
+    g.beginPath(); g.arc(cx, h*0.62, w*0.42, Math.PI*1.05, Math.PI*1.95); g.stroke();
+    g.globalAlpha=0.18; g.fillStyle=tint;
+    g.beginPath(); g.arc(cx, h*0.62, w*0.42, Math.PI, Math.PI*2); g.closePath(); g.fill();
+  }
+  g.restore();
+}
+function _makeTintedCanvas(src,tint,alpha,overlay){
+  const c=document.createElement('canvas');
+  c.width=src.naturalWidth||src.width; c.height=src.naturalHeight||src.height;
+  const g=c.getContext('2d');
+  g.drawImage(src,0,0);
+  g.globalCompositeOperation='source-atop';
+  g.globalAlpha=alpha; g.fillStyle=tint;
+  g.fillRect(0,0,c.width,c.height);
+  g.globalAlpha=1.0; g.globalCompositeOperation='source-over';
+  if(overlay) _paintMilitaryOverlay(g,c.width,c.height,overlay,tint);
+  // Stamp image-like props so the mip cache + every drawImage path accept it.
+  c.complete=true; c.naturalWidth=c.width; c.naturalHeight=c.height;
+  return c;
+}
+function _copySpriteMetrics(fromName,toName){
+  if(SPRITE_NATURAL[fromName]&&!SPRITE_NATURAL[toName]) SPRITE_NATURAL[toName]=SPRITE_NATURAL[fromName];
+  if(typeof SPRITE_SOLID!=='undefined'&&SPRITE_SOLID[fromName]&&!SPRITE_SOLID[toName]) SPRITE_SOLID[toName]=SPRITE_SOLID[fromName];
+  if(typeof SPRITE_CONTENT!=='undefined'&&SPRITE_CONTENT[fromName]&&!SPRITE_CONTENT[toName]) SPRITE_CONTENT[toName]=SPRITE_CONTENT[fromName];
+  if(SPRITE_BOT[fromName]!=null&&SPRITE_BOT[toName]==null) SPRITE_BOT[toName]=SPRITE_BOT[fromName];
+}
+function _registerDerivedSprites(){
+  for(const name of Object.keys(DERIVED_SPRITES)){
+    if(ASSETS[name]) continue;          // real art bundled — leave it alone
+    const d=DERIVED_SPRITES[name];
+    const src=imgs[d.base];
+    if(!src||!src.complete||!src.naturalWidth) continue;
+    imgs[name]=_makeTintedCanvas(src,d.tint,d.a??0.45,d.overlay);
+    _copySpriteMetrics(d.base,name);
+  }
+}
+// ── Combine (alien corp) green-tinted train sprites ──────────────────────
+// Any sprite a Combine train renders with is swapped for a green-washed copy,
+// registered lazily under 'zx_<name>' so the mip cache and sizing tables keep
+// working (metrics copied from the source name). Replace with real alien art
+// later by bundling sprites named 'zx_engine_galaxy' etc. in assets.json.
+const COMBINE_TINT='#39e060';
+function _zxName(name){
+  const zn='zx_'+name;
+  if(imgs[zn]) return zn;
+  if(ASSETS[zn]){ return zn; } // real alien art bundled under zx_ name
+  const src=imgs[name];
+  if(!src||!src.complete||!src.naturalWidth) return name;
+  imgs[zn]=_makeTintedCanvas(src,COMBINE_TINT,0.50,null);
+  _copySpriteMetrics(name,zn);
+  return zn;
+}
 // Engine-type helpers
-const ENGINE_TYPES_ALL=['engine_constellation','engine_galaxy','engine_classJ','engine_classR','engine_N700'];
+const ENGINE_TYPES_ALL=['engine_constellation','engine_galaxy','engine_classJ','engine_classR','engine_N700','engine_helios','engine_vex','engine_singularity'];
 function isEngineType(t){ return ENGINE_TYPES_ALL.includes(t); }
 function _engGap(train){ return ENGINE_ORB_GAP[train.cars?.[0]]??CAR_ORB_GAP; }
 // Cumulative center-to-center offset (world units) of car `i` behind the
@@ -2211,13 +3091,15 @@ function _engAccel(train){
 function _engMaintDecay(train){ return ENGINE_MAINT_DECAY[train.cars?.[0]]??MAINT_DECAY_PER_AU; }
 function _engRepairMult(train){ return ENGINE_REPAIR_MULT[train.cars?.[0]]??1.0; }
 function _engMaxRange(train){ return ENGINE_MAX_RANGE[train.cars?.[0]]??Infinity; }
-const _ENGINE_TYPE_SET=new Set(['engine_constellation','engine_galaxy','engine_classJ','engine_classR','engine_N700']);
+const _ENGINE_TYPE_SET=new Set(['engine_constellation','engine_galaxy','engine_classJ','engine_classR','engine_N700','engine_helios','engine_vex','engine_singularity']);
 function _carUnitCost(type){
   if(type==='car_royal') return 10000;
   let cost=ENGINE_COSTS[type]??1000;
   if(_ENGINE_TYPE_SET.has(type)){
     if(_corp?.primaryPerk?.cat==='eng_cost_red') cost=Math.round(cost*(1-_corp.primaryPerk.val/100));
     if(_corp?.secondaryPerk?.cat==='eng_cost_red') cost=Math.round(cost*(1-_corp.secondaryPerk.val/100));
+    // v0.4.7: Helios Frame completion — permanent shipyard-efficiency discount.
+    if(_heliosEngDiscount>0) cost=Math.round(cost*(1-_heliosEngDiscount));
   }
   return cost;
 }
@@ -2380,6 +3262,7 @@ let galaxy=null, cam={x:0,y:0,scale:MIN_SC};
 let zoomReturnPos=null, zoomReturnTimer=0; // selection-aware zoom return state
 let _drawTs=0; // current frame timestamp, set at start of drawGalaxy for draw helpers
 let _stationHoverInfo=null; // {ctype, isSupply, rawAmt, tx, ty, enterTime}
+let _planetUpgradeHover=null; // {name, cx, cy, enterTime} — hovering an upgrade structure on the planet-detail viz
 let drag=false, dragFrom={x:0,y:0}, dragCam={x:0,y:0}, dragDist=0;
 let sel=null, routeStops=[];
 let assignBtnBounds=null;
@@ -2598,27 +3481,48 @@ function drawLeaderboardScreen(){
     }
   }
 
-  // ── Footer: page label + prev/next + back ──
+  // ── Footer: page label + prev/next arrows + back — anchored BELOW the table
+  //    (and toward the screen bottom on tall windows), so it can never overlap
+  //    the last rows regardless of window height. ──
   ctx.textBaseline='alphabetic';
   const _maxPage=Math.max(0,Math.min(9,Math.ceil(_lbRows.length/10)-1));
-  if(_lbStatus==='ok'){
-    const _r0=_lbPage*10+1, _r1=Math.min(_lbRows.length,_lbPage*10+10);
-    ctx.font='12px "Exo 2",sans-serif'; ctx.textAlign='center'; ctx.fillStyle='rgba(190,195,220,0.82)';
-    ctx.fillText('Ranks '+_r0+'–'+_r1+' of '+_lbRows.length,W/2,H-86);
-  }
-  const _btnY=H-66, _btnH=34, _btnW=126;
-  const _mkBtn=(label,x,enabled,hover)=>{
-    ctx.fillStyle=!enabled?'rgba(28,28,42,0.5)':(hover?'rgba(72,52,124,0.96)':'rgba(45,35,80,0.85)');
-    ctx.fillRect(x,_btnY,_btnW,_btnH);
-    ctx.strokeStyle=!enabled?'rgba(60,60,80,0.4)':(hover?'rgba(185,155,255,0.9)':'rgba(120,100,190,0.6)'); ctx.lineWidth=1.5; ctx.strokeRect(x,_btnY,_btnW,_btnH);
-    ctx.font='bold 12px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
-    ctx.fillStyle=enabled?'rgba(222,212,255,0.96)':'rgba(110,110,130,0.6)'; ctx.fillText(label,x+_btnW/2,_btnY+_btnH/2);
+  const _tableBot=tableTop+10*rowH;
+  const _footCY=Math.min(Math.max(_tableBot+30,H-56),H-26); // vertical centre of the footer row
+  // BACK button — smaller (buffer below the table), left side, centred on the row.
+  const _btnW=104, _btnH=28, _btnY=Math.round(_footCY-_btnH/2);
+  {
+    const _hov=_lbBackHover;
+    ctx.fillStyle=_hov?'rgba(72,52,124,0.96)':'rgba(45,35,80,0.85)';
+    ctx.beginPath(); ctx.roundRect(tableX,_btnY,_btnW,_btnH,8); ctx.fill();
+    ctx.strokeStyle=_hov?'rgba(185,155,255,0.9)':'rgba(120,100,190,0.6)'; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.roundRect(tableX,_btnY,_btnW,_btnH,8); ctx.stroke();
+    ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillStyle='rgba(222,212,255,0.96)'; ctx.fillText('◀ BACK',tableX+_btnW/2,_btnY+_btnH/2);
     ctx.textBaseline='alphabetic';
-    return {x,y:_btnY,w:_btnW,h:_btnH};
-  };
-  _lbBackBounds=_mkBtn('◀ BACK',tableX,true,_lbBackHover);
-  _lbPrevBounds=_mkBtn('◀ PREV',W/2-_btnW-12,_lbPage>0,_lbPrevHover);
-  _lbNextBounds=_mkBtn('NEXT ▶',W/2+12,_lbPage<_maxPage,_lbNextHover);
+    _lbBackBounds={x:tableX,y:_btnY,w:_btnW,h:_btnH};
+  }
+  // Ranks label + PREV/NEXT triangles, centred on the footer row.
+  _lbPrevBounds=null; _lbNextBounds=null;
+  if(_lbStatus==='ok'){
+    ctx.font='12px "Exo 2",sans-serif'; ctx.textAlign='center'; ctx.fillStyle='rgba(190,195,220,0.82)';
+    const _rkTxt='Ranks '+(_lbPage*10+1)+'–'+Math.min(_lbRows.length,_lbPage*10+10)+' of '+_lbRows.length;
+    ctx.fillText(_rkTxt,W/2,_footCY+4);
+    const _rkHalf=ctx.measureText(_rkTxt).width/2;
+    const _triS=8, _triGap=18, _hitR=15, _cy=_footCY;
+    const _prevEn=_lbPage>0, _nextEn=_lbPage<_maxPage;
+    // Left (PREV)
+    const _pcx=W/2-_rkHalf-_triGap;
+    ctx.beginPath();
+    ctx.moveTo(_pcx+_triS/2,_cy-_triS); ctx.lineTo(_pcx-_triS/2,_cy); ctx.lineTo(_pcx+_triS/2,_cy+_triS); ctx.closePath();
+    ctx.fillStyle=!_prevEn?'rgba(110,110,130,0.38)':(_lbPrevHover?'rgba(205,185,255,0.98)':'rgba(160,140,225,0.85)'); ctx.fill();
+    if(_prevEn) _lbPrevBounds={x:_pcx-_hitR,y:_cy-_hitR,w:_hitR*2,h:_hitR*2};
+    // Right (NEXT)
+    const _ncx=W/2+_rkHalf+_triGap;
+    ctx.beginPath();
+    ctx.moveTo(_ncx-_triS/2,_cy-_triS); ctx.lineTo(_ncx+_triS/2,_cy); ctx.lineTo(_ncx-_triS/2,_cy+_triS); ctx.closePath();
+    ctx.fillStyle=!_nextEn?'rgba(110,110,130,0.38)':(_lbNextHover?'rgba(205,185,255,0.98)':'rgba(160,140,225,0.85)'); ctx.fill();
+    if(_nextEn) _lbNextBounds={x:_ncx-_hitR,y:_cy-_hitR,w:_hitR*2,h:_hitR*2};
+  }
 }
 // Short column labels for the compact in-game popup (narrow columns).
 const _LB_HDR_SHORT={corp_value:'VALUE',num_trains:'TRAINS',num_routes:'ROUTES',num_stations:'STAT.',latest_sd:'S.D.',discovered_planets:'PLNTS',discovered_stars:'STARS'};
@@ -2702,21 +3606,35 @@ function drawLeaderboardPopup(){
     ctx.font='11px "Exo 2",sans-serif'; ctx.textAlign='center'; ctx.fillStyle='rgba(190,195,220,0.82)';
     ctx.fillText('Ranks '+(_lbPage*10+1)+'–'+Math.min(_lbRows.length,_lbPage*10+10)+' of '+_lbRows.length,px+pw/2,py+ph-30);
   }
-  const _bw=104,_bh=26,_by=py+ph-46;
-  const _mk=(label,x,enabled,hover)=>{
-    ctx.fillStyle=!enabled?'rgba(30,28,46,0.5)':(hover?'rgba(74,54,128,0.96)':'rgba(48,38,86,0.85)');
-    ctx.fillRect(x,_by,_bw,_bh);
-    ctx.strokeStyle=!enabled?'rgba(60,60,82,0.4)':(hover?'rgba(188,158,255,0.9)':'rgba(122,102,192,0.6)'); ctx.lineWidth=1.3; ctx.strokeRect(x,_by,_bw,_bh);
-    ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
-    ctx.fillStyle=enabled?'rgba(224,214,255,0.96)':'rgba(110,110,132,0.6)'; ctx.fillText(label,x+_bw/2,_by+_bh/2);
-    ctx.textBaseline='alphabetic'; return {x,y:_by,w:_bw,h:_bh};
-  };
-  popupState.lbPrev=_mk('◀ PREV',px+pw/2-_bw-10,_lbPage>0,popupState.lbPrevHover);
-  popupState.lbNext=_mk('NEXT ▶',px+pw/2+10,_lbPage<_maxPage,popupState.lbNextHover);
+  // PREV / NEXT page arrows — bare triangles flanking the "Ranks X–Y of Z" label
+  // (matches the title-screen leaderboard). Still hover-aware + click to page.
+  popupState.lbPrev=null; popupState.lbNext=null;
+  if(_lbStatus==='ok'){
+    const _rkY=py+ph-30;
+    ctx.font='11px "Exo 2",sans-serif';
+    const _rkTxt='Ranks '+(_lbPage*10+1)+'–'+Math.min(_lbRows.length,_lbPage*10+10)+' of '+_lbRows.length;
+    const _rkHalf=ctx.measureText(_rkTxt).width/2;
+    const _triS=8,_triGap=18,_hitR=15,_cy=_rkY-4;
+    const _prevEn=_lbPage>0,_nextEn=_lbPage<_maxPage;
+    const _pcx=px+pw/2-_rkHalf-_triGap;
+    ctx.beginPath();
+    ctx.moveTo(_pcx+_triS/2,_cy-_triS); ctx.lineTo(_pcx-_triS/2,_cy); ctx.lineTo(_pcx+_triS/2,_cy+_triS); ctx.closePath();
+    ctx.fillStyle=!_prevEn?'rgba(110,110,130,0.38)':(popupState.lbPrevHover?'rgba(205,185,255,0.98)':'rgba(160,140,225,0.85)'); ctx.fill();
+    if(_prevEn) popupState.lbPrev={x:_pcx-_hitR,y:_cy-_hitR,w:_hitR*2,h:_hitR*2};
+    const _ncx=px+pw/2+_rkHalf+_triGap;
+    ctx.beginPath();
+    ctx.moveTo(_ncx-_triS/2,_cy-_triS); ctx.lineTo(_ncx+_triS/2,_cy); ctx.lineTo(_ncx-_triS/2,_cy+_triS); ctx.closePath();
+    ctx.fillStyle=!_nextEn?'rgba(110,110,130,0.38)':(popupState.lbNextHover?'rgba(205,185,255,0.98)':'rgba(160,140,225,0.85)'); ctx.fill();
+    if(_nextEn) popupState.lbNext={x:_ncx-_hitR,y:_cy-_hitR,w:_hitR*2,h:_hitR*2};
+  }
   ctx.restore();
 }
 let tracking=false, trackingOffset={x:0,y:0};
 let relockAfterDrag=false;
+// Brief-WASD-pan re-lock: if the player nudges the camera with W/A/S/D for under
+// a second while a selected object was being followed, and that object is still
+// (at least partly) on-screen when they let go, resume following it.
+let _wasdPanActivePrev=false, _wasdPanStartMs=0, _wasdPanWasTracking=false;
 let trains=[];
 let gStars=[];
 let starPan={x:0,y:0}, dragStarPan={x:0,y:0};
@@ -3242,9 +4160,15 @@ const _PLAYER_OPENED_POPUPS=new Set([
 let _missionTipFired=false;  // M-tip is one-shot once the player has 3 simultaneously-active missions for the first time
 let _buyTrainCompletedMs=0;  // real-time ms when buy_second_train completed (0=not yet). Gates the upgrade_station mission intro 10 s later.
 let _foundryCompletedMs=0;   // real-time ms when build_foundry completed (0=not yet). Gates the buy_second_train mission intro 10 s later.
+// True once the PLAYER has delivered [Iron] (by train) to any NON-desert planet.
+// If already true when the buy_second_train ("Buy an Iron-delivery Train") intro
+// gate opens, that mission is skipped entirely (the player already does this).
+let _ironDeliveredToNonDesert=false;
 // New-game tutorial bubble chain (zoom out → double click lava planet → build station)
-let _tutorialPhase='inactive'; // 'inactive'|'pre_zoom'|'look_around'|'look_around_pause'|'zoom_out'|'double_click'|'build_station'|'done'
+let _tutorialPhase='inactive'; // 'inactive'|'pre_zoom'|'look_around'|'look_around_pause'|'zoom_out'|'orijen_welcome'|'orijen_details'|'double_click'|'build_station'|'done'
 let _tutorialPhaseStartMs=0;   // real-time ms when the current phase started
+let _orijenTutCentered=false;  // one-shot: camera framed Orijen for the home-planet intro phase
+let _crOrijenFramed=false;     // one-shot: camera framed Orijen (LOW orbit = visible height) when the create_route train first loads at Orijen
 let _tutorialFadeOutStartMs=0; // real-time ms when the current bubble began fading out (0 = not yet)
 let _tutorialLavaPlanetId=-1;  // planet id of the lava planet in Orijen's home system
 // Per-phase frozen anchor for the secondary BLUE "HOVER your cursor" callout
@@ -3255,8 +4179,26 @@ let _tutorialLavaPlanetId=-1;  // planet id of the lava planet in Orijen's home 
 // re-entry starts fresh.
 let _blueHoverAnchorFrozen=null; // {x,y} once captured; null until then
 let _zoomBarCenter={x:0,y:0}; // cached screen centre of the zoom bar (set each frame by drawSpeedIndicator)
+let _speedValCenterX=0;        // cached screen X of the "#X" speed-multiplier text centre (set each frame by drawSpeedIndicator); the stacked planet buttons centre under it
 let _createRouteTimerMs=0; // real-time ms when player first visited a non-home-star planet (0=not yet). Used by stellar_cartography fallback.
 let _visitPlanetCompletedMs=0; // (legacy) real-time ms when visit_planet mission completed. Superseded by _tutorialDoneMs but kept reset for save compat.
+let _lavaDetailsWasOpen=false; // true once the Lava Planet details window has been opened during the tutorial
+let _lavaClosedTimerMs=0;      // real-time ms when that window was first CLOSED again (0=not yet) — arms the create_route intro
+let _orijenDetailsOpenedTut=false; // true once the player has FIRST opened the ORIJEN details window in the tutorial — queues the create_route intro immediately (it shows the moment the window closes, then the lava-station walkthrough follows)
+// First-train tutorial segment (runs AFTER Orijen details, BEFORE the create_route
+// mission): camera-locks on the Iron Express, then walks the player through the
+// train-details window (cars / engine capacity / ESC). _ftFocusFramed = camera
+// framed once on entry; _ftFirstTrainTutDone = segment complete (now gates the
+// deferred create_route intro instead of _orijenDetailsOpenedTut).
+let _ftFocusFramed=false;
+let _ftFirstTrainTutDone=false;
+// Segments 2-3 of the first-train tutorial (desert station + Orijen↔Desert
+// route). _ftFrameKey = which phase last applied its one-shot camera framing
+// (so a framing phase re-frames once on entry, then lets the scene animate).
+let _ftFrameKey='';
+let _ftWaitStartMs=0; // ms when the post-unload 20 s wait began (0=not started)
+let _ftSawLoading=false; // ft_loading: true once the first train has been observed LOADING cargo at Orijen
+let _ftLoadDoneMs=0;     // ft_loading: ms when loading finished (0=not yet) — drives the LOADING bubble's own fade-out, independent of the phase advance
 let _tutorialDoneMs=0;         // real-time ms when the tutorial chain reached 'done' — arms the 1 s create_route intro
 let _crTutorialDoneMs=0;       // real-time ms when the create_route tutorial chain reached 'all_done' — arms buy_second_train (10 s) and build_foundry (40 s) intros
 let _crTrainPreselected=false; // true if a train was already selected when the create_route tutorial chain started (drives the blue companion bubble in cr_click_orijen / cr_shift_click_other)
@@ -3266,9 +4208,21 @@ let _crTrainPreselected=false; // true if a train was already selected when the 
 // orbit, and surfaces a light-red bubble explaining the station upgrade.
 let _firstNonLowOrbitFired=false; // true once the hint has been triggered
 let _orbitHintStartMs=0;          // real-time ms when callout was triggered (0=inactive)
+// First-time "route BLOCKED" education (two flavours: star-in-path / out-of-range).
+// _firstStar/RangeBlockShown PERSIST (once per career); the rest are transient.
+let _firstStarBlockShown=false;   // shown the STAR-block lesson once
+let _firstRangeBlockShown=false;  // shown the RANGE-block lesson once
+let _blockEduStartMs=0;           // real-time ms the block-education session began (0=inactive)
+let _blockEduTrainIdx=-1;         // index into trains[] of the blocked train being taught about
+let _blockEduReason='';           // 'star' | 'range'
+let _blockEduPopupShown=false;    // true once the 7 s-delayed popup has opened
+let _blockEduOkBounds=null;       // OK-button hit-rect in the educational popup
 let _orbitHintPlanetId=-1;        // planet id the callout points at
 let _findOreTimerMs=0;     // real-time ms when create_route mission completed (0=not yet). Now arms the build_foundry intro 10 s later (was Find Molten Ore before that mission was removed).
+let _foundryUnlockSd=0;    // stardate at which the delayed IRON FOUNDRY unlock+popup fires (0=not armed). 20 in-game seconds after create_route completes = stardate+0.02.
 let _produceIronTimerMs=0; // real-time ms when produce_iron mission completed (0=not yet)
+let _produceIronIntroAtMs=0; // real-time ms (Date.now()) at which the DELAYED produce_iron NEW MISSION intro fires — armed 15 s after build_foundry completes so the popup doesn't preempt the add-cars tutorial step. 0=not armed.
+let _ironCarUnlockedMs=0;  // real-time ms when the IRON CAR first unlocked (0=not yet). Gates the upgrade_station mission intro 10 s later.
 let _steelMissionTimerMs=0; // real-time ms when first steel was produced (arms 10s intro for design_better_train)
 // Steel production sliding-window log for N700 unlock. Each entry: {sd, units}.
 // Pruned every tick to entries within the last 20 stardates; N700 unlocks once
@@ -3276,6 +4230,8 @@ let _steelMissionTimerMs=0; // real-time ms when first steel was produced (arms 
 let _steelProdLog=[];
 let pendingGoldDiscoveries=[]; // planetIds queued to show gold discovery popup
 let pendingDiamondDiscoveries=[]; // planetIds queued to show diamond discovery popup
+let pendingUraniumDiscoveries=[]; // planetIds queued to show uranium discovery popup (v0.4.7)
+let pendingArtifactDiscoveries=[]; // planetIds queued to show alien-artifact-cache popup (v0.4.7 Zeta)
 let pendingCarUnlocks=[]; // {sprite,displayName} queued to show car-unlock popup
 let pendingEngineUnlocks=[]; // {sprite,displayName} queued to show engine-unlock popup
 // ── Planet-upgrade unlock gating ─────────────────────────────
@@ -3283,18 +4239,133 @@ let pendingEngineUnlocks=[]; // {sprite,displayName} queued to show engine-unloc
 // player triggers their unlock event; unlocking pops an explainer window (like
 // the car-unlock popup). All four flags are persisted (and derived from game
 // state on load for backward-compat).
-let _foundryUnlocked=false;       // IRON FOUNDRY card — unlocked by COMPLETING the "Create a repeating train route" mission
+let _foundryUnlocked=true;        // IRON FOUNDRY card — now UNLOCKED BY DEFAULT from game start (the "new upgrade constructed" popup still fires the first time one is built)
 let _largeStationUnlocked=false;  // LARGE STATION upgrade button — unlocked by COMPLETING the "Produce Iron" mission
 let _terminalUnlocked=false;      // TERMINAL upgrade button — unlocked by producing the FIRST steel unit
 let _bakeryUnlocked=false;        // BAKERY card — unlocked by VISITING the first agricultural planet
 let _glassworksUnlocked=false;    // GLASSWORKS card — unlocked once BOTH the Sand car and Chemical car are discovered (desert + chemical planet visited)
-let pendingUpgradeUnlocks=[]; // {key} queued to show the upgrade-unlock popup (key ∈ iron_foundry, bakery, glassworks, __large_station__, __terminal__)
+// ── v0.4.7 story-arc flags (all rule-of-three persisted) ──
+let _heliosArcStarted=false;      // "The Helios Directive" intro fired — Helios industry cards visible, Dyson sites revealed
+let _militaryArcStarted=false;    // First Contact fired — Munitions Works / Armory / Defense Battery visible
+let _warpsteelRecipeKnown=false;  // Z-campaign resolved — Xenoforge card visible + buildable
+let _v47ProdTotals={};            // {cargo: cumulative units produced by PLAYER refineries} — Helios mission progress
+let _heliosTimerMs=0;             // transient: 20 s intro delay for helios_directive (re-arms on load)
+let _heliosEngDiscount=0;         // fraction: permanent engine-cost discount from completing Helios Frame
+let _sensorUpgrade2Active=false;  // Sensor Upgrade II from Helios Mirror — fog radius ×2 total
+let _portalActive=false;          // black hole portal ignited — Zeta Quadrant reachable
+let _zetaGenerated=false;         // Zeta Quadrant stars/planets exist in galaxy arrays
+let _ignitionFxStartMs=0;         // transient: ignition flash/ring FX timestamp (0=off)
+// ── Combine (alien corp) + combat globals (Stage: Zeta Quadrant) ──
+let _combineFounded=false;        // Combine trains/stations instantiated (first player transit)
+let _combineHostility=25;         // 0..100 — see the hostility model in updateCombine
+let _combineCredits=0;            // abstract Combine treasury (finances VS display)
+let _combineTrainIdxs=[];         // indices into trains[] owned by the Combine (runtime; rebuilt on load)
+let _combatProjectiles=[];        // live cannon tracer projectiles (transient)
+let _combatBeams=[];              // live laser beam FX (transient)
+let _combatFx=[];                 // explosion / shield-flash FX (transient)
+let _combatScanAcc=99;            // dtG accumulator — targeting scan every 10 frames
+let _hiveTradeUnits=0;            // player revenue-positive unloads at hive worlds (Armistice gate)
+let _combineKills=0;              // combine trains destroyed by the player
+let _combineDefeated=false;       // war ending achieved (flagship destroyed)
+let _combineArmistice=false;      // peace ending achieved
+let _alphaCamMem=null, _zetaCamMem=null; // [Z] hotkey per-region camera memory (transient)
+// ── Helios site helpers ──────────────────────────────────────────────────
+// Site state lives on the DEPOT PLANETS (auto-serialized): p.isDysonDepot,
+// p.dysonSiteKey ('frame'|'mirror'|'heart'), p.dysonNeeds {cargo:need},
+// p.dysonDelivered {cargo:n}, p._dysonComplete. galaxy.heliosSites is the
+// small index [{starId,key,depotPlanetId}] (whitelisted into the save's
+// galaxy object); star._heliosDepotPid is a runtime link rebuilt on load.
+function _heliosDepot(key){
+  if(!galaxy||!Array.isArray(galaxy.heliosSites)) return null;
+  const hs=galaxy.heliosSites.find(h=>h.key===key);
+  return hs?galaxy.planets[hs.depotPlanetId]:null;
+}
+function _linkHeliosSites(){
+  if(!galaxy||!Array.isArray(galaxy.heliosSites)) return;
+  for(const hs of galaxy.heliosSites){
+    const _st=galaxy.stars[hs.starId];
+    if(_st) _st._heliosDepotPid=hs.depotPlanetId;
+  }
+}
+// Pick the 3 small stars nearest the black hole, designate their largest
+// planet as a Construction Depot (pre-built neutral station), and reveal
+// the systems on the star map. Idempotent.
+function _initHeliosSites(){
+  if(!galaxy||(Array.isArray(galaxy.heliosSites)&&galaxy.heliosSites.length)) return;
+  const _bh=galaxy.blackHoles&&galaxy.blackHoles[0];
+  if(!_bh) return;
+  const _aiHomeP=(typeof _aiCorp!=='undefined'&&_aiCorp&&_aiCorp.homePlanetId!=null)?galaxy.planets[_aiCorp.homePlanetId]:null;
+  const _aiHomeSid=_aiHomeP?_aiHomeP.starId:null;
+  const _eligible=(s)=>s&&s.id!==galaxy.homeStarId&&s.id!==_aiHomeSid&&!s.hasDysonSphere&&Array.isArray(s.planetIds)&&s.planetIds.length>0;
+  const _byDist=(a,b)=>Math.hypot(a.x-_bh.x,a.y-_bh.y)-Math.hypot(b.x-_bh.x,b.y-_bh.y);
+  let _picks=galaxy.stars.filter(s=>_eligible(s)&&s.size==='S').sort(_byDist).slice(0,3);
+  if(_picks.length<3){
+    const _more=galaxy.stars.filter(s=>_eligible(s)&&!_picks.includes(s)).sort(_byDist);
+    _picks=_picks.concat(_more.slice(0,3-_picks.length));
+  }
+  const _defs=[
+    {key:'frame',  needs:{truss:40}},
+    {key:'mirror', needs:{solar_panel:40}},
+    {key:'heart',  needs:{superconductor:25, reactor_core:15}},
+  ];
+  galaxy.heliosSites=[];
+  for(let i=0;i<_defs.length&&i<_picks.length;i++){
+    const _st=_picks[i], _d=_defs[i];
+    let _dp=null;
+    for(const pid of _st.planetIds){
+      const q=galaxy.planets[pid];
+      if(!q||q.aiHasStation) continue;
+      if(!_dp||(q.radius||0)>(_dp.radius||0)) _dp=q;
+    }
+    if(!_dp) continue;
+    _dp.hasStation=true;      // pre-built depot station (neutral, like the alien relics)
+    if(_dp.stationAngle===undefined) _dp.stationAngle=rand(0,Math.PI*2);
+    if(!_dp.stationSpeed){ const _big=(_dp.size==='L'||_dp.size==='XL'||_dp.size==='XXL');
+      _dp.stationSpeed=(Math.random()<0.15?-1:1)*Math.PI*2/(_big?rand(4800,14400):rand(2400,7200)); }
+    _dp.isDysonDepot=true;
+    _dp.dysonSiteKey=_d.key;
+    _dp.dysonNeeds=_d.needs;
+    _dp.dysonDelivered={};
+    _dp.supplyRate=computeSupplyRate(_dp);
+    _dp.demandRate=computeDemandRate(_dp);
+    _st._heliosDepotPid=_dp.id;
+    galaxy.heliosSites.push({starId:_st.id, key:_d.key, depotPlanetId:_dp.id});
+    // Reveal the site system on the registries so the survey objective has
+    // a visible target (fog stays — the player still flies out to look).
+    revealedStarIds.add(_st.id);
+    for(const pid of _st.planetIds) discoveredPlanetIds.add(pid);
+  }
+  _invalidateUpgradePlanetCache();
+  _chatMsg('3 HELIOS CONSTRUCTION SITES MARKED ON YOUR STAR MAP','rgba(120,200,255,1)');
+}
+let pendingUpgradeUnlocks=[]; // {key,constructed?} queued to show the upgrade-unlock popup (key ∈ iron_foundry, bakery, glassworks, __large_station__, __terminal__)
+let pendingMissionRewards=[]; // {name,reward} → green "Mission Completed" reward popup (one per +credit mission completion)
+let pendingFirstDeliveries=[]; // {planetId,cargo,carType,sd} → "First Delivery" popup (first ever player cargo unloaded at a planet)
+// True for the three Gigi-Prime tutorial planets — ORIJEN, the home-system LAVA
+// PLANET (_tutorialLavaPlanetId) and the home-system DESERT PLANET — where the
+// First-Delivery popup is suppressed so it never interrupts the guided intro.
+function _isHomeTutorialPlanet(p){
+  if(!p||!galaxy) return false;
+  if(galaxy.origenId!=null && p.id===galaxy.origenId) return true;
+  if(_tutorialLavaPlanetId>=0 && p.id===_tutorialLavaPlanetId) return true;
+  const _ori=galaxy.origenId!=null?galaxy.planets[galaxy.origenId]:null;
+  if(_ori && p.starId===_ori.starId && p.type && p.type.id==='desert') return true;
+  return false;
+}
+let _foundryConstructedPopupPending=false; // defer the iron-foundry upgrade popup until the foundry is BUILT and its planet window is closed
+let _foundryConstructedPopupShown=false;   // one-shot latch so the "constructed" popup shows at most once (persisted)
 // An upgrade CARD is visible only when unlocked (or already built). Station-tier
 // buttons (Large Station / Terminal) are gated separately at their render sites.
 function _isUpgradeUnlocked(uId){
   if(uId==='iron_foundry') return _foundryUnlocked;
   if(uId==='bakery')       return _bakeryUnlocked;
   if(uId==='glassworks')   return _glassworksUnlocked;
+  // v0.4.7: Helios industry cards appear once the Helios Directive arc has
+  // started; military cards appear after First Contact in the Zeta Quadrant;
+  // the Xenoforge appears once the campaign finale reveals the recipe.
+  if(uId==='gas_siphon'||uId==='panel_fab'||uId==='cryo_forge'||uId==='orbital_shipyard'||uId==='reactor_assembly') return _heliosArcStarted;
+  if(uId==='munitions_works'||uId==='armory'||uId==='defense_battery') return _militaryArcStarted;
+  if(uId==='xenoforge') return _warpsteelRecipeKnown;
   return true; // every other upgrade is always visible (existing grey-lock gates still apply)
 }
 // True once BOTH the Sand car (a desert planet visited) and the Chemical car (a
@@ -3333,6 +4404,21 @@ let _medicalCarUnlocked=false; // true once player first visits a Jungle-type pl
 let _grainCarUnlocked=false;   // true once player first visits a granary agri planet
 let _livestockCarUnlocked=false; // true once player first visits a farm agri planet
 let _fruitCarUnlocked=false;   // true once player first visits an orchard agri planet
+// ── v0.4.7 Project Helios (mid-game) unlock flags ──
+let _heliosEngineUnlocked=false;   // Helios engine — completing "The Heart Beats" (Dyson chain H3)
+let _heliumCarUnlocked=false;      // true once the player builds a Gas Siphon on a storm planet
+let _solarCarUnlocked=false;       // true once a player Panel Fabricator first produces solar panels
+let _superconCarUnlocked=false;    // true once a player Cryo Forge first produces superconductors
+let _trussCarUnlocked=false;       // true once a player Orbital Shipyard first produces trusses
+let _reactorCarUnlocked=false;     // true once a player Reactor Assembly first produces a core
+// ── v0.4.7 Zeta Quadrant (endgame) unlock flags ──
+let _vexEngineUnlocked=false;        // Vex Interceptor — campaign mission "Patrol Sweep"
+let _singularityEngineUnlocked=false;// Singularity — epilogue (10 warpsteel to Orijen)
+let _titanplateCarUnlocked=false;  // true once a player Titan Mill first produces plate
+let _warpsteelCarUnlocked=false;   // true once the Xenoforge first produces warpsteel
+let _cannonCarUnlocked=false;      // true once an Armory first assembles a Cannon Car
+let _laserCarUnlocked=false;       // true once an Armory first assembles a Laser Car
+let _shieldCarUnlocked=false;      // true once an Armory first assembles a Shield Car
 // Cheats: "Unlock All" sets this true. The 7 cars gated by planet
 // visits/discoveries rather than _XxxCarUnlocked flags (gold, diamond, oil,
 // battery, chemical, sand, ice) check this flag too, so the cheat unlocks
@@ -3350,7 +4436,8 @@ let _playerDeliveryCount=0;
 let _galaxyCensusTimerMs=0;     // real-time ms when 15th planet was visited (0=not yet)
 let _sandstormCheckSd=0;        // last SD at which sandstorm_relief trigger was checked
 let _bhResearchTimerMs=0;       // real-time ms when bh_research's two gate conditions first both held (0=not armed). Not persisted; re-arms on load.
-let _madScientistTimerMs=0;     // real-time ms when player PURCHASED their first Large Station (0=not armed). Armed at the purchase click, not from state; not persisted (so loading a save with a pre-existing Large Station won't fire the mission).
+let _madScientistTimerMs=0;     // real-time ms when player PURCHASED their SECOND Large Station (0=not armed). Armed at the purchase click that brings the player's large-station count to 2, not from state; not persisted (so loading a save with pre-existing Large Stations won't fire the mission).
+let _madSciStationHintFocusPid=-1; // planet id last camera-focused for a station-less Mad Scientist pickup arrival (-1 = none / episode reset). One-shot per arrival so we don't re-yank the camera every frame.
 let _ancientSchematicsTimerMs=0; // real-time ms when the player FIRST visited an ancient planet (0=not armed). Fires the Ancient Schematics mission 5 s later. Transient.
 let _ancientSchematicsPlanetId=-1; // the ancient planet that triggered the schematics mission (the deliver-from source). Transient (mission stores it as sourcePlanetId).
 let _ancientSchematicsFired=false; // one-shot: true once the first ancient visit has armed/created the mission. Persisted.
@@ -3503,8 +4590,39 @@ let colorPickerState=null; // {trainIdx} when color picker sub-popup is open
 let cancelRouteBtnBounds=null;
 let routeHereBtnBounds=null;
 let routeHerePending=false; // true when player clicked "Route Train Here" on a planet
+// Non-null = "assign a route to THIS already-known train" mode, started from the
+// Train Details "ASSIGN ROUTE" button. The player picks planets/stops in galaxy
+// view (Stations tab forced, yellow box+header); clicking ASSIGN TO TRAIN
+// assigns the built route directly to this train index (no train-pick step).
+let _assignRouteTrainIdx=null;
+// true = "build a NEW route, then pick a train" mode, started from the Routes
+// window "+ NEW ROUTE" button. Same yellow SELECT-A-PLANET box as
+// _assignRouteTrainIdx mode, but ASSIGN TO TRAIN hands off to the normal
+// SELECT-A-TRAIN (assignPending) flow so the player chooses the train.
+let _newRouteMode=false;
 let _routeHereResultMs=0;    // Date.now() when a route-here result callout was armed (0 = none)
+// Tutorial phases that walk the player through the MANUAL route → ASSIGN-TO-TRAIN
+// flow. While in one of these, the auto "skip-to-SELECT-A-TRAIN" behaviour is
+// suppressed so the scripted ASSIGN-button steps still play out.
+const _TUT_MANUAL_ASSIGN_PHASES = new Set([
+  // SELECT-A-TRAIN now goes live the moment a ≥2-stop route exists (there's no
+  // in-bar ASSIGN button to gate on anymore) — INCLUDING while the player is
+  // still adding stops during the route-building tutorial steps. So none of the
+  // cr_*/bst_* building phases suppress auto-assign now (the old cr_assign_btn /
+  // bst_assign_btn callouts are skipped). vp_* uses the single-planet ROUTE
+  // TRAIN HERE flow (routeHerePending), which _routeAutoAssign already excludes,
+  // so it never triggered auto-assign — listed here only as documentation.
+  'vp_click_route','vp_click_train'
+]);
+// True when a built route (≥1 segment) should drop STRAIGHT into the
+// SELECT-A-TRAIN state (no explicit ASSIGN-TO-TRAIN click), letting the player
+// click any train in the Trains panel to assign it. Suppressed during the
+// manual-assign tutorial phases and the single-planet "Route Train Here" flow.
+function _routeAutoAssign(){
+  return routeStops.length>=2 && !routeHerePending && !_TUT_MANUAL_ASSIGN_PHASES.has(_tutorialPhase);
+}
 let _routeHereResultOk=false;// true = green "ROUTE confirmed", false = red "Failed to find a viable ROUTE"
+let _routeHereResultTrain=null; // the train the route was assigned to (green callout points at it)
 let planetStarNameBounds=null;
 let starPanelPlanetBounds=[];
 let panelScroll=0;
@@ -3536,7 +4654,7 @@ let stardate=829.00;
 // new-game; persists through saves so reloading a save at SD 829.5 doesn't
 // re-emit the earlier warnings.
 let _rivalCorpWarnTenth=0;
-let credits=250000;
+let credits=PLAYER_START_CREDITS;
 let corpName='Space Tycoon Corporation';
 let creditSnapshots=[]; // [{sd, cr}]
 let lastCreditSnapshotSd=829.00;
@@ -3623,11 +4741,20 @@ let _creditsHover=false;
 // ── hover flags for clickable elements ───────────────────────
 let _speedLeftHover=false, _speedRightHover=false;
 let _panelTabHover=null;           // 'trains' | 'stations' | null
+let _panelExpandArrowBounds=null, _panelArrowHover=false; // expand/collapse arrow by the active tab
+let _optsGearBtnBounds=null, _optsGearBtnHover=false; // settings-wheel button in the lower-right speed cluster
+let _stationsAssignBtnBounds=null, _stationsAssignBtnHover=false; // "ASSIGN TO TRAIN" button at the bottom of the STATIONS panel while building a route from it
+function _togglePanelExpand(){
+  _panelExpanded=!_panelExpanded;
+  PANEL_W=_panelExpanded?PANEL_W_BASE*2:PANEL_W_BASE;
+  if(typeof clampCamera==='function') clampCamera();
+}
 let _routeHereBtnHover=false, _assignBtnHover=false, _cancelRouteBtnHover=false;
 let _planetDetailsBtnHover=false; let planetDetailsBtnBounds=null;
 let _planetStarNameHover=false;    // star-name link in planet info bar
 let _starPanelPlanetHover=-1;      // index in starPanelPlanetBounds
 let _trainAddHover=false, _trainRowHover=-1;
+let _trainsWinAddPaneBounds=null, _trainsWinAddPaneHover=false; // "+ Add new train" pane below the last train in the TRAINS window
 let _routesRowHover=-1; // hover index for ROUTES popup rows
 let _routesStopHover=-1; // hover index for ROUTES popup per-stop planet blocks
 let _routesRuleBtnHover=-1; // hover index for the "RULES" button (one per visible stop pane)
@@ -3643,7 +4770,7 @@ let _addTrainPanelBounds=null;
 let _addTrainPanelHover=false;
 let _pokedexSortHover=false, _pokedexRowHover=-1;
 let _starRegistrySortHover=false,  _starRegistryRowHover=-1;
-let _goldOkHover=false, _diamondOkHover=false, _carUnlockOkHover=false;
+let _goldOkHover=false, _diamondOkHover=false, _carUnlockOkHover=false, _uraniumOkHover=false;
 let _quitYesHover=false, _quitNoHover=false, _saveGameBtnHover=false;
 let _startBtnHover=false, _loadBtnHover=false;
 let loadBtnBounds=null, saveGameBtnBounds=null;
@@ -3682,8 +4809,10 @@ function s2w(sx,sy){ return [(sx-W/2)/cam.scale+cam.x, (sy-GH/2)/cam.scale+cam.y
 
 function clampCamera(){
   const hw=W/(2*cam.scale), hh=GH/(2*cam.scale);
-  // Right: allow scrolling until galaxy right edge aligns with left edge of trains panel
-  cam.x=Math.max(-WORLD_W+hw,Math.min(WORLD_W-hw+PANEL_W/cam.scale,cam.x));
+  // Right: allow scrolling until galaxy right edge aligns with left edge of
+  // trains panel. WORLD_E_X extends to the Zeta east edge once the portal
+  // has ignited (pre-ignition it equals WORLD_W — unchanged behavior).
+  cam.x=Math.max(-WORLD_W+hw,Math.min(WORLD_E_X-hw+PANEL_W/cam.scale,cam.x));
   cam.y=Math.max(-WORLD_H+hh,Math.min(WORLD_H-hh,cam.y));
 }
 
@@ -3876,7 +5005,7 @@ function drawTitleScreen(ts,dt){
     p.x-=p.sp*dt;
     // Off-screen recycle. Buffer factor accounts for rings/moons that extend
     // well past the body radius. When recycled, re-roll the template so the
-    // refresh feels alive even before the next refresh-btn click.
+    // title-screen planet parade keeps varying over time.
     if(p.x+p.R*2.4<0){
       const _newR=randInt(55,115);
       const _newY=rand(_newR+25,RAIL_Y-_newR-30);
@@ -3951,67 +5080,70 @@ function drawTitleScreen(ts,dt){
     const shift=(W+60)-curLeft;
     tTrain.forEach(c=>{c.x+=shift;});
   }
-  // Title text — two-pass render for legibility against bright planet
-  // surfaces / dense star fields. Pass 1: dark stroke outline around each
-  // glyph (rounded joins so the corners stay clean at this font size). Pass
-  // 2: the existing cyan glow + cyan-white-blue gradient fill, which paints
-  // over the inside of every glyph so the outline only shows at the edges.
+  // Title wordmark — TWO lines "SPACE TRAIN" / "TYCOON" sharing ONE horizontal
+  // gradient (#88ddff → #fff → #88aaff, edge-to-edge of "SPACE TRAIN") with a
+  // doubled cyan glow and NO dark stroke — matches wordmark2.png.
+  const _twPx=75; // 1.5× the base 50px
+  ctx.font='bold '+_twPx+'px Orbitron,sans-serif'; ctx.textAlign='center';
+  const _stW=ctx.measureText('SPACE TRAIN').width;   // gradient spans this width
+  const _l1Y=82, _l2Y=151, _subBaseY=187; // 1.5× layout (line gap + subtitle gap scaled)
   ctx.save();
-  ctx.font='bold 58px Orbitron,sans-serif'; ctx.textAlign='center';
-  ctx.lineJoin='round'; ctx.lineWidth=10;
-  ctx.strokeStyle='rgba(0,0,0,0.88)';
-  ctx.strokeText('SPACE TRAIN TYCOON',W/2,90);
-  ctx.shadowColor='#4af'; ctx.shadowBlur=24;
-  const tg=ctx.createLinearGradient(W/2-200,80,W/2+200,80);
-  tg.addColorStop(0,'#88ddff'); tg.addColorStop(.5,'#fff'); tg.addColorStop(1,'#88aaff');
-  ctx.fillStyle=tg; ctx.fillText('SPACE TRAIN TYCOON',W/2,90);
+  const _tg=ctx.createLinearGradient(W/2-_stW/2,0,W/2+_stW/2,0);
+  _tg.addColorStop(0,'#88ddff'); _tg.addColorStop(.5,'#fff'); _tg.addColorStop(1,'#88aaff');
+  ctx.shadowColor='#4af'; ctx.shadowBlur=36; ctx.fillStyle=_tg;
+  // Two passes per line → the wordmark's doubled glow "punch".
+  ctx.fillText('SPACE TRAIN',W/2,_l1Y);
+  ctx.fillText('TYCOON',W/2,_l2Y);
+  ctx.fillText('SPACE TRAIN',W/2,_l1Y);
+  ctx.fillText('TYCOON',W/2,_l2Y);
   ctx.restore();
-  // Subtitle — same outline-then-fill trick at smaller line widths.
+  // Subtitle — plain #89b4d8, no glow; auto-fit to ~0.62× the "SPACE TRAIN"
+  // width (the proportion in wordmark2.png).
   ctx.save();
-  ctx.font='18px "Exo 2",sans-serif'; ctx.textAlign='center';
-  ctx.lineJoin='round'; ctx.lineWidth=3.5;
-  ctx.strokeStyle='rgba(0,0,0,0.85)';
-  ctx.strokeText('INTERSTELLAR SHIPPING CORPORATION SIMULATOR',W/2,122);
+  ctx.textAlign='center';
+  const _subStr='INTERSTELLAR SHIPPING CORPORATION SIMULATOR';
+  let _subPx=18; ctx.font=_subPx+'px "Exo 2",sans-serif';
+  _subPx=Math.max(8,Math.min(18,Math.round(_subPx*(_stW*0.62)/ctx.measureText(_subStr).width)));
+  ctx.font=_subPx+'px "Exo 2",sans-serif';
   ctx.fillStyle='#89b4d8';
-  ctx.fillText('INTERSTELLAR SHIPPING CORPORATION SIMULATOR',W/2,122);
+  ctx.fillText(_subStr,W/2,_subBaseY);
   ctx.restore();
   btnPulse=(btnPulse+0.025)%(Math.PI*2);
   const pulse=0.6+0.4*Math.sin(btnPulse);
-  const bx=W/2-95,by=150,bw=190,bh=46;
+  const bx=W/2-95,by=Math.round(_subBaseY+30),bw=190,bh=46; // sits below the (now larger) wordmark
   startBtnBounds={x:bx,y:by,w:bw,h:bh};
   ctx.save();
   ctx.shadowColor='#4af'; ctx.shadowBlur=_startBtnHover?28:18*pulse;
   ctx.strokeStyle=_startBtnHover?'rgba(120,200,255,0.95)':`rgba(60,160,255,${0.55+0.45*pulse})`; ctx.lineWidth=_startBtnHover?2.5:2;
-  ctx.strokeRect(bx,by,bw,bh);
   ctx.fillStyle=_startBtnHover?'rgba(14,36,90,0.96)':`rgba(8,22,58,${0.72+0.2*pulse})`;
-  ctx.fillRect(bx+1,by+1,bw-2,bh-2);
+  ctx.beginPath(); ctx.roundRect(bx,by,bw,bh,8); ctx.fill(); ctx.stroke();
   ctx.shadowBlur=_startBtnHover?14:10*pulse; ctx.font='bold 17px Orbitron,sans-serif';
   ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillStyle=_startBtnHover?'#d0eeff':'#aadcff';
   ctx.fillText('PLAY GAME',W/2,by+bh/2);
   ctx.restore();
-  // LOAD GAME button
-  const lbx=W/2-95, lby=by+bh+14, lbw=190, lbh=46;
+  // LOAD GAME button — 2/3 the size of PLAY GAME, centred below it.
+  const lbw=Math.round(bw*2/3), lbh=Math.round(bh*2/3);
+  const lbx=W/2-lbw/2, lby=by+bh+14;
   loadBtnBounds={x:lbx,y:lby,w:lbw,h:lbh};
   ctx.save();
   ctx.shadowColor='#fa4'; ctx.shadowBlur=_loadBtnHover?22:12;
   ctx.strokeStyle=_loadBtnHover?'rgba(255,210,100,0.95)':'rgba(200,155,50,0.65)'; ctx.lineWidth=_loadBtnHover?2:1.5;
-  ctx.strokeRect(lbx,lby,lbw,lbh);
   ctx.fillStyle=_loadBtnHover?'rgba(60,36,4,0.96)':'rgba(38,22,2,0.82)';
-  ctx.fillRect(lbx+1,lby+1,lbw-2,lbh-2);
-  ctx.shadowBlur=_loadBtnHover?12:6; ctx.font='bold 14px Orbitron,sans-serif';
+  ctx.beginPath(); ctx.roundRect(lbx,lby,lbw,lbh,6); ctx.fill(); ctx.stroke();
+  ctx.shadowBlur=_loadBtnHover?12:6; ctx.font='bold 12px Orbitron,sans-serif';
   ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillStyle=_loadBtnHover?'rgba(255,225,120,1.0)':'rgba(210,170,80,0.95)';
   ctx.fillText('LOAD GAME',W/2,lby+lbh/2);
   ctx.restore();
-  // LEADERBOARD button (below LOAD GAME) — opens the public high-score board.
-  const _lbBx=W/2-95, _lbBy=lby+lbh+14, _lbBw=190, _lbBh=46;
+  // LEADERBOARD button (below LOAD GAME) — 2/3 size, centred. Opens the board.
+  const _lbBw=Math.round(bw*2/3), _lbBh=Math.round(bh*2/3);
+  const _lbBx=W/2-_lbBw/2, _lbBy=lby+lbh+14;
   leaderboardBtnBounds={x:_lbBx,y:_lbBy,w:_lbBw,h:_lbBh};
   ctx.save();
   ctx.shadowColor='#a76cff'; ctx.shadowBlur=_leaderboardBtnHover?22:12;
   ctx.strokeStyle=_leaderboardBtnHover?'rgba(205,160,255,0.95)':'rgba(150,100,210,0.6)'; ctx.lineWidth=_leaderboardBtnHover?2:1.5;
-  ctx.strokeRect(_lbBx,_lbBy,_lbBw,_lbBh);
   ctx.fillStyle=_leaderboardBtnHover?'rgba(40,22,62,0.96)':'rgba(26,14,42,0.82)';
-  ctx.fillRect(_lbBx+1,_lbBy+1,_lbBw-2,_lbBh-2);
-  ctx.shadowBlur=_leaderboardBtnHover?12:6; ctx.font='bold 14px Orbitron,sans-serif';
+  ctx.beginPath(); ctx.roundRect(_lbBx,_lbBy,_lbBw,_lbBh,6); ctx.fill(); ctx.stroke();
+  ctx.shadowBlur=_leaderboardBtnHover?12:6; ctx.font='bold 12px Orbitron,sans-serif';
   ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillStyle=_leaderboardBtnHover?'rgba(228,205,255,1)':'rgba(190,160,230,0.95)';
   ctx.fillText('LEADERBOARD',W/2,_lbBy+_lbBh/2);
   ctx.restore();
@@ -4021,19 +5153,36 @@ function drawTitleScreen(ts,dt){
   ctx.fillStyle='rgba(95,100,112,0.8)';
   ctx.fillText(GAME_VERSION, 12, H-12);
   ctx.restore();
-  // Mute button — bottom-right corner of title screen
-  const _mbSz=32, _mbX=W-_mbSz-14, _mbY=H-_mbSz-14;
-  _muteBtnBounds={x:_mbX,y:_mbY,w:_mbSz,h:_mbSz};
+  // Settings (gear) button — bottom-right corner of the title screen. Opens the
+  // Options window (a version WITHOUT the Save Game button). Replaces the former
+  // separate mute + fullscreen buttons — both live inside Options now.
+  const _stSz=32, _stX=W-_stSz-14, _stY=H-_stSz-14;
+  _settingsBtnBounds={x:_stX,y:_stY,w:_stSz,h:_stSz};
+  _muteBtnBounds=null; _fsBtnBounds=null; // retired title buttons
   ctx.save();
-  ctx.globalAlpha=_muteBtnHover?0.92:0.60;
-  ctx.fillStyle=_musicMuted?'rgba(90,30,30,0.92)':'rgba(20,40,80,0.85)';
-  ctx.strokeStyle=_musicMuted?'rgba(255,100,100,0.8)':(_muteBtnHover?'rgba(120,200,255,0.9)':'rgba(60,120,200,0.55)');
+  ctx.globalAlpha=_settingsBtnHover?0.92:0.60;
+  ctx.fillStyle='rgba(20,40,80,0.85)';
+  ctx.strokeStyle=_settingsBtnHover?'rgba(120,200,255,0.9)':'rgba(60,120,200,0.55)';
   ctx.lineWidth=1.5;
-  ctx.beginPath(); ctx.roundRect(_mbX,_mbY,_mbSz,_mbSz,5); ctx.fill(); ctx.stroke();
-  ctx.globalAlpha=_muteBtnHover?1.0:0.75;
-  ctx.fillStyle=_musicMuted?'#f88':'#8cf';
-  ctx.font='bold 17px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
-  ctx.fillText(_musicMuted?'🔇':'🔊',_mbX+_mbSz/2,_mbY+_mbSz/2+1);
+  ctx.beginPath(); ctx.roundRect(_stX,_stY,_stSz,_stSz,5); ctx.fill(); ctx.stroke();
+  ctx.globalAlpha=_settingsBtnHover?1.0:0.78;
+  _drawGearGlyph(_stX+_stSz/2,_stY+_stSz/2,9,_settingsBtnHover?'#cfeaff':'#8cf',2);
+  ctx.restore();
+}
+// Settings-wheel (gear) icon: a toothed ring + hub hole. Stroked in `col`.
+function _drawGearGlyph(cx,cy,r,col,lw){
+  ctx.save();
+  ctx.strokeStyle=col; ctx.lineWidth=lw||2; ctx.lineJoin='round'; ctx.lineCap='round';
+  const teeth=8, rOut=r, rIn=r*0.70;
+  ctx.beginPath();
+  for(let i=0;i<teeth*2;i++){
+    const a=(i/(teeth*2))*Math.PI*2 - Math.PI/2;
+    const rr=(i%2===0)?rOut:rIn;
+    const x=cx+Math.cos(a)*rr, y=cy+Math.sin(a)*rr;
+    if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.closePath(); ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx,cy,r*0.34,0,Math.PI*2); ctx.stroke();
   ctx.restore();
 }
 
@@ -5067,10 +6216,13 @@ function _drawCutsceneBg(ts){
     const sr=s.radius*cam.scale;
     const glowR=Math.max(sr*2.8,8);
     if(sx+glowR<0||sx-glowR>W||sy+glowR<0||sy-glowR>H) continue;
-    drawStar(sx,sy,sr,s.color,!!s.hasDysonSphere);
+    drawStar(sx,sy,sr,s.color,_starDysonArg(s));
     if(sr>5){
       ctx.save();
-      const fs=Math.min(13,Math.max(10,sr*.14+9));
+      // Integer font size: fs feeds the _getTextBM cache key, and a raw
+      // float of the zoom level busts the cache for every label on every
+      // frame of a zoom (one offscreen-canvas rasterise per label per frame).
+      const fs=Math.round(Math.min(13,Math.max(10,sr*.14+9)));
       ctx.font=fs+'px "Exo 2",sans-serif'; ctx.textAlign='center';
       ctx.fillStyle='rgba(255,230,150,0.85)';
       _smoothTextMode=true; ctx.fillText(s.name,sx,sy+sr+14); _smoothTextMode=false;
@@ -5156,7 +6308,9 @@ function _drawCutsceneBg(ts){
     // Planet name label (zoomed-in enough to be readable).
     if(sr>13){
       ctx.save();
-      const fs=Math.min(14,Math.max(10,sr*.38));
+      // Integer font size — same _getTextBM cache-key reasoning as the star
+      // labels above.
+      const fs=Math.round(Math.min(14,Math.max(10,sr*.38)));
       ctx.font=fs+'px "Exo 2",sans-serif'; ctx.textAlign='center';
       ctx.textBaseline='top';
       ctx.fillStyle='rgba(170,205,255,0.8)';
@@ -5210,8 +6364,13 @@ function _introToCorpSetup(){
         _p.y=_s.y+_p.orbitRadius*Math.sin(_p.orbitAngle);
       }
     };
-    _resetPlanet(galaxy.planets[galaxy.origenId]);
-    if(_tutorialLavaPlanetId>=0) _resetPlanet(galaxy.planets[_tutorialLavaPlanetId]);
+    // Reset the WHOLE home system back to its at-generation framing — this
+    // includes Orijen, the lava planet, AND the desert (which now starts at the
+    // lava planet's clock position), so the starting cluster looks identical
+    // regardless of how long the player lingered on the cutscene narration.
+    const _hStar=galaxy.stars[galaxy.planets[galaxy.origenId].starId];
+    if(_hStar) for(const _hpid of _hStar.planetIds) _resetPlanet(galaxy.planets[_hpid]);
+    else { _resetPlanet(galaxy.planets[galaxy.origenId]); if(_tutorialLavaPlanetId>=0) _resetPlanet(galaxy.planets[_tutorialLavaPlanetId]); }
   }
   // Re-center the camera fully zoomed in on the player's train. The
   // cutscene's last shot can leave cam at any scale (often MIN_SC at the
@@ -5775,7 +6934,7 @@ function _genRandomCorpName(){
 function _genStartingCeos(){
   // Randomly pick 3 of the available CEOs (shuffle + slice so any CEO can appear)
   const _pool=[...CEO_ROSTER].sort(()=>Math.random()-0.5).slice(0,3);
-  const _used=[], _salaries=[8000,8000,12000];
+  const _used=[], _salaries=[8000,10000,12000];
   return _pool.map((r,_si)=>{
     let _pi;
     do { _pi=randInt(0,CEO_PERKS.length-1); } while(_used.includes(_pi));
@@ -5792,8 +6951,8 @@ function _doStartGame(){
   _corp.ceoSalary=_cho.ceoSalary; _corp.lastHireSD=null;
   _ceoHireCandidates=_csCeoOptions.filter((_,i)=>i!==_csSelectedCeo)
     .map(c=>{ const _r=CEO_ROSTER.find(r=>r.name===c.ceoName)||CEO_ROSTER[0]; return _genCeoCandidate(_r); });
-  // First-time entry to aiselect in this new-game flow → preselect Very Hard.
-  if(!_aiSelectSeen){ _aiDifficulty='very_hard'; _aiSelectSeen=true; }
+  // First-time entry to aiselect in this new-game flow → preselect Normal.
+  if(!_aiSelectSeen){ _aiDifficulty='normal'; _aiSelectSeen=true; }
   gs='aiselect';
 }
 function drawCorpSetup(ts){
@@ -5864,7 +7023,7 @@ function drawCorpSetup(ts){
   ctx.fillText('SELECT YOUR CEO:',_cspx+30,_cspy+145);
 
   // ── CEO cards ───────────────────────────────────────────────
-  const _cardW=242, _cardH=212, _cardGap=22;
+  const _cardW=242, _cardH=240, _cardGap=22; // +28 tall for the 3 labelled pill rows
   const _totalCW=3*_cardW+2*_cardGap;
   const _card0X=Math.round(W/2-_totalCW/2);
   const _cardY=_cspy+150;
@@ -5898,35 +7057,39 @@ function drawCorpSetup(ts){
     ctx.font='10px "Exo 2",sans-serif';
     ctx.fillStyle='rgba(148,175,238,0.70)';
     ctx.fillText(_ceoNickname(_ceo.primaryPerk),_cc,_pY+_pH+31);
-    // Salary pill — yellow (left) → orange (right) per position
-    const _salTxt='-'+_fmtCr(_ceo.ceoSalary)+' cr/S.D.';
-    ctx.font='11px "Exo 2",sans-serif';
-    const _salTW=ctx.measureText(_salTxt).width;
-    const _salPillW=_salTW+16;
-    const _salPX=Math.round(_cc-_salPillW/2);
-    const _salPY=_pY+_pH+50;
+    // Three labelled rows: a small all-caps header on the LEFT and a pill on
+    // the RIGHT (SALARY · ABILITY · STARTING CREDITS). The header column is
+    // left-aligned at the card padding; the pill is right-aligned to the card
+    // edge and truncated so it can never run under its header.
+    const _csRow=(rowCY,label,pillText,bg,tc)=>{
+      const _pad=14;
+      ctx.font='bold 7px Orbitron,sans-serif'; ctx.textAlign='left'; ctx.textBaseline='middle';
+      ctx.fillStyle='rgba(122,152,208,0.72)';
+      ctx.fillText(label,_cx+_pad,rowCY);
+      const _hdrW=ctx.measureText(label).width;
+      ctx.font='11px "Exo 2",sans-serif';
+      let _txt=pillText;
+      const _rightX=_cx+_cardW-_pad;
+      const _maxPillW=_rightX-(_cx+_pad+_hdrW+8);
+      let _pillW=ctx.measureText(_txt).width+14;
+      if(_pillW>_maxPillW){
+        while(_txt.length>2&&ctx.measureText(_txt).width+14>_maxPillW) _txt=_txt.slice(0,-1);
+        _txt=_txt.slice(0,-1)+'…'; _pillW=ctx.measureText(_txt).width+14;
+      }
+      const _pillX=_rightX-_pillW;
+      ctx.fillStyle=bg;
+      ctx.beginPath(); ctx.roundRect(_pillX,rowCY-10,_pillW,20,4); ctx.fill();
+      ctx.fillStyle=tc; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText(_txt,_pillX+_pillW/2,rowCY);
+      ctx.textBaseline='alphabetic'; ctx.textAlign='left';
+    };
     const _salBg =['rgba(85,72,8,0.68)','rgba(88,55,5,0.68)','rgba(88,36,4,0.68)'][ci];
     const _salTc =['rgba(255,230,50,0.97)','rgba(255,190,36,0.97)','rgba(255,138,22,0.97)'][ci];
-    ctx.fillStyle=_salBg;
-    ctx.beginPath(); ctx.roundRect(_salPX,_salPY-12,_salPillW,20,4); ctx.fill();
-    ctx.fillStyle=_salTc; ctx.textBaseline='middle';
-    ctx.fillText(_salTxt,_cc,_salPY-2); ctx.textBaseline='alphabetic';
-    // Perk pill (no separator line above — the salary/perk pill grouping
-    // reads cleanly on its own and the stray rule was visually noisy).
-    const _pkY=_pY+_pH+78;
-    if(_ceo.primaryPerk){
-      ctx.font='11px "Exo 2",sans-serif';
-      const _pkMaxW=_cardW-28;
-      let _lbl=_ceo.primaryPerk.label;
-      while(ctx.measureText(_lbl).width>_pkMaxW-12&&_lbl.length>4) _lbl=_lbl.slice(0,-1);
-      if(_lbl.length<_ceo.primaryPerk.label.length) _lbl+='…';
-      const _tw=ctx.measureText(_lbl).width;
-      const _pillW=Math.min(_pkMaxW,_tw+14);
-      ctx.fillStyle='rgba(22,42,105,0.65)';
-      ctx.beginPath(); ctx.roundRect(Math.round(_cc-_pillW/2),_pkY-12,_pillW,20,4); ctx.fill();
-      ctx.fillStyle='rgba(175,215,255,0.95)'; ctx.textAlign='center'; ctx.textBaseline='middle';
-      ctx.fillText(_lbl,_cc,_pkY-2); ctx.textBaseline='alphabetic';
-    }
+    _csRow(_pY+_pH+50,'SALARY','-'+_fmtCr(_ceo.ceoSalary)+' cr/Stardate',_salBg,_salTc);
+    _csRow(_pY+_pH+80,'ABILITY',_ceo.primaryPerk?_ceo.primaryPerk.label:'—','rgba(25,155,255,0.97)','#000000');
+    // STARTING CREDITS — green pill, same for every CEO, wired to the actual
+    // amount the player starts a new game with (PLAYER_START_CREDITS).
+    _csRow(_pY+_pH+110,'STARTING CREDITS','+'+_fmtCr(PLAYER_START_CREDITS)+' cr','rgba(16,70,42,0.72)','rgba(120,240,165,0.97)');
     // Selected badge
     if(_isSel){
       ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='center';
@@ -5996,64 +7159,76 @@ function drawAISelect(ts){
   const _dselbord={none:'rgba(60,105,215,0.95)',very_easy:'rgba(55,180,85,0.95)',easy:'rgba(50,178,78,0.95)',normal:'rgba(175,168,20,0.95)',hard:'rgba(218,72,72,0.95)',very_hard:'rgba(115,115,155,0.85)'};
   // true = dark text (black), false = light text (white)
   const _ddark ={none:true,very_easy:true,easy:false,normal:true,hard:false,very_hard:false};
-  // Sprites centered on top-middle of each button (108×108 — 3× the original 36px size)
-  const _dsprite={very_easy:'car_flowers',easy:'car_water_tank',normal:'car_sand',hard:'car_ore',very_hard:'car_hazmat'};
-  const _spSz=108;
-  // Layout: button height increased to accommodate taller sprites
-  const _btnW=230,_btnH=96,_gap=52;
-  const _totalBW=3*_btnW+2*_gap,_b0X=Math.round(W/2-_totalBW/2);
-  // Extra top space so row-0 sprites (which hang _spSz/2 above the button) clear the divider
-  const _row0Y=_py+116,_row1Y=_row0Y+_btnH+_gap;
+  // Sprite per option. The GALAXY ENGINE now represents the solo / no-opponent
+  // choice; the others keep their cargo-car sprites.
+  const _dsprite={none:'engine_galaxy',very_easy:'car_flowers',easy:'car_water_tank',normal:'car_sand',hard:'car_ore',very_hard:'car_hazmat'};
+  // ── All 6 options in ONE row, left (No Opponent) → right (Very Hard) ──
+  // Button width is derived from the panel so all six fit with no horizontal
+  // overlap; sprite size and fonts shrink only as far as needed for that.
+  const _innerPad=44;
+  const _avail=_pw-_innerPad*2;
+  const _gap=Math.max(10,Math.round(_avail*0.014));
+  const _btnW=Math.floor((_avail-5*_gap)/6);
+  const _spSz=Math.min(96,Math.round(_btnW*0.84)); // sprite ≤ button so neighbours never touch
+  // Shrink the label font until the LONGEST label still fits the narrowest button.
+  let _lblPx=13;
+  const _maxLbl=()=>{let m=0;ctx.font='bold '+_lblPx+'px Orbitron,sans-serif';for(const d of _diffs){const w=ctx.measureText(_dlabels[d]).width;if(w>m)m=w;}return m;};
+  while(_lblPx>7&&_maxLbl()>_btnW-10) _lblPx--;
+  const _descPx=Math.max(8,_lblPx-3);
+  // Sprites are square-bundled, so drawn height ≈ width; lay text below the sprite.
+  const _sImg=imgs[_dsprite.normal];
+  const _spH=_sImg?Math.round(_spSz*_sImg.naturalHeight/_sImg.naturalWidth):_spSz;
+  // Tall enough for sprite-overhang + label + the worst-case wrapped description.
+  const _wrapCount=(text,maxW,px)=>{ctx.font=px+'px "Exo 2",sans-serif';const ws=text.split(' ');let l='',n=1;for(const w of ws){const t=l?l+' '+w:w;if(ctx.measureText(t).width<=maxW)l=t;else{n++;l=w;}}return n;};
+  let _maxDescLines=1; for(const d of _diffs){const n=_wrapCount(_ddescs[d],_btnW-14,_descPx);if(n>_maxDescLines)_maxDescLines=n;}
+  const _btnH=Math.round(_spH/2)+_lblPx+8+(_descPx+2)*_maxDescLines+12;
+  const _totalBW=6*_btnW+5*_gap,_b0X=Math.round(W/2-_totalBW/2);
+  // Vertically centre the whole cluster (incl. sprite overhang) below the divider.
+  const _areaTop=_py+72, _areaBot=H-90;
+  const _rowY=Math.round(_areaTop+_spH/2+Math.max(0,((_areaBot-_areaTop)-(_spH/2+_btnH))/2));
   _aiSelBounds=[];
-  [[0,['none','very_easy','easy']],[1,['normal','hard','very_hard']]].forEach(([ri,row])=>{
-    const rowY=ri===0?_row0Y:_row1Y;
-    row.forEach((diff,ci)=>{
-      const bx=_b0X+ci*(_btnW+_gap),by=rowY;
-      _aiSelBounds.push({x:bx,y:by,w:_btnW,h:_btnH,diff});
-      const isSel=_aiDifficulty===diff,isHov=_aiSelHover===diff;
-      // Button fill
-      ctx.fillStyle=isSel?_dsel[diff]:isHov?_dhov[diff]:_dbg[diff];
-      ctx.beginPath();ctx.roundRect(bx,by,_btnW,_btnH,7);ctx.fill();
-      // Border
-      ctx.strokeStyle=isSel?_dselbord[diff]:_dbord[diff];
-      ctx.lineWidth=isSel?2.5:1.2;ctx.beginPath();ctx.roundRect(bx,by,_btnW,_btnH,7);ctx.stroke();
-      // Text colors
-      const _tc =_ddark[diff]?'rgba(8,12,24,0.95)':'rgba(238,248,255,0.97)';
-      const _tcd=_ddark[diff]?'rgba(8,14,32,0.60)':'rgba(210,230,255,0.62)';
-      // Sprite buttons: push text below sprite bottom; no-sprite button: vertically centred
-      const _hasSprite=diff!=='none';
-      const _lblY=_hasSprite?by+_spSz/2+8:by+_btnH/2-2;
-      const _descY=_hasSprite?by+_spSz/2+22:by+_btnH/2+12;
-      ctx.textAlign='center';ctx.font='bold 12px Orbitron,sans-serif';
-      ctx.fillStyle=_tc;ctx.fillText(_dlabels[diff],bx+_btnW/2,_lblY);
-      ctx.font='10px "Exo 2",sans-serif';ctx.fillStyle=_tcd;
-      const _dw=_btnW-20,_dwds=_ddescs[diff].split(' ');
-      let _dc='',_dy=_descY;
-      for(const _dwd of _dwds){const _dt=_dc?_dc+' '+_dwd:_dwd;if(ctx.measureText(_dt).width<=_dw)_dc=_dt;else{if(_dc)ctx.fillText(_dc,bx+_btnW/2,_dy);_dc=_dwd;_dy+=12;}}
-      if(_dc)ctx.fillText(_dc,bx+_btnW/2,_dy);
-      // Large white corner checkmark — bleeds off upper-right corner of box
-      if(isSel){
-        ctx.save();
-        ctx.font='bold 72px Orbitron,sans-serif'; ctx.textAlign='right'; ctx.textBaseline='top';
-        ctx.shadowColor='rgba(0,0,0,0.55)'; ctx.shadowBlur=8;
-        ctx.fillStyle='rgba(255,255,255,0.95)';
-        ctx.fillText('✓',bx+_btnW+18,by-18);
-        ctx.textBaseline='alphabetic'; ctx.restore();
-      }
-      // Sprite: centered horizontally on the button, vertically centred on the button's top edge.
-      // Always render at the game's intended CAR_W:CAR_H ratio (112:80 = 1.4:1) so the car
-      // looks exactly as it does in the train view — not squished by its PNG's natural dimensions.
-      if(_hasSprite&&imgs[_dsprite[diff]]){
-        const _img=imgs[_dsprite[diff]];
-        const _spW=_spSz;
-        const _spH=Math.round(_spSz*_img.naturalHeight/_img.naturalWidth);
-        const _spX=bx+_btnW/2-_spW/2, _spY=by-_spH/2;
-        ctx.save();
-        ctx.shadowColor='rgba(0,0,0,0.70)';ctx.shadowBlur=7;
-        ctx.drawImage(_img,_spX,_spY,_spW,_spH);
-        ctx.restore();
-      }
-    });
+  _diffs.forEach((diff,ci)=>{
+    const bx=_b0X+ci*(_btnW+_gap),by=_rowY;
+    _aiSelBounds.push({x:bx,y:by,w:_btnW,h:_btnH,diff});
+    const isSel=_aiDifficulty===diff,isHov=_aiSelHover===diff;
+    // Button fill + border
+    ctx.fillStyle=isSel?_dsel[diff]:isHov?_dhov[diff]:_dbg[diff];
+    ctx.beginPath();ctx.roundRect(bx,by,_btnW,_btnH,7);ctx.fill();
+    ctx.strokeStyle=isSel?_dselbord[diff]:_dbord[diff];
+    ctx.lineWidth=isSel?2.5:1.2;ctx.beginPath();ctx.roundRect(bx,by,_btnW,_btnH,7);ctx.stroke();
+    // Text colors
+    const _tc =_ddark[diff]?'rgba(8,12,24,0.95)':'rgba(238,248,255,0.97)';
+    const _tcd=_ddark[diff]?'rgba(8,14,32,0.60)':'rgba(210,230,255,0.62)';
+    // Label below the sprite; description wrapped beneath it.
+    const _lblY=by+Math.round(_spH/2)+_lblPx+4;
+    const _descY=_lblY+_descPx+6;
+    ctx.textAlign='center';ctx.font='bold '+_lblPx+'px Orbitron,sans-serif';
+    ctx.fillStyle=_tc;ctx.fillText(_dlabels[diff],bx+_btnW/2,_lblY);
+    ctx.font=_descPx+'px "Exo 2",sans-serif';ctx.fillStyle=_tcd;
+    const _dw=_btnW-14,_dwds=_ddescs[diff].split(' ');
+    let _dc='',_dy=_descY;
+    for(const _dwd of _dwds){const _dt=_dc?_dc+' '+_dwd:_dwd;if(ctx.measureText(_dt).width<=_dw)_dc=_dt;else{if(_dc)ctx.fillText(_dc,bx+_btnW/2,_dy);_dc=_dwd;_dy+=_descPx+2;}}
+    if(_dc)ctx.fillText(_dc,bx+_btnW/2,_dy);
+    // Selected checkmark — scaled to the button, bleeds just off the top-right corner.
+    if(isSel){
+      const _ckPx=Math.round(Math.min(60,_btnW*0.5));
+      ctx.save();
+      ctx.font='bold '+_ckPx+'px Orbitron,sans-serif'; ctx.textAlign='right'; ctx.textBaseline='top';
+      ctx.shadowColor='rgba(0,0,0,0.55)'; ctx.shadowBlur=8;
+      ctx.fillStyle='rgba(255,255,255,0.95)';
+      ctx.fillText('✓',bx+_btnW+5,by-Math.round(_ckPx*0.22));
+      ctx.textBaseline='alphabetic'; ctx.restore();
+    }
+    // Sprite — centered on the button's top edge (square-bundle natural ratio).
+    if(imgs[_dsprite[diff]]){
+      const _img=imgs[_dsprite[diff]];
+      const _spW=_spSz, _spHh=Math.round(_spSz*_img.naturalHeight/_img.naturalWidth);
+      const _spX=bx+_btnW/2-_spW/2, _spY=by-_spHh/2;
+      ctx.save();
+      ctx.shadowColor='rgba(0,0,0,0.70)';ctx.shadowBlur=7;
+      ctx.drawImage(_img,_spX,_spY,_spW,_spHh);
+      ctx.restore();
+    }
   });
   // Start Game — lower right, bleeds below panel (like NEXT on corp setup)
   const _cbW=190,_cbH=36,_cbX=W-_cbW-32,_cbY=H-_cbH-28;
@@ -6440,6 +7615,45 @@ function _genOilBiome(_R){
   }
   return {id:'oil', bands, glints};
 }
+// Lava biome: generate 1–6 volcanoes that extrude from the planet's RIM toward
+// orbit (like mountains, but with much wider bases). Each is positioned by a rim
+// angle `a`, a height `h` (fraction of r beyond the surface) and a WIDE half
+// angular width `wHalf`; it also carries 0–3 lava streaks (down the slopes) and a
+// set of smoke puffs (the plume). Angles are spread evenly + jittered so they
+// don't pile up. Drawn in drawPlanet (after the sphere clip restore). Seeded by
+// biomeSeed so reloads are identical.
+function _genLavaBiome(_R){
+  _R=_R||Math.random;
+  const _rd=(a,b)=>_R()*(b-a)+a;
+  const _ri=(a,b)=>Math.floor(_rd(a,b+0.999));
+  const volcanoes=[];
+  const N=_ri(1,6);                 // 1–6 volcanoes
+  const base=_R()*Math.PI*2;        // random base rotation
+  for(let i=0;i<N;i++){
+    const a=base + (i/N)*Math.PI*2 + _rd(-0.20,0.20); // evenly spread around the rim + jitter
+    const h=_rd(0.10,0.20);         // summit height beyond the surface (fraction of r)
+    const wHalf=_rd(0.18,0.34);     // WIDE half angular width (mountains: 0.05–0.14)
+    // 0–3 lava streaks running down the slopes.
+    const streaks=[];
+    const ns=_ri(0,3);
+    for(let s=0;s<ns;s++){
+      streaks.push({
+        u:_rd(-0.8,0.8),            // lateral position across the cone base (−1..1)
+        len:_rd(0.45,0.9),         // fraction of the slope it runs down from the crater
+        w:_rd(0.10,0.22),          // thickness as a fraction of the base half-width
+        phase:_R()*Math.PI*2,
+      });
+    }
+    // 4–7 smoke puffs that form the rising plume.
+    const puffs=[];
+    const np=4+_ri(0,3);
+    for(let pI=0;pI<np;pI++){
+      puffs.push({ t:pI/np, drift:_rd(-1,1), sz:_rd(0.5,1.0), phase:_R()*Math.PI*2 });
+    }
+    volcanoes.push({a, h, wHalf, phase:_R()*Math.PI*2, streaks, puffs});
+  }
+  return {id:'lava', volcanoes};
+}
 // Storm planet: generate lightning bolt data for animated rendering
 function _genStormLightning(_R){
   _R=_R||Math.random;
@@ -6511,6 +7725,7 @@ function _attachBiome(p){
   else if(p.type.id==='agri') p.type={...p.type,_b:_genAgriBiome(_R)};
   else if(p.type.id==='oil')  p.type={...p.type,_b:_genOilBiome(_R)};
   else if(p.type.id==='storm') p.type={...p.type,_b:_genStormLightning(_R)};
+  else if(p.type.id==='lava')  p.type={...p.type,_b:_genLavaBiome(_R)};
   // Mountains get a derived seed (XOR with golden ratio constant) so the
   // biome generator and mountain generator don't draw from the same stream.
   const _mtn=generatePlanetMountains(p, _mkRng((p.biomeSeed^0x9e3779b9)>>>0));
@@ -6588,7 +7803,8 @@ function generatePopulation(p){
   if(p.type.id==='ancient') return 0;
   // Biome habitability: ocean/jungle most livable; storm/lava/chemical inhospitable
   const biomeMult={ocean:1.6,jungle:1.5,resort:1.4,agri:1.2,rocky:1.0,desert:0.8,
-                   ice:0.7,oil:0.0,storm:0.35,lava:0.25,chemical:0.3,urban:2.0}[p.type.id]||1.0;
+                   ice:0.7,oil:0.0,storm:0.35,lava:0.25,chemical:0.3,urban:2.0,
+                   hive:2.2,crystal:0.2,obsidian:0.15,fungal:0.6}[p.type.id]||1.0;
   const sizeMult={XS:0.5,S:0.75,M:1.0,L:1.3,XL:1.6,XXL:2.0}[p.size]||1.0;
   const factor=biomeMult*sizeMult;
   // Urban: definitionally a planet-spanning city — always >1B population.
@@ -6728,6 +7944,18 @@ function computeSupplyRate(p){
   if(p.hasGold) r.gold=4;
   // Diamond: only planets with a deposit supply it; even rarer output than gold
   if(p.hasDiamond) r.diamond=3;
+  // ── v0.4.7 supply sources ──────────────────────────────────
+  // Uranium: deposit-only, like gold/diamond (rocky/lava veins).
+  if(p.hasUranium) r.uranium=3;
+  // Helium-3: storm planets, but ONLY once a Gas Siphon is built there.
+  if(bio==='storm'&&(p.upgrades||[]).includes('gas_siphon')) r.helium3=3.0*_szSc;
+  // Zeta Quadrant biome generators.
+  if(bio==='crystal')  r.aetherium=3.0*_szSc;
+  if(bio==='obsidian') r.titanium=4.0*_szSc;
+  if(bio==='fungal')   r.biomass=5.0*_szSc;
+  // Hive worlds trickle out artifacts; buried caches add a deposit bonus.
+  if(bio==='hive')     r.artifact=1.0*_szSc;
+  if(p.hasArtifact)    r.artifact=(r.artifact||0)+2;
   // Dev level: scale all base rates, then unlock new supply types
   const dl=p.devLevel||0;
   if(dl>0){const dm=_devMult(dl); for(const k in r) r[k]*=dm;}
@@ -6923,6 +8151,64 @@ function computeDemandRate(p){
       // simply disappears on non-agri biomes once cargo is online.
     }
   }
+  // ── v0.4.7 demand: Helios + Zeta tier cargos ─────────────────────
+  {
+    const _v47pf=pop>0?Math.min(2,0.5+pop/2e9):0.3;
+    const _urD={lava:1.0,rocky:0.8,urban:0.5}[bio];            if(_urD!==undefined) r.uranium=Math.max(r.uranium||0,_urD*_v47pf);
+    const _heD={urban:1.0,lava:0.8,storm:0.5}[bio];            if(_heD!==undefined) r.helium3=Math.max(r.helium3||0,_heD*_v47pf);
+    const _soD={urban:1.5,resort:0.8,ocean:0.6,hive:1.2}[bio]; if(_soD!==undefined) r.solar_panel=Math.max(r.solar_panel||0,_soD*_v47pf);
+    const _scD={urban:1.0,ice:0.4,hive:1.0}[bio];              if(_scD!==undefined) r.superconductor=Math.max(r.superconductor||0,_scD*_v47pf);
+    const _trD={urban:1.0,rocky:0.5,hive:0.8}[bio];            if(_trD!==undefined) r.truss=Math.max(r.truss||0,_trD*_v47pf);
+    const _rcD={urban:0.6,hive:0.6}[bio];                      if(_rcD!==undefined) r.reactor_core=Math.max(r.reactor_core||0,_rcD*_v47pf);
+    const _aeD={urban:1.8,resort:1.0,hive:2.0}[bio];           if(_aeD!==undefined) r.aetherium=Math.max(r.aetherium||0,_aeD*_v47pf);
+    const _tiD={urban:1.2,rocky:0.8,hive:1.5}[bio];            if(_tiD!==undefined) r.titanium=Math.max(r.titanium||0,_tiD*_v47pf);
+    const _bmD={hive:2.5,urban:0.8,jungle:0.5,agri:0.5}[bio];  if(_bmD!==undefined) r.biomass=Math.max(r.biomass||0,_bmD*_v47pf);
+    const _arD={resort:1.5,urban:1.5,ocean:0.8}[bio];          if(_arD!==undefined) r.artifact=Math.max(r.artifact||0,_arD*_v47pf);
+    const _tpD={hive:0.8,urban:0.5}[bio];                      if(_tpD!==undefined) r.titanium_plate=Math.max(r.titanium_plate||0,_tpD*_v47pf);
+    // Hive worlds are ravenous trade hubs — they consume everything the
+    // Alpha economy exports at scale (the diplomacy lever: trading with
+    // hives lowers Combine hostility — see _combineHostility handling).
+    if(bio==='hive'){
+      for(const _hk of ['water','ice','grain','fruit','livestock','iron','steel','glass','machinery','gold','diamond','medical','flowers','cargo','oil','battery','chemical']){
+        r[_hk]=Math.max(r[_hk]||0, 1.5*_v47pf);
+      }
+    }
+    // ── Building-driven input demand floors (new refinery chains sit on
+    // biomes with no natural demand for their inputs — the floor makes the
+    // input legs profitable, mirroring the juicery/bakery floor pattern) ──
+    const _ups47=p.upgrades||[];
+    const _binOpen=(uid,key)=>((p.upgradeData?.[uid]?.[key]||0)<10);
+    if(_ups47.includes('panel_fab')){ if(_binOpen('panel_fab','glass'))r.glass=Math.max(r.glass||0,1.5); if(_binOpen('panel_fab','battery'))r.battery=Math.max(r.battery||0,1.5); }
+    if(_ups47.includes('cryo_forge')){ if(_binOpen('cryo_forge','gold'))r.gold=Math.max(r.gold||0,1.5); if(_binOpen('cryo_forge','battery'))r.battery=Math.max(r.battery||0,1.5); }
+    if(_ups47.includes('orbital_shipyard')){ if(_binOpen('orbital_shipyard','steel'))r.steel=Math.max(r.steel||0,1.5); if(_binOpen('orbital_shipyard','machinery'))r.machinery=Math.max(r.machinery||0,1.5); }
+    if(_ups47.includes('reactor_assembly')){ if(_binOpen('reactor_assembly','uranium'))r.uranium=Math.max(r.uranium||0,1.5); if(_binOpen('reactor_assembly','steel'))r.steel=Math.max(r.steel||0,1.0); if(_binOpen('reactor_assembly','helium3'))r.helium3=Math.max(r.helium3||0,1.5); }
+    if(_ups47.includes('titan_mill')){ if(_binOpen('titan_mill','titanium'))r.titanium=Math.max(r.titanium||0,1.5); if(_binOpen('titan_mill','chemical'))r.chemical=Math.max(r.chemical||0,1.0); }
+    if(_ups47.includes('munitions_works')){ if(_binOpen('munitions_works','steel'))r.steel=Math.max(r.steel||0,1.5); if(_binOpen('munitions_works','chemical'))r.chemical=Math.max(r.chemical||0,1.0); }
+    if(_ups47.includes('plasma_refinery')){ if(_binOpen('plasma_refinery','aetherium'))r.aetherium=Math.max(r.aetherium||0,1.5); if(_binOpen('plasma_refinery','battery'))r.battery=Math.max(r.battery||0,1.5); }
+    if(_ups47.includes('bioforge')){ if(_binOpen('bioforge','biomass'))r.biomass=Math.max(r.biomass||0,1.5); if(_binOpen('bioforge','water'))r.water=Math.max(r.water||0,1.0); if(_binOpen('bioforge','chemical'))r.chemical=Math.max(r.chemical||0,1.0); }
+    if(_ups47.includes('xenoforge')){ if(_binOpen('xenoforge','titanium_plate'))r.titanium_plate=Math.max(r.titanium_plate||0,1.5); if(_binOpen('xenoforge','aetherium'))r.aetherium=Math.max(r.aetherium||0,1.5); if(_binOpen('xenoforge','superconductor'))r.superconductor=Math.max(r.superconductor||0,1.5); }
+    // Armory bins accept every military component.
+    if(_ups47.includes('armory')){
+      for(const _ak of ['steel','machinery','titanium_plate','superconductor','aetherium','glass','aegis_gel']){
+        if((p.upgradeData?.armory?.[_ak]||0)<10) r[_ak]=Math.max(r[_ak]||0,1.0);
+      }
+    }
+    // Defense Battery: restock demand for cannon shells (magazine cap 12).
+    if(_ups47.includes('defense_battery')&&(p.defenseShells||0)<12) r.cannon_shell=Math.max(r.cannon_shell||0,2.0);
+    // Dyson Construction Depot: demands its outstanding sphere components,
+    // plus steel/glass while the Ground Breaking mission runs.
+    if(p.isDysonDepot&&p.dysonNeeds&&!p._dysonComplete){
+      for(const _dk in p.dysonNeeds){
+        if((p.dysonDelivered?.[_dk]||0)<p.dysonNeeds[_dk]) r[_dk]=Math.max(r[_dk]||0,8.0);
+      }
+      if(typeof missions!=='undefined'&&missions.some(mx=>mx.id==='helios_groundbreak'&&mx.status==='active')){
+        r.steel=Math.max(r.steel||0,3.0); r.glass=Math.max(r.glass||0,3.0);
+      }
+    }
+    // Warpsteel epilogue: Orijen demands warpsteel while the Singularity
+    // engine hasn't been unlocked yet (10-unit delivery mission).
+    if(galaxy&&galaxy.origenId!=null&&p.id===galaxy.origenId&&_warpsteelCarUnlocked&&!_singularityEngineUnlocked) r.warpsteel=Math.max(r.warpsteel||0,3.0);
+  }
   // Ancient Schematics: while that mission is active, ORIJEN always demands ≥1
   // cargo so the one-off Schematics cargo can be delivered there (the cargo car
   // carrying it is restricted to unloading only at Orijen).
@@ -6941,7 +8227,7 @@ function computeDemandRate(p){
 // Planet economic health: multiplier for revenue (0.3–1.5)
 function computeEconomicHealth(p){
   const pop=p.population||0;
-  const bm={urban:1.5,resort:1.4,ocean:1.2,jungle:1.1,agri:1.0,rocky:0.9,desert:0.8,ice:0.7,oil:0.6,storm:0.4,lava:0.3,chemical:0.3}[p.type.id]||1.0;
+  const bm={urban:1.5,resort:1.4,ocean:1.2,jungle:1.1,agri:1.0,rocky:0.9,desert:0.8,ice:0.7,oil:0.6,storm:0.4,lava:0.3,chemical:0.3,hive:1.5,crystal:0.7,obsidian:0.5,fungal:0.8}[p.type.id]||1.0;
   const pm=pop>=1e10?1.5:pop>=1e8?1.2:pop>=1e6?1.0:pop>=1e4?0.7:pop>0?0.5:0.3;
   return Math.round(bm*pm*100)/100;
 }
@@ -7058,6 +8344,8 @@ function _startCargoOps(t, p){
       if(!cargo){ t.carFull[i]=false; continue; } // self-heal orphaned full state
       const _cU=CAR_CARGO_UNITS[t.cars[i]]||1.0;
       if((p.demand?.[cargo]||0)<0.5*_cU) continue;
+      // v0.4.7: shield cars never dump their Aegis Gel charge as freight.
+      if(t.cars[i]==='car_shield') continue;
       // Same-planet unload guard: cargo never unloads at the planet it was
       // originally loaded from, even if there's local demand. Keeps the
       // commodity in transit so it can earn revenue at a real destination.
@@ -7103,6 +8391,10 @@ function _startLoadPhase(t, p){
       if(_emptyRuleCargos.has(cargo)) continue;
       if(cargo==='gold'&&!p.goldRevealed) continue;
       if(cargo==='diamond'&&!p.diamondRevealed) continue;
+      if(cargo==='uranium'&&p.hasUranium&&!p.uraniumRevealed) continue;
+      if(cargo==='artifact'&&p.hasArtifact&&!p.artifactRevealed&&p.type.id!=='hive') continue;
+      // v0.4.7: disabled (combat-damaged) cars can't load until repaired.
+      if(t.carDisabled?.[i]) continue;
       if(!(cargo in _remaining)) _remaining[cargo]=(p.supply?.[cargo]||0);
       if(_remaining[cargo]>=_cU){
         _remaining[cargo]-=_cU;
@@ -7124,6 +8416,8 @@ function _startUnloadPhase(t, p){
       if(!cargo){ t.carFull[i]=false; continue; }
       const _cU=CAR_CARGO_UNITS[t.cars[i]]||1.0;
       if((p.demand?.[cargo]||0)<0.5*_cU) continue;
+      // v0.4.7: shield cars never dump their Aegis Gel charge as freight.
+      if(t.cars[i]==='car_shield') continue;
       // Same-planet unload guard (see _startCargoOps for the full comment) —
       // covers every cargo type, not just passengers.
       if(t.carCargoSource?.[i]===p.id) continue;
@@ -7166,7 +8460,7 @@ function _processCargoQueue(t, p){
         if(_corp?.primaryPerk?.cat==='cargo_rev'&&_corp.primaryPerk.cargo==='hazmat') _ceoM*=1+_corp.primaryPerk.val/100;
         if(_corp?.secondaryPerk?.cat==='cargo_rev'&&_corp.secondaryPerk.cargo==='hazmat') _ceoM*=1+_corp.secondaryPerk.val/100;
         const rev=Math.round(_base*_dM*_shM*_ceoM);
-        if(t.isPlayer) credits+=rev; else if(_aiCorp){_aiCorp.credits+=rev;_aiCorp.totalRevenue+=rev;}
+        if(t.isPlayer) credits+=rev; else if(t.isCombine){_combineCredits+=rev;} else if(_aiCorp){_aiCorp.credits+=rev;_aiCorp.totalRevenue+=rev;}
         if(rev>0&&t.isPlayer){const[_cfx,_cfy]=getTrainCarPos(t,i);spawnCreditFloat(_cfx,_cfy,rev);pendingCreditDeltas.push({timer:30,amount:rev});t.totalRevenue=(t.totalRevenue||0)+rev;financeLedger.push({sd:stardate,revenue:rev,cost:0,cargoType:'hazmat',trainName:t.name,planetId:null,starId:p.starId});if(!t._revLog)t._revLog=[];t._revLog.push({sd:stardate,rev});while(t._revLog.length&&stardate-t._revLog[0].sd>1.0)t._revLog.shift();}
         else if(rev>0&&!t.isPlayer){
           t.totalRevenue=(t.totalRevenue||0)+rev;
@@ -7186,8 +8480,24 @@ function _processCargoQueue(t, p){
       } else {
         // ── Normal planet unload ───────────────────────────────
         const src=t.carCargoSource?.[i]!=null?galaxy.planets[t.carCargoSource[i]]:null;
+        // First-ever player cargo unloaded at this planet → queue the
+        // "First Delivery" popup (captures the car type + cargo + S.D.).
+        // Suppressed for the three Gigi-Prime tutorial planets (ORIJEN, the home
+        // LAVA PLANET and DESERT PLANET) — those deliveries are part of the guided
+        // intro and a popup there would interrupt the tutorial flow.
+        if(t.isPlayer && !p._firstPlayerDelivery){
+          p._firstPlayerDelivery=true;
+          if(!_isHomeTutorialPlanet(p)) pendingFirstDeliveries.push({planetId:p.id, cargo, carType:t.cars[i], sd:stardate});
+        }
         const rev=computeCargoRevenue(t.cars[i],cargo,p,src);
-        if(t.isPlayer) credits+=rev; else if(_aiCorp){_aiCorp.credits+=rev;_aiCorp.totalRevenue+=rev;}
+        if(t.isPlayer) credits+=rev; else if(t.isCombine){_combineCredits+=rev;} else if(_aiCorp){_aiCorp.credits+=rev;_aiCorp.totalRevenue+=rev;}
+        // v0.4.7 diplomacy: player deliveries to HIVE worlds soften the
+        // Combine (-0.5 hostility per revenue-positive unload) and count
+        // toward the Armistice ending gate.
+        if(t.isPlayer&&rev>0&&p.type&&p.type.id==='hive'){
+          _combineHostility=Math.max(0,_combineHostility-0.5);
+          _hiveTradeUnits++;
+        }
         if(rev>0&&t.isPlayer){const[_cfx,_cfy]=getTrainCarPos(t,i);spawnCreditFloat(_cfx,_cfy,rev);pendingCreditDeltas.push({timer:30,amount:rev});t.totalRevenue=(t.totalRevenue||0)+rev;financeLedger.push({sd:stardate,revenue:rev,cost:0,cargoType:cargo,trainName:t.name,planetId:p.id,starId:p.starId});if(!t._revLog)t._revLog=[];t._revLog.push({sd:stardate,rev});while(t._revLog.length&&stardate-t._revLog[0].sd>1.0)t._revLog.shift();}
         else if(rev>0&&!t.isPlayer){
           t.totalRevenue=(t.totalRevenue||0)+rev;
@@ -7206,6 +8516,9 @@ function _processCargoQueue(t, p){
         const _cUU=CAR_CARGO_UNITS[t.cars[i]]||1.0;
         if(t.carUnitsUnloaded) t.carUnitsUnloaded[i]=(t.carUnitsUnloaded[i]||0)+_cUU;
         if(cargo==='iron')      p.ironDelivered     =(p.ironDelivered     ||0)+_cUU;
+        // Latch: the player delivered iron to a NON-desert planet (used to skip
+        // the buy_second_train intro — they've already learned this loop).
+        if(cargo==='iron' && t.isPlayer && p.type && p.type.id!=='desert') _ironDeliveredToNonDesert=true;
         // buy_second_train obj 4: count IRON loaded from a DESERT planet that
         // gets delivered to ORIJEN. Player-only; ignores AI deliveries.
         if(cargo==='iron' && t.isPlayer && galaxy && p.id===galaxy.origenId && src && src.type && src.type.id==='desert'){
@@ -7254,6 +8567,13 @@ function _processCargoQueue(t, p){
           // race the intro trigger and pop the mission before the player has
           // actually delivered anything.
           if(t.isPlayer) _totalPassengersDelivered++;
+          // "Earning your first credits" (tutorial): obj 3 fires when the player
+          // earns money UNLOADING passengers at the home-system DESERT PLANET.
+          if(t.isPlayer && rev>0 && p.type && p.type.id==='desert'){
+            const _efcMx=missions.find(mx=>mx.id==='earn_first_credits'&&mx.status==='active');
+            const _hpE=galaxy&&galaxy.origenId!=null?galaxy.planets[galaxy.origenId]:null;
+            if(_efcMx && _hpE && p.starId===_hpE.starId) _efcMx._earnedAtDesert=true;
+          }
           // Seeking a Way Home: check if this delivery completes the mission objective
           const _shMx=missions.find(mx=>mx.id==='seeking_home'&&mx.status==='active');
           if(t.isPlayer&&_shMx&&p.id===_shMx.targetPlanetId&&src&&src.id===_shMx.sourcePlanetId) _shMx._rockyDelivered=true;
@@ -7322,6 +8642,54 @@ function _processCargoQueue(t, p){
           if(!p.upgradeData.juicery) p.upgradeData.juicery={fruit:0,progress:0};
           const _jc=p.upgradeData.juicery;
           if(cargo==='fruit') _jc.fruit=Math.min(10,(_jc.fruit||0)+_cUU);
+        }
+        // v0.4.7 generic refinery intake — one loop covers every Helios/Zeta
+        // recipe (cap 10 per input bin, mirroring the bespoke intakes above).
+        for(const _rc of V47_RECIPES){
+          if(_rc.inputs.includes(cargo)&&(p.upgrades||[]).includes(_rc.id)){
+            if(!p.upgradeData) p.upgradeData={};
+            if(!p.upgradeData[_rc.id]){ const _nb={progress:0}; for(const _ik of _rc.inputs) _nb[_ik]=0; p.upgradeData[_rc.id]=_nb; }
+            const _rb=p.upgradeData[_rc.id];
+            _rb[cargo]=Math.min(10,(_rb[cargo]||0)+_cUU);
+          }
+        }
+        // Armory intake — component bins (cap 10 each).
+        if((p.upgrades||[]).includes('armory')&&ARMORY_BIN_KEYS.includes(cargo)){
+          if(!p.upgradeData) p.upgradeData={};
+          if(!p.upgradeData.armory){ const _ab={progress:0,building:null}; for(const _ak of ARMORY_BIN_KEYS) _ab[_ak]=0; p.upgradeData.armory=_ab; }
+          const _am=p.upgradeData.armory;
+          _am[cargo]=Math.min(10,(_am[cargo]||0)+_cUU);
+        }
+        // Defense Battery restock — cannon shell deliveries load the station
+        // magazine directly (cap 12 shells).
+        if((p.upgrades||[]).includes('defense_battery')&&cargo==='cannon_shell'){
+          p.defenseShells=Math.min(12,(p.defenseShells||0)+1);
+        }
+        // ── v0.4.7 Helios: component deliveries to a Construction Depot ──
+        if(p.isDysonDepot&&p.dysonNeeds&&p.dysonNeeds[cargo]!=null&&t.isPlayer){
+          if(!p.dysonDelivered) p.dysonDelivered={};
+          const _hNeed=p.dysonNeeds[cargo], _hCur=p.dysonDelivered[cargo]||0;
+          if(_hCur<_hNeed){
+            p.dysonDelivered[cargo]=Math.min(_hNeed,_hCur+_cUU);
+            const _hAll=Object.keys(p.dysonNeeds).every(k=>(p.dysonDelivered[k]||0)>=p.dysonNeeds[k]);
+            if(_hAll&&!p._dysonComplete){
+              p._dysonComplete=true;
+              const _hSite=galaxy.heliosSites&&galaxy.heliosSites.find(h=>h.depotPlanetId===p.id);
+              const _hStar=_hSite?galaxy.stars[_hSite.starId]:null;
+              if(_hStar) _hStar.hasDysonSphere=true;
+              p.demandRate=computeDemandRate(p);
+              _chatMsg((_hStar?_hStar.name.toUpperCase():'HELIOS SITE')+': DYSON SPHERE COMPLETE!','rgba(120,220,255,1)');
+              playSound('construction_complete');
+            }
+          }
+        }
+        // Ground Breaking mission counters: steel/glass delivered to any depot.
+        if(p.isDysonDepot&&t.isPlayer&&(cargo==='steel'||cargo==='glass')){
+          const _gbMx=missions.find(mx=>mx.id==='helios_groundbreak'&&mx.status==='active');
+          if(_gbMx){
+            if(cargo==='steel') _gbMx._depotSteel=(_gbMx._depotSteel||0)+1;
+            else _gbMx._depotGlass=(_gbMx._depotGlass||0)+1;
+          }
         }
         // Famine mission: count livestock deliveries to the famine planet
         if(cargo==='livestock'){
@@ -7456,6 +8824,11 @@ function _processCargoQueue(t, p){
       t.carFull[i]=true; if(t.carCargo) t.carCargo[i]=cargo;
       if(t.carCargoSource) t.carCargoSource[i]=t.planetId;
       if(t.carUnitsLoaded) t.carUnitsLoaded[i]=(t.carUnitsLoaded[i]||0)+_cUL;
+      // v0.4.7 military: loading ONE unit of ammo/gel fills the magazine.
+      if(MILITARY_CARS.has(t.cars[i])){
+        if(!t.carAmmo) t.carAmmo=[];
+        t.carAmmo[i]=_WEAPON_STATS[t.cars[i]].mag;
+      }
       // Mission escort tagging: the FIRST car to pick up a story-critical
       // mission cargo from its source planet becomes the glowing, destination-
       // locked escort car. Iterates the unified escort specs so mad_scientist,
@@ -7475,6 +8848,42 @@ function _processCargoQueue(t, p){
 }
 
 // ── Cargo beam particles ───────────────────────────────────────
+// Compute the LIVE beam endpoints for a loading/unloading car, recomputed from
+// the car's CURRENT orbital position. Returns null if the train/planet/car is no
+// longer valid or the beam would be degenerate. Both _spawnCargoBeam (initial
+// placement) and _updateCargoParticles (per-frame homing) call this so a particle
+// always converges onto the car's moving TOP-CENTRE, never the spot it occupied
+// when it spawned.
+//   • car end  = the car's top edge (closest to the planet surface), tangentially
+//                centred on the car (no along-length offset).
+//   • planet end = the planet-surface point directly beneath that car, so the beam
+//                  spans the real orbit→surface gap at every planet size/orbit.
+function _cargoBeamEnds(train, carIdx, isLoading){
+  if(!train||!train.cars||carIdx==null) return null;
+  const planet=_gp(train.planetId);
+  if(!planet) return null;
+  const _styp=train.cars[carIdx];
+  if(_styp===undefined) return null;
+  const _ang = train.angle + _carOffset(train,carIdx)/train.orbitR;
+  const carWx = planet.x + train.orbitR*Math.cos(_ang);
+  const carWy = planet.y + train.orbitR*Math.sin(_ang);
+  const _vfCar = (_styp==='caboose' ? 0.66
+              : (_styp&&_styp.indexOf('engine_')===0) ? 0.66*(ENGINE_GALAXY_H_TIER[_styp]||1.0)
+              : 0.60) * _GAL_SCALE;
+  const _carRadialH = _vfCar * CAR_ORB_H; // car's visible radial extent (world units)
+  const dx=carWx-planet.x, dy=carWy-planet.y;
+  const dist=Math.hypot(dx,dy)||1;
+  const nx=dx/dist, ny=dy/dist;        // outward radial unit (planet centre → car)
+  const carEndX=carWx - nx*_carRadialH, carEndY=carWy - ny*_carRadialH; // top edge
+  const _surfR=Math.max(2, planet.radius||0);
+  const planEndX=planet.x + nx*_surfR, planEndY=planet.y + ny*_surfR;   // surface beneath car
+  const srcX=isLoading?planEndX:carEndX, srcY=isLoading?planEndY:carEndY;
+  const dstX=isLoading?carEndX:planEndX, dstY=isLoading?carEndY:planEndY;
+  const beamLen=Math.hypot(dstX-srcX,dstY-srcY);
+  if(beamLen<2) return null;
+  const bdx=(dstX-srcX)/beamLen, bdy=(dstY-srcY)/beamLen;
+  return {srcX,srcY,dstX,dstY,bdx,bdy,perpX:-bdy,perpY:bdx,beamLen};
+}
 function _spawnCargoBeam(train, dt){
   if(!train.cargoPhase||!train.cargoQueue?.length) return;
   const planet=_gp(train.planetId);
@@ -7482,62 +8891,22 @@ function _spawnCargoBeam(train, dt){
   const carIdx=train.cargoQueue[0];
   const isLoading=train.cargoPhase==='loading';
   const lifetime=30;           // ~0.5 s at 60 fps; independent of game speed
-  // Anchor BOTH beam endpoints to the car's CURRENT orbital position (no lead).
-  // The loading path used to aim a fixed ORB_SPD*lifetime ANGULAR lead ahead of
-  // the car so particles "met" it on arrival — but that angular lead becomes a
-  // LINEAR offset of orbitR*ORB_SPD*lifetime, which grows with orbit size (~20
-  // world units at an M planet's LOW orbit, ~34 at L, ~49 at XL). On big planets
-  // that pushed the whole radial beam tangentially off the visible car, so it
-  // read as "not reaching the car". Dropping the lead keeps the beam line locked
-  // under the current car at every size, matching the (already-correct) unload
-  // beam; particles are short-lived enough that the tiny in-flight drift is
-  // imperceptible.
-  const _ang = train.angle + _carOffset(train,carIdx)/train.orbitR;
-  const carWx = planet.x + train.orbitR*Math.cos(_ang);
-  const carWy = planet.y + train.orbitR*Math.sin(_ang);
-  // Radial attachment point on the car. carWx,carWy sits at the car's OUTER
-  // edge — the part FURTHEST from the planet — because the car sprite is
-  // bottom-aligned so its body extends radially INWARD (toward the planet)
-  // from that point. Aiming there made the beam run all the way to the far
-  // side of the car. Instead, move the car-side endpoint INWARD (toward the
-  // planet) by the car's visible radial height, so the beam meets the car's
-  // TOP — the edge closest to the planet's surface — and is correspondingly
-  // a touch shorter. Tangentially centred (no along-length offset).
-  const _styp = train.cars[carIdx];
-  const _vfCar = (_styp==='caboose' ? 0.66
-              : (_styp&&_styp.indexOf('engine_')===0) ? 0.66*(ENGINE_GALAXY_H_TIER[_styp]||1.0)
-              : 0.60) * _GAL_SCALE;
-  const _carRadialH = _vfCar * CAR_ORB_H; // car's visible radial extent (world units)
-  // Outward radial unit vector at the car's angle (planet centre → car).
-  const dx=carWx-planet.x, dy=carWy-planet.y;
-  const dist=Math.hypot(dx,dy)||1;
-  const nx=dx/dist, ny=dy/dist;
-  // Car-side endpoint: pulled inward by the full body height to the top edge.
-  const carEndX=carWx - nx*_carRadialH, carEndY=carWy - ny*_carRadialH;
-  // Planet-side endpoint: the PLANET SURFACE point directly beneath the car
-  // (radially inward). This spans the real orbit→surface gap, so the beam always
-  // connects the car to the ground on EVERY planet size (XS–XXL) and orbit tier
-  // (LOW / MED / HIGH). A previous build used a fixed reach off the car to keep
-  // beam length uniform, but that left the beam detached/short on L+ planets,
-  // whose orbit→surface gap is far larger than the fixed reach (and overshoot
-  // into the body on small planets). The surface anchor self-scales: the gap is
-  // (orbitR − planet.radius), so the beam naturally lengthens on larger worlds
-  // and outer orbits and shortens on smaller worlds and LOW orbit.
-  const _surfR=Math.max(2, planet.radius||0);
-  const planEndX=planet.x + nx*_surfR, planEndY=planet.y + ny*_surfR;
-  const srcX=isLoading?planEndX:carEndX, srcY=isLoading?planEndY:carEndY;
-  const dstX=isLoading?carEndX:planEndX, dstY=isLoading?carEndY:planEndY;
-  const beamLen=Math.hypot(dstX-srcX,dstY-srcY);
-  if(beamLen<2) return;
-  const bdx=(dstX-srcX)/beamLen, bdy=(dstY-srcY)/beamLen;
-  const perpX=-bdy, perpY=bdx;
+  // LIVE-TRACKED beam: endpoints are recomputed every frame (see _cargoBeamEnds +
+  // _updateCargoParticles) so each particle homes onto the car's moving TOP-CENTRE
+  // rather than the spot the car occupied at spawn. Free-flight particles with a
+  // fixed destination always arrived where the car USED to be — i.e. its rear —
+  // because the car orbits forward during the ~0.5 s flight; the lag grew with
+  // orbit size and game speed. Tracking the live car removes it entirely.
+  const ends=_cargoBeamEnds(train,carIdx,isLoading);
+  if(!ends) return;
+  const {srcX,srcY,bdx,bdy,perpX,perpY,beamLen}=ends;
   const spread=beamLen*0.22; // funnel width at source (converges to zero at destination)
   const speed=beamLen/lifetime;
   const spawnN=Math.ceil(dt*3);
   // Color by cargo type
   const isLoading2=isLoading;
   const _ctype=isLoading2?CAR_CARGO_TYPE[train.cars[carIdx]]:(train.carCargo?.[carIdx]||null);
-  const _BEAM_COLS={passengers:{col:'#ffe060',glow:'#ffcc00'},royal:{col:'#dd88ff',glow:'#bb44ee'},livestock:{col:'#cc8844',glow:'#aa6622'},water:{col:'#44ccff',glow:'#22aaff'},mail:{col:'#a8d8ff',glow:'#7ab8f0'},ice:{col:'#aaeeff',glow:'#ddf8ff'},sand:{col:'#e8c96a',glow:'#c8a030'},molten_ore:{col:'#ff6010',glow:'#ff2200'},iron:{col:'#ffcc44',glow:'#ddaa00'},gold:{col:'#ffe030',glow:'#ffbb00'},diamond:{col:'#80c0ff',glow:'#c0e0ff'},hazmat:{col:'#80ff20',glow:'#40cc00'},oil:{col:'#0a0a0a',glow:'#1a1a1a'},battery:{col:'#fff230',glow:'#ffff80'},flowers:{col:'#ff88cc',glow:'#ff44aa'},medical:{col:'#40eeaa',glow:'#00cc88'},grain:{col:'#e8d840',glow:'#c0aa10'},fruit:{col:'#ff8822',glow:'#ff5500'},steel:{col:'#c8d0e0',glow:'#8898b0'},glass:{col:'#a8e6d8',glow:'#60c0a8'},machinery:{col:'#a8a890',glow:'#706a4a'},cargo:{col:'#e8c898',glow:'#a88848'},chemical:{col:'#60d820',glow:'#28980c'}};
+  const _BEAM_COLS={passengers:{col:'#ffe060',glow:'#ffcc00'},royal:{col:'#dd88ff',glow:'#bb44ee'},livestock:{col:'#cc8844',glow:'#aa6622'},water:{col:'#44ccff',glow:'#22aaff'},mail:{col:'#a8d8ff',glow:'#7ab8f0'},ice:{col:'#aaeeff',glow:'#ddf8ff'},sand:{col:'#e8c96a',glow:'#c8a030'},molten_ore:{col:'#ff6010',glow:'#ff2200'},iron:{col:'#ffcc44',glow:'#ddaa00'},gold:{col:'#ffe030',glow:'#ffbb00'},diamond:{col:'#80c0ff',glow:'#c0e0ff'},hazmat:{col:'#80ff20',glow:'#40cc00'},oil:{col:'#0a0a0a',glow:'#1a1a1a'},battery:{col:'#fff230',glow:'#ffff80'},flowers:{col:'#ff88cc',glow:'#ff44aa'},medical:{col:'#40eeaa',glow:'#00cc88'},grain:{col:'#e8d840',glow:'#c0aa10'},fruit:{col:'#ff8822',glow:'#ff5500'},steel:{col:'#c8d0e0',glow:'#8898b0'},glass:{col:'#a8e6d8',glow:'#60c0a8'},machinery:{col:'#a8a890',glow:'#706a4a'},cargo:{col:'#e8c898',glow:'#a88848'},chemical:{col:'#60d820',glow:'#28980c'},uranium:{col:'#aaff00',glow:'#66cc00'},helium3:{col:'#ffbb55',glow:'#dd8820'},solar_panel:{col:'#55b8ff',glow:'#2080dd'},superconductor:{col:'#9070ff',glow:'#6040cc'},truss:{col:'#a8c4dc',glow:'#7090b0'},reactor_core:{col:'#40e0c0',glow:'#10a888'},aetherium:{col:'#ff50e0',glow:'#cc20b0'},titanium:{col:'#70c8e8',glow:'#3898c0'},biomass:{col:'#a8e030',glow:'#78a810'},artifact:{col:'#40ff90',glow:'#10cc60'},titanium_plate:{col:'#b8e0ff',glow:'#80b0e0'},warpsteel:{col:'#b070ff',glow:'#8040dd'},cannon_shell:{col:'#ffb060',glow:'#dd8020'},plasma_cell:{col:'#ff70ff',glow:'#cc30cc'},aegis_gel:{col:'#70ffd8',glow:'#30ccaa'}};
   const {col:pcol,glow:pglow}=_BEAM_COLS[_ctype]||{col:'#88ccff',glow:'#44aaff'};
   // Oil gets a per-particle slick effect: mostly black, with occasional iridescent
   // rainbow sprinkles to evoke the rainbow sheen on real oil.
@@ -7549,13 +8918,19 @@ function _spawnCargoBeam(train, dt){
   ];
   const _isOil=(_ctype==='oil');
   for(let k=0;k<spawnN;k++){
-    const spr=(Math.random()-0.5)*2*spread;
+    const f=(Math.random()-0.5)*2;     // signed lateral fraction of the funnel spread
+    const spr=f*spread;
     let pcK=pcol, pgK=pglow;
     if(_isOil && Math.random()<0.18){
       const _rb=_OIL_RAINBOW[Math.floor(Math.random()*_OIL_RAINBOW.length)];
       pcK=_rb.col; pgK=_rb.glow;
     }
     cargoParticles.push({
+      // Live-tracking fields: each frame the particle is repositioned along the
+      // CURRENT beam (src→dst at progress `prog`, lateral funnel `f` converging to
+      // 0 at the car). train/carIdx/isLoading identify the live geometry.
+      beam:true, train, carIdx, isLoading, prog:0, f, lifetime,
+      // Fallback free-flight (used only if the live geometry goes invalid mid-flight):
       x:srcX+perpX*spr, y:srcY+perpY*spr,
       vx:bdx*speed - perpX*spr/lifetime,
       vy:bdy*speed - perpY*spr/lifetime,
@@ -7571,27 +8946,61 @@ function _spawnCargoBeam(train, dt){
 function _updateCargoParticles(dtG){
   for(let i=cargoParticles.length-1;i>=0;i--){
     const p=cargoParticles[i];
-    p.x+=p.vx*dtG; p.y+=p.vy*dtG; p.life-=dtG;
+    p.life-=dtG;
+    if(p.beam && p.train){
+      // Home onto the LIVE car: advance progress 0→1 and reposition on the
+      // current beam, so the particle converges on the car's moving top-centre
+      // even as it orbits. Lateral funnel offset shrinks to 0 at the car.
+      p.prog += dtG/(p.lifetime||30);
+      const ends=_cargoBeamEnds(p.train,p.carIdx,p.isLoading);
+      if(ends){
+        const pr=p.prog<0?0:(p.prog>1?1:p.prog);
+        const lat=p.f*(ends.beamLen*0.22)*(1-pr);
+        p.x=ends.srcX+(ends.dstX-ends.srcX)*pr + ends.perpX*lat;
+        p.y=ends.srcY+(ends.dstY-ends.srcY)*pr + ends.perpY*lat;
+      } else {
+        p.x+=p.vx*dtG; p.y+=p.vy*dtG; // geometry gone — fall back to free flight
+      }
+    } else {
+      p.x+=p.vx*dtG; p.y+=p.vy*dtG;
+    }
     if(p.life<=0) cargoParticles.splice(i,1);
   }
+}
+// Pre-baked cargo-particle sprites: one tiny offscreen per (col,glow) pair,
+// baked with the exact arc + shadowBlur the per-particle path used to issue
+// live. A shadowed fill() re-rasterises the blur on EVERY call — the
+// fillStyle batching below never saved that — so with ~90 live particles per
+// docked train the old path ran thousands of blur passes per frame. A plain
+// drawImage of the baked sprite is a straight blit. Keyspace is bounded by
+// the ~10 cargo colours + fallback, so the cache stays tiny.
+const _particleSpriteCache=new Map();
+const _PART_SPR_R=10; // half-size: 1.8px dot + 6px blur halo fits inside 10px
+function _particleSprite(col,glow){
+  const key=col+'|'+glow;
+  let c=_particleSpriteCache.get(key);
+  if(!c){
+    c=document.createElement('canvas');
+    c.width=c.height=_PART_SPR_R*2;
+    const pc=c.getContext('2d');
+    pc.fillStyle=col; pc.shadowColor=glow; pc.shadowBlur=6;
+    pc.beginPath(); pc.arc(_PART_SPR_R,_PART_SPR_R,1.8,0,Math.PI*2); pc.fill();
+    _particleSpriteCache.set(key,c);
+  }
+  return c;
 }
 function _drawCargoParticles(){
   if(!cargoParticles.length) return;
   ctx.save();
-  ctx.shadowBlur=6;
-  let lastCol=null;
+  let lastCol=null,_spr=null;
   for(const p of cargoParticles){
     const [sx,sy]=w2s(p.x,p.y);
     if(sx<-4||sx>W+4||sy<-4||sy>GH+4) continue;
     const t=1-p.life/p.maxLife;
     const fa=t<0.15?t/0.15:t>0.72?(1-t)/0.28:1;
-    if(p.col!==lastCol){
-      lastCol=p.col;
-      ctx.fillStyle=p.col;
-      ctx.shadowColor=p.glow;
-    }
+    if(p.col!==lastCol){ lastCol=p.col; _spr=_particleSprite(p.col,p.glow); }
     ctx.globalAlpha=fa*0.85;
-    ctx.beginPath(); ctx.arc(sx,sy,1.8,0,Math.PI*2); ctx.fill();
+    ctx.drawImage(_spr,sx-_PART_SPR_R,sy-_PART_SPR_R);
   }
   ctx.restore();
 }
@@ -8063,6 +9472,7 @@ function generateGalaxy(){
     // The home-system LAVA planet (HOME_BIOMES index 0) is then placed
     // within ±30° of Orijen's anchor angle for tutorial proximity.
     const _homeOrijenAngle=isHome?((dominantDir>0)?Math.PI:0):0;
+    let _homeLavaAngle=null; // captured at home index 0 so the desert can mirror it
     for(let i=0;i<np;i++){
       const isStarter=(isHome&&i===1); // Orijen sits at HOME_BIOMES index 1
       // Orijen is always L (home planet). The HOME_BIOMES index-0 lava is
@@ -8079,9 +9489,14 @@ function generateGalaxy(){
       if(isHome&&i===0){
         // Lava (home index 0) — placed within ±30° of Orijen's anchor.
         angle=_homeOrijenAngle+(Math.random()*2-1)*(Math.PI/6);
+        _homeLavaAngle=angle;
       } else if(isHome&&i===1){
         // Orijen (home index 1) — deterministic 9pm (CW) / 3pm (CCW).
         angle=_homeOrijenAngle;
+      } else if(isHome&&i===2&&_homeLavaAngle!==null){
+        // Desert (home index 2) — starts at the SAME clock position as the lava
+        // planet relative to Gigi Prime (different orbit radius, same angle).
+        angle=_homeLavaAngle;
       }
       // Kepler-inspired speed: closer planets orbit faster (v ∝ 1/√r).
       // Default 2% chance of retrograde — but the home-system lava and
@@ -8156,6 +9571,12 @@ function generateGalaxy(){
       p.hasDiamond=(!isHome&&_goldBiomes.includes(p.type.id)&&Math.random()<0.02);
       p.diamondRevealed=false;
       p.diamondPatch=p.hasDiamond?{angle:rand(0,Math.PI*2),arcSize:Math.PI*0.22}:null;
+      // Uranium vein (v0.4.7 Project Helios): rocky/lava planets only, rarer
+      // than gold. Hidden until a player train orbits the planet, mirroring
+      // the gold/diamond EUREKA flow. Feeds the Reactor Assembly chain.
+      p.hasUranium=(!isHome&&['rocky','lava'].includes(p.type.id)&&Math.random()<0.05);
+      p.uraniumRevealed=false;
+      p.uraniumPatch=p.hasUranium?{angle:rand(0,Math.PI*2),arcSize:Math.PI*0.22}:null;
       p.devLevelBase=isStarter?3:(isHome?randInt(1,2):randInt(0,3));
       p.devLevel=p.devLevelBase; p.populationBase=p.population; p.devLog=[]; p.passengerDeliveries=[];
       if(p.type.id==='agri'){
@@ -8494,6 +9915,7 @@ function generateGalaxy(){
           // were assigned when this planet was a different biome.
           _victim.hasGold=false; _victim.goldRevealed=false; _victim.goldPatch=null;
           _victim.hasDiamond=false; _victim.diamondRevealed=false; _victim.diamondPatch=null;
+          _victim.hasUranium=false; _victim.uraniumRevealed=false; _victim.uraniumPatch=null;
           // Urban planets shouldn't carry flower fields either.
           _victim.flowerUnlocked=false; _victim.flowerPositions=null; _victim.flowerSeed=null; _victim.isFlowersOrigin=false;
         }
@@ -8533,6 +9955,630 @@ function generateGalaxy(){
   return {stars, planets, homeStarId, origenId, trainPlanetId: origenId, blackHoles: _blackHoles, starProxyMap, colonyTrainDestId:_colonyTrainDestId, faminePlanetId:_faminePlanetId, outbreakPlanetId:_outbreakPlanetId, bhResearchPlanetId:_bhResearchPlanetId, bhResearchPlanetIds:_bhResearchPlanetIds, nebulas:_nebulas, rockyMissionPids:_rockyMissionPids};
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// v0.4.7 — THE ZETA QUADRANT
+// Generated LAZILY at portal ignition (never at new-game), appended to the
+// existing galaxy arrays so every runtime system (orbits, economy, fog,
+// transit, registries) picks the new region up with zero special-casing.
+// While the camera is in Alpha, Zeta planets live in the 10 Hz inactive
+// orbit batch and the economy ignores them (no stations/routes) — dormant
+// cost is effectively zero.
+// ═══════════════════════════════════════════════════════════════════════
+function _ensurePortalProxies(){
+  if(!galaxy||!galaxy.starProxyMap) return;
+  const _mk=(id,x,y,radius,name)=>({
+    id, starId:-1, isStarProxy:true, isPortal:true,
+    x, y, radius,
+    orbitRadius:0, orbitAngle:0, orbitSpeed:0,
+    size:'XL', name, starOrbitR:Math.round(radius*1.6), starOrbitROuter:Math.round(radius*2.4),
+    hasStation:false, isAlienRelic:false, isStarter:false,
+    moons:[], ring:null, clouds:[], cloudAngle:0,
+    hasGold:false, goldRevealed:false, goldPatch:null,
+    hasDiamond:false, diamondRevealed:false, diamondPatch:null,
+    devLevel:0, devLevelBase:0, devLog:[], passengerDeliveries:[],
+    population:0, populationBase:0,
+    supplyRate:{}, demandRate:{}, economicHealth:1,
+    catchphrase:'', type:PTYPES[0], upgrades:[]
+  });
+  const _bh=galaxy.blackHoles&&galaxy.blackHoles[0];
+  if(_bh&&!galaxy.starProxyMap[PORTAL_PROXY_ALPHA])
+    galaxy.starProxyMap[PORTAL_PROXY_ALPHA]=_mk(PORTAL_PROXY_ALPHA,_bh.x,_bh.y,_bh.radius,'The Portal');
+  if(galaxy.zetaPortal&&!galaxy.starProxyMap[PORTAL_PROXY_ZETA])
+    galaxy.starProxyMap[PORTAL_PROXY_ZETA]=_mk(PORTAL_PROXY_ZETA,galaxy.zetaPortal.x,galaxy.zetaPortal.y,galaxy.zetaPortal.radius,'Zeta Portal');
+}
+function generateZetaQuadrant(){
+  if(_zetaGenerated||!galaxy) return;
+  const stars=galaxy.stars, planets=galaxy.planets;
+  const _usedNames=new Set();
+  for(const s of stars) if(s&&s.name) _usedNames.add(s.name);
+  for(const p of planets) if(p&&p.name) _usedNames.add(p.name);
+  const _uniqueFrom=gen=>{
+    for(let _t=0;_t<60;_t++){
+      const _n=gen();
+      if(!_usedNames.has(_n)){ _usedNames.add(_n); return _n; }
+    }
+    let _base=gen(), _sfx=2;
+    while(_usedNames.has(_base+' '+_sfx)) _sfx++;
+    const _final=_base+' '+_sfx;
+    _usedNames.add(_final); return _final;
+  };
+  // ── Stars: rejection-sample ~34 systems inside the Zeta band. The min
+  // spacing (19.5k) already guarantees two 9k-orbit systems can't overlap,
+  // so no push-apart pass is needed.
+  const _zStars=[];
+  for(let attempt=0;attempt<20000&&_zStars.length<34;attempt++){
+    const sz=pickStarSize(), sr=STAR_R[sz];
+    const x=rand(ZETA_X0+9500, ZETA_X1-9500);
+    const y=rand(-WORLD_H+9500, WORLD_H-9500);
+    if(!_zStars.every(s=>Math.hypot(s.x-x,s.y-y)>s.radius+sr+19500)) continue;
+    const cn=pickStarColor(sz);
+    const st={id:stars.length, x, y, size:sz, radius:sr,
+              colorName:cn, color:STAR_COLORS[cn], name:_uniqueFrom(makeStarName), planetIds:[], isZeta:true};
+    stars.push(st); _zStars.push(st);
+  }
+  // ── Planets: mirror generateGalaxy's per-star loop (non-home path) with
+  // the Zeta biome table (crystal / obsidian / fungal + all Alpha biomes).
+  for(const star of _zStars){
+    const np=bellPlanetCount();
+    const orbitCap=9000;
+    const boundLimit=Math.min(star.x-ZETA_X0, ZETA_X1-star.x, WORLD_H-Math.abs(star.y))-400;
+    let orbitR=star.radius*1.8+400;
+    const dominantDir=Math.random()<0.5?1:-1;
+    for(let i=0;i<np;i++){
+      const sz=pickSize(), pr=SIZE_R[sz];
+      orbitR+=pr+rand(300,1200);
+      if(orbitR>orbitCap) break;
+      if(orbitR+pr>boundLimit) break;
+      const angle=rand(0,Math.PI*2);
+      const dir=Math.random()<0.02?-dominantDir:dominantDir;
+      const spd=0.00025*Math.sqrt(800/orbitR)*dir;
+      const p={
+        id:planets.length, starId:star.id,
+        orbitRadius:orbitR, orbitAngle:angle, orbitSpeed:spd,
+        _initialOrbitAngle:angle,
+        x:star.x+orbitR*Math.cos(angle), y:star.y+orbitR*Math.sin(angle),
+        size:sz, radius:pr,
+        type:_pickBiomeWeightedZeta(),
+        name:_uniqueFrom(()=>makeName(i+1)),
+        isStarter:false, isZeta:true
+      };
+      _attachBiome(p);
+      p.moons=generateMoons(p);
+      p.ring=(Math.random()<0.10)?{
+        rot:pick([0,Math.PI/8,Math.PI/4,Math.PI*3/8,Math.PI/2,Math.PI*5/8,Math.PI*3/4,Math.PI*7/8]),
+        outerFrac:rand(2.0,2.9), innerFrac:rand(1.35,1.75),
+        incl:rand(0.15,0.42),
+        rgb:p.type.rim.map(v=>Math.min(255,Math.round(v*0.5+rand(30,70))))
+      }:null;
+      p.catchphrase=generateCatchphrase(p);
+      p.population=generatePopulation(p);
+      p.clouds=generatePlanetClouds(p); p.cloudAngle=Math.random()*Math.PI*2;
+      const _goldBiomes=['rocky','desert','resort','jungle','ocean'];
+      p.hasGold=(_goldBiomes.includes(p.type.id)&&Math.random()<0.05);
+      p.goldRevealed=false;
+      p.goldPatch=p.hasGold?{angle:rand(0,Math.PI*2),arcSize:Math.PI*0.25}:null;
+      p.hasDiamond=(_goldBiomes.includes(p.type.id)&&Math.random()<0.02);
+      p.diamondRevealed=false;
+      p.diamondPatch=p.hasDiamond?{angle:rand(0,Math.PI*2),arcSize:Math.PI*0.22}:null;
+      p.hasUranium=(['rocky','lava'].includes(p.type.id)&&Math.random()<0.05);
+      p.uraniumRevealed=false;
+      p.uraniumPatch=p.hasUranium?{angle:rand(0,Math.PI*2),arcSize:Math.PI*0.22}:null;
+      p.hasArtifact=false; p.artifactRevealed=false; p.artifactPatch=null;
+      p.devLevelBase=randInt(0,3);
+      p.devLevel=p.devLevelBase; p.populationBase=p.population; p.devLog=[]; p.passengerDeliveries=[];
+      if(p.type.id==='agri'){
+        const _aR=Math.random(); p.agriStructAngle=rand(0,Math.PI*2);
+        if(_aR<0.333){p.grainUnlocked=true; p.upgrades=['granary'];}
+        else if(_aR<0.667){p.livestockUnlocked=true; p.upgrades=['farm'];}
+        else{p.fruitUnlocked=true; p.upgrades=['orchard'];}
+      }
+      p.supplyRate=computeSupplyRate(p); p.demandRate=computeDemandRate(p);
+      p.economicHealth=computeEconomicHealth(p); seedCargoPlanet(p);
+      if(p.type.id!=='agri') p.upgrades=UPGRADES.filter(u=>u.preBuiltBiomes.includes(p.type.id)).map(u=>u.id);
+      p.hasStation=false;
+      star.planetIds.push(p.id);
+      planets.push(p);
+      orbitR+=pr+rand(200,800);
+    }
+  }
+  // ── Hive worlds: promote up to 4 M+ planets on DISTINCT stars (preferring
+  // the Zeta interior) to the Combine's teeming hive biome.
+  const _zetaCx=(ZETA_X0+ZETA_X1)/2;
+  const _hiveType=PTYPES.find(t=>t.id==='hive');
+  const _hiveCands=planets.filter(p=>p&&p.isZeta&&['M','L','XL','XXL'].includes(p.size))
+    .sort((a,b)=>Math.hypot(a.x-_zetaCx,a.y)-Math.hypot(b.x-_zetaCx,b.y));
+  const _hiveStars=new Set();
+  const _hivePids=[];
+  for(const p of _hiveCands){
+    if(_hivePids.length>=4) break;
+    if(_hiveStars.has(p.starId)) continue;
+    p.type=_hiveType;
+    p._b=undefined;
+    p.population=Math.round(1e9+Math.random()*2e10);
+    p.populationBase=p.population;
+    p.hasGold=false; p.goldRevealed=false; p.goldPatch=null;
+    p.hasDiamond=false; p.diamondRevealed=false; p.diamondPatch=null;
+    p.hasUranium=false; p.uraniumRevealed=false; p.uraniumPatch=null;
+    p.devLevelBase=randInt(3,5); p.devLevel=p.devLevelBase;
+    p.supplyRate=computeSupplyRate(p); p.demandRate=computeDemandRate(p);
+    p.economicHealth=computeEconomicHealth(p); seedCargoPlanet(p);
+    p.catchphrase='A trillion voices hum in the dark.';
+    _hiveStars.add(p.starId); _hivePids.push(p.id);
+  }
+  galaxy.zetaHivePids=_hivePids;
+  // The Spire — the Combine HQ: the biggest hive world.
+  if(_hivePids.length){
+    let _spire=null;
+    for(const pid of _hivePids){ const q=planets[pid]; if(!_spire||(q.radius||0)>(_spire.radius||0)) _spire=q; }
+    galaxy.zetaSpireId=_spire?_spire.id:null;
+  }
+  // ── Artifact caches: buried near hive systems (revealed by orbiting).
+  for(const p of planets){
+    if(!p||!p.isZeta||p.type.id==='hive'||p.hasArtifact) continue;
+    if(!['rocky','desert','resort','jungle','ocean','ancient','crystal','obsidian','fungal'].includes(p.type.id)) continue;
+    const _nearHive=_hivePids.some(hid=>{const h=planets[hid];return h&&Math.hypot(h.x-p.x,h.y-p.y)<30000;});
+    if(_nearHive&&Math.random()<0.15){
+      p.hasArtifact=true;
+      p.artifactPatch={angle:rand(0,Math.PI*2),arcSize:Math.PI*0.22};
+    }
+  }
+  // ── Exit portal: west-central Zeta, clear of every system.
+  {
+    let _px=ZETA_X0+20000, _py=0;
+    for(let _pa=0;_pa<400;_pa++){
+      const _tx=rand(ZETA_X0+14000,ZETA_X0+34000);
+      const _ty=rand(-WORLD_H*0.4,WORLD_H*0.4);
+      if(_zStars.every(s=>Math.hypot(s.x-_tx,s.y-_ty)>s.radius+16000)){ _px=_tx; _py=_ty; break; }
+    }
+    galaxy.zetaPortal={x:Math.round(_px), y:Math.round(_py), radius:5000};
+  }
+  _zetaGenerated=true;
+  _applyZetaWorldExtent();
+  _ensurePortalProxies();
+}
+// Ignition: flips the black hole into portal mode, births the Zeta Quadrant,
+// and stages the reveal (camera cut + FX + chat + the Threshold mission).
+function _igniteBlackHolePortal(){
+  if(_portalActive) return;
+  _portalActive=true;
+  generateZetaQuadrant();
+  _ignitionFxStartMs=Date.now();
+  const _bh=galaxy&&galaxy.blackHoles&&galaxy.blackHoles[0];
+  if(_bh){
+    sel=null; tracking=false;
+    const _zTarget=Math.exp(Math.log(MIN_SC)+0.55*(Math.log(MAX_SC)-Math.log(MIN_SC)));
+    cam.scale=Math.max(MIN_SC,Math.min(MAX_SC,_zTarget));
+    cam.x=_bh.x+(PANEL_W)/(2*cam.scale); cam.y=_bh.y; clampCamera();
+  }
+  playSound('discovery');
+  _chatMsg('THE BLACK HOLE IGNITES — AN ANCIENT PORTAL TEARS OPEN','rgba(255,120,255,1)');
+  _chatMsg('ROUTE A TRAIN INTO THE PORTAL TO CROSS INTO THE ZETA QUADRANT','rgba(180,235,255,1)');
+  _ga('portal_ignited',{sd:Math.floor(stardate)});
+  if(!_missionPending('zeta_threshold')&&!missions.some(mx=>mx.id==='zeta_threshold')){
+    pendingMissionIntros.push({defId:'zeta_threshold',readySd:stardate});
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// v0.4.7 — THE VERDANT COMBINE (alien rail corporation) + COMBAT
+// The Combine is instantiated only at the player's FIRST Zeta planet visit
+// (abstract until then — zero cost). It is deliberately NOT a second
+// _aiCorp instance: its trains run scripted freight/patrol loops among its
+// own stations, and the interesting behavior (fire-fights, raids, the
+// hostility dial) lives in updateCombat/updateCombine below.
+// ═══════════════════════════════════════════════════════════════════════
+const COMBINE_TRAIN_NAMES=['VRX THORAX','VRX MANDIBLE','VRX CARAPACE','VRX STINGER','VRX CHITIN','VRX SWARMLIGHT','VRX PHEROMONE','VRX DRONE-9','VRX WARDEN','VRX TALON'];
+function _combineAssignLoop(t, stops){
+  const fp=_gp(stops[0]); if(!fp) return;
+  const stopOrbitR=stops.map(id=>{const q=_gp(id);return q?.isStarProxy?q.starOrbitR:(ORBIT_TIERS[q?.size||'M']['LOW']??ORBIT_TIERS.M.LOW);});
+  t.orbitR=fp.isStarProxy?fp.starOrbitR:(ORBIT_TIERS[fp.size]['LOW']||t.orbitR);
+  t.orbitGap=CAR_ORB_GAP/t.orbitR;
+  stopOrbitR[0]=t.orbitR;
+  t.route={stops:stops.slice(), isLoop:true, fromIdx:0, toIdx:Math.min(1,stops.length-1), phase:'orbit',
+    orbitSpun:0, dir:1, minOrbitDone:true, stopOrbitR, _recomputeTimer:0,
+    departAngle:computeDepartAngle(fp,stops[1],t.orbitR,stopOrbitR[1]||t.orbitR)};
+  t._cargoCheckedThisStop=false;
+  _invalidateOccOrbit();
+}
+function _makeCombineTrain(name, planetId, cars){
+  const t=makeGalaxyTrain(name, planetId, 'LOW', cars, false);
+  t.isCombine=true;
+  t.color='#39e060';
+  t.carAmmo=new Array(cars.length).fill(0);
+  t.carDisabled=new Array(cars.length).fill(false);
+  // Combine weapons spawn loaded.
+  for(let i=0;i<cars.length;i++){
+    if(MILITARY_CARS.has(cars[i])){ t.carAmmo[i]=_WEAPON_STATS[cars[i]].mag; t.carFull[i]=true; t.carCargo[i]=CAR_CARGO_TYPE[cars[i]]; }
+  }
+  t._engineFailureSd=Infinity; // Combine drives don't break down
+  trains.push(t);
+  _combineTrainIdxs.push(trains.length-1);
+  return t;
+}
+function _combineStations(){
+  const out=[];
+  if(!galaxy) return out;
+  for(const p of galaxy.planets){ if(p&&p.combineStation) out.push(p); }
+  return out;
+}
+function _foundCombine(){
+  if(_combineFounded||!galaxy||!_zetaGenerated) return;
+  _combineFounded=true;
+  _combineCredits=750000;
+  // Stations: every hive world + up to 5 resource worlds near hives.
+  const _hives=(galaxy.zetaHivePids||[]).map(id=>galaxy.planets[id]).filter(Boolean);
+  const _stationify=(p)=>{
+    if(p.hasStation) { p.combineStation=p.combineStation||!p.playerBuiltStation; return; }
+    p.hasStation=true; p.combineStation=true;
+    p.stationAngle=rand(0,Math.PI*2);
+    const _big=(p.size==='L'||p.size==='XL'||p.size==='XXL');
+    p.stationSpeed=(Math.random()<0.15?-1:1)*Math.PI*2/(_big?rand(4800,14400):rand(2400,7200));
+  };
+  for(const h of _hives) _stationify(h);
+  let _resCount=0;
+  const _resStations=[];
+  for(const p of galaxy.planets){
+    if(_resCount>=5) break;
+    if(!p||!p.isZeta||p.combineStation||p.hasStation) continue;
+    if(!['crystal','obsidian','fungal','ocean','lava'].includes(p.type.id)) continue;
+    if(!_hives.some(h=>Math.hypot(h.x-p.x,h.y-p.y)<28000)) continue;
+    _stationify(p); _resStations.push(p); _resCount++;
+  }
+  const _allSt=_combineStations();
+  // Trains: one freight loop hive↔resource per pair, plus 3 armed patrols.
+  let _nameIdx=0;
+  const _nextName=()=>COMBINE_TRAIN_NAMES[(_nameIdx++)%COMBINE_TRAIN_NAMES.length];
+  for(let i=0;i<_resStations.length&&i<_hives.length;i++){
+    const _cargoCar=({crystal:'car_aetherium',obsidian:'car_titanium',fungal:'car_biomass',ocean:'car_water_tank',lava:'car_ore'})[_resStations[i].type.id]||'car_cargo';
+    const t=_makeCombineTrain(_nextName(),_resStations[i].id,
+      ['engine_galaxy',_cargoCar,_cargoCar,_cargoCar,'car_cannon','car_shield','caboose']);
+    _combineAssignLoop(t,[_resStations[i].id,_hives[i%_hives.length].id]);
+  }
+  for(let i=0;i<3&&_allSt.length>=2;i++){
+    const a=_allSt[i%_allSt.length], b=_allSt[(i+1)%_allSt.length];
+    if(a.id===b.id) continue;
+    const t=_makeCombineTrain(_nextName(),a.id,
+      ['engine_classJ','car_cannon','car_laser','car_shield','car_shield','caboose']);
+    t._isPatrol=true;
+    _combineAssignLoop(t,[a.id,b.id]);
+  }
+  // The Spire flagship exists but stays docked until the campaign finale.
+  _chatMsg('CONTACT: AN ALIEN RAIL NETWORK LIGHTS UP ACROSS THE ZETA QUADRANT','rgba(80,255,140,1)');
+  _chatMsg('THE VERDANT COMBINE HAS NOTICED YOUR ARRIVAL','rgba(80,255,140,1)');
+  playSound('notification');
+  _ga('combine_founded',{sd:Math.floor(stardate)});
+  // First Contact scripted beat + the military arc trigger live in the
+  // zeta_foothold mission completion (see updateMissions).
+}
+// Rebuild _combineTrainIdxs after load (trains carry isCombine).
+function _relinkCombineTrains(){
+  _combineTrainIdxs=[];
+  for(let i=0;i<trains.length;i++) if(trains[i]&&trains[i].isCombine) _combineTrainIdxs.push(i);
+}
+// True when a world point sits inside claimed Combine territory.
+function _inCombineTerritory(x,y){
+  if(!galaxy) return false;
+  for(const pid of (galaxy.zetaHivePids||[])){
+    const h=galaxy.planets[pid];
+    if(h&&Math.hypot(h.x-x,h.y-y)<25000) return true;
+  }
+  for(const p of _combineStations()){
+    if(Math.hypot(p.x-x,p.y-y)<15000) return true;
+  }
+  return false;
+}
+// Light per-frame Combine upkeep: keep parked trains on patrol loops, drift
+// hostility toward its resting level, tick the abstract treasury.
+let _combineUpkeepAcc=0;
+function updateCombine(dtG){
+  if(!_combineFounded) return;
+  _combineUpkeepAcc+=dtG;
+  if(_combineUpkeepAcc<120) return; // ~2 s cadence at 1×
+  _combineUpkeepAcc=0;
+  const _allSt=_combineStations();
+  for(const ti of _combineTrainIdxs){
+    const t=trains[ti];
+    if(!t||t._destroyed) continue;
+    if(!t.route&&_allSt.length>=2){
+      const a=_allSt[Math.floor(Math.random()*_allSt.length)];
+      let b=_allSt[Math.floor(Math.random()*_allSt.length)];
+      if(b.id===a.id) b=_allSt[(_allSt.indexOf(a)+1)%_allSt.length];
+      if(t.planetId!==a.id){
+        // Teleport-free re-anchor: patrol from wherever it is to a station.
+        const cur=_gp(t.planetId);
+        if(cur) _combineAssignLoop(t,[t.planetId,a.id]);
+      } else if(b.id!==a.id){
+        _combineAssignLoop(t,[a.id,b.id]);
+      }
+    }
+  }
+  // Hostility drifts slowly back toward the 25-point resting tension
+  // (war pushes it up, trade pulls it down, time forgives a little).
+  if(!_combineDefeated&&!_combineArmistice){
+    if(_combineHostility>25) _combineHostility=Math.max(25,_combineHostility-dtG*0.0004);
+  }
+  _combineCredits+=Math.round(dtG*2); // abstract hive-economy income
+}
+
+// ── Combat core ─────────────────────────────────────────────────────────
+function _trainAlive(t){ return t&&!t._destroyed; }
+function _trainHasWeapons(t){
+  if(!_trainAlive(t)||t.crippled||!t.carAmmo) return false;
+  for(let i=0;i<t.cars.length;i++){
+    if(WEAPON_CARS.has(t.cars[i])&&!t.carDisabled?.[i]&&(t.carAmmo[i]||0)>0) return true;
+  }
+  return false;
+}
+function _trainShieldCharges(t){
+  if(!t||!t.carAmmo) return 0;
+  let s=0;
+  for(let i=0;i<t.cars.length;i++) if(t.cars[i]==='car_shield'&&!t.carDisabled?.[i]) s+=(t.carAmmo[i]||0);
+  return s;
+}
+function _trainEnginePos(t){
+  const pos=getTrainCarPos(t,0);
+  return pos||[t&&_gp(t.planetId)?_gp(t.planetId).x:0, t&&_gp(t.planetId)?_gp(t.planetId).y:0];
+}
+// Apply one hit to a train. dmg = shield charges consumed / cars threatened.
+function _applyHit(targetTi, dmg, srcIsPlayer){
+  const t=trains[targetTi];
+  if(!_trainAlive(t)) return;
+  // Shields absorb first — drain charges across shield cars.
+  let _absorb=0;
+  for(let i=0;i<t.cars.length&&_absorb<dmg;i++){
+    if(t.cars[i]==='car_shield'&&!t.carDisabled?.[i]&&(t.carAmmo?.[i]||0)>0){
+      const take=Math.min(dmg-_absorb, t.carAmmo[i]);
+      t.carAmmo[i]-=take; _absorb+=take;
+      if(t.carAmmo[i]<=0){ t.carFull[i]=false; t.carCargo[i]=null; }
+    }
+  }
+  if(_absorb>0){
+    t._shieldFlashMs=Date.now();
+    const [ex,ey]=_trainEnginePos(t);
+    _combatFx.push({kind:'shield',x:ex,y:ey,life:18,max:18});
+    if(_absorb>=dmg) return;
+  }
+  // Unshielded hit: disable a random still-enabled mid car.
+  if(!t.carDisabled) t.carDisabled=new Array(t.cars.length).fill(false);
+  const _cands=[];
+  for(let i=1;i<t.cars.length;i++){
+    if(t.cars[i]==='caboose') continue;
+    if(!t.carDisabled[i]) _cands.push(i);
+  }
+  if(_cands.length){
+    const ci=_cands[Math.floor(Math.random()*_cands.length)];
+    t.carDisabled[ci]=true;
+    t.carFull[ci]=false; if(t.carCargo) t.carCargo[ci]=null;
+    if(t.carAmmo) t.carAmmo[ci]=0;
+    const pos=getTrainCarPos(t,ci)||_trainEnginePos(t);
+    _combatFx.push({kind:'hit',x:pos[0],y:pos[1],life:24,max:24});
+    if(t.isPlayer){ _chatMsg(t.name+': CAR HIT — '+(CAR_LABELS[t.cars[ci]]||'CAR')+' DISABLED','rgba(255,90,90,1)'); playSound('breakdown'); }
+    return;
+  }
+  // No cars left — the engine takes it.
+  if(t.isPlayer||t.isAlly){
+    if(!t.crippled){
+      t.crippled=true;
+      _chatMsg(t.name+': ENGINE HIT — TRAIN CRIPPLED (limping to a friendly station)','rgba(255,60,60,1)');
+      playSound('breakdown');
+    }
+  } else if(t.isCombine){
+    _destroyCombineTrain(targetTi, srcIsPlayer);
+  }
+}
+function _destroyCombineTrain(ti, byPlayer){
+  const t=trains[ti];
+  if(!_trainAlive(t)) return;
+  t._destroyed=true;
+  t.route=null; t.queuedRoute=null; t.cargoPhase=null;
+  const [ex,ey]=_trainEnginePos(t);
+  _combatFx.push({kind:'boom',x:ex,y:ey,life:40,max:40});
+  playSound('breakdown');
+  if(byPlayer){
+    const _bounty=15000+Math.floor(Math.random()*10000);
+    credits+=_bounty; pendingCreditDeltas.push({timer:30,amount:_bounty});
+    spawnCreditFloat(ex,ey,_bounty);
+    _combineKills++;
+    _combineHostility=Math.min(100,_combineHostility+8);
+    _chatMsg((t.name||'COMBINE TRAIN')+' DESTROYED — SALVAGE +'+_fmtCr(_bounty)+' cr','rgba(120,255,160,1)');
+    if(t._isFlagship&&!_combineDefeated){ _combineDefeated=true; }
+    _ga('combine_train_destroyed',{sd:Math.floor(stardate), kills:_combineKills});
+  }
+  // Deselect if the player had it selected.
+  if(sel&&sel.type==='car'&&trains[sel.data?.trainIdx]===t){ sel=null; tracking=false; }
+}
+// May this Combine train open fire on that player/ally train?
+function _combineWillAttack(target){
+  if(!_trainAlive(target)||target.crippled) return false;
+  const [tx,ty]=_trainEnginePos(target);
+  if(_regionOfX(tx)!=='zeta'&&_combineHostility<90) return false; // Combine stays in Zeta until all-out war
+  const _armed=_trainHasWeapons(target);
+  if(_combineHostility>=75) return true;
+  if(_combineHostility>=40) return _inCombineTerritory(tx,ty)||_armed;
+  return _armed&&_inCombineTerritory(tx,ty);
+}
+function updateCombat(dtG){
+  if(!_combineFounded&&_combatProjectiles.length===0) return;
+  // ── Advance cooldowns every frame ──
+  for(const t of trains){
+    if(!_trainAlive(t)||!t._carCd) continue;
+    for(let i=0;i<t._carCd.length;i++) if(t._carCd[i]>0) t._carCd[i]-=dtG;
+  }
+  // ── Projectiles (homing cannon shells) ──
+  for(let i=_combatProjectiles.length-1;i>=0;i--){
+    const pr=_combatProjectiles[i];
+    const tgt=trains[pr.targetTi];
+    if(!_trainAlive(tgt)){ _combatProjectiles.splice(i,1); continue; }
+    const [tx,ty]=_trainEnginePos(tgt);
+    const dx=tx-pr.x, dy=ty-pr.y;
+    const d=Math.hypot(dx,dy)||1;
+    const step=pr.speed*dtG;
+    if(d<=step){ _applyHit(pr.targetTi, pr.dmg, pr.srcIsPlayer); _combatProjectiles.splice(i,1); continue; }
+    pr.x+=dx/d*step; pr.y+=dy/d*step;
+    pr.life-=dtG;
+    if(pr.life<=0) _combatProjectiles.splice(i,1);
+  }
+  // ── Beam / FX lifetimes (real-frame-ish decay via dtG) ──
+  for(let i=_combatBeams.length-1;i>=0;i--){ _combatBeams[i].life-=dtG; if(_combatBeams[i].life<=0) _combatBeams.splice(i,1); }
+  for(let i=_combatFx.length-1;i>=0;i--){ _combatFx[i].life-=dtG; if(_combatFx[i].life<=0) _combatFx.splice(i,1); }
+  if(!_combineFounded) return;
+  // ── Targeting scan (throttled) ──
+  _combatScanAcc+=dtG;
+  if(_combatScanAcc<10) return;
+  _combatScanAcc=0;
+  const _playerSide=[], _combineSide=[];
+  for(let ti=0;ti<trains.length;ti++){
+    const t=trains[ti];
+    if(!_trainAlive(t)) continue;
+    if(t.isCombine) _combineSide.push(ti);
+    else if(t.isPlayer||t.isAlly) _playerSide.push(ti);
+  }
+  const _fireFrom=(ti, enemyList, isPlayerSide)=>{
+    const t=trains[ti];
+    if(!_trainHasWeapons(t)) return;
+    if(!t._carCd) t._carCd=new Array(t.cars.length).fill(0);
+    const [sx,sy]=_trainEnginePos(t);
+    // Vex Interceptor: +25% fire rate for the whole train.
+    const _cdMult=t.cars[0]==='engine_vex'?0.75:1.0;
+    for(let ci=0;ci<t.cars.length;ci++){
+      const ct=t.cars[ci];
+      if(!WEAPON_CARS.has(ct)||t.carDisabled?.[ci]) continue;
+      if((t.carAmmo?.[ci]||0)<=0) continue;
+      if((t._carCd[ci]||0)>0) continue;
+      const ws=_WEAPON_STATS[ct];
+      // Nearest living enemy in range
+      let best=-1, bestD=Infinity;
+      for(const ei of enemyList){
+        const et=trains[ei];
+        if(!_trainAlive(et)) continue;
+        if(!isPlayerSide&&!_combineWillAttack(et)) continue;
+        const [ex,ey]=_trainEnginePos(et);
+        const d=Math.hypot(ex-sx,ey-sy);
+        if(d<ws.range&&d<bestD){ best=ei; bestD=d; }
+      }
+      if(best<0) continue;
+      const cpos=getTrainCarPos(t,ci)||[sx,sy];
+      t.carAmmo[ci]--;
+      if(t.carAmmo[ci]<=0){ t.carFull[ci]=false; if(t.carCargo) t.carCargo[ci]=null; }
+      t._carCd[ci]=ws.cdFrames*_cdMult;
+      if(ws.kind==='cannon'){
+        _combatProjectiles.push({x:cpos[0],y:cpos[1],targetTi:best,dmg:ws.dmg,speed:14,life:600,srcIsPlayer:isPlayerSide});
+      } else {
+        const [ex2,ey2]=_trainEnginePos(trains[best]);
+        _combatBeams.push({x1:cpos[0],y1:cpos[1],x2:ex2,y2:ey2,life:14,max:14,player:isPlayerSide});
+        _applyHit(best, ws.dmg, isPlayerSide);
+      }
+      playSound('blip');
+    }
+  };
+  for(const ti of _playerSide) _fireFrom(ti,_combineSide,true);
+  for(const ti of _combineSide) _fireFrom(ti,_playerSide,false);
+  // ── Defense batteries (player stations) fire at Combine trains ──
+  for(const p of _getUpgradePlanets()){
+    if(!(p.upgrades||[]).includes('defense_battery')) continue;
+    if((p.defenseShells||0)<=0) continue;
+    if(p._defCd>0){ p._defCd-=10; continue; }
+    let best=-1,bestD=Infinity;
+    for(const ei of _combineSide){
+      const et=trains[ei];
+      if(!_trainAlive(et)) continue;
+      const [ex,ey]=_trainEnginePos(et);
+      const d=Math.hypot(ex-p.x,ey-p.y);
+      if(d<2500&&d<bestD){best=ei;bestD=d;}
+    }
+    if(best>=0){
+      p.defenseShells--;
+      p._defCd=200;
+      _combatProjectiles.push({x:p.x,y:p.y,targetTi:best,dmg:2,speed:14,life:600,srcIsPlayer:true});
+      playSound('blip');
+    }
+  }
+  // ── Crippled player trains limp + auto-repair at friendly stations ──
+  for(const ti of _playerSide){
+    const t=trains[ti];
+    if(!t.isPlayer) continue;
+    const _hasDisabled=t.carDisabled&&t.carDisabled.some(d=>d);
+    if(!t.crippled&&!_hasDisabled) continue;
+    const p=_gp(t.planetId);
+    const _atFriendly=p&&p.hasStation&&!p.combineStation&&(!t.route||t.route.phase!=='transit');
+    if(!_atFriendly) continue;
+    t._repairAcc=(t._repairAcc||0)+10;
+    if(t._repairAcc>=600){ // ~10 s at 1× per car
+      t._repairAcc=0;
+      let _fixed=false;
+      for(let ci=0;ci<t.cars.length;ci++){
+        if(t.carDisabled?.[ci]){
+          if(credits>=500){ credits-=500; creditDelta-=500; }
+          t.carDisabled[ci]=false;
+          _chatMsg(t.name+': '+(CAR_LABELS[t.cars[ci]]||'CAR')+' REPAIRED (-500 cr)','rgba(120,220,160,1)');
+          _fixed=true; break;
+        }
+      }
+      if(!_fixed&&t.crippled){
+        t.crippled=false;
+        _chatMsg(t.name+': ENGINE REPAIRED — BACK IN SERVICE','rgba(120,220,160,1)');
+      }
+    }
+  }
+}
+// Combat FX rendering (world space) — called from drawGalaxy after trains.
+function _drawCombatFX(){
+  if(!_combatProjectiles.length&&!_combatBeams.length&&!_combatFx.length) return;
+  ctx.save();
+  for(const pr of _combatProjectiles){
+    const [sx,sy]=w2s(pr.x,pr.y);
+    if(sx<-20||sx>W+20||sy<-20||sy>GH+20) continue;
+    const r=Math.max(1.5,3*cam.scale*40);
+    ctx.fillStyle=pr.srcIsPlayer?'rgba(255,190,90,0.95)':'rgba(120,255,140,0.95)';
+    ctx.beginPath(); ctx.arc(sx,sy,Math.min(3.5,r),0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='rgba(255,255,255,0.55)';
+    ctx.beginPath(); ctx.arc(sx,sy,Math.min(1.6,r*0.5),0,Math.PI*2); ctx.fill();
+  }
+  for(const b of _combatBeams){
+    const [x1,y1]=w2s(b.x1,b.y1), [x2,y2]=w2s(b.x2,b.y2);
+    const a=Math.max(0,b.life/b.max);
+    ctx.strokeStyle=b.player?('rgba(255,110,255,'+(0.85*a).toFixed(3)+')'):('rgba(110,255,150,'+(0.85*a).toFixed(3)+')');
+    ctx.lineWidth=2.2;
+    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+    ctx.strokeStyle='rgba(255,255,255,'+(0.45*a).toFixed(3)+')';
+    ctx.lineWidth=0.9;
+    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+  }
+  for(const fx of _combatFx){
+    const [sx,sy]=w2s(fx.x,fx.y);
+    const tt=1-fx.life/fx.max;
+    if(fx.kind==='boom'){
+      ctx.strokeStyle='rgba(255,160,60,'+(0.9*(1-tt)).toFixed(3)+')';
+      ctx.lineWidth=Math.max(1.2,3*(1-tt));
+      ctx.beginPath(); ctx.arc(sx,sy,4+tt*60*Math.max(0.4,cam.scale*20),0,Math.PI*2); ctx.stroke();
+      ctx.fillStyle='rgba(255,230,140,'+(0.55*(1-tt)).toFixed(3)+')';
+      ctx.beginPath(); ctx.arc(sx,sy,Math.max(1.5,6*(1-tt)),0,Math.PI*2); ctx.fill();
+    } else if(fx.kind==='shield'){
+      ctx.strokeStyle='rgba(90,220,255,'+(0.8*(1-tt)).toFixed(3)+')';
+      ctx.lineWidth=1.6;
+      ctx.beginPath(); ctx.arc(sx,sy,10+tt*18,0,Math.PI*2); ctx.stroke();
+    } else { // 'hit'
+      ctx.fillStyle='rgba(255,90,60,'+(0.85*(1-tt)).toFixed(3)+')';
+      ctx.beginPath(); ctx.arc(sx,sy,Math.max(1.5,5*(1-tt)),0,Math.PI*2); ctx.fill();
+    }
+  }
+  // Shield bubbles: any live train with charges shows a faint aura.
+  for(const t of trains){
+    if(!_trainAlive(t)) continue;
+    const _sc=_trainShieldCharges(t);
+    if(_sc<=0) continue;
+    const [ex,ey]=_trainEnginePos(t);
+    const [sx,sy]=w2s(ex,ey);
+    if(sx<-80||sx>W+80||sy<-80||sy>GH+80) continue;
+    const _rad=Math.max(14,(_trainTailLen(t)*0.62+40)*cam.scale);
+    const _flash=t._shieldFlashMs&&(Date.now()-t._shieldFlashMs)<260;
+    ctx.strokeStyle=_flash?'rgba(160,240,255,0.9)':'rgba(80,200,255,0.30)';
+    ctx.lineWidth=_flash?2.0:1.1;
+    ctx.beginPath(); ctx.arc(sx,sy,_rad,0,Math.PI*2); ctx.stroke();
+  }
+  ctx.restore();
+}
+
 // Pre-determined engine lifespan: every newly-installed engine fails some
 // random 8–15 stardates later. Hidden from the player; surfaced only when
 // the engine actually dies via the failure handler. Called from train
@@ -8546,7 +10592,7 @@ function makeGalaxyTrain(name, planetId, orbitTier, cars, isPlayer){
   return {name, cars, planetId, orbitTier, orbitR, orbitGap, angle:Math.random()*Math.PI*2, isPlayer, route:null,
           orbitCounts:{}, routeCounts:{}, totalDist:0, _angleAcc:0, color:pick(TRAIN_COLORS),
           maintenance:1.0, distSinceMaint:0.0, totalRevenue:0, totalCosts:0,
-          _engineFailureSd:_rollEngineFailureSd(), _engineFailed:false,
+          _engineFailureSd:_rollEngineFailureSd(), _engineBornSd:stardate, _engineFailed:false,
           carFull: new Array(cars.length).fill(false),
           carCargo: new Array(cars.length).fill(null),
           carCargoSource: new Array(cars.length).fill(null),
@@ -8683,6 +10729,7 @@ function _initAICorp(){
     // symmetric and forces both sides to explore outward for deposits.
     _p.hasGold=false; _p.goldRevealed=false; _p.goldPatch=null;
     _p.hasDiamond=false; _p.diamondRevealed=false; _p.diamondPatch=null;
+    _p.hasUranium=false; _p.uraniumRevealed=false; _p.uraniumPatch=null;
   }
   // If the host star started with fewer than 6 planets, append new ones to
   // fill the canonical sequence at outer orbits.
@@ -8750,6 +10797,9 @@ function _initAICorp(){
       _np.hasDiamond=false;
       _np.diamondRevealed=false;
       _np.diamondPatch=null;
+      _np.hasUranium=false;
+      _np.uraniumRevealed=false;
+      _np.uraniumPatch=null;
       _np.devLevelBase=(i===1)?3:randInt(0,2);
       _np.devLevel=_np.devLevelBase;
       _np.devLog=[]; _np.passengerDeliveries=[];
@@ -10446,6 +12496,8 @@ const _AI_CAR_VALS={engine_constellation:10000,engine_galaxy:20000,engine_classJ
 //   • upgradeId !== 'repair_drones' (passive — not an economic priority)
 //   • planet is AI-owned with a station, biome matches eligibleBiomes,
 //     upgrade not already built
+// v0.4.7 upgrades the rival AI never builds (player/Combine story content).
+const _AI_V47_SKIP=new Set(['gas_siphon','panel_fab','cryo_forge','orbital_shipyard','reactor_assembly','titan_mill','munitions_works','plasma_refinery','bioforge','xenoforge','armory','defense_battery']);
 function _aiPickUpgradeTarget(){
   if(!_aiCorp||!galaxy) return null;
   let _fEngine='engine_constellation';
@@ -10459,6 +12511,10 @@ function _aiPickUpgradeTarget(){
   for(const upDef of UPGRADES){
     if(!upDef||upDef.cost<=0) continue;
     if(upDef.id==='repair_drones') continue;
+    // v0.4.7: the rival AI corp stays out of the Helios/Zeta/military
+    // chains entirely — those are the player's (and the Combine's) story
+    // content, and the AI's input/output tables don't model them.
+    if(_AI_V47_SKIP.has(upDef.id)) continue;
     if(_aiCorp.credits<upDef.cost) continue;
     const _inputs=_AI_UPGRADE_INPUTS[upDef.id]||[];
     const _outputCargo=_AI_UPGRADE_OUTPUTS[upDef.id]||null;
@@ -11622,6 +13678,57 @@ function _drawGoldPatch(cx,cy,r,patch,glowR=0){
   ctx.restore();
 }
 
+// v0.4.7: uranium vein — pulsing radioactive-green wedge. Far simpler than
+// the gold/diamond fans; the pulse alone reads as "hazardous deposit".
+function _drawUraniumPatch(cx,cy,r,patch,glowR=0){
+  if(!patch||r<2) return;
+  const a0=patch.angle, arc=patch.arcSize??Math.PI*0.22;
+  const _pulse=0.65+0.35*Math.sin((typeof _drawTs==='number'?_drawTs:0)*0.004);
+  ctx.save();
+  ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.clip();
+  const inner=r*0.55, outer=r*0.98;
+  const _gr=ctx.createRadialGradient(cx,cy,inner,cx,cy,outer);
+  _gr.addColorStop(0,'rgba(170,255,0,0)');
+  _gr.addColorStop(0.35,'rgba(150,240,20,'+(0.55*_pulse)+')');
+  _gr.addColorStop(1,'rgba(80,160,0,'+(0.65*_pulse)+')');
+  ctx.beginPath(); ctx.moveTo(cx,cy); ctx.arc(cx,cy,outer,a0,a0+arc); ctx.closePath();
+  ctx.fillStyle=_gr; ctx.fill();
+  // Hot glint specks
+  const _uc=Math.max(2,Math.round(r*0.14));
+  for(let _ui=0;_ui<_uc;_ui++){
+    const _ua=a0+arc*(_ui+0.5)/_uc;
+    const _ur=inner+((_ui*37)%100)/100*(outer-inner)*0.8;
+    ctx.fillStyle='rgba(220,255,120,'+(0.8*_pulse)+')';
+    ctx.beginPath(); ctx.arc(cx+Math.cos(_ua)*_ur, cy+Math.sin(_ua)*_ur, Math.max(0.6,r*0.03), 0, Math.PI*2); ctx.fill();
+  }
+  ctx.restore();
+}
+// v0.4.7 Zeta: alien artifact cache — teal-green geometric ruin-glyph wedge.
+function _drawArtifactPatch(cx,cy,r,patch,glowR=0){
+  if(!patch||r<2) return;
+  const a0=patch.angle, arc=patch.arcSize??Math.PI*0.22;
+  ctx.save();
+  ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.clip();
+  const inner=r*0.55, outer=r*0.98;
+  const _gr=ctx.createRadialGradient(cx,cy,inner,cx,cy,outer);
+  _gr.addColorStop(0,'rgba(64,255,144,0)');
+  _gr.addColorStop(0.35,'rgba(64,255,144,0.42)');
+  _gr.addColorStop(1,'rgba(20,140,90,0.60)');
+  ctx.beginPath(); ctx.moveTo(cx,cy); ctx.arc(cx,cy,outer,a0,a0+arc); ctx.closePath();
+  ctx.fillStyle=_gr; ctx.fill();
+  // Rectilinear "buried structure" bars
+  ctx.strokeStyle='rgba(160,255,200,0.65)'; ctx.lineWidth=Math.max(0.6,r*0.03);
+  const _bc=Math.max(2,Math.round(r*0.10));
+  for(let _bi=0;_bi<_bc;_bi++){
+    const _ba=a0+arc*(_bi+0.5)/_bc;
+    const _r0=inner+0.15*(outer-inner), _r1=inner+(0.45+0.35*(_bi%2))*(outer-inner);
+    ctx.beginPath();
+    ctx.moveTo(cx+Math.cos(_ba)*_r0, cy+Math.sin(_ba)*_r0);
+    ctx.lineTo(cx+Math.cos(_ba)*_r1, cy+Math.sin(_ba)*_r1);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
 function _drawDiamondPatch(cx,cy,r,patch,glowR=0){
   if(!patch||r<2) return;
   const a0=patch.angle, arc=patch.arcSize??Math.PI*0.22;
@@ -11897,6 +14004,80 @@ function drawPlanet(cx,cy,r,pt,ring,glowMult=4.5,starSx,starSy,skipRing=false,fl
       }
     }
   }
+  // Lava planet: 1–6 volcanoes — wide cones extruding from the rim toward orbit
+  // (like the mountains above, but with much broader bases), each with a glowing
+  // lava summit, a wispy rising smoke plume, and occasional lava streaks down the
+  // slopes. Drawn AFTER the sphere clip restore so they poke OUT past the disc.
+  if(pt._b&&pt._b.id==='lava'&&r>5){
+    const _vn=Date.now();
+    for(const v of (pt._b.volcanoes||[])){
+      const _pulse=0.78+0.22*Math.sin(_vn*0.0019+v.phase);
+      const wB=v.wHalf, wT=v.wHalf*0.38;     // base / crater half-widths (cone tapers up)
+      const baseR=r, topR=r+v.h*r;
+      // Point on the cone at radial fraction rf (0=surface,1=summit) + lateral lf (−1..1).
+      const vp=(rf,lf)=>{
+        const rad=baseR+rf*(topR-baseR);
+        const w=wB+rf*(wT-wB);
+        const ang=v.a+lf*w;
+        return [cx+rad*Math.cos(ang), cy+rad*Math.sin(ang)];
+      };
+      const [bcx,bcy]=vp(0,0), [tcx,tcy]=vp(1,0);
+      const [b0x,b0y]=vp(0,-1), [b1x,b1y]=vp(0,1), [t1x,t1y]=vp(1,1), [t0x,t0y]=vp(1,-1);
+      // ── Cone body (dark warm basalt) ──
+      ctx.beginPath(); ctx.moveTo(b0x,b0y); ctx.lineTo(b1x,b1y); ctx.lineTo(t1x,t1y); ctx.lineTo(t0x,t0y); ctx.closePath();
+      const bodyG=ctx.createLinearGradient(bcx,bcy,tcx,tcy);
+      bodyG.addColorStop(0,'rgb(30,18,15)');
+      bodyG.addColorStop(0.62,'rgb(20,10,8)');
+      bodyG.addColorStop(1,'rgb(46,20,12)');
+      ctx.fillStyle=bodyG; ctx.fill();
+      // ── Lava streaks down the slopes ──
+      ctx.save(); ctx.lineCap='round';
+      ctx.shadowColor='rgba(255,90,0,0.7)'; ctx.shadowBlur=Math.max(1.5,r*0.05);
+      for(const s of v.streaks){
+        const [s0x,s0y]=vp(0.92, s.u*0.42);
+        const [s1x,s1y]=vp(Math.max(0,1-s.len), s.u);
+        const _sp=0.55+0.45*Math.sin(_vn*0.0022+s.phase);
+        ctx.beginPath(); ctx.moveTo(s0x,s0y); ctx.lineTo(s1x,s1y);
+        ctx.lineWidth=Math.max(0.8, s.w*wB*r*1.3);
+        ctx.strokeStyle=`rgba(255,${(110+70*_sp)|0},25,${(0.5+0.4*_sp).toFixed(3)})`;
+        ctx.stroke();
+      }
+      ctx.restore();
+      // ── Glowing lava summit cap (upper ~26% of the cone) ──
+      const [c0x,c0y]=vp(0.74,-1), [c1x,c1y]=vp(0.74,1);
+      ctx.beginPath(); ctx.moveTo(c0x,c0y); ctx.lineTo(c1x,c1y); ctx.lineTo(t1x,t1y); ctx.lineTo(t0x,t0y); ctx.closePath();
+      const [capBx,capBy]=vp(0.74,0);
+      const capG=ctx.createLinearGradient(capBx,capBy,tcx,tcy);
+      capG.addColorStop(0,`rgba(190,52,8,${(0.5*_pulse).toFixed(3)})`);
+      capG.addColorStop(1,`rgba(255,205,105,${(0.95*_pulse).toFixed(3)})`);
+      ctx.fillStyle=capG; ctx.fill();
+      // ── Crater bloom at the summit ──
+      const craterHalf=Math.max(1,Math.hypot(t1x-t0x,t1y-t0y)/2);
+      const glowG=ctx.createRadialGradient(tcx,tcy,0,tcx,tcy,craterHalf*1.5);
+      glowG.addColorStop(0,`rgba(255,245,200,${(0.9*_pulse).toFixed(3)})`);
+      glowG.addColorStop(0.45,`rgba(255,150,45,${(0.6*_pulse).toFixed(3)})`);
+      glowG.addColorStop(1,'rgba(255,70,0,0)');
+      ctx.beginPath(); ctx.arc(tcx,tcy,craterHalf*1.5,0,Math.PI*2); ctx.fillStyle=glowG; ctx.fill();
+      // ── Smoke plume: wispy puffs rising radially + drifting laterally ──
+      const _rdx=Math.cos(v.a), _rdy=Math.sin(v.a);     // radial (outward)
+      const _tgx=-Math.sin(v.a), _tgy=Math.cos(v.a);    // tangent (lateral)
+      const plumeLen=v.h*r*2.6;
+      for(const pf of v.puffs){
+        const rf=(pf.t + _vn*0.000085) % 1;             // 0 at crater → 1 at plume top
+        const rise=rf*plumeLen;
+        const drift=(pf.drift*(0.4+rf*2.0))*craterHalf + Math.sin(_vn*0.0012+pf.phase)*craterHalf*0.4;
+        const px2=tcx+_rdx*rise+_tgx*drift, py2=tcy+_rdy*rise+_tgy*drift;
+        const sz=craterHalf*(0.9+pf.sz*1.6+rf*3.4);
+        const _a=Math.sin(rf*Math.PI)*0.26*pf.sz;
+        if(_a<=0.01) continue;
+        const puffG=ctx.createRadialGradient(px2,py2,0,px2,py2,sz);
+        puffG.addColorStop(0,`rgba(120,110,108,${_a.toFixed(3)})`);
+        puffG.addColorStop(0.5,`rgba(92,84,82,${(_a*0.6).toFixed(3)})`);
+        puffG.addColorStop(1,'rgba(70,64,62,0)');
+        ctx.beginPath(); ctx.arc(px2,py2,sz,0,Math.PI*2); ctx.fillStyle=puffG; ctx.fill();
+      }
+    }
+  }
   // Flowers on planet surface (only if planet has flowers, and large enough to see)
   // Pre-rendered to an OffscreenCanvas on first use to avoid re-drawing hundreds of
   // flower shapes every frame (300 flowers × 6 canvas ops = 1800 ops/frame otherwise).
@@ -12026,7 +14207,28 @@ function drawStar(cx,cy,r,color,hasDyson){
   // front-facing panels appear over the star. Star light still shines through
   // the gaps between panels because each hex is a separate fill that leaves
   // the star pixels visible in between.
-  if(hasDyson) drawDysonSphere(cx,cy,pr);
+  // v0.4.7: `hasDyson` may also be a NUMBER 0..1 — the construction progress
+  // of a Project Helios site sphere. Partial progress renders a growing
+  // polar cap of panels plus scaffold rings (see drawDysonSphere).
+  if(hasDyson) drawDysonSphere(cx,cy,pr, hasDyson===true?1:Math.max(0.02,Math.min(1,hasDyson)));
+}
+// Resolve the dyson argument for a star: full sphere when constructed,
+// construction progress (0..1) when it's an unfinished Helios site.
+function _starDysonArg(s){
+  if(!s) return false;
+  if(s.hasDysonSphere) return true;
+  if(s._heliosDepotPid!=null&&galaxy){
+    const _dp=galaxy.planets[s._heliosDepotPid];
+    if(_dp&&_dp.dysonNeeds){
+      let _tot=0,_del=0;
+      for(const k in _dp.dysonNeeds){
+        _tot+=_dp.dysonNeeds[k];
+        _del+=Math.min(_dp.dysonNeeds[k], _dp.dysonDelivered?.[k]||0);
+      }
+      if(_tot>0) return Math.max(0.02, Math.min(1, _del/_tot));
+    }
+  }
+  return false;
 }
 
 // ── Dyson sphere overlay ─────────────────────────────────────
@@ -12043,8 +14245,9 @@ function drawStar(cx,cy,r,color,hasDyson){
 // "reflective" look you see in the reference image.
 const _DYSON_PANEL_COUNT = 220;
 const _DYSON_PHI = Math.PI * (3 - Math.sqrt(5)); // golden angle
-function drawDysonSphere(cx, cy, r){
+function drawDysonSphere(cx, cy, r, progress){
   if(r < 4) return; // below this the hexagons are sub-pixel; skip
+  if(progress===undefined) progress=1;
   // Panel shell is offset just inside the train's LOW orbit
   // (`_starOrbitR = star.radius × 1.40`) by 1.5 train-heights, so the
   // train's inner edge clears the sphere's outer edge by exactly one
@@ -12067,8 +14270,13 @@ function drawDysonSphere(cx, cy, r){
   const _cR = Math.cos(_rot), _sR = Math.sin(_rot);
   // Build panel list with rotation applied. Reused arrays would avoid GC
   // but with 220 entries this is sub-ms per star.
+  // Construction progress: only the first progress×220 panels exist. The
+  // index maps to latitude top→bottom, so a partial shell reads as a polar
+  // cap growing downward around the star — a genuine "under construction"
+  // look. Scaffold rings (below) telegraph the final extent.
+  const _panelCnt = Math.max(0, Math.min(_DYSON_PANEL_COUNT, Math.round(_DYSON_PANEL_COUNT*progress)));
   const panels = [];
-  for(let i = 0; i < _DYSON_PANEL_COUNT; i++){
+  for(let i = 0; i < _panelCnt; i++){
     const y0 = 1 - (i / (_DYSON_PANEL_COUNT - 1)) * 2;
     const rd = Math.sqrt(Math.max(0, 1 - y0*y0));
     const theta = _DYSON_PHI * i;
@@ -12079,6 +14287,19 @@ function drawDysonSphere(cx, cy, r){
     const nrx = px*_cR + pz*_sR;
     const nrz = -px*_sR + pz*_cR;
     panels.push({nx: nrx, ny: py, nz: nrz});
+  }
+  // Scaffold rings while under construction: three dashed lattice ellipses
+  // marking the final shell extent, plus a faint equatorial ring.
+  if(progress < 1){
+    ctx.save();
+    ctx.strokeStyle='rgba(150,200,255,0.35)';
+    ctx.lineWidth=Math.max(0.6, sphereR*0.012);
+    ctx.setLineDash([Math.max(2,sphereR*0.06), Math.max(2,sphereR*0.05)]);
+    ctx.beginPath(); ctx.ellipse(cx, cy, sphereR, sphereR*0.32, 0, 0, Math.PI*2); ctx.stroke();
+    ctx.beginPath(); ctx.ellipse(cx, cy, sphereR*0.32, sphereR, 0, 0, Math.PI*2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, cy, sphereR, 0, Math.PI*2); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
   }
   // Painter sort: smallest z first → drawn first → ends up behind larger-z
   panels.sort((a,b) => a.nz - b.nz);
@@ -12680,6 +14901,19 @@ function drawAncientRuins(sx,sy,sr){
 }
 
 // ── foundry building draw ─────────────────────────────────────
+// v0.4.7: first-built new-refinery structure for a planet. Reuses the
+// existing drawFoundryBuilding visual styles (kind) so every new industry
+// gets a surface structure without bespoke art.
+const _V47_STRUCT_KIND={gas_siphon:'factory',panel_fab:'glassworks',cryo_forge:'glassworks',orbital_shipyard:'factory',reactor_assembly:'blast_furnace',titan_mill:'blast_furnace',munitions_works:'factory',plasma_refinery:'glassworks',bioforge:'juicery',xenoforge:'factory',armory:'factory'};
+function _v47FirstStruct(p){
+  const _u=p.upgrades;
+  if(!_u||!_u.length) return null;
+  for(const uid of _u){
+    const kind=_V47_STRUCT_KIND[uid];
+    if(kind) return {uid, kind, active:(p.upgradeData?.[uid]?.progress||0)>0};
+  }
+  return null;
+}
 function drawFoundryBuilding(sx,sy,sr,angle,ssz,smelting=false,kind=''){
   const rx=sx+Math.cos(angle)*sr, ry=sy+Math.sin(angle)*sr;
   ctx.save();
@@ -12853,19 +15087,26 @@ function drawOrchardBuilding(sx,sy,sr,angle,ssz){
   ctx.restore();
 }
 // ── station draw ─────────────────────────────────────────────
-function drawPlanetStation(sx,sy,sr,angle,ssz,isAlienRelic=false,isLarge=false,largeMedR=null,isTerminal=false,largeHighR=null,largeLowR=null){
+function drawPlanetStation(sx,sy,sr,angle,ssz,isAlienRelic=false,isLarge=false,largeMedR=null,isTerminal=false,largeHighR=null,largeLowR=null,aiTint=false){
   // Terminal supersedes Large Station: when isTerminal is true, the Large-Station
   // path is suppressed and the Terminal path takes over (dock ring at HIGH orbit,
   // five towers reaching LOW / MED / HIGH respectively).
   if(isTerminal) isLarge=false;
   // sr  = actual planet screen radius — controls WHERE the ring sits and where buildings are rooted
   // ssz = fixed visual size (always M-planet equivalent) — controls HOW BIG everything looks
-  const _tieCol  =isAlienRelic?'#1a3520':'#2a3a55';
-  const _railCol =isAlienRelic?'#2a7a38':'#4a6a9a';
-  const _railHi  =isAlienRelic?'#60b865':'#8ab0d0';
-  const _bldgFill=isAlienRelic?'rgba(75,210,105,0.88)':'rgba(160,220,255,0.88)';
-  const _bldgStr =isAlienRelic?'rgba(35,175,75,0.55)':'rgba(70,160,255,0.55)';
-  const _winCol  =isAlienRelic?'rgba(155,255,135,0.85)':'rgba(255,255,180,0.85)';
+  // aiTint swaps the palette to the rival corp's orange. This used to be done
+  // at the call site with ctx.filter='sepia(1) hue-rotate(...)', but a canvas
+  // filter forces an offscreen compositing pass around every AI-station draw,
+  // every frame — direct fill colors cost nothing extra.
+  const _tieCol  =isAlienRelic?'#1a3520':aiTint?'#55402a':'#2a3a55';
+  const _railCol =isAlienRelic?'#2a7a38':aiTint?'#a06a30':'#4a6a9a';
+  const _railHi  =isAlienRelic?'#60b865':aiTint?'#dca868':'#8ab0d0';
+  const _bldgFill=isAlienRelic?'rgba(75,210,105,0.88)':aiTint?'rgba(255,200,130,0.88)':'rgba(160,220,255,0.88)';
+  const _bldgStr =isAlienRelic?'rgba(35,175,75,0.55)':aiTint?'rgba(255,150,50,0.55)':'rgba(70,160,255,0.55)';
+  const _winCol  =isAlienRelic?'rgba(155,255,135,0.85)':aiTint?'rgba(255,235,170,0.85)':'rgba(255,255,180,0.85)';
+  const _dockTie =aiTint?'rgba(255,175,80,0.30)':'rgba(80,180,255,0.30)';
+  const _dockRing=aiTint?'rgba(240,145,55,0.40)':'rgba(60,140,240,0.40)';
+  const _dockHi  =aiTint?'rgba(255,215,150,0.22)':'rgba(140,220,255,0.22)';
   ctx.save();
   // spread: scale angular offsets so arc-length between buildings matches M-planet reference
   const spread=ssz/Math.max(sr,0.1);
@@ -12901,12 +15142,12 @@ function drawPlanetStation(sx,sy,sr,angle,ssz,isAlienRelic=false,isLarge=false,l
     if(_dockR&&_dockR>sr+2){
       const _or1=_dockR*0.97, _or2=_or1+Math.max(1.0,ssz*0.04);
       const nT2=Math.max(4,Math.min(64,Math.round(sr*0.45)));
-      ctx.strokeStyle='rgba(80,180,255,0.30)'; ctx.lineWidth=Math.max(0.4,ssz*0.02);
+      ctx.strokeStyle=_dockTie; ctx.lineWidth=Math.max(0.4,ssz*0.02);
       for(let i=0;i<nT2;i++){const a=(i/nT2)*Math.PI*2+angle,ca=Math.cos(a),sa=Math.sin(a);ctx.beginPath();ctx.moveTo(sx+(_or1-0.5)*ca,sy+(_or1-0.5)*sa);ctx.lineTo(sx+(_or2+0.5)*ca,sy+(_or2+0.5)*sa);ctx.stroke();}
-      ctx.strokeStyle='rgba(60,140,240,0.40)'; ctx.lineWidth=Math.max(0.5,ssz*0.018);
+      ctx.strokeStyle=_dockRing; ctx.lineWidth=Math.max(0.5,ssz*0.018);
       ctx.beginPath(); ctx.arc(sx,sy,_or1,0,Math.PI*2); ctx.stroke();
       ctx.beginPath(); ctx.arc(sx,sy,_or2,0,Math.PI*2); ctx.stroke();
-      ctx.strokeStyle='rgba(140,220,255,0.22)'; ctx.lineWidth=Math.max(0.2,ssz*0.008);
+      ctx.strokeStyle=_dockHi; ctx.lineWidth=Math.max(0.2,ssz*0.008);
       ctx.beginPath(); ctx.arc(sx,sy,_or1,0,Math.PI*2); ctx.stroke();
     }
     let buildings;
@@ -13253,23 +15494,38 @@ function drawTrainsPanel(){
   if(!galaxy) return;
   const px=W-PANEL_W;
   const showTrains=panelTab==='trains';
+  _stationsAssignBtnBounds=null; // re-set below only when the Stations route-assign button is shown
 
+  // The panel now extends the FULL height of the screen (TOP_H → H), covering
+  // the area the bottom info bar used to occupy on the right. _pBot is the
+  // panel's bottom edge.
+  const _pBot=H;
   // Background + left border. Wipe the HD text overlay over the panel
   // region so any earlier-drawn world text (planet labels, etc.) doesn't
   // appear ON TOP of the panel chrome.
-  _clearTextOverlayRect(px, TOP_H, PANEL_W, GH-TOP_H);
+  _clearTextOverlayRect(px, TOP_H, PANEL_W, _pBot-TOP_H);
   // Fully opaque so the galaxy-content clip can safely exclude this entire
   // strip — see drawGalaxy's `ctx.rect(0,TOP_H,W-PANEL_W,GH-TOP_H)` clip.
-  ctx.fillStyle='rgb(4,8,20)'; ctx.fillRect(px,TOP_H,PANEL_W,GH-TOP_H);
+  ctx.fillStyle='rgb(4,8,20)'; ctx.fillRect(px,TOP_H,PANEL_W,_pBot-TOP_H);
+  // Navigating away from the Stations tab cancels the route-stop-picking modes
+  // (the yellow box belongs to the Stations panel). Exception: while
+  // assignPending the +NEW ROUTE flow has legitimately moved to the Trains tab
+  // to pick a train, so don't cancel there.
+  const _routePickMode=(_assignRouteTrainIdx!=null||_newRouteMode);
+  if(_routePickMode && showTrains && !assignPending){ _assignRouteTrainIdx=null; _newRouteMode=false; }
   if(showTrains&&(assignPending||routeHerePending)){
     ctx.strokeStyle='rgba(120,200,255,0.85)'; ctx.lineWidth=2;
-    ctx.strokeRect(px+1,TOP_H+1,PANEL_W-2,GH-TOP_H-2);
+    ctx.strokeRect(px+1,TOP_H+1,PANEL_W-2,_pBot-TOP_H-2);
+  } else if(!showTrains && _routePickMode){
+    // Yellow highlight box around the Stations panel while picking route stops.
+    ctx.strokeStyle='rgba(255,210,70,0.9)'; ctx.lineWidth=2;
+    ctx.strokeRect(px+1,TOP_H+1,PANEL_W-2,_pBot-TOP_H-2);
   } else {
     ctx.strokeStyle='rgba(50,100,200,0.40)'; ctx.lineWidth=1;
-    ctx.beginPath(); ctx.moveTo(px,TOP_H); ctx.lineTo(px,GH); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(px,TOP_H); ctx.lineTo(px,_pBot); ctx.stroke();
   }
 
-  const panelViewH=GH-TOP_H;
+  const panelViewH=_pBot-TOP_H;
 
   // ── TRAINS tab ──────────────────────────────────────────────
   if(showTrains){
@@ -13287,7 +15543,7 @@ function drawTrainsPanel(){
       const {t:train,i:ti}=playerTrains[ri];
       const ry=TOP_H+ri*ROW_H-panelScroll;
       // Off-panel cull — row not visible in viewport, skip entirely.
-      if(ry+ROW_H<TOP_H||ry>=GH) continue;
+      if(ry+ROW_H<TOP_H||ry>=_pBot) continue;
       const isSelected=sel&&sel.type==='car'&&sel.data.trainIdx===ti;
       // Cache hit/miss check — keyed by every visual-relevant field on the
       // train. ~85% of rows hit per frame (only progress-bar trains miss
@@ -13354,7 +15610,7 @@ function drawTrainsPanel(){
       const _addRy=TOP_H+_addRi*ROW_H-panelScroll;
       // Only register bounds (and draw the highlight) when the slot is at least
       // partially visible inside the panel viewport.
-      if(_addRy+ROW_H>TOP_H && _addRy<GH){
+      if(_addRy+ROW_H>TOP_H && _addRy<_pBot){
         if(_addTrainPanelHover){
           ctx.fillStyle='rgba(80,140,255,0.10)';
           ctx.fillRect(px+2,_addRy-1,PANEL_W-4,ROW_H-2);
@@ -13430,7 +15686,9 @@ function drawTrainsPanel(){
       else if(p.type.id==='ancient') drawAncientRuins(vizCX,rowMidY,VIZ_R);
       if(p.hasGold&&p.goldRevealed) _drawGoldPatch(vizCX,rowMidY,VIZ_R,p.goldPatch);
       if(p.hasDiamond&&p.diamondRevealed) _drawDiamondPatch(vizCX,rowMidY,VIZ_R,p.diamondPatch);
-      drawPlanetStation(vizCX,rowMidY,VIZ_R,0,VIZ_R,p.isAlienRelic,p.hasLargeStation||false,null,p.hasTerminal||false);
+      if(p.hasUranium&&p.uraniumRevealed) _drawUraniumPatch(vizCX,rowMidY,VIZ_R,p.uraniumPatch);
+      if(p.hasArtifact&&p.artifactRevealed) _drawArtifactPatch(vizCX,rowMidY,VIZ_R,p.artifactPatch);
+      drawPlanetStation(vizCX,rowMidY,VIZ_R,0,VIZ_R,p.isAlienRelic||p.combineStation,p.hasLargeStation||false,null,p.hasTerminal||false);
       // Surface structures (foundry + agri buildings) — drawn just above and
       // below the station so the right-panel viz reflects every upgrade built
       // on the planet (matching what's shown in the main galaxy view and the
@@ -13448,6 +15706,8 @@ function drawTrainsPanel(){
         if(_ups.includes('factory')) _structDraws.push((a)=>drawFoundryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R,(p.upgradeData?.factory?.progress||0)>0,'factory'));
         if(_ups.includes('bakery')) _structDraws.push((a)=>drawFoundryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R,(p.upgradeData?.bakery?.progress||0)>0,'bakery'));
         if(_ups.includes('juicery')) _structDraws.push((a)=>drawFoundryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R,(p.upgradeData?.juicery?.progress||0)>0,'juicery'));
+        { const _v47s=_v47FirstStruct(p);
+          if(_v47s) _structDraws.push((a)=>drawFoundryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R,_v47s.active,_v47s.kind)); }
         if(_ups.includes('granary'))      _structDraws.push((a)=>drawGranaryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R));
         if(_ups.includes('farm'))         _structDraws.push((a)=>drawFarmBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R));
         if(_ups.includes('orchard'))      _structDraws.push((a)=>drawOrchardBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R));
@@ -13484,8 +15744,13 @@ function drawTrainsPanel(){
       // text row was merged into the first. This leaves more breathing room below
       // the 4th supply/demand item before the row divider.
       {
+        // EXPANDED: panel is 2× wide, so each of SUPPLY and DEMAND fans out into
+        // TWO sub-columns showing the top 8 (4 rows × 2). NORMAL: single column,
+        // top 4 each — unchanged.
+        const _exp=_panelExpanded;
         const colW2=Math.floor((W-8-vizTextX)/2);
         const supX=vizTextX, demX=vizTextX+colW2+2;
+        const _subW=Math.floor(colW2/2); // sub-column width when expanded
         const hdrY=ry+30, rowY0=ry+40, rowStep=8;
         // Headers
         ctx.font='bold 7px Orbitron,sans-serif'; ctx.textAlign='left';
@@ -13493,22 +15758,18 @@ function drawTrainsPanel(){
         ctx.fillStyle='rgba(255,170,60,0.70)';  ctx.fillText('DEMAND',demX,hdrY);
         // Helper: format amount — floor to nearest whole unit (3.7 → 3).
         function _fmtAmt(v){ return Math.floor(v).toString(); }
-        // Supply entries (sorted descending)
-        const supEntries=_planetTop4(p,'supply');
-        ctx.font='7px "Exo 2",sans-serif'; ctx.fillStyle='rgba(80,200,255,0.85)';
-        for(let ei=0;ei<supEntries.length;ei++){
-          const [ct,v]=supEntries[ei];
-          ctx.fillText((CARGO_SHORT[ct]||ct.slice(0,5).toUpperCase())+' x'+_fmtAmt(v), supX, rowY0+ei*rowStep);
-        }
-        if(!supEntries.length){ ctx.fillStyle='rgba(80,150,200,0.35)'; ctx.fillText('none',supX,rowY0); }
-        // Demand entries (sorted descending)
-        const demEntries=_planetTop4(p,'demand');
-        ctx.font='7px "Exo 2",sans-serif'; ctx.fillStyle='rgba(255,170,60,0.85)';
-        for(let ei=0;ei<demEntries.length;ei++){
-          const [ct,v]=demEntries[ei];
-          ctx.fillText((CARGO_SHORT[ct]||ct.slice(0,5).toUpperCase())+' x'+_fmtAmt(v), demX, rowY0+ei*rowStep);
-        }
-        if(!demEntries.length){ ctx.fillStyle='rgba(200,130,40,0.35)'; ctx.fillText('none',demX,rowY0); }
+        const _drawCol=(entries,baseX,col,emptyCol)=>{
+          ctx.font='7px "Exo 2",sans-serif'; ctx.fillStyle=col;
+          for(let ei=0;ei<entries.length;ei++){
+            const [ct,v]=entries[ei];
+            const _ex=baseX+(_exp&&ei>=4?_subW:0);
+            const _ey=rowY0+(_exp?(ei%4):ei)*rowStep;
+            ctx.fillText((CARGO_SHORT[ct]||ct.slice(0,5).toUpperCase())+' x'+_fmtAmt(v), _ex, _ey);
+          }
+          if(!entries.length){ ctx.fillStyle=emptyCol; ctx.fillText('none',baseX,rowY0); }
+        };
+        _drawCol(_exp?_planetTopN(p,'supply',8):_planetTop4(p,'supply'),supX,'rgba(80,200,255,0.85)','rgba(80,150,200,0.35)');
+        _drawCol(_exp?_planetTopN(p,'demand',8):_planetTop4(p,'demand'),demX,'rgba(255,170,60,0.85)','rgba(200,130,40,0.35)');
       }
       // Row divider
       if(ri<stationPlanets.length-1){
@@ -13524,6 +15785,29 @@ function drawTrainsPanel(){
       ctx.fillStyle='rgba(60,100,200,0.35)'; ctx.fillRect(sbX,TOP_H,sbW,panelViewH);
       ctx.fillStyle='rgba(100,160,255,0.65)'; ctx.fillRect(sbX,sbY,sbW,sbH);
       _regScrollbar({x:sbX,y:TOP_H,w:sbW,h:panelViewH,thumbY:sbY,thumbH:sbH,maxScroll:panelMaxScroll,setScroll:(v)=>{stationPanelScroll=v;}});
+    }
+    // ── ASSIGN TO TRAIN button — overlays the BOTTOM of the Stations panel
+    // (in line with the bottom info bar, GH→H) while a multi-stop route is being
+    // built FROM this panel. Opaque highlight-blue; clicking it flips to the
+    // Trains panel + SELECT-A-TRAIN state.
+    _stationsAssignBtnBounds=null;
+    if(_routeAutoAssign() && !assignPending && trains.some(t=>t.isPlayer)){
+      // Wipe the HD overlay (station-row text) in the band, then opaque backing.
+      _clearTextOverlayRect(px, GH, PANEL_W, H-GH);
+      ctx.fillStyle='rgb(4,8,20)'; ctx.fillRect(px, GH, PANEL_W, H-GH);
+      ctx.strokeStyle='rgba(120,200,255,0.55)'; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.moveTo(px,GH+0.5); ctx.lineTo(px+PANEL_W,GH+0.5); ctx.stroke();
+      const _ah=_stationsAssignBtnHover;
+      const _abx=px+6, _aby=GH+6, _abw=PANEL_W-12, _abh=(H-GH)-12;
+      ctx.fillStyle=_ah?'rgb(70,150,250)':'rgb(45,110,220)';
+      ctx.beginPath(); ctx.roundRect(_abx,_aby,_abw,_abh,5); ctx.fill();
+      ctx.strokeStyle=_ah?'rgba(180,225,255,1)':'rgba(120,190,255,0.9)'; ctx.lineWidth=1.5;
+      ctx.beginPath(); ctx.roundRect(_abx,_aby,_abw,_abh,5); ctx.stroke();
+      ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillStyle='#fff';
+      ctx.fillText('ASSIGN TO TRAIN', px+PANEL_W/2, _aby+_abh/2+0.5);
+      ctx.textBaseline='alphabetic';
+      _stationsAssignBtnBounds={x:_abx,y:_aby,w:_abw,h:_abh};
     }
   }
 }
@@ -13774,7 +16058,8 @@ function _getUpgradePlanets(){
     const u=p.upgrades;
     if(u && u.length>0 &&
        (u.includes('iron_foundry')||u.includes('blast_furnace')||u.includes('glassworks')
-        ||u.includes('factory')||u.includes('bakery')||u.includes('juicery'))){
+        ||u.includes('factory')||u.includes('bakery')||u.includes('juicery')
+        ||u.includes('armory')||V47_RECIPES.some(_rc=>u.includes(_rc.id)))){
       out.push(p);
     }
   }
@@ -13786,6 +16071,15 @@ function updateFoundries(dtG){
   // late-game scale where 99% of planets have none, this drops the per-frame
   // foundry loop from ~1,117 iterations to ~37.
   for(const p of _getUpgradePlanets()){
+    // A car-type unlock (iron / hazmat / steel / glass / machinery) may ONLY be
+    // triggered by production from an upgrade the PLAYER built. The signal is
+    // p.playerBuiltUpgrades — the player's upgrade-purchase path pushes to it,
+    // but the AI/rival build path (see _aiExecuteAction 'build_upgrade') pushes
+    // ONLY to p.upgrades, never to playerBuiltUpgrades. So AI/rival production
+    // can never unlock the player's cars regardless of station-flag state.
+    // (The old `hasStation && !aiHasStation` gate could mis-fire if a non-player
+    // station-bearing planet — e.g. a co-owned planet — ever hosted a foundry.)
+    const _pBuilt = (uid)=>(p.playerBuiltUpgrades||[]).includes(uid);
     if(_pUpg(p,'iron_foundry')&&p.upgradeData?.iron_foundry){
       const _fd=p.upgradeData.iron_foundry;
       if((_fd.progress||0)>0){
@@ -13810,10 +16104,10 @@ function updateFoundries(dtG){
           // diversity tally counts it as a unique cargo type at this planet.
           if(!p.devLog) p.devLog=[];
           p.devLog.push({sd:stardate, value:DEV_CARGO_VALUES.iron||100, cargo:'iron'});
-          if(!_ironCarUnlocked){ _ironCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_iron',displayName:'Iron Car'}); _chatMsg('IRON CAR UNLOCKED','rgba(200,210,235,1)'); _ga('car_unlocked',{car_type:'iron', cargo:'iron', sd:Math.floor(stardate)}); }
+          if(_pBuilt('iron_foundry') && !_ironCarUnlocked){ _ironCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_iron',displayName:'Iron Car',planetId:p.id}); _chatMsg('IRON CAR UNLOCKED','rgba(200,210,235,1)'); _ga('car_unlocked',{car_type:'iron', cargo:'iron', sd:Math.floor(stardate)}); }
           p.supply.hazmat=Math.min(CARGO_MAX_SUPPLY,(p.supply.hazmat||0)+0.5);
           _fd.hazmatTotal=(_fd.hazmatTotal||0)+0.5; // cumulative produced, unaffected by consumption
-          if(!_hazmatCarUnlocked&&_fd.hazmatTotal>=1){ _hazmatCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_hazmat',displayName:'Hazmat Car'}); _chatMsg('HAZMAT CAR UNLOCKED','rgba(255,165,40,1)'); _ga('car_unlocked',{car_type:'hazmat', cargo:'hazmat', sd:Math.floor(stardate)}); }
+          if(_pBuilt('iron_foundry') && !_hazmatCarUnlocked&&_fd.hazmatTotal>=1){ _hazmatCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_hazmat',displayName:'Hazmat Car',planetId:p.id}); _chatMsg('HAZMAT CAR UNLOCKED','rgba(255,165,40,1)'); _ga('car_unlocked',{car_type:'hazmat', cargo:'hazmat', sd:Math.floor(stardate)}); }
         }
       } else if((_fd.ore||0)>=1&&(_fd.water||0)>=1){
         _fd.progress=FOUNDRY_PROD_TIME;
@@ -13842,16 +16136,17 @@ function updateFoundries(dtG){
           p.supply.steel  =Math.min(CARGO_MAX_SUPPLY,(p.supply.steel||0)+1);
           p.steelDelivered=(p.steelDelivered||0)+1;
           // Sliding-window log of steel production (per-tick units), used for the
-          // N700 unlock check (200 units in any 20-stardate window).
-          _steelProdLog.push({sd:stardate,units:1});
-          // Producing the FIRST steel unit UNLOCKS the TERMINAL upgrade.
-          if(!_terminalUnlocked){
+          // N700 unlock check (200 units in any 20-stardate window). Player planets
+          // only — AI/rival steel must not unlock the N700 for the player.
+          if(_pBuilt('blast_furnace')) _steelProdLog.push({sd:stardate,units:1});
+          // Producing the FIRST steel unit on a PLAYER planet UNLOCKS the TERMINAL upgrade.
+          if(_pBuilt('blast_furnace') && !_terminalUnlocked){
             _terminalUnlocked=true; pendingUpgradeUnlocks.push({key:'__terminal__'});
             _chatMsg('TERMINAL UPGRADE UNLOCKED','rgba(255,210,120,1)');
           }
-          if(!_steelCarUnlocked){
+          if(_pBuilt('blast_furnace') && !_steelCarUnlocked){
             _steelCarUnlocked=true;
-            pendingCarUnlocks.push({sprite:'car_steel',displayName:'Steel Car'});
+            pendingCarUnlocks.push({sprite:'car_steel',displayName:'Steel Car',planetId:p.id});
             _chatMsg('STEEL CAR UNLOCKED','rgba(220,230,245,1)');
             _ga('car_unlocked',{car_type:'steel', cargo:'steel', sd:Math.floor(stardate)});
             // NOTE: the "Designing a better space train" 10-second intro
@@ -13866,9 +16161,9 @@ function updateFoundries(dtG){
           // arms the Hazmat Car unlock if the foundry hasn't already done so.
           p.supply.hazmat=Math.min(CARGO_MAX_SUPPLY,(p.supply.hazmat||0)+0.5);
           _bf.hazmatTotal=(_bf.hazmatTotal||0)+0.5;
-          if(!_hazmatCarUnlocked&&_bf.hazmatTotal>=1){
+          if(_pBuilt('blast_furnace') && !_hazmatCarUnlocked&&_bf.hazmatTotal>=1){
             _hazmatCarUnlocked=true;
-            pendingCarUnlocks.push({sprite:'car_hazmat',displayName:'Hazmat Car'});
+            pendingCarUnlocks.push({sprite:'car_hazmat',displayName:'Hazmat Car',planetId:p.id});
             _chatMsg('HAZMAT CAR UNLOCKED','rgba(255,165,40,1)');
             _ga('car_unlocked',{car_type:'hazmat', cargo:'hazmat', sd:Math.floor(stardate)});
           }
@@ -13892,10 +16187,10 @@ function updateFoundries(dtG){
           _gw.chemical=Math.max(0,(_gw.chemical||0)-1);
           p.supply.glass  =Math.min(CARGO_MAX_SUPPLY,(p.supply.glass||0)+1);
           p.glassDelivered=(p.glassDelivered||0)+1;
-          if(!_glassCarUnlocked){ _glassCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_glass',displayName:'Glass Car'}); _chatMsg('GLASS CAR UNLOCKED','rgba(170,230,210,1)'); _ga('car_unlocked',{car_type:'glass', cargo:'glass', sd:Math.floor(stardate)}); }
+          if(_pBuilt('glassworks') && !_glassCarUnlocked){ _glassCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_glass',displayName:'Glass Car',planetId:p.id}); _chatMsg('GLASS CAR UNLOCKED','rgba(170,230,210,1)'); _ga('car_unlocked',{car_type:'glass', cargo:'glass', sd:Math.floor(stardate)}); }
           // Industrial chain reaction: first glass produced also unlocks the
           // Machinery Car (which gets manufactured by Factories on urban planets).
-          if(!_machineryCarUnlocked){ _machineryCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_machinery',displayName:'Machinery Car'}); _chatMsg('MACHINERY CAR UNLOCKED','rgba(200,200,170,1)'); _ga('car_unlocked',{car_type:'machinery', cargo:'machinery', sd:Math.floor(stardate)}); }
+          if(_pBuilt('glassworks') && !_machineryCarUnlocked){ _machineryCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_machinery',displayName:'Machinery Car',planetId:p.id}); _chatMsg('MACHINERY CAR UNLOCKED','rgba(200,200,170,1)'); _ga('car_unlocked',{car_type:'machinery', cargo:'machinery', sd:Math.floor(stardate)}); }
         }
       } else if((_gw.sand||0)>=1&&(_gw.chemical||0)>=1){
         _gw.progress=FOUNDRY_PROD_TIME;
@@ -13916,7 +16211,7 @@ function updateFoundries(dtG){
           p.machineryDelivered=(p.machineryDelivered||0)+1;
           // Safety net: in the unlikely case a factory produces machinery
           // before any glassworks has fired, unlock the Machinery Car here too.
-          if(!_machineryCarUnlocked){ _machineryCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_machinery',displayName:'Machinery Car'}); _chatMsg('MACHINERY CAR UNLOCKED','rgba(200,200,170,1)'); _ga('car_unlocked',{car_type:'machinery', cargo:'machinery', sd:Math.floor(stardate)}); }
+          if(_pBuilt('factory') && !_machineryCarUnlocked){ _machineryCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_machinery',displayName:'Machinery Car',planetId:p.id}); _chatMsg('MACHINERY CAR UNLOCKED','rgba(200,200,170,1)'); _ga('car_unlocked',{car_type:'machinery', cargo:'machinery', sd:Math.floor(stardate)}); }
           // Hazmat byproduct: each machinery unit also produces 0.5 hazmat —
           // metal-shop chemical solvents, oil sludge, and assembly-line waste.
           // Mirrors the foundry (iron→0.5 hazmat) and blast-furnace
@@ -13924,9 +16219,9 @@ function updateFoundries(dtG){
           // unlock if no upstream producer has already done so.
           p.supply.hazmat=Math.min(CARGO_MAX_SUPPLY,(p.supply.hazmat||0)+0.5);
           _ft.hazmatTotal=(_ft.hazmatTotal||0)+0.5;
-          if(!_hazmatCarUnlocked&&_ft.hazmatTotal>=1){
+          if(_pBuilt('factory') && !_hazmatCarUnlocked&&_ft.hazmatTotal>=1){
             _hazmatCarUnlocked=true;
-            pendingCarUnlocks.push({sprite:'car_hazmat',displayName:'Hazmat Car'});
+            pendingCarUnlocks.push({sprite:'car_hazmat',displayName:'Hazmat Car',planetId:p.id});
             _chatMsg('HAZMAT CAR UNLOCKED','rgba(255,165,40,1)');
             _ga('car_unlocked',{car_type:'hazmat', cargo:'hazmat', sd:Math.floor(stardate)});
           }
@@ -13946,9 +16241,9 @@ function updateFoundries(dtG){
           _bk.grain=Math.max(0,(_bk.grain||0)-1);
           p.supply.cargo=Math.min(CARGO_MAX_SUPPLY,(p.supply.cargo||0)+1);
           _anyCargoProduced=true; // one-shot flag for galaxy-wide cargo demand
-          if(!_cargoCarUnlocked){
+          if(_pBuilt('bakery') && !_cargoCarUnlocked){
             _cargoCarUnlocked=true;
-            pendingCarUnlocks.push({sprite:'car_cargo',displayName:'Cargo Car'});
+            pendingCarUnlocks.push({sprite:'car_cargo',displayName:'Cargo Car',planetId:p.id});
             _chatMsg('CARGO CAR UNLOCKED','rgba(200,170,120,1)');
             _ga('car_unlocked',{car_type:'cargo', cargo:'cargo', sd:Math.floor(stardate)});
           }
@@ -13967,15 +16262,95 @@ function updateFoundries(dtG){
           _jc.fruit=Math.max(0,(_jc.fruit||0)-1);
           p.supply.cargo=Math.min(CARGO_MAX_SUPPLY,(p.supply.cargo||0)+1);
           _anyCargoProduced=true;
-          if(!_cargoCarUnlocked){
+          if(_pBuilt('juicery') && !_cargoCarUnlocked){
             _cargoCarUnlocked=true;
-            pendingCarUnlocks.push({sprite:'car_cargo',displayName:'Cargo Car'});
+            pendingCarUnlocks.push({sprite:'car_cargo',displayName:'Cargo Car',planetId:p.id});
             _chatMsg('CARGO CAR UNLOCKED','rgba(200,170,120,1)');
             _ga('car_unlocked',{car_type:'cargo', cargo:'cargo', sd:Math.floor(stardate)});
           }
         }
       } else if((_jc.fruit||0)>=1){
         _jc.progress=FOUNDRY_PROD_TIME;
+      }
+    }
+    // ── v0.4.7 generic refinery ticks (Helios + Zeta recipes) ──────────
+    // One loop, driven by V47_RECIPES. Mirrors the bespoke blocks above:
+    // consume 1 unit from each input bin, add 1 output unit to planet
+    // supply + a Delivered-style inventory counter, unlock the matching
+    // car on first PLAYER production.
+    for(const _rc of V47_RECIPES){
+      if(!_pUpg(p,_rc.id)||!p.upgradeData?.[_rc.id]) continue;
+      const _rb=p.upgradeData[_rc.id];
+      if((_rb.progress||0)>0){
+        _rb.progress-=dtG;
+        if(_rb.progress<=0){
+          _rb.progress=0;
+          for(const _ik of _rc.inputs) _rb[_ik]=Math.max(0,(_rb[_ik]||0)-1);
+          p.supply[_rc.out]=Math.min(CARGO_MAX_SUPPLY,(p.supply[_rc.out]||0)+1);
+          if(!p.devLog) p.devLog=[];
+          p.devLog.push({sd:stardate, value:DEV_CARGO_VALUES[_rc.out]||100, cargo:_rc.out});
+          if(_pBuilt(_rc.id)){
+            // Helios chain mission progress counters (H1/H2/H3 sub-goals).
+            if(!p._v47Produced) p._v47Produced={};
+            p._v47Produced[_rc.out]=(p._v47Produced[_rc.out]||0)+1;
+            _v47ProdTotals[_rc.out]=(_v47ProdTotals[_rc.out]||0)+1;
+            if(_rc.car){
+              const _flagMap={car_solar:'_solarCarUnlocked',car_supercon:'_superconCarUnlocked',car_truss:'_trussCarUnlocked',car_reactor:'_reactorCarUnlocked',car_titanplate:'_titanplateCarUnlocked',car_warpsteel:'_warpsteelCarUnlocked'};
+              const _fk=_flagMap[_rc.car];
+              const _isLocked=_fk==='_solarCarUnlocked'?!_solarCarUnlocked:_fk==='_superconCarUnlocked'?!_superconCarUnlocked:_fk==='_trussCarUnlocked'?!_trussCarUnlocked:_fk==='_reactorCarUnlocked'?!_reactorCarUnlocked:_fk==='_titanplateCarUnlocked'?!_titanplateCarUnlocked:!_warpsteelCarUnlocked;
+              if(_isLocked){
+                if(_fk==='_solarCarUnlocked')_solarCarUnlocked=true;
+                else if(_fk==='_superconCarUnlocked')_superconCarUnlocked=true;
+                else if(_fk==='_trussCarUnlocked')_trussCarUnlocked=true;
+                else if(_fk==='_reactorCarUnlocked')_reactorCarUnlocked=true;
+                else if(_fk==='_titanplateCarUnlocked')_titanplateCarUnlocked=true;
+                else _warpsteelCarUnlocked=true;
+                pendingCarUnlocks.push({sprite:_rc.car,displayName:_rc.label,planetId:p.id});
+                _chatMsg((_rc.label||'CAR').toUpperCase()+' UNLOCKED',_rc.chatCol);
+                _ga('car_unlocked',{car_type:_rc.car, cargo:_rc.out, sd:Math.floor(stardate)});
+              }
+            }
+          }
+        }
+      } else {
+        let _ready=true;
+        for(const _ik of _rc.inputs){ if((_rb[_ik]||0)<1){ _ready=false; break; } }
+        if(_ready) _rb.progress=FOUNDRY_PROD_TIME*(_rc.tm||1);
+      }
+    }
+    // ── Armory assembly tick ───────────────────────────────────────────
+    // When idle, pick the FIRST recipe whose component bins are all full
+    // enough; on completion consume the components and push the finished
+    // military car into the trainyard, unlocking it on first assembly.
+    if(_pUpg(p,'armory')&&p.upgradeData?.armory){
+      const _am=p.upgradeData.armory;
+      if((_am.progress||0)>0){
+        _am.progress-=dtG;
+        if(_am.progress<=0){
+          _am.progress=0;
+          const _rec=ARMORY_RECIPES.find(_r=>_r.car===_am.building);
+          _am.building=null;
+          if(_rec){
+            for(const _ck in _rec.comps) _am[_ck]=Math.max(0,(_am[_ck]||0)-_rec.comps[_ck]);
+            _tyPush(_rec.car,{});
+            _chatMsg(p.name+': '+_rec.label.toUpperCase()+' ASSEMBLED — added to trainyard','rgba(255,140,90,1)');
+            playSound('construction_complete');
+            const _mflag={car_cannon:_cannonCarUnlocked,car_laser:_laserCarUnlocked,car_shield:_shieldCarUnlocked}[_rec.car];
+            if(!_mflag){
+              if(_rec.car==='car_cannon')_cannonCarUnlocked=true;
+              else if(_rec.car==='car_laser')_laserCarUnlocked=true;
+              else _shieldCarUnlocked=true;
+              pendingCarUnlocks.push({sprite:_rec.car,displayName:_rec.label,planetId:p.id});
+              _ga('car_unlocked',{car_type:_rec.car, cargo:CAR_CARGO_TYPE[_rec.car], sd:Math.floor(stardate)});
+            }
+          }
+        }
+      } else {
+        for(const _rec of ARMORY_RECIPES){
+          let _ok=true;
+          for(const _ck in _rec.comps){ if((_am[_ck]||0)<_rec.comps[_ck]){ _ok=false; break; } }
+          if(_ok){ _am.building=_rec.car; _am.progress=FOUNDRY_PROD_TIME*1.5; break; }
+        }
       }
     }
   }
@@ -14315,7 +16690,7 @@ function _buildOccOrbitMap(){
   // the same destination can't race in and steal the slot between the claim
   // and the next tangent crossing.
   for(let i=0;i<trains.length;i++){
-    const t=trains[i]; if(!t) continue;
+    const t=trains[i]; if(!t||t._destroyed) continue;
     const _ph=t.route?.phase;
     if(_ph==='transit'){
       const _dest=t.route.stops[t.route.toIdx];
@@ -14336,7 +16711,7 @@ function _buildOccOrbitMap(){
   // is the descent TARGET so the claim sits on the slot the train is
   // committed to).
   for(let i=0;i<trains.length;i++){
-    const t=trains[i]; if(!t) continue;
+    const t=trains[i]; if(!t||t._destroyed) continue;
     const _ph=t.route?.phase;
     if(!t.route||_ph==='orbit'||_ph==='waiting'||_ph==='blocked'||_ph==='queueing'||_ph==='descending'){
       _add(t.planetId,t.orbitTier,t);
@@ -14553,6 +16928,7 @@ function segmentBlockedByStar(ax, ay, bx, by){
 
 // Returns true if the segment is blocked specifically by engine range (not star blocking).
 function _segmentRangeBlocked(fromP, toP, fromOrbitR, toOrbitR, train){
+  if(fromP?.isPortal&&toP?.isPortal) return false; // portal jump — range-exempt
   const lt=computeLiveTangent(fromP,toP,fromOrbitR,toOrbitR);
   return !!lt && lt.tanLen>_engMaxRange(train);
 }
@@ -14562,6 +16938,10 @@ function _segmentRangeBlocked(fromP, toP, fromOrbitR, toOrbitR, train){
 // estFrames is in game-time frame-units; because train speed and orbital speed both scale
 // by the same game-speed multiplier, the multiplier cancels out and is NOT applied here.
 function transitPathBlocked(fromP, toP, fromOrbitR, toOrbitR, train){
+  // v0.4.7 portal jump (portal-proxy → portal-proxy): always clear. The void
+  // band is empty and the crossing is powered by the portal itself, so both
+  // the range gate and star-blocking are skipped.
+  if(fromP?.isPortal&&toP?.isPortal) return false;
   const lt0=computeLiveTangent(fromP,toP,fromOrbitR,toOrbitR);
   if(!lt0) return false;
   // Engine range limit: engine_constellation cannot travel a segment longer than ENGINE_MAX_RANGE
@@ -14650,6 +17030,10 @@ function getTrainCarPos(train, carIdx){
 }
 
 function updateTrain(t, dt){
+  // v0.4.7: destroyed (Combine) trains are tombstones — they stay in the
+  // trains[] array to preserve indices, but never tick, render, or occupy
+  // orbit slots again.
+  if(t._destroyed) return;
   // Hidden engine-lifespan check — fires once per player train when stardate
   // crosses the pre-rolled _engineFailureSd. The engine is the train's first
   // car; for a freshly-purchased train it was rolled by _rollEngineFailureSd
@@ -15041,7 +17425,18 @@ function updateTrain(t, dt){
             }
           }
           if(t.isPlayer&&!r._blockedSoundFired){ playSound('breakdown'); r._blockedSoundFired=true; }
-          r.phase='blocked'; r.orbitSpun=0; r._blockedTime=0; return;
+          r.phase='blocked'; r.orbitSpun=0; r._blockedTime=0;
+          // First-time educational moment — distinguish range-block vs star-block.
+          if(t.isPlayer && (!_firstRangeBlockShown || !_firstStarBlockShown) && _blockEduStartMs===0){
+            const _rangeBlk=_segmentRangeBlocked(fromP,toP,t.orbitR,r.arrivalOrbitR,t);
+            if(_rangeBlk && !_firstRangeBlockShown){
+              _firstRangeBlockShown=true; _triggerBlockEdu(t,'range',toP); // frame train + destination
+            } else if(!_rangeBlk && !_firstStarBlockShown){
+              const _blkStar=lt?segmentBlockedByStar(lt.ax,lt.ay,lt.bx,lt.by):null;
+              _firstStarBlockShown=true; _triggerBlockEdu(t,'star',_blkStar); // frame train + blocking star
+            }
+          }
+          return;
         }
         const snapAngle=lt?lt.tanAngle:r.departAngle;
         const k=Math.round((t.angle-snapAngle)/(Math.PI*2));
@@ -15193,7 +17588,12 @@ function updateTrain(t, dt){
     const _eTanLen=r._departExtLen!=null?r._departExtLen-_tailLen:lt2.tanLen;
     const extLen=_eTanLen+_tailLen; // = r._departExtLen
     const _maintF=t.maintenance??1;
-    const _accel=_engAccel(t)*(_maintF<=0?0.25:1), _maxSpd=_engMaxSpd(t)*(_maintF<=0?0.10:1);
+    // v0.4.7 portal jump: a leg between the two portal proxies is powered by
+    // the portal — the train streaks across the void at 8× engine speed with
+    // matching acceleration (and no maintenance penalty on the crossing).
+    const _isPortalLeg=!!(_gp(r.stops[r.fromIdx])?.isPortal&&_gp(r.stops[r.toIdx])?.isPortal);
+    const _pB=(_isPortalLeg?8:1)*(t.crippled?0.5:1); // crippled trains limp at half speed
+    const _accel=_engAccel(t)*(_maintF<=0&&!_isPortalLeg?0.25:1)*_pB, _maxSpd=_engMaxSpd(t)*(_maintF<=0&&!_isPortalLeg?0.10:1)*_pB;
     // Two-zone deceleration: train starts braking at 80% of route.
     // Zone 1 (80%→engine at orbit): decel from cruise to 1.2× arrival orbital speed.
     // Zone 2 (engine at orbit→caboose at orbit): decel from 1.2× to 1.0× orbital speed.
@@ -15463,6 +17863,14 @@ function updateTrain(t, dt){
         t.route=qr;
         t.queuedRoute=qr._nextQueuedRoute||null;
         qr._nextQueuedRoute=null;
+        // Queueing-or-descending check (mirrors every other arrival path). If the
+        // temp route delivered us into a tier this stop's station can't service —
+        // e.g. LOW was full so we landed in MED at a basic STATION — drop into
+        // descending (if a lower slot is free now) or queueing (otherwise). Without
+        // this the activated route treats the unserviceable orbit as a normal stop,
+        // skips cargo ops, and immediately departs for stop 2.
+        {const _arrP=_gp(t.planetId);
+         if(_shouldQueueForLowerOrbit(t,_arrP)){ _enterQueueOrDescend(t, qr); _invalidateOccOrbit(); }}
         return;
       }
       r.fromIdx=r.toIdx;
@@ -15537,6 +17945,15 @@ function trackVisit(pid){
   if(_tp.hasDiamond&&!_tp.diamondRevealed&&!pendingDiamondDiscoveries.includes(pid)){
     pendingDiamondDiscoveries.push(pid);
   }
+  if(_tp.hasUranium&&!_tp.uraniumRevealed&&!pendingUraniumDiscoveries.includes(pid)){
+    pendingUraniumDiscoveries.push(pid);
+  }
+  if(_tp.hasArtifact&&!_tp.artifactRevealed&&!pendingArtifactDiscoveries.includes(pid)){
+    pendingArtifactDiscoveries.push(pid);
+  }
+  // v0.4.7: the player's first Zeta planet visit instantiates the Combine
+  // (its rail network was "always there" — the sim just didn't need it yet).
+  if(_tp.isZeta&&_zetaGenerated&&!_combineFounded) _foundCombine();
   // First visit of this specific planet — award credits, log message, car unlock
   if(!visitedPlanetIds.has(pid)){
     const _bio=_tp.type.id;
@@ -15638,7 +18055,7 @@ function trackVisit(pid){
     if(_tp.isFlowersOrigin){
       if(!_flowersCarUnlocked){
         _flowersCarUnlocked=true;
-        pendingCarUnlocks.push({sprite:'car_flowers',displayName:'Flowers Car'});
+        pendingCarUnlocks.push({sprite:'car_flowers',displayName:'Flowers Car',planetId:_tp.id});
         _chatMsg('FLOWERS CAR UNLOCKED!','rgba(255,160,210,1)');
         _newsLog('flowers_discovered',{pln:_tp.name,plnId:_tp.id});
         _ga('car_unlocked',{car_type:'flowers', cargo:'flowers', sd:Math.floor(stardate)});
@@ -15650,7 +18067,7 @@ function trackVisit(pid){
     // Jungle visit: unlock Medical Supplies car + trigger Outbreak mission if this is the outbreak planet
     if(_bio==='jungle'&&!_medicalCarUnlocked){
       _medicalCarUnlocked=true;
-      pendingCarUnlocks.push({sprite:'car_medical',displayName:'Medical Supplies Car'});
+      pendingCarUnlocks.push({sprite:'car_medical',displayName:'Medical Supplies Car',planetId:_tp.id});
       _chatMsg('MEDICAL SUPPLIES CAR UNLOCKED!','rgba(80,230,180,1)');
       _ga('car_unlocked',{car_type:'medical', cargo:'medical', sd:Math.floor(stardate)});
     }
@@ -15669,7 +18086,7 @@ function trackVisit(pid){
     if(_bioUnlockMsg && galaxy.planets.filter(p=>visitedPlanetIds.has(p.id)&&p.type.id===_bio).length===1){
       _chatMsg(_bioUnlockMsg,'rgba(80,230,130,1)');
       if(_bioUnlockCar){
-        pendingCarUnlocks.push(_bioUnlockCar);
+        pendingCarUnlocks.push({..._bioUnlockCar,planetId:_tp.id});
         // Biome-first-visit car unlocks. Map sprite → (car_type, cargo) for
         // consistent param values across all car_unlocked events.
         const _bioCargo={
@@ -15690,19 +18107,19 @@ function trackVisit(pid){
       const _ups=_tp.upgrades||[];
       if(_ups.includes('granary')&&!_grainCarUnlocked){
         _grainCarUnlocked=true;
-        pendingCarUnlocks.push({sprite:'car_grain',displayName:'Grain Car'});
+        pendingCarUnlocks.push({sprite:'car_grain',displayName:'Grain Car',planetId:_tp.id});
         _chatMsg('GRAIN CAR UNLOCKED','rgba(80,230,130,1)');
         _ga('car_unlocked',{car_type:'grain', cargo:'grain', sd:Math.floor(stardate)});
       }
       if(_ups.includes('farm')&&!_livestockCarUnlocked){
         _livestockCarUnlocked=true;
-        pendingCarUnlocks.push({sprite:'car_livestock',displayName:'Livestock Car'});
+        pendingCarUnlocks.push({sprite:'car_livestock',displayName:'Livestock Car',planetId:_tp.id});
         _chatMsg('LIVESTOCK CAR UNLOCKED','rgba(80,230,130,1)');
         _ga('car_unlocked',{car_type:'livestock', cargo:'livestock', sd:Math.floor(stardate)});
       }
       if(_ups.includes('orchard')&&!_fruitCarUnlocked){
         _fruitCarUnlocked=true;
-        pendingCarUnlocks.push({sprite:'car_fruit',displayName:'Fruit Car'});
+        pendingCarUnlocks.push({sprite:'car_fruit',displayName:'Fruit Car',planetId:_tp.id});
         _chatMsg('FRUIT CAR UNLOCKED','rgba(80,230,130,1)');
         _ga('car_unlocked',{car_type:'fruit', cargo:'fruit', sd:Math.floor(stardate)});
       }
@@ -15742,6 +18159,12 @@ function trackOrbit(t){
   }
   if(_gop?.hasDiamond&&!_gop.diamondRevealed&&!pendingDiamondDiscoveries.includes(pid)){
     pendingDiamondDiscoveries.push(pid);
+  }
+  if(_gop?.hasUranium&&!_gop.uraniumRevealed&&!pendingUraniumDiscoveries.includes(pid)){
+    pendingUraniumDiscoveries.push(pid);
+  }
+  if(_gop?.hasArtifact&&!_gop.artifactRevealed&&!pendingArtifactDiscoveries.includes(pid)){
+    pendingArtifactDiscoveries.push(pid);
   }
 }
 // Note: maintenance repair is now applied immediately on orbit entry in the
@@ -15792,7 +18215,7 @@ function drawFog(){
   fctx.fillRect(0,0,W-PANEL_W,GH);
   fctx.globalCompositeOperation='destination-out';
 
-  const sr=FOG_REVEAL_R*(_sensorUpgradeActive?1.5:1.0)*cam.scale;
+  const sr=FOG_REVEAL_R*(_sensorUpgrade2Active?2.0:(_sensorUpgradeActive?1.5:1.0))*cam.scale;
   const viewMax=Math.max(W-PANEL_W,GH);
 
   if(sr*2>viewMax){
@@ -15892,34 +18315,47 @@ function drawFog(){
 }
 
 function drawArrowBtn(x,y,w,h,dir,active,hov=false){
-  const r=3;
+  // Bare filled triangle (no button box). Smaller than the leaderboard arrows,
+  // and tinted to match the "GAME SPEED" label colour (soft blue) rather than
+  // lavender — normal = label blue, hover = brighter blue, disabled = dim.
+  // The (x,y,w,h) rect is still the click hit-box; only the visual is a triangle.
+  const cx=x+w/2, cy=y+h/2, _triS=Math.min(6,h*0.38);
   ctx.beginPath();
-  ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y); ctx.arcTo(x+w,y,x+w,y+r,r);
-  ctx.lineTo(x+w,y+h-r); ctx.arcTo(x+w,y+h,x+w-r,y+h,r);
-  ctx.lineTo(x+r,y+h); ctx.arcTo(x,y+h,x,y+h-r,r);
-  ctx.lineTo(x,y+r); ctx.arcTo(x,y,x+r,y,r); ctx.closePath();
-  ctx.fillStyle=hov?'rgba(90,150,240,0.92)':active?'rgba(60,110,200,0.75)':'rgba(30,45,80,0.6)';
+  if(dir<0){ ctx.moveTo(cx+_triS/2,cy-_triS); ctx.lineTo(cx-_triS/2,cy); ctx.lineTo(cx+_triS/2,cy+_triS); }
+  else      { ctx.moveTo(cx-_triS/2,cy-_triS); ctx.lineTo(cx+_triS/2,cy); ctx.lineTo(cx-_triS/2,cy+_triS); }
+  ctx.closePath();
+  ctx.fillStyle=!active?'rgba(110,110,130,0.38)':(hov?'rgba(170,215,255,0.95)':'rgba(120,180,255,0.6)');
   ctx.fill();
-  ctx.strokeStyle=hov?'rgba(160,220,255,0.90)':active?'rgba(100,180,255,0.7)':'rgba(50,70,120,0.5)'; ctx.lineWidth=1;
-  ctx.stroke();
-  // Arrow triangle
-  const mx=x+w/2, my=y+h/2, as=h*0.28;
-  ctx.fillStyle=hov?'rgba(230,248,255,1.0)':active?'rgba(160,210,255,0.95)':'rgba(70,90,130,0.5)';
-  ctx.beginPath();
-  if(dir<0){ ctx.moveTo(mx-as,my); ctx.lineTo(mx+as,my-as); ctx.lineTo(mx+as,my+as); }
-  else      { ctx.moveTo(mx+as,my); ctx.lineTo(mx-as,my-as); ctx.lineTo(mx-as,my+as); }
-  ctx.closePath(); ctx.fill();
 }
 
 function drawSpeedIndicator(){
   const spd=SPEED_OPTS[gameSpeedIdx];
-  // Right-aligned cluster: speed selector right, zoom bar left — both above info bar
-  const rightEdge=W-PANEL_W-6;
+  // Right-aligned cluster: [settings gear] | speed selector | zoom bar — above info bar
+  const panelEdge=W-PANEL_W-6;
   const rowY=GH-10; // vertical centre
   ctx.save();
 
-  // Speed selector — 3 elements: left arrow | value | right arrow
   const btnW=18, btnH=16, valW=32;
+
+  // ── Settings (gear) button — far right, same size as a speed arrow, same
+  //    gear design as the title screen. Opens the Options window. ──
+  const _gX=panelEdge-btnW, _gY=rowY-btnH/2;
+  _optsGearBtnBounds={x:_gX,y:_gY,w:btnW,h:btnH};
+  {
+    const r=3, hov=_optsGearBtnHover, x=_gX, y=_gY, w=btnW, h=btnH;
+    ctx.beginPath();
+    ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y); ctx.arcTo(x+w,y,x+w,y+r,r);
+    ctx.lineTo(x+w,y+h-r); ctx.arcTo(x+w,y+h,x+w-r,y+h,r);
+    ctx.lineTo(x+r,y+h); ctx.arcTo(x,y+h,x,y+h-r,r);
+    ctx.lineTo(x,y+r); ctx.arcTo(x,y,x+r,y,r); ctx.closePath();
+    ctx.fillStyle=hov?'rgba(90,150,240,0.92)':'rgba(60,110,200,0.75)'; ctx.fill();
+    ctx.strokeStyle=hov?'rgba(160,220,255,0.90)':'rgba(100,180,255,0.7)'; ctx.lineWidth=1; ctx.stroke();
+    _drawGearGlyph(x+w/2,y+h/2,5.2,hov?'rgba(230,248,255,1.0)':'rgba(160,210,255,0.95)',1.5);
+  }
+  // Speed/zoom cluster sits to the LEFT of the gear button (with a small buffer).
+  const rightEdge=_gX-8;
+
+  // Speed selector — 3 elements: left arrow | value | right arrow
   const selW=btnW+valW+btnW+4; // total width
   const selX=rightEdge-selW;
   const leftBx=selX, rightBx=selX+btnW+valW+4;
@@ -15935,18 +18371,23 @@ function drawSpeedIndicator(){
   else if(spd>1)      { _spdLbl=spd+'X';_spdCol='rgba(255,220,60,0.95)';  }
   else                { _spdLbl='1X';   _spdCol='rgba(140,190,255,0.85)'; }
   ctx.fillStyle=_spdCol;
-  ctx.fillText(_spdLbl,selX+btnW+valW/2+2,rowY+3.5);
+  _speedValCenterX=selX+btnW+valW/2+2; // cache for the stacked planet buttons to centre under
+  ctx.fillText(_spdLbl,_speedValCenterX,rowY+3.5);
 
-  // Zoom bar — to the left of speed selector, with ZOOM label
+  // Zoom bar — to the left of the speed selector (its label now sits ABOVE it,
+  // so the 30px left-label reservation is gone; the bar keeps its old position).
   const zoomBarW=60, zoomBarH=5;
-  const zoomLabelW=30;
-  const zoomX=selX-8-zoomBarW-zoomLabelW;
-  _zoomBarCenter={x:Math.round(zoomX+zoomLabelW+zoomBarW/2), y:rowY};
+  const zoomBarX=selX-8-zoomBarW;
+  _zoomBarCenter={x:Math.round(zoomBarX+zoomBarW/2), y:rowY};
   const zt=Math.max(0,Math.min(1,(Math.log(cam.scale)-Math.log(MIN_SC))/(Math.log(MAX_SC)-Math.log(MIN_SC))));
-  ctx.fillStyle='rgba(20,40,80,0.55)'; ctx.fillRect(zoomX+zoomLabelW,rowY-zoomBarH/2,zoomBarW,zoomBarH);
-  ctx.fillStyle='rgba(80,160,255,0.8)'; ctx.fillRect(zoomX+zoomLabelW,rowY-zoomBarH/2,zoomBarW*zt,zoomBarH);
-  ctx.font='9px Orbitron,sans-serif'; ctx.textAlign='right';
-  ctx.fillStyle='rgba(120,180,255,0.6)'; ctx.fillText('ZOOM',zoomX+zoomLabelW-4,rowY+3.5);
+  ctx.fillStyle='rgba(20,40,80,0.55)'; ctx.fillRect(zoomBarX,rowY-zoomBarH/2,zoomBarW,zoomBarH);
+  ctx.fillStyle='rgba(80,160,255,0.8)'; ctx.fillRect(zoomBarX,rowY-zoomBarH/2,zoomBarW*zt,zoomBarH);
+
+  // Labels — each centered just ABOVE its control cluster.
+  const _lblY=rowY-13;
+  ctx.font='8px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.fillStyle='rgba(120,180,255,0.6)';
+  ctx.fillText('ZOOM', zoomBarX+zoomBarW/2, _lblY);
+  ctx.fillText('GAME SPEED', selX+selW/2, _lblY);
 
   ctx.restore();
 }
@@ -16047,6 +18488,65 @@ function drawDiamondDiscoveryPopup(){
   ctx.restore();
 }
 
+// v0.4.7: uranium-vein discovery popup — mirrors the gold EUREKA flow with a
+// radioactive-green palette. OK click reveals the vein + seeds supply.
+let _uraniumDiscoveryOkBounds=null;
+function drawUraniumDiscoveryPopup(){
+  if(activePopup!=='uranium_discovery') return;
+  const pw=320, ph=340;
+  const [px,py]=drawPopupBase(pw,ph,'rgba(150,255,40,0.7)');
+  ctx.save();
+  ctx.font='bold 13px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='#c8ff40'; ctx.shadowColor='#88cc00'; ctx.shadowBlur=10;
+  ctx.fillText('GEIGER COUNTERS SINGING!',px+pw/2,py+26);
+  ctx.shadowBlur=0;
+  ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(210,240,200,0.85)';
+  const _lines=["Your train's sensors have detected a rich","uranium vein beneath this planet's surface."];
+  for(let _li=0;_li<_lines.length;_li++) ctx.fillText(_lines[_li],px+pw/2,py+44+_li*14);
+  const _spr=imgs['car_uranium'];
+  if(_spr){
+    const _sw=200, _sh=Math.round(200*_spr.naturalHeight/_spr.naturalWidth);
+    const _sx=px+(pw-_sw)/2, _sy=py+76;
+    ctx.drawImage(_spr,_sx,_sy,_sw,_sh);
+  }
+  const _bw=100, _bh=26, _bx=px+(pw-100)/2, _by=py+ph-40;
+  ctx.fillStyle=_uraniumOkHover?'rgba(120,200,20,0.95)':'rgba(85,150,10,0.85)'; ctx.fillRect(_bx,_by,_bw,_bh);
+  ctx.strokeStyle=_uraniumOkHover?'rgba(210,255,90,0.95)':'rgba(170,255,30,0.8)'; ctx.lineWidth=1.5; ctx.strokeRect(_bx,_by,_bw,_bh);
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='rgba(235,255,190,0.95)'; ctx.fillText('OKAY!',_bx+_bw/2,_by+17);
+  _uraniumDiscoveryOkBounds={x:_bx,y:_by,w:_bw,h:_bh};
+  ctx.restore();
+}
+
+// v0.4.7 Zeta: alien artifact-cache discovery popup — same flow, alien-green.
+let _artifactDiscoveryOkBounds=null;
+function drawArtifactDiscoveryPopup(){
+  if(activePopup!=='artifact_discovery') return;
+  const pw=320, ph=340;
+  const [px,py]=drawPopupBase(pw,ph,'rgba(60,255,150,0.7)');
+  ctx.save();
+  ctx.font='bold 13px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='#60ffb0'; ctx.shadowColor='#10cc70'; ctx.shadowBlur=12;
+  ctx.fillText('XENO-ARCHAEOLOGY!',px+pw/2,py+26);
+  ctx.shadowBlur=0;
+  ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(200,255,225,0.85)';
+  const _alines=["A buried cache of alien artifacts! Collectors","back home will pay a fortune for these."];
+  for(let _li=0;_li<_alines.length;_li++) ctx.fillText(_alines[_li],px+pw/2,py+44+_li*14);
+  const _aspr=imgs['car_artifact'];
+  if(_aspr){
+    const _sw=200, _sh=Math.round(200*_aspr.naturalHeight/_aspr.naturalWidth);
+    const _sx=px+(pw-_sw)/2, _sy=py+76;
+    ctx.drawImage(_aspr,_sx,_sy,_sw,_sh);
+  }
+  const _bw=100, _bh=26, _bx=px+(pw-100)/2, _by=py+ph-40;
+  ctx.fillStyle=popupState.artifactOkHover?'rgba(20,170,90,0.95)':'rgba(10,120,60,0.85)'; ctx.fillRect(_bx,_by,_bw,_bh);
+  ctx.strokeStyle=popupState.artifactOkHover?'rgba(120,255,190,0.95)':'rgba(60,255,150,0.8)'; ctx.lineWidth=1.5; ctx.strokeRect(_bx,_by,_bw,_bh);
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='rgba(200,255,230,0.95)'; ctx.fillText('OKAY!',_bx+_bw/2,_by+17);
+  _artifactDiscoveryOkBounds={x:_bx,y:_by,w:_bw,h:_bh};
+  ctx.restore();
+}
+
 // Accept-the-pending-new-mission helper. Reads its inputs from `state`
 // (either the live `popupState` when the Accept button is clicked, or the
 // stashed `_pendingNewMissionStash` when the safety-net path fires after a
@@ -16070,6 +18570,36 @@ function _resolveMissionText(txt, ctx){
   }
   if(txt.includes('{CORP}')) txt=txt.split('{CORP}').join(corpName||'your corporation');
   return txt;
+}
+// Live seconds remaining on the nearest-to-done PLAYER foundry smelt (40 s nominal
+// at 1× = FOUNDRY_PROD_TIME/60). Returns null when no player foundry is smelting
+// or about to start (no inputs yet). Used by the produce_iron obj-2 countdown.
+function _smeltSecondsRemaining(){
+  if(!galaxy) return null;
+  let _best=null;
+  for(const p of galaxy.planets){
+    if(p.aiHasStation) continue;                                   // player-relevant foundries only
+    if(!(p.upgrades||[]).includes('iron_foundry')) continue;
+    const _fd=p.upgradeData&&p.upgradeData.iron_foundry;
+    if(!_fd) continue;
+    let _rem;
+    if((_fd.progress||0)>0) _rem=_fd.progress;                     // actively smelting
+    else if((_fd.ore||0)>=1&&(_fd.water||0)>=1) _rem=FOUNDRY_PROD_TIME; // inputs stocked, about to start
+    else continue;
+    if(_best==null||_rem<_best) _best=_rem;
+  }
+  return _best==null?null:Math.max(0,Math.ceil(_best/60));
+}
+// Display text for a tracked mission objective — identical to obj.text except the
+// produce_iron "wait_smelt" objective, whose second-count updates LIVE each frame.
+function _objDisplayText(m,obj){
+  if(!obj) return '';
+  if(m&&m.id==='produce_iron'&&obj.id==='wait_smelt'){
+    const _s=_smeltSecondsRemaining();
+    if(_s==null) return 'Wait for the FOUNDRY to SMELT IRON';
+    return 'Wait '+_s+(_s===1?' second':' seconds')+' for the FOUNDRY to SMELT IRON';
+  }
+  return obj.text||'';
 }
 // Pick the three More-Scientists pickup planets: the closest planet of each of
 // urban / oil / storm biomes to Orijen that has NO rival/AI station. Returns
@@ -16120,6 +18650,7 @@ function _acceptNewMissionFromState(state){
     scientistSourceIds:Array.isArray(state.scientistSourceIds)?state.scientistSourceIds.slice():null,
     _scientistsDelivered:def.id==='more_scientists'?[]:undefined,
     _researchStartSd:def.id==='another_dimension'?stardate:undefined,
+    _alignStartSd:def.id==='helios_ignition'?stardate:undefined,
     hazmatIncineratedSnapshot:_totalHazmatIncinerated});
   _recomputeMissionTargets();
   _chatMsg('MISSION STARTED: '+def.name.toUpperCase(),'rgba(255,220,80,1)');
@@ -16187,7 +18718,58 @@ function _acceptNewMissionFromState(state){
 function drawNewMissionPopup(){
   if(activePopup!=='new_mission'||!popupState.newMissionDef) return;
   const def=popupState.newMissionDef;
-  const pw=440,ph=295;
+  const pw=440;
+  // Display objectives — some missions show ONE summarised line in the popup
+  // (display only; def.objectives is unchanged and still drives completion + the
+  // [M] tracker). Keyed by mission id.
+  const _SUMMARY_OBJS={
+    create_route:'Create a LOOP ROUTE that allows your TRAIN to ship [Molten Ore] and [Water] to a nearby DESERT PLANET',
+    buy_second_train:'Buy a new TRAIN to deliver the [Iron] being produced on the DESERT PLANET back to ORIJEN',
+    // produce_iron's two tracked objectives collapse to its original single line
+    // here so the NEW MISSION popup text stays exactly as before.
+    produce_iron:'Produce [Iron] by delivering both [Molten Ore] and [Water] to a FOUNDRY',
+  };
+  const _displayObjs=_SUMMARY_OBJS[def.id]
+    ? [{id:'__'+def.id+'_summary__', text:_SUMMARY_OBJS[def.id]}]
+    : (def.introHideObjs ? def.objectives.filter(o=>!def.introHideObjs.includes(o.id)) : def.objectives);
+  // ── Pre-measure the right-column content to size the popup snugly so short
+  // missions (e.g. create_route) don't leave a big empty gap above the reward /
+  // ACCEPT button. Mirrors the draw layout below; capped at 295 so longer
+  // missions look exactly as before.
+  let _measPh=295;
+  {
+    const _mTxtCtx={sourcePlanetId:popupState.sourcePlanetId,targetPlanetId:popupState.targetPlanetId,scientistSourceIds:popupState.scientistSourceIds};
+    const _mPStyles=_missionPlanetStyles(_mTxtCtx);
+    const _mMaxW=pw-114;            // == cMaxW below
+    let _mY=62;                     // imgBY(51)+11 offset from the popup top
+    if(def.details){
+      const _dtTxtM=_resolveMissionText(def.details,_mTxtCtx);
+      // detailsBreaks: one sentence per paragraph (split on each period) with a
+      // blank line between sentences; otherwise a single wrapped block.
+      const _detParasM=def.detailsBreaks ? ((_dtTxtM.match(/[^.]+\.\s*/g)||[_dtTxtM]).map(s=>s.trim()).filter(Boolean)) : [_dtTxtM];
+      for(let _pi=0;_pi<_detParasM.length;_pi++){
+        const _mdL=_objWrapTokens(_objTokenize(_detParasM[_pi],_mPStyles),_mMaxW,'italic 12px "Exo 2",sans-serif');
+        _mY += _mdL.length*15 + (_pi<_detParasM.length-1?15:0);
+      }
+      _mY += 7;
+    }
+    _mY += 15;                      // OBJECTIVES label row
+    ctx.font='12px "Exo 2",sans-serif'; const _mCbW=Math.round(ctx.measureText('○').width)+5;
+    for(const _o of _displayObjs){
+      const _moL=_objWrapTokens(_objTokenize(_resolveMissionText(_o.text,_mTxtCtx),_mPStyles),_mMaxW-_mCbW,'10px "Exo 2",sans-serif');
+      _mY += _moL.length*13 + 2;
+    }
+    if(def.note){
+      const _ntL=_objWrapTokens(_objTokenize(_resolveMissionText(def.note,_mTxtCtx),_mPStyles),_mMaxW,'italic 10px "Exo 2",sans-serif');
+      _mY += 8 + _ntL.length*13;
+    }
+    // Content bottom = lower of the right-column end and the 72px image box
+    // (bottom at offset 123). Reward group + button occupy ~95 px below it.
+    // Fully content-driven height (clamped only to sane min/max bounds), so
+    // every mission popup fits snugly — short ones shrink, long ones grow.
+    _measPh = Math.max(200, Math.min(H-28, Math.round(Math.max(123,_mY)+95)));
+  }
+  const ph=_measPh;
   const [px,py]=drawPopupBase(pw,ph,'rgba(80,200,130,0.7)');
   ctx.save();
   // "NEW MISSION" label
@@ -16225,6 +18807,8 @@ function drawNewMissionPopup(){
   // Right column: details (above objectives) then objectives
   const cX=imgBX+imgBW+14, cMaxW=pw-(cX-px)-14;
   let _rcy=imgBY+11; // running y cursor for right column
+  // Per-mission planet-name styles (biome-coloured) for details + objectives.
+  const _npPStyles=_missionPlanetStyles({sourcePlanetId:popupState.sourcePlanetId,targetPlanetId:popupState.targetPlanetId,scientistSourceIds:popupState.scientistSourceIds});
   // Flavor / details text — italic 12px, word-wrapped, ABOVE objectives
   if(def.details){
     const _dtLH=15;
@@ -16236,12 +18820,18 @@ function drawNewMissionPopup(){
     // font; coloured planet tokens render bold-italic in their biome colour.
     const _dtFontStr='italic 12px "Exo 2",sans-serif';
     const _dtBaseCol='rgba(150,185,220,0.80)';
-    const _dtLines=_objWrapTokens(_objTokenize(_dtTxt), cMaxW, _dtFontStr);
-    for(let _li=0;_li<_dtLines.length;_li++){
-      _objDrawLine(_dtLines[_li], cX, _rcy, _dtFontStr, _dtBaseCol);
-      if(_li<_dtLines.length-1) _rcy+=_dtLH;
+    // detailsBreaks: render one sentence per paragraph (a full line break after
+    // each period), with a blank line between sentences. Otherwise a single block.
+    const _detParas=def.detailsBreaks ? ((_dtTxt.match(/[^.]+\.\s*/g)||[_dtTxt]).map(s=>s.trim()).filter(Boolean)) : [_dtTxt];
+    for(let _pi=0;_pi<_detParas.length;_pi++){
+      const _dtLines=_objWrapTokens(_objTokenize(_detParas[_pi],_npPStyles), cMaxW, _dtFontStr);
+      for(let _li=0;_li<_dtLines.length;_li++){
+        _objDrawLine(_dtLines[_li], cX, _rcy, _dtFontStr, _dtBaseCol);
+        _rcy+=_dtLH;
+      }
+      if(_pi<_detParas.length-1) _rcy+=_dtLH; // blank line between sentences
     }
-    _rcy+=_dtLH+7; // gap after details before objectives
+    _rcy+=7; // gap after details before objectives
   }
   // OBJECTIVES label
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
@@ -16255,8 +18845,10 @@ function drawNewMissionPopup(){
   ctx.font='12px "Exo 2",sans-serif';
   const _cbW=Math.round(ctx.measureText('○').width)+5;
   const _preCompIds=popupState.preCompletedObjIds||new Set();
-  for(let _oi=0;_oi<def.objectives.length;_oi++){
-    const obj=def.objectives[_oi];
+  // _displayObjs is computed once near the top of this function (create_route
+  // shows a single summarised objective; everything else uses def.objectives).
+  for(let _oi=0;_oi<_displayObjs.length;_oi++){
+    const obj=_displayObjs[_oi];
     const _isPreComp=_preCompIds.has(obj.id);
     const _isHov=popupState.hoveredObjIdx===_oi;
     // Pre-completed objectives render in green; others use normal blue-white
@@ -16266,7 +18858,7 @@ function drawNewMissionPopup(){
     // Tokenize for colored [Name] segments, then word-wrap by tokens.
     const _objFontStr='10px "Exo 2",sans-serif';
     const _objTxtW=cMaxW-_cbW;
-    const _objTokens=_objTokenize(_ot);
+    const _objTokens=_objTokenize(_ot,_npPStyles);
     const _objLines=_objWrapTokens(_objTokens,_objTxtW,_objFontStr);
     const _objRowTotalH=_objLines.length*_objLH+2;
     const _objRowStartY=_rcy-13;
@@ -16279,6 +18871,18 @@ function drawNewMissionPopup(){
       _objDrawLine(_objLines[_li],cX+_cbW,_rcy+_li*_objLH,_objFontStr,_baseCol);
     }
     _rcy+=_objRowTotalH;
+  }
+  // Optional italic "Note: …" clarification under the objectives.
+  if(def.note){
+    _rcy+=8;
+    const _ntFontStr='italic 10px "Exo 2",sans-serif';
+    const _ntTxt=_resolveMissionText(def.note,{sourcePlanetId:popupState.sourcePlanetId,targetPlanetId:popupState.targetPlanetId,scientistSourceIds:popupState.scientistSourceIds});
+    const _ntLines=_objWrapTokens(_objTokenize(_ntTxt,_npPStyles),cMaxW,_ntFontStr);
+    ctx.textAlign='left';
+    for(let _li=0;_li<_ntLines.length;_li++){
+      _objDrawLine(_ntLines[_li],cX,_rcy,_ntFontStr,'rgba(140,160,195,0.72)');
+      _rcy+=13;
+    }
   }
   if(def.reward||def.rewardText){
     // Reward pill — same small-rounded-rect treatment as the upgrade
@@ -16480,21 +19084,21 @@ function drawCarUnlockPopup(){
 // and the station-upgrade buttons — keep them in sync if those constants change.
 const _UPGRADE_UNLOCK_INFO={
   iron_foundry:{ name:'IRON FOUNDRY', kind:'iron_foundry', biome:'#c9a55a',
-    cost:'10,000 cr', buildOn:'DESERT planets',
-    enables:'Enables this planet to smelt delivered MOLTEN ORE + WATER into IRON.',
-    formula:'1 Molten Ore  +  1 Water   →   1 Iron', time:'~40 seconds' },
+    cost:'10,000 cr', buildOn:'DESERT planets', buildOnColor:'#f0a040',
+    enables:'Enables this planet to smelt delivered [Molten Ore] + [Water]\ninto [Iron].',
+    formula:'1 [Molten Ore]  +  1 [Water]   →   1 [Iron]', time:'~40 seconds' },
   bakery:{ name:'BAKERY', kind:'bakery', biome:'#3a9fc2',
-    cost:'15,000 cr', buildOn:'RESORT planets',
-    enables:'Enables this planet to bake delivered GRAIN into CARGO.',
-    formula:'1 Grain   →   1 Cargo', time:'~40 seconds' },
+    cost:'15,000 cr', buildOn:'RESORT planets', buildOnColor:'#38aaf0',
+    enables:'Enables this planet to bake delivered [Grain] into [Cargo].',
+    formula:'1 [Grain]   →   1 [Cargo]', time:'~40 seconds' },
   glassworks:{ name:'GLASSWORKS', kind:'glassworks', biome:'#3a9fc2',
-    cost:'25,000 cr', buildOn:'RESORT planets',
-    enables:'Enables this planet to melt delivered SAND + CHEMICALS into GLASS.',
-    formula:'1 Sand  +  1 Chemical   →   1 Glass', time:'~40 seconds' },
+    cost:'25,000 cr', buildOn:'RESORT planets', buildOnColor:'#38aaf0',
+    enables:'Enables this planet to melt delivered [Sand] + [Chemical] into [Glass].',
+    formula:'1 [Sand]  +  1 [Chemical]   →   1 [Glass]', time:'~40 seconds' },
   __large_station__:{ name:'LARGE STATION', kind:'station', rings:2, biome:'#8893a3',
     cost:'50,000 cr  +  4 Iron',
     buildOn:'any planet where a STATION has already been built',
-    enables:'Enables TRAINS in both LOW and MEDIUM orbits to LOAD/UNLOAD simultaneously.' },
+    enables:'Enables TRAINS in both LOW and MEDIUM orbits\nto LOAD/UNLOAD simultaneously.' },
   __terminal__:{ name:'TERMINAL', kind:'station', rings:3, biome:'#8893a3',
     cost:'75,000 cr  +  6 Steel',
     buildOn:'any planet where a LARGE STATION has already been built',
@@ -16547,9 +19151,12 @@ function drawUpgradeUnlockPopup(){
   // ── Size the popup to its content (no fixed height / blank tail) ──
   // Count wrapped lines per section (mirrors the _wrapC wrapping below: split on
   // spaces, max width pw-36) so the height is exactly what the copy needs.
-  const _lc=(text,font)=>{ ctx.font=font; const _ws=(text||'').split(' '); let _l='',_n=0; for(const _w of _ws){ const _t=_l?_l+' '+_w:_w; if(ctx.measureText(_t).width<=pw-36)_l=_t; else { if(_l)_n++; _l=_w; } } if(_l)_n++; return Math.max(1,_n); };
+  const _lc=(text,font)=>{ ctx.font=font; let _n=0; for(const _seg of (text||'').split('\n')){ const _ws=_seg.split(' '); let _l=''; for(const _w of _ws){ const _t=_l?_l+' '+_w:_w; if(ctx.measureText(_t).width<=pw-36)_l=_t; else { if(_l)_n++; _l=_w; } } if(_l)_n++; } return Math.max(1,_n); };
+  // Tokenised line-count — mirrors _wrapTokC's [Cargo]-aware wrapping so the
+  // height reserved for enables / formula matches the bold, coloured render.
+  const _lcTok=(text,font)=>{ let _n=0; for(const _seg of (text||'').split('\n')) _n+=_objWrapTokens(_objTokenize(_seg),pw-36,font).length; return Math.max(1,_n); };
   const _F_COST='bold 12px "Exo 2",sans-serif',_F_BUILD='bold 11px "Exo 2",sans-serif',_F_EN='10px "Exo 2",sans-serif',_F_FORM='bold 11px "Exo 2",sans-serif';
-  const _nCost=_lc(info.cost||'—',_F_COST), _nBuild=_lc(info.buildOn||'—',_F_BUILD), _nEn=_lc(info.enables||'',_F_EN), _nForm=info.formula?_lc(info.formula,_F_FORM):0;
+  const _nCost=_lc(info.cost||'—',_F_COST), _nBuild=_lc(info.buildOn||'—',_F_BUILD), _nEn=_lcTok(info.enables||'',_F_EN), _nForm=info.formula?_lcTok(info.formula,_F_FORM):0;
   let _be=196;                       // body cursor start (clears the visual)
   _be+=15+15*_nCost+9;               // COST: caption + value + gap
   _be+=15+14*_nBuild+9;              // BUILDABLE ON
@@ -16563,10 +19170,11 @@ function drawUpgradeUnlockPopup(){
   ctx.strokeStyle='rgba(245,200,40,0.7)'; ctx.lineWidth=2; ctx.strokeRect(px,py,pw,ph);
   ctx.save();
   ctx.textAlign='center';
-  // Label line
+  // Label line — re-titled "NEW UPGRADE CONSTRUCTED" for the deferred
+  // iron-foundry popup (shown after the foundry is actually built).
   ctx.font='bold 10px Orbitron,sans-serif';
   ctx.fillStyle='rgba(255,225,130,0.78)';
-  ctx.fillText('NEW PLANET UPGRADE UNLOCKED',px+pw/2,py+22);
+  ctx.fillText((popupState.upgradeUnlock||{}).constructed?'NEW UPGRADE CONSTRUCTED':'NEW PLANET UPGRADE UNLOCKED',px+pw/2,py+22);
   // Name — big glowing title
   ctx.font='bold 15px Orbitron,sans-serif';
   ctx.fillStyle='#ffe080'; ctx.shadowColor='#ffaa20'; ctx.shadowBlur=12;
@@ -16579,27 +19187,61 @@ function drawUpgradeUnlockPopup(){
   // the line AFTER the block.
   const _wrapC=(text,font,col,startY,lh)=>{
     ctx.font=font; ctx.fillStyle=col;
-    const _ws=(text||'').split(' '); let _line='', _y=startY;
-    for(const _w of _ws){ const _t=_line?_line+' '+_w:_w; if(ctx.measureText(_t).width<=pw-36){_line=_t;} else {ctx.fillText(_line,px+pw/2,_y); _y+=lh; _line=_w;} }
-    if(_line){ ctx.fillText(_line,px+pw/2,_y); _y+=lh; }
+    let _y=startY;
+    // Honour explicit '\n' line breaks, then word-wrap each segment.
+    for(const _seg of (text||'').split('\n')){
+      const _ws=_seg.split(' '); let _line='';
+      for(const _w of _ws){ const _t=_line?_line+' '+_w:_w; if(ctx.measureText(_t).width<=pw-36){_line=_t;} else {ctx.fillText(_line,px+pw/2,_y); _y+=lh; _line=_w;} }
+      if(_line){ ctx.fillText(_line,px+pw/2,_y); _y+=lh; }
+    }
+    return _y;
+  };
+  // Tokenised centred word-wrap — like _wrapC but routes [Cargo] tokens through
+  // the shared objective tokenizer so resource refs ([Iron], [Water], …) get
+  // their cargo colour + bold, matching the convention used in mission/bubble
+  // text. Honours explicit '\n' breaks. Restores textAlign='center' on exit so
+  // the centred _cap/footer draws that follow are unaffected.
+  const _wrapTokC=(text,font,baseCol,startY,lh)=>{
+    let _y=startY;
+    for(const _seg of (text||'').split('\n')){
+      for(const _ln of _objWrapTokens(_objTokenize(_seg),pw-36,font)){
+        ctx.textBaseline='alphabetic';
+        _objDrawLineCentered(_ln,px+pw/2,_y,font,baseCol);
+        _y+=lh;
+      }
+    }
+    ctx.textAlign='center';
     return _y;
   };
   // Small caption helper for the COST / BUILDABLE ON / ENABLES section headers.
   const _cap=(txt,y)=>{ ctx.font='9px Orbitron,sans-serif'; ctx.fillStyle='rgba(150,200,255,0.65)'; ctx.fillText(txt,px+pw/2,y); };
   let _ly=py+196;
-  // (1) COST
+  // (1) COST — red cost pill (matches the PURCHASE cost pills elsewhere).
   _cap('COST',_ly); _ly+=15;
-  _ly=_wrapC(info.cost||'—',_F_COST,'rgba(255,220,120,0.97)',_ly,15)+9;
+  {
+    const _cTxt=info.cost||'—';
+    ctx.font='bold 11px "Exo 2",sans-serif';
+    const _cPW=ctx.measureText(_cTxt).width+16, _cPH=17;
+    const _cPX=px+(pw-_cPW)/2, _cPY=_ly-13;
+    ctx.fillStyle='rgba(110,18,18,0.92)';
+    ctx.beginPath(); ctx.roundRect(_cPX,_cPY,_cPW,_cPH,4); ctx.fill();
+    ctx.fillStyle='rgba(255,255,255,0.97)'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(_cTxt,px+pw/2,_cPY+_cPH/2); ctx.textBaseline='alphabetic';
+  }
+  _ly+=24;
   // (2) BUILDABLE ON — eligible biomes, or the prerequisite that must be met.
+  // When the upgrade is biome-specific (info.buildOnColor set), the "BIOME
+  // planets" line is drawn bold in that biome's colour (e.g. DESERT in desert
+  // sand-orange); otherwise it keeps the neutral blue.
   _cap('BUILDABLE ON',_ly); _ly+=15;
-  _ly=_wrapC(info.buildOn||'—',_F_BUILD,'rgba(190,225,255,0.95)',_ly,14)+9;
-  // (3) ENABLES — one-sentence benefit.
+  _ly=_wrapC(info.buildOn||'—',_F_BUILD,info.buildOnColor||'rgba(190,225,255,0.95)',_ly,14)+9;
+  // (3) ENABLES — one-sentence benefit. Tokenised so [Cargo] refs colour+bold.
   _cap('ENABLES',_ly); _ly+=15;
-  _ly=_wrapC(info.enables||'',_F_EN,'rgba(228,228,233,0.9)',_ly,14);
+  _ly=_wrapTokC(info.enables||'',_F_EN,'rgba(228,228,233,0.9)',_ly,14);
   // Processing formula + time (production upgrades only).
   if(info.formula){
     _ly+=8;
-    _ly=_wrapC(info.formula,_F_FORM,'rgba(255,235,160,0.97)',_ly,15);
+    _ly=_wrapTokC(info.formula,_F_FORM,'rgba(255,235,160,0.97)',_ly,15);
     if(info.time) _ly=_wrapC('Processing time: '+info.time,'9px "Exo 2",sans-serif','rgba(200,205,215,0.78)',_ly,13);
   }
   // Footer + OKAY — placed right after the body (no blank tail).
@@ -16611,6 +19253,119 @@ function drawUpgradeUnlockPopup(){
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
   ctx.fillStyle='rgba(255,245,210,0.97)'; ctx.fillText('OKAY!',_bx+_bw/2,_by+17);
   _upgradeUnlockOkBounds={x:_bx,y:_by,w:_bw,h:_bh};
+  ctx.restore();
+}
+
+// Shared word-wrap → array-of-lines helper for the reward / first-delivery popups.
+// Honours explicit '\n' then greedily wraps each segment at maxW.
+function _popupWrapLines(text,font,maxW){
+  ctx.font=font; const out=[];
+  for(const seg of (text||'').split('\n')){
+    const ws=seg.split(' '); let l='';
+    for(const w of ws){ const t=l?l+' '+w:w; if(ctx.measureText(t).width<=maxW) l=t; else { if(l)out.push(l); l=w; } }
+    if(l) out.push(l);
+  }
+  return out.length?out:[''];
+}
+
+// ── Mission-reward popup (green) ─────────────────────────────
+// Fires on any mission completion that grants +credits. Title "Mission
+// Completed: <name>", a large green reward pill, a one-line detail, OKAY.
+let _missionRewardOkBounds=null;
+function drawMissionRewardPopup(){
+  if(activePopup!=='mission_reward') return;
+  const _mr=popupState.missionReward; if(!_mr) return;
+  const pw=380;
+  const _nameLines=_popupWrapLines(_mr.name,'bold 15px Orbitron,sans-serif',pw-44);
+  const _detTxt='Mission accomplished! Your corporation earned a reward of '+_fmtCr(_mr.reward)+' credits.';
+  const _detLines=_popupWrapLines(_detTxt,'11px "Exo 2",sans-serif',pw-48);
+  // Height sized to content.
+  const _pillH=38;
+  let ph=24+18 + _nameLines.length*20+8 + (_pillH+22) + (_detLines.length*16+10) + (26+18);
+  const px=(W-pw)/2; let py=(H-ph)/2; if(py<TOP_H+4) py=TOP_H+4;
+  _clearTextOverlayRect(px,py,pw,ph);
+  ctx.fillStyle='rgba(4,16,10,0.97)'; ctx.fillRect(px,py,pw,ph);
+  ctx.strokeStyle='rgba(60,210,130,0.75)'; ctx.lineWidth=2; ctx.strokeRect(px,py,pw,ph);
+  ctx.save(); ctx.textAlign='center';
+  // Caption + name (reads as "Mission Completed: <name>").
+  ctx.font='bold 10px Orbitron,sans-serif'; ctx.fillStyle='rgba(130,235,175,0.82)';
+  ctx.fillText('MISSION COMPLETED',px+pw/2,py+24);
+  ctx.font='bold 15px Orbitron,sans-serif'; ctx.fillStyle='#7dffb0'; ctx.shadowColor='#1fae6e'; ctx.shadowBlur=12;
+  let _ny=py+46; for(const l of _nameLines){ ctx.fillText(l,px+pw/2,_ny); _ny+=20; }
+  ctx.shadowBlur=0;
+  // Large green reward pill.
+  const _pillTxt='+ '+_fmtCr(_mr.reward)+' CR';
+  ctx.font='bold 18px Orbitron,sans-serif';
+  const _pillW=ctx.measureText(_pillTxt).width+44;
+  const _pillY=_ny+8, _pillX=px+(pw-_pillW)/2;
+  const _pg=ctx.createLinearGradient(0,_pillY,0,_pillY+_pillH);
+  _pg.addColorStop(0,'rgba(44,196,116,0.96)'); _pg.addColorStop(1,'rgba(20,138,80,0.96)');
+  ctx.fillStyle=_pg; ctx.beginPath(); ctx.roundRect(_pillX,_pillY,_pillW,_pillH,_pillH/2); ctx.fill();
+  ctx.strokeStyle='rgba(150,255,200,0.9)'; ctx.lineWidth=1.5; ctx.beginPath(); ctx.roundRect(_pillX,_pillY,_pillW,_pillH,_pillH/2); ctx.stroke();
+  ctx.fillStyle='rgba(255,255,255,0.98)'; ctx.shadowColor='rgba(8,55,28,0.7)'; ctx.shadowBlur=4;
+  ctx.textBaseline='middle'; ctx.fillText(_pillTxt,px+pw/2,_pillY+_pillH/2+1); ctx.textBaseline='alphabetic'; ctx.shadowBlur=0;
+  // Detail line(s).
+  let _dy=_pillY+_pillH+22;
+  ctx.font='11px "Exo 2",sans-serif'; ctx.fillStyle='rgba(208,234,218,0.92)';
+  for(const l of _detLines){ ctx.fillText(l,px+pw/2,_dy); _dy+=16; }
+  // OKAY button.
+  const _bw=110,_bh=26,_bx=px+(pw-_bw)/2,_by=py+ph-_bh-14;
+  const _hov=!!popupState.mrOkHover;
+  ctx.fillStyle=_hov?'rgba(28,180,105,0.97)':'rgba(18,120,72,0.9)'; ctx.fillRect(_bx,_by,_bw,_bh);
+  ctx.strokeStyle=_hov?'rgba(130,255,190,0.95)':'rgba(80,225,150,0.82)'; ctx.lineWidth=1.5; ctx.strokeRect(_bx,_by,_bw,_bh);
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.fillStyle='rgba(240,255,245,0.97)';
+  ctx.fillText('OKAY!',_bx+_bw/2,_by+17);
+  _missionRewardOkBounds={x:_bx,y:_by,w:_bw,h:_bh};
+  ctx.restore();
+}
+
+// ── First-delivery popup ─────────────────────────────────────
+// Fires the first time a planet ever receives player cargo. Shows the delivered
+// car type, "First Delivery arrives at <planet>", and a flavour line.
+let _firstDeliveryOkBounds=null;
+function drawFirstDeliveryPopup(){
+  if(activePopup!=='first_delivery') return;
+  const _fdd=popupState.firstDelivery; if(!_fdd) return;
+  const p=galaxy?galaxy.planets[_fdd.planetId]:null;
+  const _pName=p?p.name:'the planet';
+  const _inhabited=!!(p&&(p.population||0)>0);
+  const _cargoName=CARGO_LABEL[_fdd.cargo]||((_fdd.cargo||'cargo').toUpperCase());
+  const _who=_inhabited?'Citizens':((corpName||'Corporation')+' investors');
+  const pw=400;
+  const _titleLines=_popupWrapLines('First Delivery arrives at '+_pName,'bold 15px Orbitron,sans-serif',pw-40);
+  const _detTxt=_who+' rejoice as the first-ever shipment of '+_cargoName+' arrives at '+_pName+'. S.D. '+(_fdd.sd||0).toFixed(1);
+  const _detLines=_popupWrapLines(_detTxt,'12px "Exo 2",sans-serif',pw-44);
+  const _vizH=64;
+  let ph=22+_titleLines.length*20+12 + (_vizH+18) + (_detLines.length*17+10) + (28+18);
+  const px=(W-pw)/2; let py=(H-ph)/2; if(py<TOP_H+4) py=TOP_H+4;
+  _clearTextOverlayRect(px,py,pw,ph);
+  ctx.fillStyle='rgba(4,11,22,0.97)'; ctx.fillRect(px,py,pw,ph);
+  ctx.strokeStyle='rgba(90,180,255,0.78)'; ctx.lineWidth=2; ctx.strokeRect(px,py,pw,ph);
+  ctx.save(); ctx.textAlign='center';
+  // Title.
+  ctx.font='bold 15px Orbitron,sans-serif'; ctx.fillStyle='#9ad6ff'; ctx.shadowColor='#2a78d0'; ctx.shadowBlur=11;
+  let _ty=py+30; for(const l of _titleLines){ ctx.fillText(l,px+pw/2,_ty); _ty+=20; }
+  ctx.shadowBlur=0;
+  // Delivered car sprite (loaded variant), bottom-aligned over the rail line.
+  const _vizBottomY=_ty+_vizH;
+  const _spK=getCarSprite(_fdd.carType,true);
+  if(_spK&&imgs[_spK]){
+    ctx.strokeStyle='rgba(70,130,210,0.35)'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(px+pw/2-90,_vizBottomY+2); ctx.lineTo(px+pw/2+90,_vizBottomY+2); ctx.stroke();
+    _drawFittedSprite(ctx,_fdd.carType,px+pw/2,_vizBottomY,150,_vizH,_spK);
+  }
+  // Flavour detail.
+  let _dy=_vizBottomY+30;
+  ctx.font='12px "Exo 2",sans-serif'; ctx.fillStyle='rgba(206,226,250,0.92)';
+  for(const l of _detLines){ ctx.fillText(l,px+pw/2,_dy); _dy+=17; }
+  // OKAY button.
+  const _bw=110,_bh=27,_bx=px+(pw-_bw)/2,_by=py+ph-_bh-13;
+  const _hov=!!popupState.fdOkHover;
+  ctx.fillStyle=_hov?'rgba(40,120,225,0.97)':'rgba(24,80,170,0.9)'; ctx.fillRect(_bx,_by,_bw,_bh);
+  ctx.strokeStyle=_hov?'rgba(140,200,255,0.95)':'rgba(90,160,240,0.82)'; ctx.lineWidth=1.5; ctx.strokeRect(_bx,_by,_bw,_bh);
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.fillStyle='rgba(235,245,255,0.97)';
+  ctx.fillText('OKAY!',_bx+_bw/2,_by+17);
+  _firstDeliveryOkBounds={x:_bx,y:_by,w:_bw,h:_bh};
   ctx.restore();
 }
 
@@ -17065,7 +19820,7 @@ function drawCorpPopup(){
   let _cperkY=_ceoBaseY+14+_portH+45; // salary pill text baseline
   // Salary pill
   const _csal=_corp.ceoSalary||10000;
-  const _csalTxt='-'+_fmtCr(_csal)+' cr/S.D.';
+  const _csalTxt='-'+_fmtCr(_csal)+' cr/Stardate';
   ctx.font='11px "Exo 2",sans-serif';
   const _csalPW=Math.min(_cpMaxW,ctx.measureText(_csalTxt).width+16);
   const _csalBg=_csal>200000?'rgba(90,18,18,0.65)':_csal>100000?'rgba(90,52,10,0.65)':'rgba(85,72,8,0.65)';
@@ -17168,14 +19923,6 @@ function drawCorpPopup(){
   _dRow2('Cargo Delivered',_cargoCount.toLocaleString(),_bRX,_bY+_bRLH*6);
   _dRow2('Passengers Delivered',_paxCount.toLocaleString(),_bRX,_bY+_bRLH*7);
   _dRow2('Hazmat Incinerated',_totalHazmatIncinerated.toLocaleString(),_bRX,_bY+_bRLH*8);
-    if(_aiCorp){
-      const _aiNW=_aiComputeNetWorth();
-      const _aiNWTxt=_aiNW>=1000000?(_aiNW/1000000).toFixed(1)+'M cr':_aiNW>=1000?Math.round(_aiNW/1000)+'k cr':_aiNW+' cr';
-      const _aiNWStr='rivals: '+_aiCorp.name.split(' ').slice(0,2).join(' ')+' · '+_aiNWTxt+' · '+_aiCorp.trainIndices.length+' trains · '+_aiCorp.stationsBuilt+' stn';
-      ctx.font='9px "Exo 2",sans-serif';ctx.textAlign='left';
-      ctx.fillStyle='rgba(232,147,32,0.70)';
-      ctx.fillText(_aiNWStr,_bRX-170,_bY+_bRLH*9+4);
-    }
 
   ctx.restore();
 }
@@ -17245,7 +19992,7 @@ function drawCeoHirePopup(){
     ctx.fillText(_ceoNickname(ceoData.primaryPerk),panCX,_pY+_pH+30);
     // Salary pill
     const _sal=ceoData.salary||ceoData.ceoSalary||0;
-    const _salTxt='-'+_fmtCr(_sal)+' cr/S.D.';
+    const _salTxt='-'+_fmtCr(_sal)+' cr/Stardate';
     const _pkMaxW=_panW-20;
     ctx.font='11px "Exo 2",sans-serif';
     const _salTW=ctx.measureText(_salTxt).width;
@@ -17352,6 +20099,16 @@ function _versusLiveValue(which){
   if(_m==='trains'  ) return _aiCorp.trainIndices.length;
   return 0;
 }
+// Pick a "nice" axis step (1 / 2 / 2.5 / 5 ×10^n) so ~`ticks` gridlines cover
+// `range` with round-number labels (e.g. 200K steps topping out at 1M).
+function _niceStep(range, ticks){
+  if(!(range>0)) return 1;
+  const _raw=range/Math.max(1,ticks);
+  const _mag=Math.pow(10,Math.floor(Math.log10(_raw)));
+  const _n=_raw/_mag;
+  const _nice=_n<=1?1:_n<=2?2:_n<=2.5?2.5:_n<=5?5:10;
+  return _nice*_mag;
+}
 function _drawFinancesVersusTab(px,py,pw,ph,_tabBaseY){
   const _curSd=Math.floor(stardate);
   // Metric dropdown — sits in the same row, mirrors the FINANCIALS-tab control.
@@ -17408,20 +20165,23 @@ function _drawFinancesVersusTab(px,py,pw,ph,_tabBaseY){
   // ── Chart area ──
   const _cX=px+58, _cY=_ddY+_ddH+22, _cW=pw-78, _cH=py+ph-_cY-34;
 
-  // Y-axis range with a smidge of padding so points don't sit on the frame.
-  let _maxY=Math.max(1,..._pVals,..._aVals);
+  // Y-axis with ROUND-NUMBER gridlines: pick a nice step (1/2/2.5/5 ×10^n) and
+  // round the top up to a multiple of it (e.g. data max ~870K → step 200K, top
+  // 1M), instead of dividing the raw data max into 5 ugly fractions.
+  let _dataMax=Math.max(1,..._pVals,..._aVals)*1.05; // a little headroom above the top point
   let _minY=Math.min(0,..._pVals,..._aVals);
-  const _yPad=Math.max(1,(_maxY-_minY)*0.12);
-  _maxY+=_yPad; if(_minY>0) _minY=0;
-  if(_maxY===_minY) _maxY=_minY+1;
+  const _step=_niceStep(_dataMax-_minY,5);
+  _minY=Math.floor(_minY/_step)*_step;               // 0 for non-negative data; a nice multiple if negative
+  let _maxY=_minY+Math.max(1,Math.ceil((_dataMax-_minY)/_step))*_step;
+  const _numSteps=Math.max(1,Math.round((_maxY-_minY)/_step));
 
   // Axes + gridlines + Y-tick labels
   ctx.strokeStyle='rgba(60,140,90,0.55)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(_cX,_cY); ctx.lineTo(_cX,_cY+_cH); ctx.lineTo(_cX+_cW,_cY+_cH); ctx.stroke();
   ctx.font='8px "Exo 2",sans-serif'; ctx.textAlign='right'; ctx.fillStyle='rgba(140,200,160,0.70)';
-  for(let _ti=0;_ti<=5;_ti++){
-    const _vy=_cY+_cH-(_cH*_ti/5);
-    const _vv=_minY+(_maxY-_minY)*_ti/5;
+  for(let _ti=0;_ti<=_numSteps;_ti++){
+    const _vy=_cY+_cH-(_cH*_ti/_numSteps);
+    const _vv=_minY+_step*_ti;
     ctx.fillText(_selMet.fmt(_vv),_cX-4,_vy+3);
     ctx.strokeStyle='rgba(60,140,90,0.15)';
     ctx.beginPath(); ctx.moveTo(_cX,_vy); ctx.lineTo(_cX+_cW,_vy); ctx.stroke();
@@ -17464,16 +20224,16 @@ function _drawFinancesVersusTab(px,py,pw,ph,_tabBaseY){
   // was open (causing legend text to bleed visibly through the dropdown).
   // Moving it here also keeps it out of the way of the right-most data
   // points, which are usually the most interesting on a per-SD chart.
+  // Colours + corp names overlaid DIRECTLY on the chart — no background box.
+  // Names run much longer before truncating with an ellipsis.
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
   const _lgX=_cX+8, _lgY=_cY+8;
-  ctx.fillStyle='rgba(10,22,16,0.78)'; ctx.fillRect(_lgX-6,_lgY-3,148,28);
-  ctx.strokeStyle='rgba(60,140,90,0.35)'; ctx.strokeRect(_lgX-6,_lgY-3,148,28);
+  const _lgMaxW=Math.min(_cW-30, 280); // generous vs the old 108
+  const _lgTrunc=(s)=>{ if(ctx.measureText(s).width<=_lgMaxW) return s; while(s.length>1 && ctx.measureText(s+'…').width>_lgMaxW) s=s.slice(0,-1); return s+'…'; };
   ctx.fillStyle='rgba(80,180,255,1)'; ctx.fillRect(_lgX,_lgY+1,10,3);
-  ctx.fillStyle='rgba(200,230,255,0.95)';
-  {let _pn=(corpName||'YOU'); while(ctx.measureText(_pn).width>108) _pn=_pn.slice(0,-1); ctx.fillText(_pn,_lgX+16,_lgY+5);}
+  ctx.fillStyle='rgba(200,230,255,0.97)'; ctx.fillText(_lgTrunc(corpName||'YOU'),_lgX+16,_lgY+5);
   ctx.fillStyle='rgba(255,170,60,1)'; ctx.fillRect(_lgX,_lgY+15,10,3);
-  ctx.fillStyle='rgba(255,220,170,0.95)';
-  {let _an=(_aiCorp.name||'RIVAL'); while(ctx.measureText(_an).width>108) _an=_an.slice(0,-1); ctx.fillText(_an,_lgX+16,_lgY+19);}
+  ctx.fillStyle='rgba(255,220,170,0.97)'; ctx.fillText(_lgTrunc(_aiCorp.name||'RIVAL'),_lgX+16,_lgY+19);
 
   // Dropdown options last so they overlay the chart cleanly.
   _drawVersusDropdownOptions(_ddX,_ddY,_ddW,_ddH);
@@ -17982,6 +20742,10 @@ function drawFinancesPopup(){
   }
   // Dropdown options drawn last so they render on top of the table header and rows
   if(_financeDropdownOpen){
+    // Wipe the HD text overlay over the WHOLE dropdown footprint first — the
+    // table text behind it is overlay text (composited last) and would otherwise
+    // bleed THROUGH the dropdown's opaque option backgrounds.
+    _clearTextOverlayRect(_dbX+_lblW, _dbY+_dbH, _dbW, _bdKeys.length*_dbH);
     for(let _oi=0;_oi<_bdKeys.length;_oi++){
       const _oy=_dbY+_dbH+_oi*_dbH;
       const _isAct=_bdKeys[_oi]===_financeBreakdown;
@@ -18104,6 +20868,20 @@ function _drawMissionImage(m,cx,cy,w,h){
       }
       _ry+=_rowH;
     }
+  } else if(m.imageType==='dyson'){
+    // Partial Dyson sphere around a small amber star (Helios missions)
+    const _dyR=Math.min(w,h)*0.24;
+    const _dyCol={core:'#ffcf70',hi:'#fff3c0',glow:'#ffab30',edge:'#c87818'};
+    drawStar(cx,cy+h*0.04,_dyR,_dyCol,0.45);
+  } else if(m.imageType==='blackhole'){
+    if(typeof drawBlackHole==='function'){
+      drawBlackHole(cx,cy+h*0.02,Math.min(w,h)*0.22,(typeof _drawTs==='number'?_drawTs:0));
+    } else {
+      // Fallback: plain dark disc + amber accretion ellipse
+      ctx.fillStyle='#000'; ctx.beginPath(); ctx.arc(cx,cy,Math.min(w,h)*0.18,0,Math.PI*2); ctx.fill();
+      ctx.strokeStyle='rgba(255,170,60,0.8)'; ctx.lineWidth=3;
+      ctx.beginPath(); ctx.ellipse(cx,cy,Math.min(w,h)*0.30,Math.min(w,h)*0.10,0.3,0,Math.PI*2); ctx.stroke();
+    }
   } else if(m.imageType==='foundry'){
     const bw=w*0.60,bh=h*0.48,bx=cx-bw/2,by=cy-bh/2+h*0.08;
     ctx.fillStyle='rgba(72,76,82,0.95)'; ctx.fillRect(bx,by,bw,bh);
@@ -18141,6 +20919,14 @@ function _maybeStartMissionTip(){
     _missionTipStartMs=Date.now();
     _missionTipPending=false;
   }
+}
+// Tokenise a plain callout string with CLICK / SHIFT+CLICK auto-bolded — for the
+// few callouts that render via fillText instead of _drawBubble. Draw the result
+// with _objDrawLineCentered (which honours each token's bold flag).
+function _calloutBoldTokens(txt){
+  const _toks=_objTokenize(txt);
+  for(const _t of _toks){ const _k=_t.text.toLowerCase().replace(/[^a-z0-9]/g,''); if(_k==='click'||_k==='shiftclick') _t.bold=true; }
+  return _toks;
 }
 function _drawMissionTip(){
   if(!_missionTipStartMs) return;
@@ -18197,38 +20983,79 @@ function _drawRouteHereResult(){
   else if(_elpMs>TOTAL-FADE_OUT) _a=(TOTAL-_elpMs)/FADE_OUT;
   else _a=1;
   if(_a<=0) return;
-  // Anchor above the [O] options text; fall back to the galaxy-viewport centre.
-  const _ob=_hintBounds.find(b=>b.popup==='options');
-  const _tipX=_ob?(_ob.x+_ob.w/2):((W-PANEL_W)/2);
-  const _tipY=_ob?(_ob.y-3):(GH-11);
   const _ok=_routeHereResultOk;
   const _txt=_ok?'ROUTE confirmed':'Failed to find a viable ROUTE';
   ctx.font='bold 9px "Exo 2",sans-serif';
   const _tw=ctx.measureText(_txt).width;
   const _pad=11, _bH=24, _bR=6, _tailH=8;
   const _bW=_tw+_pad*2;
-  let _bx=_tipX-_bW/2;
-  if(_bx<6) _bx=6;
-  if(_bx+_bW>W-6) _bx=W-6-_bW;
-  const _by=_tipY-_tailH-_bH;
-  const _tailX=Math.max(_bx+_bR+6,Math.min(_tipX,_bx+_bW-_bR-6));
   const _bg=_ok?'rgba(38,170,90,0.97)':'rgba(212,62,56,0.97)';
   const _sh=_ok?'rgba(0,120,50,0.55)':'rgba(150,20,20,0.55)';
-  // Wipe any HD-overlay text (chat log / hint bar) behind the pill so it can't
-  // bleed through the opaque background (HD overlay is composited last).
-  _clearTextOverlayRect(_bx-2,_by-2,_bW+4,_bH+_tailH+4);
+  // Default anchor: above the settings-gear button (lower-right); fall back to
+  // galaxy-viewport centre. On SUCCESS, point at the train the route was
+  // assigned to (its engine).
+  const _ob=_optsGearBtnBounds;
+  let _tipX=_ob?(_ob.x+_ob.w/2):((W-PANEL_W)/2);
+  let _tipY=_ob?(_ob.y-3):(GH-11);
+  // Galaxy viewport, clear of the top bar + right panel.
+  const vpL=12, vpR=W-PANEL_W-12, vpT=TOP_H+12, vpB=GH-12;
+  let _offTrain=null; // {sx,sy} true screen pos of an OFF-screen target train
+  const _rt=_routeHereResultTrain;
+  if(_ok && _rt && galaxy && trains.includes(_rt)){
+    const _pos=getTrainCarPos(_rt,0); // engine world position
+    if(_pos){
+      const [_sx,_sy]=w2s(_pos[0],_pos[1]);
+      if(_sx>=vpL&&_sx<=vpR&&_sy>=vpT&&_sy<=vpB){ _tipX=_sx; _tipY=_sy; }   // on-screen → point at engine
+      else { _offTrain={sx:_sx,sy:_sy}; }                                    // off-screen → point off the edge toward it
+    }
+  }
   ctx.save();
   ctx.globalAlpha=_a;
-  ctx.shadowColor=_sh; ctx.shadowBlur=8;
-  ctx.fillStyle=_bg;
-  ctx.beginPath(); ctx.roundRect(_bx,_by,_bW,_bH,_bR); ctx.fill();
-  // Downward tail toward the bottom bar.
-  ctx.beginPath(); ctx.moveTo(_tailX-6,_by+_bH); ctx.lineTo(_tailX+6,_by+_bH); ctx.lineTo(_tailX,_tipY); ctx.closePath(); ctx.fill();
-  ctx.shadowBlur=0;
-  ctx.fillStyle='#ffffff';
-  ctx.textAlign='center'; ctx.textBaseline='middle';
-  ctx.fillText(_txt,_bx+_bW/2,_by+_bH/2);
-  ctx.textBaseline='alphabetic';
+  if(_offTrain){
+    // Clamp a tip to the viewport edge in the train's direction; sit the bubble
+    // just inside that edge with a tail pointing OUTWARD toward the off-screen train.
+    const vcx=(vpL+vpR)/2, vcy=(vpT+vpB)/2;
+    const _ex=Math.max(vpL,Math.min(vpR,_offTrain.sx));
+    const _ey=Math.max(vpT,Math.min(vpB,_offTrain.sy));
+    let _dx=_offTrain.sx-vcx, _dy=_offTrain.sy-vcy; const _dl=Math.hypot(_dx,_dy)||1; _dx/=_dl; _dy/=_dl;
+    let _bx=_ex-_dx*(_bH/2+18)-_bW/2, _by=_ey-_dy*(_bH/2+18)-_bH/2;
+    _bx=Math.max(vpL,Math.min(vpR-_bW,_bx));
+    _by=Math.max(vpT,Math.min(vpB-_bH,_by));
+    _clearTextOverlayRect(Math.min(_bx,_ex)-2,Math.min(_by,_ey)-2,Math.abs(_ex-_bx)+_bW+4,Math.abs(_ey-_by)+_bH+4);
+    ctx.shadowColor=_sh; ctx.shadowBlur=8; ctx.fillStyle=_bg;
+    ctx.beginPath(); ctx.roundRect(_bx,_by,_bW,_bH,_bR); ctx.fill();
+    // Triangular tail from the bubble toward the edge point.
+    const _cx=_bx+_bW/2, _cy=_by+_bH/2;
+    let _tdx=_ex-_cx, _tdy=_ey-_cy; const _tl=Math.hypot(_tdx,_tdy)||1; _tdx/=_tl; _tdy/=_tl;
+    const _baseX=_cx+_tdx*(_bH*0.42), _baseY=_cy+_tdy*(_bH*0.42);
+    const _perpX=-_tdy, _perpY=_tdx, _half=6.5;
+    ctx.beginPath();
+    ctx.moveTo(_baseX+_perpX*_half,_baseY+_perpY*_half);
+    ctx.lineTo(_baseX-_perpX*_half,_baseY-_perpY*_half);
+    ctx.lineTo(_ex,_ey);
+    ctx.closePath(); ctx.fill();
+    ctx.shadowBlur=0; ctx.fillStyle='#ffffff';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(_txt,_cx,_cy); ctx.textBaseline='alphabetic';
+  } else {
+    let _bx=_tipX-_bW/2;
+    if(_bx<6) _bx=6;
+    if(_bx+_bW>W-6) _bx=W-6-_bW;
+    // Bubble normally sits ABOVE the tip (tail down). If that would clip the top
+    // bar (train near the top of the viewport), flip it BELOW (tail up).
+    let _below=false;
+    let _by=_tipY-_tailH-_bH;
+    if(_by<TOP_H+4){ _below=true; _by=_tipY+_tailH; }
+    const _tailX=Math.max(_bx+_bR+6,Math.min(_tipX,_bx+_bW-_bR-6));
+    _clearTextOverlayRect(_bx-2,Math.min(_by,_tipY)-2,_bW+4,Math.abs(_tipY-_by)+_bH+4);
+    ctx.shadowColor=_sh; ctx.shadowBlur=8; ctx.fillStyle=_bg;
+    ctx.beginPath(); ctx.roundRect(_bx,_by,_bW,_bH,_bR); ctx.fill();
+    if(_below){ ctx.beginPath(); ctx.moveTo(_tailX-6,_by); ctx.lineTo(_tailX+6,_by); ctx.lineTo(_tailX,_tipY); ctx.closePath(); ctx.fill(); }
+    else      { ctx.beginPath(); ctx.moveTo(_tailX-6,_by+_bH); ctx.lineTo(_tailX+6,_by+_bH); ctx.lineTo(_tailX,_tipY); ctx.closePath(); ctx.fill(); }
+    ctx.shadowBlur=0; ctx.fillStyle='#ffffff';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(_txt,_bx+_bW/2,_by+_bH/2); ctx.textBaseline='alphabetic';
+  }
   ctx.restore();
 }
 
@@ -18284,9 +21111,8 @@ function _drawBuyTrainHintCallout(){
   // Downward tail from bubble bottom to just above the hint text.
   ctx.beginPath(); ctx.moveTo(_tailX-7,_by+_bH); ctx.lineTo(_tailX+7,_by+_bH); ctx.lineTo(_tailX,_tipY); ctx.closePath(); ctx.fill();
   ctx.shadowBlur=0;
-  ctx.fillStyle='#1a1308';
-  ctx.textAlign='center'; ctx.textBaseline='middle';
-  ctx.fillText(_txt,_bx+_bW/2,_by+_bH/2);
+  ctx.textBaseline='middle';
+  _objDrawLineCentered(_calloutBoldTokens(_txt),_bx+_bW/2,_by+_bH/2,'10px "Exo 2",sans-serif','#1a1308');
   ctx.textBaseline='alphabetic';
   ctx.restore();
 }
@@ -18319,23 +21145,18 @@ function _drawFoundryCallout(){
   // Only render while the foundry card is actually visible on-screen.
   const _cb=_foundryCardScreenBounds;
   if(!_cb || activePopup!=='planet') return;
-  // Wrapped bubble text — kept literal-bracketed like the tutorial bubbles.
   const _txt='This upgrade allows this planet to combine delivered [Molten Ore] + [Water] into units of [Iron], a valuable resource';
   ctx.save();
-  ctx.font='10px "Exo 2",sans-serif';
+  const _fcFont='10px "Exo 2",sans-serif';
+  ctx.font=_fcFont;
   const _maxTextW=170;
-  const _words=_txt.split(' ');
-  const _lines=[]; let _cur='';
-  for(const _w of _words){
-    const _t=_cur?_cur+' '+_w:_w;
-    if(ctx.measureText(_t).width<=_maxTextW) _cur=_t;
-    else { if(_cur) _lines.push(_cur); _cur=_w; }
-  }
-  if(_cur) _lines.push(_cur);
-  let _tw=0; for(const _ln of _lines){ const _w=ctx.measureText(_ln).width; if(_w>_tw) _tw=_w; }
+  // Tokenise + wrap so [Molten Ore] / [Water] / [Iron] get the same cargo
+  // colour + bold treatment as mission text and the other callout bubbles.
+  const _lineToks=_objWrapTokens(_objTokenize(_txt), _maxTextW, _fcFont);
+  let _tw=0; for(const _tk of _lineToks){ const _w=_objLineWidth(_tk,_fcFont); if(_w>_tw) _tw=_w; }
   const _pad=12, _lh=15, _bR=7, _tailW=11;
   const _bW=_tw+_pad*2;
-  const _bH=Math.max(28,_lines.length*_lh+10);
+  const _bH=Math.max(28,_lineToks.length*_lh+10);
   // Box around the whole foundry card.
   ctx.globalAlpha=_a;
   ctx.shadowColor='rgba(255,210,40,0.75)'; ctx.shadowBlur=14;
@@ -18361,9 +21182,8 @@ function _drawFoundryCallout(){
   const _tb=Math.max(_by+_bR+8,Math.min(_tipY,_by+_bH-_bR-8));
   ctx.beginPath(); ctx.moveTo(_bx,_tb-7); ctx.lineTo(_bx,_tb+7); ctx.lineTo(_tipX,_tipY); ctx.closePath(); ctx.fill();
   ctx.shadowBlur=0;
-  ctx.fillStyle='#1a1308';
-  ctx.textAlign='center'; ctx.textBaseline='middle';
-  for(let _i=0;_i<_lines.length;_i++) ctx.fillText(_lines[_i],_bx+_bW/2,_by+_pad/2+_lh/2+_i*_lh);
+  ctx.textBaseline='middle';
+  for(let _i=0;_i<_lineToks.length;_i++) _objDrawLineCentered(_lineToks[_i],_bx+_bW/2,_by+_pad/2+_lh/2+_i*_lh,_fcFont,'#1a1308');
   ctx.textBaseline='alphabetic';
   ctx.restore();
 }
@@ -18437,9 +21257,8 @@ function _drawSpeedTip(){
   ctx.beginPath(); ctx.roundRect(_bx,_by,_bW,_bH,_bR); ctx.fill();
   ctx.beginPath(); ctx.moveTo(_tailX-7,_by+_bH); ctx.lineTo(_tailX+7,_by+_bH); ctx.lineTo(_tailX,_tipY); ctx.closePath(); ctx.fill();
   ctx.shadowBlur=0;
-  ctx.fillStyle='#000000';
-  ctx.textAlign='center'; ctx.textBaseline='middle';
-  ctx.fillText(_txt,_bx+_bW/2,_by+_bH/2);
+  ctx.textBaseline='middle';
+  _objDrawLineCentered(_calloutBoldTokens(_txt),_bx+_bW/2,_by+_bH/2,'9px "Exo 2",sans-serif','#000000');
   ctx.textBaseline='alphabetic';
   ctx.restore();
 }
@@ -18539,9 +21358,8 @@ function _drawBuyTrainPlusHintCallout(){
   // Upward tail: base along the bubble's top edge, point pokes UP at the +
   ctx.beginPath(); ctx.moveTo(_tailX-7,_by); ctx.lineTo(_tailX+7,_by); ctx.lineTo(_tailX,_tipY); ctx.closePath(); ctx.fill();
   ctx.shadowBlur=0;
-  ctx.fillStyle='#1a1308';
-  ctx.textAlign='center'; ctx.textBaseline='middle';
-  ctx.fillText(_txt,_bx+_bW/2,_by+_bH/2);
+  ctx.textBaseline='middle';
+  _objDrawLineCentered(_calloutBoldTokens(_txt),_bx+_bW/2,_by+_bH/2,'10px "Exo 2",sans-serif','#1a1308');
   ctx.textBaseline='alphabetic';
   ctx.restore();
 }
@@ -18663,7 +21481,7 @@ function _drawTutorialChain(stage){
   // drawPanelTabs / drawTopBar, so the yellow bubble can never be partially
   // hidden behind the Stations/Trains folder tabs that sit at the top of the
   // panel.
-  const _POPUP_PHASES=new Set(['build_station','supply_demand','select_train','train_detail_edit','builder_add_cars','builder_purchase','train_detail_post_confirm','bf_click_build_station','bf_click_foundry_upgrade','bst_builder_add_iron']);
+  const _POPUP_PHASES=new Set(['orijen_details','ft_train_details','ft_desert_pd','ft_route_assign','build_station','supply_demand','select_train','train_detail_edit','builder_add_cars','builder_purchase','train_detail_post_confirm','bf_click_build_station','bf_click_foundry_upgrade','bst_builder_add_iron']);
   const _isPopupPhase=_POPUP_PHASES.has(_tutorialPhase);
   // Popup-stage calls for non-popup phases have nothing to do (no advance
   // either — that already ran in the 'galaxy' call earlier this frame).
@@ -18680,7 +21498,7 @@ function _drawTutorialChain(stage){
   // their initializer runs — calling them earlier throws ReferenceError and
   // takes the rest of drawGalaxy down with it.)
   if(_tutorialPhase==='pre_zoom'){
-    if(_elapsed>=2000){ _tutorialPhase='look_around'; _tutorialPhaseStartMs=_now; _tutorialFadeOutStartMs=0; }
+    if(_elapsed>=2000){ _tutorialPhase='look_around'; _tutorialPhaseStartMs=_now; _tutorialFadeOutStartMs=0; _orijenTutCentered=false; _crOrijenFramed=false; _lavaDetailsWasOpen=false; _lavaClosedTimerMs=0; _orijenDetailsOpenedTut=false; }
     return;
   }
   // ── Helpers ──────────────────────────────────────────────
@@ -18692,11 +21510,31 @@ function _drawTutorialChain(stage){
     ctx.save();
     const _bubbleFont='10px "Exo 2",sans-serif';
     ctx.font=_bubbleFont;
+    // In fullscreen, X is the universal Escape alias (see the keydown handler +
+    // _escLabelSwap), so any callout that tells the player to press ESC must say
+    // X instead. Whole-word, case-insensitive; trailing punctuation preserved.
+    if(_isFullscreen()) lines=lines.map(_ln=>_ln.replace(/\bESC\b/gi,'X'));
     // Tokenise each line so [Cargo] brackets + planet/biome phrases (DESERT
     // PLANET / LAVA PLANET / ORIJEN) get the SAME colour+bold treatment as
     // mission objective/details text. Measure with that styling so the bubble
     // sizes correctly around the (wider) bold tokens.
     const _lineToks=lines.map(_ln=>_objTokenize(_ln));
+    // opts.italicWords / opts.boldWords: case-insensitive whole-word lists to
+    // render italic / bold (e.g. "supplies", "STATION", "CARGO"). Trailing
+    // punctuation on a token is ignored when matching ("STATION," still hits).
+    // Layers on top of the cargo/planet colouring.
+    const _wordKey=s=>s.toLowerCase().replace(/[^a-z0-9]/g,'');
+    if(opts&&opts.italicWords&&opts.italicWords.length){
+      const _iw=new Set(opts.italicWords.map(_wordKey));
+      for(const _tk of _lineToks) for(const _t of _tk) if(_iw.has(_wordKey(_t.text))) _t.italic=true;
+    }
+    if(opts&&opts.boldWords&&opts.boldWords.length){
+      const _bw2=new Set(opts.boldWords.map(_wordKey));
+      for(const _tk of _lineToks) for(const _t of _tk) if(_bw2.has(_wordKey(_t.text))) _t.bold=true;
+    }
+    // Always bold the action words 'CLICK' and 'SHIFT+CLICK' in every bubble
+    // (punctuation-insensitive: "CLICK,"→click, "SHIFT+CLICK"→shiftclick).
+    for(const _tk of _lineToks) for(const _t of _tk){ const _k=_wordKey(_t.text); if(_k==='click'||_k==='shiftclick') _t.bold=true; }
     let _maxW=0;
     for(const _tk of _lineToks){ const _w=_objLineWidth(_tk,_bubbleFont); if(_w>_maxW) _maxW=_w; }
     const _pad=12, _lh=15, _bH=Math.max(28,lines.length*_lh+10), _bR=7, _tailH=10;
@@ -18859,6 +21697,46 @@ function _drawTutorialChain(stage){
     // current sprite layout instead of using a stale one.
     _blueHoverAnchorFrozen=null;
   };
+  // ── First-train tutorial (segments 2-3) helpers ────────────
+  // Home-system desert planet id (Orijen's system).
+  const _ftDesertId=()=>{
+    if(galaxy.origenId==null) return -1;
+    const _op=galaxy.planets[galaxy.origenId]; if(!_op) return -1;
+    for(const _p of galaxy.planets){ if(_p.starId===_op.starId && _p.type && _p.type.id==='desert') return _p.id; }
+    return -1;
+  };
+  // Centre + zoom so a planet's LOW orbit is framed in the visible galaxy area.
+  const _ftFrameLowOrbit=(planet)=>{
+    if(!planet) return;
+    const _lr=(ORBIT_TIERS[planet.size]&&ORBIT_TIERS[planet.size]['LOW'])||120;
+    const _vpW=W-PANEL_W, _vpH=GH-TOP_H;
+    const _sc=Math.max(MIN_SC,Math.min(MAX_SC,Math.min(_vpW/(2.3*_lr),_vpH/(2.3*_lr))));
+    cam.scale=_sc; cam.x=planet.x+PANEL_W/(2*_sc); cam.y=planet.y-TOP_H/(2*_sc); tracking=false;
+    if(typeof clampCamera==='function') clampCamera();
+  };
+  // Re-centre the camera on a world point EVERY frame (keeps the existing
+  // scale). Used to "lock" the camera onto an orbiting planet (or the moving
+  // train) while a tutorial bubble is displayed — the one-shot framers above
+  // drift as the planet orbits, so the lock re-applies the centre each frame.
+  const _ftLockOnWorld=(wx,wy)=>{
+    const _sc=cam.scale;
+    cam.x=wx+PANEL_W/(2*_sc); cam.y=wy-TOP_H/(2*_sc); tracking=false;
+    if(typeof clampCamera==='function') clampCamera();
+  };
+  const _ftLockOnPlanet=(p)=>{ if(p) _ftLockOnWorld(p.x,p.y); };
+  // Frame so two planets both sit in the visible area (for route building).
+  const _ftFrameBoth=(a,b)=>{
+    if(!a||!b) return;
+    const _buf=380;
+    const _xMin=Math.min(a.x,b.x)-_buf,_xMax=Math.max(a.x,b.x)+_buf;
+    const _yMin=Math.min(a.y,b.y)-_buf,_yMax=Math.max(a.y,b.y)+_buf;
+    const _vpW=W-PANEL_W,_vpH=GH-TOP_H;
+    const _sc=Math.max(MIN_SC,Math.min(MAX_SC,Math.min(_vpW/(_xMax-_xMin),_vpH/(_yMax-_yMin))));
+    cam.scale=_sc; cam.x=(_xMin+_xMax)/2+PANEL_W/(2*_sc); cam.y=(_yMin+_yMax)/2-TOP_H/(2*_sc); tracking=false;
+    if(typeof clampCamera==='function') clampCamera();
+  };
+  // First player train + its index.
+  const _ftTrain=()=>{ const _i=trains.findIndex(t=>t.isPlayer); return {i:_i, t:_i>=0?trains[_i]:null}; };
   // ── Phase: look_around ─────────────────────────────────────
   // First tutorial bubble — sits in the same spot as the upcoming ZOOM OUT
   // bubble. Lifecycle: 1 s fade in (handled by _resolveAlpha), 5 s fully
@@ -18890,7 +21768,7 @@ function _drawTutorialChain(stage){
         const _BUF=30, _visW0=W-PANEL_W;
         _skipZoom=(_sx0-_sr0>=_BUF && _sx0+_sr0<=_visW0-_BUF && _sy0-_sr0>=TOP_H+_BUF && _sy0+_sr0<=GH-_BUF);
       }
-      _tutorialPhase=_skipZoom?'double_click':'zoom_out';
+      _tutorialPhase=_skipZoom?'orijen_welcome':'zoom_out';
       _tutorialPhaseStartMs=_now; _tutorialFadeOutStartMs=0;
     }
     return;
@@ -18898,7 +21776,7 @@ function _drawTutorialChain(stage){
   // ── Phase: zoom_out ────────────────────────────────────────
   if(_tutorialPhase==='zoom_out'){
     const r=_resolveAlpha();
-    if(r.advanced){ _advanceTo('double_click'); return; }
+    if(r.advanced){ _advanceTo('orijen_welcome'); return; }
     if(_tutorialFadeOutStartMs===0){
       const _lp=galaxy.planets[_tutorialLavaPlanetId];
       if(_lp){
@@ -18911,6 +21789,83 @@ function _drawTutorialChain(stage){
       }
     }
     _drawBubble(['ZOOM OUT using the SCROLL WHEEL or ARROW KEYS'], null, r.alpha);
+    return;
+  }
+  // ── Phase: orijen_welcome ──────────────────────────────────
+  // Home-planet intro (NEW). Frames Orijen once, then shows a BLUE welcome
+  // bubble above it; 2 s later a YELLOW "double click for details" bubble fades
+  // in below it. Both persist until the player opens Orijen's detail popup,
+  // then fade out and hand off to orijen_details.
+  if(_tutorialPhase==='orijen_welcome'){
+    const _ori=galaxy.origenId!=null?galaxy.planets[galaxy.origenId]:null;
+    if(_ori && !_orijenTutCentered){
+      cam.scale=Math.sqrt(MIN_SC*MAX_SC);
+      trackingOffset={x:PANEL_W/(2*cam.scale),y:0};
+      cam.x=_ori.x+trackingOffset.x; cam.y=_ori.y; tracking=true;
+      if(typeof clampCamera==='function') clampCamera();
+      _orijenTutCentered=true;
+    }
+    const _open=(activePopup==='planet'&&popupState.planet&&galaxy.origenId!=null&&popupState.planet.id===galaxy.origenId);
+    // First open of the Orijen details window → queue the create_route intro now
+    // (it appears the moment the window closes; see the updateMissions gate).
+    if(_open) _orijenDetailsOpenedTut=true;
+    if(_tutorialFadeOutStartMs===0 && _open) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _advanceTo('orijen_details'); return; }
+    if(_ori){
+      const [_sx,_sy]=w2s(_ori.x,_ori.y);
+      const _sr=Math.max(8,_ori.radius*cam.scale);
+      _drawBubble(['Welcome, CEO. This is your HOME PLANET'], {x:_sx,y:_sy-_sr}, r.alpha, {color:'blue', target:{x:_sx,y:_sy}});
+      // Yellow "double click" prompt fades in 2 s after the welcome bubble.
+      let _ddA=0;
+      if(_tutorialFadeOutStartMs>0) _ddA=r.alpha;            // share the fade-out
+      else if(_elapsed>=FADE_MS+2000) _ddA=Math.min(1,(_elapsed-(FADE_MS+2000))/FADE_MS);
+      if(_ddA>0) _drawBubble(['DOUBLE CLICK on this PLANET for details'], {x:_sx,y:_sy+_sr}, _ddA, {below:true, target:{x:_sx,y:_sy}});
+    }
+    return;
+  }
+  // ── Phase: orijen_details (popup) ──────────────────────────
+  // Inside Orijen's detail popup. (3) box + bubble on the STATION upgrade card;
+  // (4) ~1.5 s later, box + bubble on the supply/demand pane ("supplies" /
+  // "demands" italic); (5) at ~8 s, a blue bubble at the [ESC] close hint. All
+  // persist until the popup closes, then hand off to the lava double_click.
+  if(_tutorialPhase==='orijen_details'){
+    const _open=(activePopup==='planet'&&popupState.planet&&galaxy.origenId!=null&&popupState.planet.id===galaxy.origenId);
+    if(_open) _orijenDetailsOpenedTut=true; // (also caught here in case the player opens it directly)
+    if(_tutorialFadeOutStartMs===0 && !_open) _tutorialFadeOutStartMs=_now; // popup closed → fade out
+    const r=_resolveAlpha();
+    if(r.advanced){
+      // New flow: instead of queueing the create_route mission here, walk the
+      // player through their FIRST TRAIN (the Iron Express) — camera-lock on it,
+      // then the train-details window. The create_route intro is deferred until
+      // that segment completes (see _ftFirstTrainTutDone gate).
+      _ftFocusFramed=false; _advanceTo('ft_focus_train'); return;
+    }
+    // (3) STATION upgrade card — box + bubble (shown immediately).
+    const _sc=popupState._stationCardBounds;
+    if(_sc){
+      _drawHighlightBox(_sc.x,_sc.y,_sc.w,_sc.h,r.alpha,3);
+      // Bubble sits BELOW the card, tail pointing UP at it.
+      _drawBubble(['Your HOME PLANET starts with a STATION, which','allows your TRAINs to LOAD + UNLOAD CARGO','from this planet'], {x:_sc.x+_sc.w/2,y:_sc.y+_sc.h}, r.alpha, {below:true, boldWords:['STATION','CARGO']});
+    }
+    // (4) supply/demand pane — fades in 5 s after (3); shares the fade-out.
+    let _sdA=0;
+    if(_tutorialFadeOutStartMs>0) _sdA=r.alpha;
+    else if(_elapsed>=FADE_MS+5000) _sdA=Math.min(1,(_elapsed-(FADE_MS+5000))/FADE_MS);
+    const _sd=popupState.supplyDemandPanelBounds;
+    if(_sdA>0 && _sd){
+      _drawHighlightBox(_sd.x,_sd.y,_sd.w,_sd.h,_sdA,3);
+      // Bubble sits ABOVE the pane, tail pointing DOWN at it.
+      _drawBubble(['This PLANET supplies [Passengers] and [Water],','and demands [Sand], among other things'], {x:_sd.x+_sd.w/2,y:_sd.y}, _sdA, {italicWords:['supplies','demands']});
+    }
+    // (5) blue [ESC] close hint — fades in 10 s after the phase starts (5 s after (4)).
+    let _escA=0;
+    if(_tutorialFadeOutStartMs>0) _escA=r.alpha;
+    else if(_elapsed>=FADE_MS+10000) _escA=Math.min(1,(_elapsed-(FADE_MS+10000))/FADE_MS);
+    const _eb=popupState.escBounds;
+    if(_escA>0 && _eb){
+      _drawBubble(['Press ESC, or CLICK anywhere outside of a window to close it'], {x:_eb.x+_eb.w-7,y:_eb.y+_eb.h*0.5}, _escA, {below:true, color:'blue'});
+    }
     return;
   }
   // ── Phase: double_click ────────────────────────────────────
@@ -18941,31 +21896,33 @@ function _drawTutorialChain(stage){
     if(r.advanced){ _advanceTo('supply_demand'); return; }
     if(_popupOpen&&popupState.buildStationBtnBounds){
       const _b=popupState.buildStationBtnBounds;
-      _drawBubble(['CLICK HERE to PURCHASE A STATION','for this planet'], {x:_b.x+_b.w/2,y:_b.y+_b.h}, r.alpha, {below:true});
+      _drawBubble(['CLICK HERE to PURCHASE A STATION','for this planet'], {x:_b.x+_b.w/2,y:_b.y+_b.h}, r.alpha, {below:true, boldWords:['STATION']});
     }
     return;
   }
   // ── Phase: supply_demand ───────────────────────────────────
-  // Yellow box around Supply/Demand pane + bubble. Closes after 10 s
-  // visible-time OR popup close, whichever comes first.
-  // Secondary blue callout: starts fading in 3 s after the yellow bubble
-  // has fully faded in (i.e. at _elapsed >= FADE_MS + 3000 = 4000 ms),
-  // points at the Molten Ore supply sprite, and fades out alongside the
-  // yellow bubble (or disappears immediately if the popup closes).
+  // Yellow box around Supply/Demand pane + bubble. The yellow box+bubble (and
+  // the secondary blue HOVER hint) persist for as long as the Lava Planet
+  // details window stays open — they ONLY fade out when the player closes it.
+  // A blue [ESC] close hint fades in once the bubbles have been up > 10 s.
+  // Secondary blue HOVER callout: starts fading in 3 s after the yellow bubble
+  // has fully faded in (_elapsed >= FADE_MS + 3000), points at the Molten Ore
+  // supply sprite, and shares the popup-close fade-out.
   if(_tutorialPhase==='supply_demand'){
     const _popupOpen=(activePopup==='planet'&&popupState.planet&&popupState.planet.id===_tutorialLavaPlanetId);
-    // Start fade-out at 10s after fade-in began (1s fade-in + 10s persist) OR on popup close
-    if(_tutorialFadeOutStartMs===0){
-      if(!_popupOpen || _elapsed>=11000) _tutorialFadeOutStartMs=_now;
-    }
+    // Fade out ONLY when the player closes the details window (no timeout).
+    if(_tutorialFadeOutStartMs===0 && !_popupOpen) _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
+    // The create_route mission was already introduced + accepted earlier (right
+    // after the Orijen window closed). After the lava station + supply/demand
+    // walkthrough, hand off to the customise-a-train chain.
     if(r.advanced){ _advanceTo('select_train'); return; }
     if(_popupOpen&&popupState.supplyDemandPanelBounds){
       const _b=popupState.supplyDemandPanelBounds;
       _drawHighlightBox(_b.x,_b.y,_b.w,_b.h,r.alpha,3);
       // Bubble anchored to the LEFT edge of the pane, pointing right at it
       const _ax=_b.x, _ay=_b.y+12;
-      _drawBubble(['This PLANET supplies [Molten Ore],','and demands a variety of resources'], {x:_ax+30,y:_ay}, r.alpha);
+      _drawBubble(['This PLANET supplies [Molten Ore],','and demands a variety of resources'], {x:_ax+30,y:_ay}, r.alpha, {italicWords:['supplies','demands']});
       // ── Secondary blue HOVER hint ───────────────────────────
       // 3 s after the yellow bubble finishes fading in, fade in a blue
       // bubble pointing at the Molten Ore supply sprite. Uses the same
@@ -19021,6 +21978,310 @@ function _drawTutorialChain(stage){
           );
         }
       }
+      // ── Blue [ESC] close hint ──────────────────────────────
+      // Fades in once the yellow bubble has been up > 10 s, pointing at the
+      // [ESC] close label (top-right of the window). Shares the popup-close
+      // fade-out so it disappears with everything else when the window closes.
+      let _escA2=0;
+      if(_tutorialFadeOutStartMs>0) _escA2=r.alpha;
+      else if(_elapsed>=FADE_MS+10000) _escA2=Math.min(1,(_elapsed-(FADE_MS+10000))/FADE_MS);
+      const _eb2=popupState.escBounds;
+      if(_escA2>0 && _eb2){
+        _drawBubble(['Press ESC, or CLICK anywhere outside of a window to close it'], {x:_eb2.x+_eb2.w-7,y:_eb2.y+_eb2.h*0.5}, _escA2, {below:true, color:'blue'});
+      }
+    }
+    return;
+  }
+  // ── Phase: cr_pending_accept ───────────────────────────────
+  // Reached right after the ORIJEN details window closes (+1.5 s). The create_route
+  // ("Create a profitable train route") mission is introduced here (see
+  // updateMissions). No rendering — just wait for the player to ACCEPT it, then run
+  // the lava double-click / build-station walkthrough (double_click). If it's
+  // somehow already completed, jump straight to the all_done poll.
+  // ── Phase: ft_focus_train (galaxy) ─────────────────────────
+  // Camera-locks (frames once) on the player's first train as it orbits, then
+  // a blue "first TRAIN" bubble + a yellow "double click for details" prompt.
+  if(_tutorialPhase==='ft_focus_train'){
+    const _ftIdx=trains.findIndex(t=>t.isPlayer);
+    const _ft=_ftIdx>=0?trains[_ftIdx]:null;
+    // Lock the camera on the TRAIN, FULLY zoomed in, every frame while the
+    // "This is your first TRAIN" bubble is up. (Was a one-shot orbit-fit framing;
+    // now it pins the orbiting train dead-centre at MAX zoom so it stays put.)
+    if(_ft){
+      const [_flx,_fly]=getTrainCarPos(_ft,0);
+      cam.scale=MAX_SC;
+      _ftLockOnWorld(_flx,_fly);
+      _ftFocusFramed=true;
+    }
+    const _open=(activePopup==='train' && popupState.trainIdx===_ftIdx);
+    if(_tutorialFadeOutStartMs===0 && _open) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _advanceTo('ft_train_details'); return; }
+    if(_ft){
+      const [_twx,_twy]=getTrainCarPos(_ft,0);
+      const [_sx,_sy]=w2s(_twx,_twy);
+      _drawBubble(['This is your first TRAIN'], {x:_sx,y:_sy-18}, r.alpha, {color:'blue', target:{x:_sx,y:_sy}});
+      // Yellow "double click" prompt fades in 2 s after the welcome bubble.
+      let _ddA=0;
+      if(_tutorialFadeOutStartMs>0) _ddA=r.alpha;
+      else if(_elapsed>=FADE_MS+2000) _ddA=Math.min(1,(_elapsed-(FADE_MS+2000))/FADE_MS);
+      if(_ddA>0) _drawBubble(['DOUBLE CLICK on this TRAIN for details'], {x:_sx,y:_sy+18}, _ddA, {below:true, target:{x:_sx,y:_sy}});
+    }
+    return;
+  }
+  // ── Phase: ft_train_details (popup) ────────────────────────
+  // Inside the first train's detail window: (1) blue bubble over the passenger
+  // + mail cars; (2) +5 s blue bubble at the CARS tow-capacity row; (3) +5 s
+  // yellow ESC-close hint. On close → mark the segment done (which queues the
+  // deferred create_route intro) and hand off to cr_pending_accept.
+  if(_tutorialPhase==='ft_train_details'){
+    const _ftIdx=trains.findIndex(t=>t.isPlayer);
+    const _ft=_ftIdx>=0?trains[_ftIdx]:null;
+    const _open=(activePopup==='train' && popupState.trainIdx===_ftIdx);
+    if(_tutorialFadeOutStartMs===0 && !_open) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){
+      // Introduce the "Earning your first credits" mission right BEFORE the
+      // desert double-click guidance; ft_earn_pending waits for the player to
+      // ACCEPT it, then the DESERT-PLANET double-click bubble takes over.
+      _ftFrameKey='';
+      if(!_missionPending('earn_first_credits') && !missions.some(m=>m.id==='earn_first_credits')){
+        pendingMissionIntros.push({defId:'earn_first_credits',readySd:stardate});
+      }
+      _advanceTo('ft_earn_pending'); return;
+    }
+    if(_open && _ft){
+      // (1) passenger + mail cars — blue bubble ABOVE them, pointing down.
+      const _cb=popupState.tdCarBounds||[];
+      let _pcb=null,_mcb=null;
+      for(const b of _cb){ const ct=_ft.cars[b.ci]; if(ct==='car_passenger'&&!_pcb)_pcb=b; if(ct==='car_mail'&&!_mcb)_mcb=b; }
+      const _abs=[_pcb,_mcb].filter(Boolean);
+      if(_abs.length){
+        const _minX=Math.min(..._abs.map(b=>b.x)), _maxX=Math.max(..._abs.map(b=>b.x+b.w));
+        const _ax=(_minX+_maxX)/2, _ay=_abs[0].y;
+        _drawHighlightBox(_minX,_ay,_maxX-_minX,_abs[0].h,r.alpha,2);
+        _drawBubble(['This train has cars for carrying [Passengers] and [Mail]'], {x:_ax,y:_ay}, r.alpha, {target:{x:_ax,y:_ay+8}});
+      }
+      // (2) +5 s — CARS tow-capacity row, blue bubble BELOW it, pointing up.
+      let _c2A=0;
+      if(_tutorialFadeOutStartMs>0) _c2A=r.alpha;
+      else if(_elapsed>=FADE_MS+5000) _c2A=Math.min(1,(_elapsed-(FADE_MS+5000))/FADE_MS);
+      const _ctb=popupState.tdCarsTextBounds;
+      if(_c2A>0 && _ctb){
+        _drawBubble(['The CONSTELLATION ENGINE on this train can tow UP TO 6 CARGO CARS'], {x:_ctb.x+_ctb.w/2,y:_ctb.y+_ctb.h}, _c2A, {below:true});
+      }
+      // (3) +10 s — yellow ESC-close hint below the [ESC] label, pointing up.
+      let _e3A=0;
+      if(_tutorialFadeOutStartMs>0) _e3A=r.alpha;
+      else if(_elapsed>=FADE_MS+10000) _e3A=Math.min(1,(_elapsed-(FADE_MS+10000))/FADE_MS);
+      const _eb=popupState.escBounds;
+      if(_e3A>0 && _eb){
+        _drawBubble(['Press ESC, or CLICK anywhere outside a window to close it'], {x:_eb.x+_eb.w-7,y:_eb.y+_eb.h*0.5}, _e3A, {below:true, color:'blue'});
+      }
+    }
+    return;
+  }
+  // ── Phase: ft_earn_pending ─────────────────────────────────
+  // Wait for the "Earning your first credits" mission to be ACCEPTED (its
+  // NEW MISSION popup blocks until the player accepts), then run the desert
+  // double-click guidance. If it was somehow already accepted/completed, fall
+  // straight through.
+  if(_tutorialPhase==='ft_earn_pending'){
+    if(missions.some(m=>m.id==='earn_first_credits'&&(m.status==='active'||m.status==='completed'))){
+      _ftFrameKey=''; _advanceTo('ft_desert_dblclick'); return;
+    }
+    return;
+  }
+  // ── Phase: ft_desert_dblclick (galaxy) — segment 2 ─────────
+  if(_tutorialPhase==='ft_desert_dblclick'){
+    const _dId=_ftDesertId();
+    const _dp=_dId>=0?galaxy.planets[_dId]:null;
+    const _ori=galaxy.origenId!=null?galaxy.planets[galaxy.origenId]:null;
+    if(_ftFrameKey!=='ft_desert_dblclick'){ _ftFrameBoth(_ori,_dp); _ftFrameKey='ft_desert_dblclick'; }
+    const _open=(activePopup==='planet'&&popupState.planet&&_dId>=0&&popupState.planet.id===_dId);
+    if(_tutorialFadeOutStartMs===0 && _open) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _advanceTo('ft_desert_pd'); return; }
+    if(_dp){
+      const [_sx,_sy]=w2s(_dp.x,_dp.y);
+      const _sr=Math.max(8,_dp.radius*cam.scale);
+      _drawBubble(['DOUBLE CLICK on the DESERT PLANET to view its details'], {x:_sx,y:_sy-_sr}, r.alpha, {target:{x:_sx,y:_sy}});
+    }
+    return;
+  }
+  // ── Phase: ft_desert_pd (popup) ────────────────────────────
+  if(_tutorialPhase==='ft_desert_pd'){
+    const _dId=_ftDesertId();
+    const _dp=_dId>=0?galaxy.planets[_dId]:null;
+    const _open=(activePopup==='planet'&&popupState.planet&&_dId>=0&&popupState.planet.id===_dId);
+    const _built=!!(_dp&&_dp.playerBuiltStation);
+    // Fallback: player closed the desert details window BEFORE building a
+    // station → roll back to the double-click prompt so they're guided to
+    // reopen it (mirrors the build_station phase fallback). Without this the
+    // phase would silently stall: no bubble renders (gated on _open) and the
+    // advance never fires (gated on _built).
+    if(!_open && !_built && _tutorialFadeOutStartMs===0){ _ftFrameKey=''; _advanceTo('ft_desert_dblclick'); return; }
+    if(_tutorialFadeOutStartMs===0 && _built && !_open) _tutorialFadeOutStartMs=_now; // station built + window closed → advance
+    const r=_resolveAlpha();
+    if(r.advanced){ _ftFrameKey=''; _advanceTo('ft_route_orijen'); return; }
+    if(_open){
+      // (ii) demand pane — inhabited → demands passengers & mail.
+      const _sd=popupState.supplyDemandPanelBounds;
+      if(_sd){
+        _drawHighlightBox(_sd.x,_sd.y,_sd.w,_sd.h,r.alpha,3);
+        _drawBubble(['This PLANET is INHABITED, so it demands [Passengers] and [Mail]'], {x:_sd.x+_sd.w/2,y:_sd.y}, r.alpha, {color:'blue', italicWords:['demands']});
+      }
+      // (iii) +5 s — can't load/unload without a STATION + build guide.
+      let _stA=0;
+      if(_tutorialFadeOutStartMs>0) _stA=r.alpha;
+      else if(_elapsed>=FADE_MS+5000) _stA=Math.min(1,(_elapsed-(FADE_MS+5000))/FADE_MS);
+      const _bb=popupState.buildStationBtnBounds;
+      if(_stA>0 && _bb && !_built){
+        _drawBubble(['You can’t LOAD or UNLOAD cargo here without a STATION.','CLICK HERE to BUILD A STATION on this PLANET'], {x:_bb.x+_bb.w/2,y:_bb.y+_bb.h}, _stA, {below:true, boldWords:['STATION']});
+      }
+      // (iv) +10 s — blue ESC-close hint.
+      let _e3A=0;
+      if(_tutorialFadeOutStartMs>0) _e3A=r.alpha;
+      else if(_elapsed>=FADE_MS+10000) _e3A=Math.min(1,(_elapsed-(FADE_MS+10000))/FADE_MS);
+      const _eb=popupState.escBounds;
+      if(_e3A>0 && _eb){
+        _drawBubble(['Press ESC, or CLICK anywhere outside a window to close it'], {x:_eb.x+_eb.w-7,y:_eb.y+_eb.h*0.5}, _e3A, {below:true, color:'blue'});
+      }
+    }
+    return;
+  }
+  // ── Phase: ft_route_orijen (galaxy) — segment 3 ────────────
+  if(_tutorialPhase==='ft_route_orijen'){
+    const _ori=galaxy.origenId!=null?galaxy.planets[galaxy.origenId]:null;
+    const _dId=_ftDesertId(); const _dp=_dId>=0?galaxy.planets[_dId]:null;
+    if(_ftFrameKey!=='ft_route_orijen'){ _ftFrameBoth(_ori,_dp); _ftFrameKey='ft_route_orijen'; }
+    const _oriPicked=(galaxy.origenId!=null) && (routeStops.some(p=>p&&p.id===galaxy.origenId) || (sel&&sel.type==='planet'&&sel.data&&sel.data.id===galaxy.origenId));
+    if(_tutorialFadeOutStartMs===0 && _oriPicked) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _advanceTo('ft_route_desert'); return; }
+    if(_ori){
+      const [_sx,_sy]=w2s(_ori.x,_ori.y);
+      const _sr=Math.max(8,_ori.radius*cam.scale);
+      _drawBubble(['CLICK on ORIJEN to START A ROUTE'], {x:_sx,y:_sy-_sr}, r.alpha, {target:{x:_sx,y:_sy}});
+    }
+    return;
+  }
+  // ── Phase: ft_route_desert (galaxy) ────────────────────────
+  if(_tutorialPhase==='ft_route_desert'){
+    const _dId=_ftDesertId(); const _dp=_dId>=0?galaxy.planets[_dId]:null;
+    // Roll back to the "select ORIJEN" step whenever ORIJEN is no longer the route
+    // anchor — i.e. the player DE-SELECTED it (clicked empty space, clearing
+    // routeStops to empty) or selected something else. Mirrors ft_route_orijen's
+    // _oriPicked test (the old `routeStops.length>0` form missed the empty case).
+    const _oriPicked=(galaxy.origenId!=null) && (routeStops.some(p=>p&&p.id===galaxy.origenId) || (sel&&sel.type==='planet'&&sel.data&&sel.data.id===galaxy.origenId));
+    if(_tutorialFadeOutStartMs===0 && !_oriPicked){ _advanceTo('ft_route_orijen'); return; }
+    const _twoStops=routeStops.length>=2 && _dId>=0 && routeStops.some(p=>p&&p.id===_dId) && routeStops.some(p=>p&&p.id===galaxy.origenId);
+    if(_tutorialFadeOutStartMs===0 && _twoStops) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _advanceTo('ft_route_assign'); return; }
+    if(_dp){
+      const [_sx,_sy]=w2s(_dp.x,_dp.y);
+      const _sr=Math.max(8,_dp.radius*cam.scale);
+      _drawBubble(['SHIFT+CLICK on the DESERT PLANET to ADD A STOP to your ROUTE'], {x:_sx,y:_sy-_sr}, r.alpha, {target:{x:_sx,y:_sy}});
+    }
+    return;
+  }
+  // ── Phase: ft_route_assign (popup-stage, points at panel) ──
+  if(_tutorialPhase==='ft_route_assign'){
+    const {t:_ft}=_ftTrain();
+    const _assigned=!!(_ft && _ft.route);
+    if(_tutorialFadeOutStartMs===0 && _assigned) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _ftFrameKey=''; _ftSawLoading=false; _ftLoadDoneMs=0; _advanceTo('ft_loading'); return; }
+    _drawBubble(['CLICK on your TRAIN to ASSIGN the ROUTE'], {x:W-PANEL_W,y:TOP_H+70}, r.alpha, {below:true, target:{x:W-PANEL_W-2,y:TOP_H+70}});
+    return;
+  }
+  // ── Phase: ft_loading (galaxy) — Orijen low orbit framed ───
+  if(_tutorialPhase==='ft_loading'){
+    const {t:_ft}=_ftTrain();
+    const _ori=galaxy.origenId!=null?galaxy.planets[galaxy.origenId]:null;
+    const _dId=_ftDesertId();
+    if(_ftFrameKey!=='ft_loading'){ _ftFrameLowOrbit(_ori); _ftFrameKey='ft_loading'; }
+    const _atDesert=!!(_ft && _ft.planetId===_dId && _dId>=0);
+    if(_tutorialFadeOutStartMs===0 && _atDesert) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _ftFrameKey=''; _advanceTo('ft_unloading'); return; }
+    // ── Done-loading detection ──────────────────────────────────
+    // The bubble fades out as soon as the train FINISHES loading cargo at
+    // Orijen — independently of the phase advance, which still waits until the
+    // train reaches the desert planet (_atDesert above). cargoPhase==='loading'
+    // while loading; clears to null when done. r.phase==='transit' is a
+    // fast-forward fallback (loading may complete between frames at high speed).
+    const _loadingNow=!!(_ft && _ft.cargoPhase==='loading');
+    if(_loadingNow) _ftSawLoading=true;
+    const _doneLoading=(_ftSawLoading && !_loadingNow) || !!(_ft && _ft.route && _ft.route.phase==='transit');
+    let _bubA=r.alpha;
+    if(_doneLoading){
+      if(_ftLoadDoneMs===0) _ftLoadDoneMs=_now;
+      _bubA=Math.min(_bubA, Math.max(0,1-(_now-_ftLoadDoneMs)/FADE_MS));
+    }
+    // Camera lock: hold Orijen centred while the bubble is up (watch it load);
+    // once loading is done, follow the departing train toward the desert.
+    if(!_doneLoading) _ftLockOnPlanet(_ori);
+    else if(_ft){ const [_lx,_ly]=getTrainCarPos(_ft,0); _ftLockOnWorld(_lx,_ly); }
+    if(_ft && _bubA>0){
+      const [_tx,_ty]=getTrainCarPos(_ft,0);
+      const [_sx,_sy]=w2s(_tx,_ty);
+      _drawBubble(['Your TRAIN is now LOADING CARGO before departure'], {x:_sx,y:_sy-18}, _bubA, {color:'blue', target:{x:_sx,y:_sy}});
+    }
+    return;
+  }
+  // ── Phase: ft_unloading (galaxy) — Desert low orbit framed ─
+  if(_tutorialPhase==='ft_unloading'){
+    const {t:_ft}=_ftTrain();
+    const _dId=_ftDesertId();
+    const _dp=_dId>=0?galaxy.planets[_dId]:null;
+    if(_ftFrameKey!=='ft_unloading'){ _ftFrameLowOrbit(_dp); _ftFrameKey='ft_unloading'; }
+    // Camera lock: keep the desert planet centred every frame while the
+    // UNLOAD/RELOAD bubble is displayed (the train is in its orbit here).
+    _ftLockOnPlanet(_dp);
+    const _leftDesert=!!(_ft && _ft.planetId!==_dId && _elapsed>=4000);
+    if(_tutorialFadeOutStartMs===0 && (_leftDesert || _elapsed>=16000)) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _ftWaitStartMs=_now; _advanceTo('ft_wait20'); return; }
+    if(_ft){
+      const [_tx,_ty]=getTrainCarPos(_ft,0);
+      const [_sx,_sy]=w2s(_tx,_ty);
+      _drawBubble(['Your TRAIN will now UNLOAD CARGO','& then LOAD NEW CARGO before heading back'], {x:_sx,y:_sy-18}, r.alpha, {color:'blue', target:{x:_sx,y:_sy}});
+    }
+    return;
+  }
+  // ── Phase: ft_wait20 — 20 s, then queue the create_route mission ──
+  if(_tutorialPhase==='ft_wait20'){
+    if(_ftWaitStartMs===0) _ftWaitStartMs=_now;
+    if(_now-_ftWaitStartMs>=20000){ _ftFirstTrainTutDone=true; _advanceTo('cr_pending_accept'); }
+    return;
+  }
+  if(_tutorialPhase==='cr_pending_accept'){
+    if(missions.some(m=>m.id==='create_route'&&m.status==='active')){
+      // Mission accepted → NOW re-frame Orijen + lava + Gigi Prime centre and run
+      // the lava double-click / build-station walkthrough.
+      const _ori=galaxy.origenId!=null?galaxy.planets[galaxy.origenId]:null;
+      const _lp=galaxy.planets[_tutorialLavaPlanetId];
+      const _gStar=galaxy.stars[galaxy.homeStarId];
+      if(_ori&&_lp&&_gStar){
+        const _oR=_ori.radius||30, _lR=_lp.radius||30, _buf=500;
+        const _xMin=Math.min(_ori.x-_oR,_lp.x-_lR,_gStar.x)-_buf;
+        const _xMax=Math.max(_ori.x+_oR,_lp.x+_lR,_gStar.x)+_buf;
+        const _yMin=Math.min(_ori.y-_oR,_lp.y-_lR,_gStar.y)-_buf;
+        const _yMax=Math.max(_ori.y+_oR,_lp.y+_lR,_gStar.y)+_buf;
+        const _vpW=W-PANEL_W, _vpH=GH-TOP_H;
+        const _scale=Math.max(MIN_SC,Math.min(MAX_SC,Math.min(_vpW/(_xMax-_xMin),_vpH/(_yMax-_yMin))));
+        cam.scale=_scale;
+        cam.x=(_xMin+_xMax)/2 + PANEL_W/(2*_scale);
+        cam.y=(_yMin+_yMax)/2 - TOP_H/(2*_scale);
+        tracking=false;
+        if(typeof clampCamera==='function') clampCamera();
+      }
+      _advanceTo('double_click');
+    }
+    else if(missions.some(m=>m.id==='create_route'&&m.status==='completed')){
+      _tutorialPhase='all_done'; if(!_crTutorialDoneMs) _crTutorialDoneMs=_now;
     }
     return;
   }
@@ -19097,7 +22358,7 @@ function _drawTutorialChain(stage){
         const _minY=Math.min(..._rects.map(b=>b.y));
         const _maxY=Math.max(..._rects.map(b=>b.y+b.h));
         _drawHighlightBox(_minX,_minY,_maxX-_minX,_maxY-_minY,r.alpha,3);
-        _drawBubble(['Add WATER and MOLTEN ORE cars to this train'], {x:(_minX+_maxX)/2,y:_maxY}, r.alpha, {below:true});
+        _drawBubble(['Add [Water] and [Molten Ore] cars to this train'], {x:(_minX+_maxX)/2,y:_maxY}, r.alpha, {below:true});
       }
     }
     return;
@@ -19146,7 +22407,7 @@ function _drawTutorialChain(stage){
     if(_blueAlpha>0 && popupState.escBounds){
       const _eb=popupState.escBounds;
       _drawBubble(['Press ESC, or CLICK anywhere outside a window to close it'],
-                  {x:_eb.x+_eb.w/2, y:_eb.y+_eb.h}, _blueAlpha, {below:true, color:'blue'});
+                  {x:_eb.x+_eb.w-7, y:_eb.y+_eb.h*0.5}, _blueAlpha, {below:true, color:'blue'});
     }
     return;
   }
@@ -19160,12 +22421,37 @@ function _drawTutorialChain(stage){
   if(_tutorialPhase==='post_builder_wait'){
     if(gs==='galaxy' && !activePopup){
       if(_elapsed>=1000){
-        if(!_missionPending('visit_planet')&&!missions.some(mx=>mx.id==='visit_planet'&&mx.status==='completed')){
-          pendingMissionIntros.push({defId:'visit_planet',readySd:stardate});
+        // Reordered: create_route was already introduced + accepted before this
+        // train-builder walkthrough (in cr_pending_accept). Now that the train
+        // detail window is closed, start the create-route yellow-bubble
+        // guidance directly. (The _crChainDone short-circuit handles the case
+        // where the route somehow got assigned already.) The legacy vp_* / 'done'
+        // phases below are now unreachable in the normal flow.
+        if(!_tutorialDoneMs) _tutorialDoneMs=_now;
+        // Re-frame so all three route planets — Orijen, the home-system lava
+        // planet, and the home-system desert planet — are in view (with a small
+        // buffer) before the route-building bubbles start.
+        {
+          const _ori=galaxy.origenId!=null?galaxy.planets[galaxy.origenId]:null;
+          const _lp=galaxy.planets[_tutorialLavaPlanetId];
+          let _des=null;
+          if(_ori){ for(const _p of galaxy.planets){ if(_p.starId===_ori.starId && _p.type && _p.type.id==='desert'){ _des=_p; break; } } }
+          if(_ori&&_lp&&_des){
+            const _pts=[_ori,_lp,_des], _buf=500;
+            const _xMin=Math.min(..._pts.map(p=>p.x-(p.radius||30)))-_buf;
+            const _xMax=Math.max(..._pts.map(p=>p.x+(p.radius||30)))+_buf;
+            const _yMin=Math.min(..._pts.map(p=>p.y-(p.radius||30)))-_buf;
+            const _yMax=Math.max(..._pts.map(p=>p.y+(p.radius||30)))+_buf;
+            const _vpW=W-PANEL_W, _vpH=GH-TOP_H;
+            const _scale=Math.max(MIN_SC,Math.min(MAX_SC,Math.min(_vpW/(_xMax-_xMin),_vpH/(_yMax-_yMin))));
+            cam.scale=_scale;
+            cam.x=(_xMin+_xMax)/2 + PANEL_W/(2*_scale);
+            cam.y=(_yMin+_yMax)/2 - TOP_H/(2*_scale);
+            tracking=false;
+            if(typeof clampCamera==='function') clampCamera();
+          }
         }
-        // Wait for the player to accept the new-mission popup before the
-        // post-accept callout chain starts.
-        _advanceTo('vp_pending_accept');
+        _advanceTo('cr_click_lava');
         return;
       }
     } else {
@@ -19287,6 +22573,27 @@ function _drawTutorialChain(stage){
   // accepting (or already having completed) the build_foundry mission,
   // then start the bf_* chain. No rendering in this phase.
   if(_tutorialPhase==='all_done'){
+    // One-shot: the moment the create_route train first starts LOADING cargo at
+    // Orijen, SELECT + TRACK Orijen and zoom so its LOW orbit spans exactly from
+    // the bottom of the top UI (TOP_H) to the top of the bottom UI bar (GH).
+    // Tracking keeps Orijen centred (orbit stays framed) as it orbits its star.
+    if(!_crOrijenFramed && galaxy && galaxy.origenId!=null){
+      const _ori=galaxy.planets[galaxy.origenId];
+      if(_ori && trains.some(t=>t.isPlayer && t.planetId===galaxy.origenId && t.cargoPhase==='loading')){
+        const _lowR=(ORBIT_TIERS[_ori.size]||{}).LOW||_ori.radius*2;
+        const _sc=Math.max(MIN_SC,Math.min(MAX_SC,(GH-TOP_H)/(2*_lowR)));
+        cam.scale=_sc;
+        sel={type:'planet',data:_ori}; routeStops=[]; assignPending=false; routeHerePending=false;
+        // Offset that centres Orijen at the visible-area centre ((W-PANEL_W)/2,
+        // (TOP_H+GH)/2); the tracking loop maintains cam = orijen + this offset.
+        trackingOffset={x:PANEL_W/(2*_sc), y:-TOP_H/(2*_sc)};
+        cam.x=_ori.x+trackingOffset.x;
+        cam.y=_ori.y+trackingOffset.y;
+        tracking=true;
+        if(typeof clampCamera==='function') clampCamera();
+        _crOrijenFramed=true;
+      }
+    }
     if(missions.some(m=>m.id==='build_foundry'&&m.status==='completed')){
       _tutorialPhase='bf_all_done';
       return;
@@ -19367,7 +22674,7 @@ function _drawTutorialChain(stage){
     if(_lp){
       const [_sx,_sy]=w2s(_lp.x,_lp.y);
       const _sr=Math.max(8,_lp.radius*cam.scale);
-      _drawBubble(['CLICK on the LAVA PLANET to START a ROUTE'], {x:_sx,y:_sy-_sr+6}, r.alpha, {target:{x:_sx,y:_sy}});
+      _drawBubble(['CLICK on the LAVA PLANET to START A ROUTE'], {x:_sx,y:_sy-_sr+6}, r.alpha, {target:{x:_sx,y:_sy}});
     }
     return;
   }
@@ -19385,7 +22692,7 @@ function _drawTutorialChain(stage){
     if(_op){
       const [_sx,_sy]=w2s(_op.x,_op.y);
       const _sr=Math.max(8,_op.radius*cam.scale);
-      _drawBubble(['SHIFT+CLICK on ORIJEN to ADD a STOP to your ROUTE'], {x:_sx,y:_sy-_sr+6}, r.alpha, {target:{x:_sx,y:_sy}});
+      _drawBubble(['SHIFT+CLICK on ORIJEN to ADD A STOP to your ROUTE'], {x:_sx,y:_sy-_sr+6}, r.alpha, {target:{x:_sx,y:_sy}});
     }
     return;
   }
@@ -19419,7 +22726,10 @@ function _drawTutorialChain(stage){
     if(!_crDesertInRoute){ _advanceTo('cr_shift_desert'); return; }
     if(_tutorialFadeOutStartMs===0 && _crLoopClosed) _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
-    if(r.advanced){ _advanceTo('cr_assign_btn'); return; }
+    // The route now auto-drops into the SELECT-A-TRAIN state once the loop is
+    // closed (no in-bar ASSIGN TO TRAIN button anymore), so skip the old
+    // cr_assign_btn callout and go STRAIGHT to pointing at the Iron Express.
+    if(r.advanced){ _advanceTo('cr_click_train'); return; }
     const _lp=galaxy.planets[_tutorialLavaPlanetId];
     if(_lp){
       const [_sx,_sy]=w2s(_lp.x,_lp.y);
@@ -19461,6 +22771,19 @@ function _drawTutorialChain(stage){
   // temp routes left over from earlier tutorial steps.)
   if(_tutorialPhase==='cr_click_train'){
     if(_elapsed<50 && !activePopup) panelTab='trains';
+    // Roll back if the player undid the loop BEFORE it auto-dropped into the
+    // SELECT-A-TRAIN state and before any assignment (mirrors the safety the old
+    // cr_assign_btn phase had).
+    if(!assignPending && !_crLoopClosed){
+      const _crBack=missions.find(mx=>mx.id==='create_route');
+      const _crAssignedYet=!!(_crBack&&_crBack._routeAssigned) || trains.some(t=>t.isPlayer&&((t.route&&!t.route.isTempRoute&&t.route.stops&&t.route.stops.length>=2)||(t.queuedRoute&&!t.queuedRoute.isTempRoute&&t.queuedRoute.stops&&t.queuedRoute.stops.length>=2)));
+      if(!_crAssignedYet){
+        if(!_crLavaInRoute){ _advanceTo('cr_click_lava'); return; }
+        if(!_crOrijenInRoute){ _advanceTo('cr_shift_orijen'); return; }
+        if(!_crDesertInRoute){ _advanceTo('cr_shift_desert'); return; }
+        _advanceTo('cr_shift_lava'); return;
+      }
+    }
     // Detect the moment of click via the create_route mission's _routeAssigned
     // flag — set at the END of assignRouteToTrain (line ~17718), which runs
     // synchronously inside the click handler. NOTE: we intentionally do NOT
@@ -19553,7 +22876,7 @@ function _drawTutorialChain(stage){
     if(r.advanced){ _advanceTo('bf_click_foundry_upgrade'); return; }
     if(_bfPopupOpen && popupState.buildStationBtnBounds){
       const _b=popupState.buildStationBtnBounds;
-      _drawBubble(['CLICK HERE to BUILD a STATION on this PLANET'], {x:_b.x+_b.w/2,y:_b.y+_b.h}, r.alpha, {below:true});
+      _drawBubble(['CLICK HERE to BUILD A STATION on this PLANET'], {x:_b.x+_b.w/2,y:_b.y+_b.h}, r.alpha, {below:true, boldWords:['STATION']});
     }
     return;
   }
@@ -19572,7 +22895,7 @@ function _drawTutorialChain(stage){
     if(_bfPopupOpen && Array.isArray(popupState.upgradeBuildBounds)){
       const _fb=popupState.upgradeBuildBounds.find(b=>b&&b.upgradeId==='iron_foundry');
       if(_fb){
-        _drawBubble(['CLICK HERE to BUILD a FOUNDRY'], {x:_fb.x+_fb.w/2,y:_fb.y+_fb.h}, r.alpha, {below:true});
+        _drawBubble(['CLICK HERE to BUILD A FOUNDRY'], {x:_fb.x+_fb.w/2,y:_fb.y+_fb.h}, r.alpha, {below:true, boldWords:['FOUNDRY']});
       }
     }
     return;
@@ -19594,14 +22917,32 @@ function _drawTutorialChain(stage){
   })));
   const _bstIronDelivered=!!(_bstMission && (_bstMission._ironFromDesertToOrijen||0)>=1);
   // ── Phase: bf_all_done — poll for buy_second_train becoming active with
-  // the player already owning a 2nd train, then transition into bst_load_iron.
+  // the player already owning a 2nd train, then transition into bst_click_desert.
   // Skips straight to bst_all_done if the mission is already completed. Also
   // detects the train builder being open during the buy phase to surface
   // the "Add 2+ IRON cars" callout.
   if(_tutorialPhase==='bf_all_done'){
     if(_bstMission && _bstMission.status==='completed'){ _tutorialPhase='bst_all_done'; return; }
     if(_bstMission && _bstMission.status==='active' && _bstPlayerOwns2){
-      _advanceTo('bst_load_iron');
+      // Frame the desert + Orijen for the upcoming route-building bubbles.
+      {
+        const _ori=galaxy.origenId!=null?galaxy.planets[galaxy.origenId]:null;
+        if(_ori&&_bfDesert){
+          const _pts=[_ori,_bfDesert], _buf=500;
+          const _xMin=Math.min(..._pts.map(p=>p.x-(p.radius||30)))-_buf;
+          const _xMax=Math.max(..._pts.map(p=>p.x+(p.radius||30)))+_buf;
+          const _yMin=Math.min(..._pts.map(p=>p.y-(p.radius||30)))-_buf;
+          const _yMax=Math.max(..._pts.map(p=>p.y+(p.radius||30)))+_buf;
+          const _vpW=W-PANEL_W, _vpH=GH-TOP_H;
+          const _scale=Math.max(MIN_SC,Math.min(MAX_SC,Math.min(_vpW/(_xMax-_xMin),_vpH/(_yMax-_yMin))));
+          cam.scale=_scale;
+          cam.x=(_xMin+_xMax)/2 + PANEL_W/(2*_scale);
+          cam.y=(_yMin+_yMax)/2 - TOP_H/(2*_scale);
+          tracking=false;
+          if(typeof clampCamera==='function') clampCamera();
+        }
+      }
+      _advanceTo('bst_click_desert');
       return;
     }
     // Train builder open during buy_second_train (before 2nd train owned) and
@@ -19624,7 +22965,7 @@ function _drawTutorialChain(stage){
   if(_tutorialPhase==='bst_builder_add_iron'){
     const _bld=(activePopup==='trainbuilder')?trainBuilderState:null;
     if(!_bld){ _advanceTo('bf_all_done'); return; }
-    if(_bstPlayerOwns2){ _advanceTo('bst_load_iron'); return; }
+    if(_bstPlayerOwns2){ _advanceTo('bst_click_desert'); return; }
     const _ironCt=(_bld.cars||[]).filter(c=>c==='car_iron').length;
     if(_tutorialFadeOutStartMs===0 && _ironCt>=2) _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
@@ -19633,44 +22974,98 @@ function _drawTutorialChain(stage){
       const _ib=_bld.carBtnBounds.find(cb=>cb&&cb.type==='car_iron');
       if(_ib){
         _drawHighlightBox(_ib.x,_ib.y,_ib.w,_ib.h,r.alpha,3);
-        _drawBubble(['Add 2+ IRON cars to this TRAIN'], {x:_ib.x+_ib.w/2,y:_ib.y+_ib.h}, r.alpha, {below:true});
+        _drawBubble(['Add 2+ [Iron] cars to this TRAIN'], {x:_ib.x+_ib.w/2,y:_ib.y+_ib.h}, r.alpha, {below:true});
       }
     }
     return;
   }
-  // Chain-done short-circuit for the bst_* phases.
-  if(_bstMission && _bstMission.status==='completed' &&
-     (_tutorialPhase==='bst_load_iron'||_tutorialPhase==='bst_deliver_iron')){
+  // ── buy_second_train ROUTE-BUILDING walkthrough (bst_*) ─────
+  // Mirrors the create_route cr_* chain, but for a simple 2-stop DESERT→ORIJEN
+  // route assigned to the player's NEW (2nd) train: CLICK the desert planet,
+  // SHIFT+CLICK Orijen, ASSIGN the route, then click the new train.
+  const _bstDesertId=_bfDesertId; // home-system desert (resolved above)
+  const _bstDesertInRoute = !!(galaxy && _bstDesertId>=0 && routeStops.some(p=>p&&p.id===_bstDesertId));
+  const _bstOrijenInRoute = !!(galaxy && routeStops.some(p=>p&&p.id===galaxy.origenId));
+  // Anchor ready = desert is selected, or desert is already the route's 1st stop.
+  const _bstSelDesert = !!(sel && sel.type==='planet' && sel.data && sel.data.id===_bstDesertId);
+  const _bstAnchorReady = _bstSelDesert || _bstDesertInRoute;
+  const _bstRouteReady = _bstDesertInRoute && _bstOrijenInRoute && routeStops.length>=2;
+  // Route assigned = a 2nd player train now has a real (non-temp) ≥2-stop route
+  // (train 1 already has its create_route loop, so the count hitting 2 signals a
+  // fresh assignment), OR the mission has begun loading/delivering iron.
+  const _bstRoutedCount = galaxy ? trains.filter(t=>t.isPlayer && (
+    (t.route       && !t.route.isTempRoute       && (t.route.stops||[]).length>=2) ||
+    (t.queuedRoute && !t.queuedRoute.isTempRoute && (t.queuedRoute.stops||[]).length>=2)
+  )).length : 0;
+  const _bstRouteDone = _bstRoutedCount>=2 || _bstIronFromDesertLoaded || _bstIronDelivered ||
+                        (_bstMission && _bstMission.status==='completed');
+  // Chain-done short-circuit for the bst_* route phases.
+  if(_bstRouteDone && (_tutorialPhase==='bst_click_desert'||_tutorialPhase==='bst_shift_orijen'||_tutorialPhase==='bst_assign_btn'||_tutorialPhase==='bst_click_train')){
     _tutorialPhase='bst_all_done'; return;
   }
-  // ── Phase: bst_load_iron ──────────────────────────────────
-  // Yellow bubble pointing at the home-system desert planet. Advances the
-  // moment any player train is carrying IRON sourced from a DESERT planet.
-  if(_tutorialPhase==='bst_load_iron'){
-    if(_tutorialFadeOutStartMs===0 && (_bstIronFromDesertLoaded||_bstIronDelivered)) _tutorialFadeOutStartMs=_now;
+  // ── Phase: bst_click_desert ───────────────────────────────
+  if(_tutorialPhase==='bst_click_desert'){
+    if(_tutorialFadeOutStartMs===0 && _bstAnchorReady) _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
-    if(r.advanced){ _advanceTo('bst_deliver_iron'); return; }
+    if(r.advanced){ _advanceTo('bst_shift_orijen'); return; }
     if(_bfDesert){
       const [_sx,_sy]=w2s(_bfDesert.x,_bfDesert.y);
       const _sr=Math.max(8,_bfDesert.radius*cam.scale);
-      _drawBubble(['ROUTE your new TRAIN to LOAD IRON from the DESERT PLANET'], {x:_sx,y:_sy-_sr+6}, r.alpha, {target:{x:_sx,y:_sy}});
+      _drawBubble(['CLICK on the DESERT PLANET to START A ROUTE'], {x:_sx,y:_sy-_sr+6}, r.alpha, {target:{x:_sx,y:_sy}});
     }
     return;
   }
-  // ── Phase: bst_deliver_iron ───────────────────────────────
-  // Yellow bubble pointing at ORIJEN. Rolls back to bst_load_iron if the
-  // iron is no longer in transit (player unloaded it at the wrong stop or
-  // the train ran out of iron cars). Advances when iron is delivered.
-  if(_tutorialPhase==='bst_deliver_iron'){
-    if(!_bstIronFromDesertLoaded && !_bstIronDelivered){ _advanceTo('bst_load_iron'); return; }
-    if(_tutorialFadeOutStartMs===0 && _bstIronDelivered) _tutorialFadeOutStartMs=_now;
+  // ── Phase: bst_shift_orijen ───────────────────────────────
+  if(_tutorialPhase==='bst_shift_orijen'){
+    if(!_bstAnchorReady){ _advanceTo('bst_click_desert'); return; }
+    if(_tutorialFadeOutStartMs===0 && _bstRouteReady) _tutorialFadeOutStartMs=_now;
     const r=_resolveAlpha();
-    if(r.advanced){ _tutorialPhase='bst_all_done'; return; }
+    // Route auto-drops into SELECT-A-TRAIN once the 2nd stop is added — skip the
+    // dead bst_assign_btn callout and go straight to pointing at the new train.
+    if(r.advanced){ _advanceTo('bst_click_train'); return; }
     const _op=galaxy.planets[galaxy.origenId];
     if(_op){
       const [_sx,_sy]=w2s(_op.x,_op.y);
       const _sr=Math.max(8,_op.radius*cam.scale);
-      _drawBubble(['Deliver the IRON to ORIJEN'], {x:_sx,y:_sy-_sr+6}, r.alpha, {target:{x:_sx,y:_sy}});
+      _drawBubble(['SHIFT+CLICK on ORIJEN to ADD A STOP to your route'], {x:_sx,y:_sy-_sr+6}, r.alpha, {target:{x:_sx,y:_sy}});
+    }
+    return;
+  }
+  // ── Phase: bst_assign_btn ─────────────────────────────────
+  if(_tutorialPhase==='bst_assign_btn'){
+    if(!_bstRouteReady && !assignPending){
+      if(!_bstAnchorReady){ _advanceTo('bst_click_desert'); return; }
+      _advanceTo('bst_shift_orijen'); return;
+    }
+    if(_tutorialFadeOutStartMs===0 && assignPending) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _advanceTo('bst_click_train'); return; }
+    if(assignBtnBounds){
+      const _b=assignBtnBounds;
+      _drawBubble(['CLICK HERE to ASSIGN this ROUTE'], {x:_b.x+_b.w/2,y:_b.y+20}, r.alpha);
+    }
+    return;
+  }
+  // ── Phase: bst_click_train ────────────────────────────────
+  // Highlight box + bubble on the NEW (2nd) train row. Advances when the route
+  // is assigned to a 2nd train.
+  if(_tutorialPhase==='bst_click_train'){
+    if(_elapsed<50 && !activePopup) panelTab='trains';
+    // Roll back if the route was undone before it auto-dropped into SELECT-A-TRAIN
+    // and before assignment (mirrors the old bst_assign_btn safety).
+    if(!assignPending && !_bstRouteReady && !_bstRouteDone){
+      if(!_bstAnchorReady){ _advanceTo('bst_click_desert'); return; }
+      _advanceTo('bst_shift_orijen'); return;
+    }
+    if(_tutorialFadeOutStartMs===0 && _bstRouteDone) _tutorialFadeOutStartMs=_now;
+    const r=_resolveAlpha();
+    if(r.advanced){ _tutorialPhase='bst_all_done'; return; }
+    if(panelTab==='trains'){
+      const _ROW_H=82;
+      // 2nd row — the newly-bought train (appended to the bottom of the list).
+      const _rx=W-PANEL_W+2, _ry=TOP_H+1+_ROW_H-panelScroll, _rw=PANEL_W-4, _rh=_ROW_H-2;
+      _drawHighlightBox(_rx,_ry,_rw,_rh,r.alpha,2);
+      _drawBubble(['CLICK on your NEW TRAIN to ASSIGN the ROUTE'], {x:_rx+_rw/2,y:_ry+53}, r.alpha, {below:true});
     }
     return;
   }
@@ -19712,13 +23107,13 @@ function _drawTutorialChain(stage){
     if(_hzDesert && _yA>0){
       const [_dsx,_dsy]=w2s(_hzDesert.x,_hzDesert.y);
       const _dsr=Math.max(8,_hzDesert.radius*cam.scale);
-      _drawBubble(['Industrial activity (like producing IRON) also produces HAZMAT as a byproduct'],
+      _drawBubble(['Industrial activity (like producing [Iron]) also produces [Hazmat] as a byproduct'],
                   {x:_dsx,y:_dsy-_dsr+6}, _yA);
     }
     if(_hzStar && _bA>0){
       const [_ssx,_ssy]=w2s(_hzStar.x,_hzStar.y);
       const _ssr=Math.max(8,_hzStar.radius*cam.scale);
-      _drawBubble(['HAZMAT must be disposed of by EJECTING it into a STAR'],
+      _drawBubble(['[Hazmat] must be disposed of by EJECTING it into a STAR'],
                   {x:_ssx,y:_ssy-_ssr+6}, _bA, {color:'blue'});
     }
     return;
@@ -19735,45 +23130,41 @@ function _drawStationHoverTooltipOverlay(){
   if(activePopup!=='planet'||!_stationHoverInfo||!popupState.planet) return;
   const p=popupState.planet;
   const _elapsed=Date.now()-_stationHoverInfo.enterTime;
-  if(_elapsed<=1000) return;
-  const _fa=Math.min(1,(_elapsed-1000)/200);
-  const sprH=40;
-  const _allCargo=['passengers','livestock','grain','fruit','cargo','mail','water','ice','sand','molten_ore','iron','steel','glass','machinery','gold','hazmat','oil','battery','chemical','flowers','medical'];
-  const {isSupply:_his,tx:_htx,ty:_hty}=_stationHoverInfo;
-  // Collect cargo types with non-zero value on the hovered side, sorted most→least.
+  const _fa=Math.min(1,_elapsed/120);  // instant appearance (quick fade-in, no hover delay)
+  const {kind:_hkind,isSupply:_his,ctype:_hc,tx:_htx,ty:_hty}=_stationHoverInfo;
+  const _anchorH=_hkind==='more'?13:26; // fallback offset when the tooltip flips below the anchor
+  const _side=_his?(p.supply||{}):(p.demand||{});
+  // Rows: a single-resource tooltip for a hovered row, or the folded "… and N
+  // more" list for the overflow link. Values read LIVE and rounded to a tenth.
   const _ttRows=[];
-  for(const ctype of _allCargo){
-    if(ctype==='gold'&&!p.goldRevealed) continue;
-    if(ctype==='diamond'&&!p.diamondRevealed) continue;
-    const amt=_his?((p.supply||{})[ctype]||0):((p.demand||{})[ctype]||0);
-    if(amt>0.005) _ttRows.push({ctype,amt});
+  if(_hkind==='more'){
+    for(const ct of (_stationHoverInfo.items||[])){
+      if(ct==='gold'&&!p.goldRevealed) continue;
+      if(ct==='diamond'&&!p.diamondRevealed) continue;
+      _ttRows.push({ctype:ct,amt:(_side[ct]||0)});
+    }
+    _ttRows.sort((a,b)=>b.amt-a.amt);
+  } else if(_hc){
+    _ttRows.push({ctype:_hc,amt:(_side[_hc]||0)});
   }
-  _ttRows.sort((a,b)=>b.amt-a.amt);
   if(!_ttRows.length) return;
   ctx.save();
   const _pad=8, _rowH=15, _hdH=22;
   const _hdTxt=_his?'SUPPLY':'DEMAND';
-  const _twoCol=_ttRows.length>8;
-  const _leftN=_twoCol?Math.ceil(_ttRows.length/2):_ttRows.length;
-  const _rightN=_twoCol?_ttRows.length-_leftN:0;
   ctx.font='bold 8px Orbitron,sans-serif';
-  let _hdrW=ctx.measureText(_hdTxt).width;
+  let _maxLW=ctx.measureText(_hdTxt).width;
   ctx.font='9px "Exo 2",sans-serif';
-  let _maxLW_L=_hdrW, _maxLW_R=0;
-  for(let _ri=0;_ri<_ttRows.length;_ri++){
-    const lw=ctx.measureText(CARGO_LABEL[_ttRows[_ri].ctype]||_ttRows[_ri].ctype.toUpperCase()).width;
-    if(_ri<_leftN){ if(lw>_maxLW_L) _maxLW_L=lw; }
-    else          { if(lw>_maxLW_R) _maxLW_R=lw; }
+  for(const r of _ttRows){
+    const lw=ctx.measureText(CARGO_LABEL[r.ctype]||r.ctype.toUpperCase()).width;
+    if(lw>_maxLW) _maxLW=lw;
   }
   const _valW=34;
-  const _colW_L=_maxLW_L+_valW+8;
-  const _colW_R=_twoCol?(_maxLW_R+_valW+8):0;
-  const _colGap=_twoCol?14:0;
-  const _ttW=_pad*2+_colW_L+_colGap+_colW_R;
-  const _rowsTall=Math.max(_leftN,_rightN);
-  const _ttH=_hdH+_rowsTall*_rowH+_pad;
+  const _colW_L=_maxLW+_valW+8;
+  const _leftN=_ttRows.length, _rightN=0;
+  const _ttW=_pad*2+_colW_L;
+  const _ttH=_hdH+_ttRows.length*_rowH+_pad;
   let _ttx=_htx, _tty=_hty-_ttH-6;
-  if(_tty<4) _tty=_hty+sprH+6;
+  if(_tty<4) _tty=_hty+_anchorH+6;
   if(_tty+_ttH>GH-4) _tty=GH-4-_ttH;
   if(_tty<4) _tty=4;
   if(_ttx+_ttW>W-4) _ttx=W-4-_ttW;
@@ -19803,18 +23194,39 @@ function _drawStationHoverTooltipOverlay(){
     ctx.fillText(CARGO_LABEL[ctype]||ctype.toUpperCase(),colX,ry);
     ctx.fillStyle='rgba(230,240,255,0.95)';
     ctx.textAlign='right';
-    ctx.fillText(amt.toFixed(2),colX+colW,ry);
+    ctx.fillText(amt.toFixed(1),colX+colW,ry); // rounded to nearest tenth
   };
   const _leftColX=_ttx+_pad;
-  const _rightColX=_ttx+_pad+_colW_L+_colGap;
   for(let ri=0;ri<_leftN;ri++){
     const {ctype,amt}=_ttRows[ri];
     _drawRow(ctype,amt,_leftColX,_colW_L,_tty+_hdH+ri*_rowH+10);
   }
-  for(let ri=0;ri<_rightN;ri++){
-    const {ctype,amt}=_ttRows[_leftN+ri];
-    _drawRow(ctype,amt,_rightColX,_colW_R,_tty+_hdH+ri*_rowH+10);
-  }
+  ctx.restore();
+}
+// Tooltip naming the upgrade structure (STATION / FOUNDRY / ORCHARD …) being
+// hovered on the planet-detail viz. Drawn AFTER drawPlanetDetailPopup so it
+// floats over the popup; appears after a 0.1 s hover (see the mousemove handler).
+function _drawPlanetUpgradeTooltipOverlay(){
+  if(activePopup!=='planet'||!_planetUpgradeHover) return;
+  if(Date.now()-_planetUpgradeHover.enterTime<100) return;
+  const _uh=_planetUpgradeHover;
+  const pw=470, ph=416, px=(W-pw)/2, py=(H-ph)/2;
+  ctx.save();
+  ctx.font='bold 9px Orbitron,sans-serif';
+  const _tw=ctx.measureText(_uh.name).width;
+  const _pad=8, _h=18, _r=4, _w=_tw+_pad*2;
+  let _tx=Math.round(_uh.cx-_w/2);
+  let _ty=Math.round(_uh.cy-_h-9);          // sit above the structure
+  _tx=Math.max(px+4,Math.min(px+pw-_w-4,_tx));
+  if(_ty<py+4) _ty=Math.round(_uh.cy+10);   // flip below if it would clip the popup top
+  _clearTextOverlayRect(_tx,_ty,_w,_h);
+  ctx.fillStyle='rgba(8,16,34,0.97)';
+  ctx.beginPath(); ctx.roundRect(_tx,_ty,_w,_h,_r); ctx.fill();
+  ctx.strokeStyle='rgba(90,150,235,0.7)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.roundRect(_tx,_ty,_w,_h,_r); ctx.stroke();
+  ctx.fillStyle='rgba(212,232,255,0.98)'; ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(_uh.name,_tx+_w/2,_ty+_h/2+0.5);
+  ctx.textBaseline='alphabetic';
   ctx.restore();
 }
 
@@ -19926,6 +23338,202 @@ function _drawVisitHint(){
   ctx.restore();
 }
 
+// A Mad Scientist: while the pickup is still outstanding and a PLAYER train has
+// arrived at the (station-less) scientist source planet, focus the camera on it
+// (once per arrival) and draw a blue callout bubble ABOVE the planet, tail
+// pointing DOWN, reminding the player that a STATION is needed before the
+// scientist ([Passengers]) can be loaded. STATION is bold; [Passengers] picks up
+// its cargo colour. Modeled on _drawVisitHint but uses the [bracket]/bold token
+// renderer so the styled words render correctly.
+function _drawMadSciStationHint(){
+  if(gs!=='galaxy'||!galaxy) return;
+  if(activePopup) return; // don't draw over open popups (keep the focus latch)
+  const m=missions.find(mx=>mx.id==='mad_scientist'&&mx.status==='active');
+  if(!m){ _madSciStationHintFocusPid=-1; return; }
+  const _pick=Array.isArray(m.objectives)?m.objectives.find(o=>o.id==='pickup_scientist'):null;
+  if(_pick&&_pick.done){ _madSciStationHintFocusPid=-1; return; } // scientist already aboard
+  const _sid=m.sourcePlanetId;
+  if(_sid==null){ _madSciStationHintFocusPid=-1; return; }
+  const _p=galaxy.planets[_sid];
+  if(!_p){ _madSciStationHintFocusPid=-1; return; }
+  // A station already here (player/starter/AI) → nothing to warn about.
+  if(_p.hasStation||_p.playerBuiltStation||_p.isStarter||_p.aiHasStation){ _madSciStationHintFocusPid=-1; return; }
+  // A PLAYER train must currently be AT this planet (arrived/orbiting — not mid-transit).
+  const _arrived=trains.some(t=>t&&t.isPlayer&&t.planetId===_sid&&(!t.route||t.route.phase!=='transit'));
+  if(!_arrived){ _madSciStationHintFocusPid=-1; return; }
+  // Focus the camera on the planet ONCE per arrival episode (zoom + centre in
+  // the visible playfield, accounting for the right panel + top bar).
+  if(_madSciStationHintFocusPid!==_sid){
+    _madSciStationHintFocusPid=_sid;
+    const _zTarget=Math.exp(Math.log(MIN_SC)+0.80*(Math.log(MAX_SC)-Math.log(MIN_SC)));
+    cam.scale=Math.max(MIN_SC,Math.min(MAX_SC,_zTarget));
+    const _sc=cam.scale;
+    cam.x=_p.x+PANEL_W/(2*_sc); cam.y=_p.y-TOP_H/(2*_sc); tracking=false;
+    if(typeof clampCamera==='function') clampCamera();
+  }
+  // Blue bubble ABOVE the planet, tail pointing DOWN.
+  const [_sx,_sy]=w2s(_p.x,_p.y);
+  const _sr=Math.max(10,_p.radius*cam.scale);
+  ctx.save();
+  const _font='10px "Exo 2",sans-serif';
+  ctx.font=_font;
+  const _toks=_objTokenize('A STATION must be built before [Passengers] can be loaded');
+  for(const _t of _toks){ if(_t.text.replace(/[^A-Za-z]/g,'').toUpperCase()==='STATION') _t.bold=true; }
+  const _tw=_objLineWidth(_toks,_font);
+  const _pad=12,_bH=28,_bR=7,_tailH=10;
+  const _bW=_tw+_pad*2;
+  let _bx=Math.round(_sx-_bW/2);
+  _bx=Math.max(8,Math.min(W-PANEL_W-8-_bW,_bx));
+  let _by=_sy-_sr-_tailH-_bH-6;
+  if(_by<TOP_H+6) _by=TOP_H+6; // keep on-screen; tail still points down at the planet
+  const _tailX=Math.max(_bx+_bR+8,Math.min(_sx,_bx+_bW-_bR-8));
+  // Clear the HD text overlay under the bubble so chat-log / hint-bar text
+  // doesn't bleed through (the bubble fill is on the MAIN canvas — see §1.1).
+  _clearTextOverlayRect(_bx-2,_by-2,_bW+4,_bH+4);
+  ctx.shadowColor='rgba(40,120,210,0.55)'; ctx.shadowBlur=8;
+  ctx.fillStyle='rgba(70,150,235,0.97)';
+  ctx.beginPath(); ctx.roundRect(_bx,_by,_bW,_bH,_bR); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(_tailX-7,_by+_bH); ctx.lineTo(_tailX+7,_by+_bH); ctx.lineTo(_tailX,_sy-_sr-2); ctx.closePath(); ctx.fill();
+  ctx.shadowBlur=0;
+  ctx.textBaseline='middle';
+  _objDrawLineCentered(_toks,_bx+_bW/2,_by+_bH/2,_font,'#fff');
+  ctx.textBaseline='alphabetic';
+  ctx.restore();
+}
+
+// ── First-time "route BLOCKED" education ─────────────────────────────────────
+// Frame the camera so all of `pts` ({x,y,r}) fit; if they can't fit even at MIN
+// zoom (e.g. an out-of-range destination is very far), centre on the train instead.
+function _frameBlockEdu(pts, train){
+  let xMin=Infinity,xMax=-Infinity,yMin=Infinity,yMax=-Infinity;
+  for(const p of pts){
+    const rr=p.r||0;
+    xMin=Math.min(xMin,p.x-rr); xMax=Math.max(xMax,p.x+rr);
+    yMin=Math.min(yMin,p.y-rr); yMax=Math.max(yMax,p.y+rr);
+  }
+  const pad=Math.max(xMax-xMin,yMax-yMin)*0.16+140;
+  xMin-=pad;xMax+=pad;yMin-=pad;yMax+=pad;
+  const _vpW=Math.max(60,W-PANEL_W), _vpH=Math.max(60,GH-TOP_H);
+  const _reqSc=Math.min(_vpW/Math.max(1,xMax-xMin), _vpH/Math.max(1,yMax-yMin));
+  if(_reqSc>=MIN_SC){
+    cam.scale=Math.min(MAX_SC,_reqSc);
+    cam.x=(xMin+xMax)/2+PANEL_W/(2*cam.scale);
+    cam.y=(yMin+yMax)/2-TOP_H/(2*cam.scale);
+  } else {
+    const [_tx,_ty]=getTrainCarPos(train,0);
+    const _orb=train.orbitR||200;
+    cam.scale=Math.max(MIN_SC,Math.min(MAX_SC,Math.min(_vpW,_vpH)*0.42/_orb));
+    cam.x=_tx+PANEL_W/(2*cam.scale);
+    cam.y=_ty-TOP_H/(2*cam.scale);
+  }
+  tracking=false;
+  if(typeof clampCamera==='function') clampCamera();
+}
+// Fire the education for a freshly-blocked PLAYER train: select it, frame the
+// camera on the train + the blocker (a star, or the out-of-range destination),
+// and arm the red callout + 7 s-delayed popup. `blocker` is {x,y,radius?} or null.
+function _triggerBlockEdu(t, reason, blocker){
+  const _ti=trains.indexOf(t);
+  if(_ti<0) return;
+  _blockEduStartMs=Date.now(); _blockEduTrainIdx=_ti; _blockEduReason=reason; _blockEduPopupShown=false;
+  sel={type:'car',data:{trainIdx:_ti,carIdx:0,car:t.cars[0]}};
+  routeStops=[]; assignPending=false; routeHerePending=false;
+  const [_tx,_ty]=getTrainCarPos(t,0);
+  const _pts=[{x:_tx,y:_ty,r:(t.orbitR||200)}];
+  if(blocker && blocker.x!=null) _pts.push({x:blocker.x,y:blocker.y,r:(blocker.radius||blocker.r||300)});
+  _frameBlockEdu(_pts, t);
+}
+// Red callout above the blocked train; opens the educational popup 7 s later.
+function _drawBlockEduCallout(){
+  if(gs!=='galaxy'||!galaxy) return;
+  if(_blockEduStartMs===0) return;
+  // Popup was shown and has since been dismissed (OK / ESC / ✕ / outside-click) → end.
+  if(_blockEduPopupShown && activePopup!=='blocked_edu'){ _blockEduStartMs=0; return; }
+  const t=trains[_blockEduTrainIdx];
+  if(!t||!t.isPlayer){ _blockEduStartMs=0; return; }
+  // 7 s after the block, open the educational popup (once, when nothing else is up).
+  if(!_blockEduPopupShown && Date.now()-_blockEduStartMs>=7000 && !activePopup){
+    activePopup='blocked_edu'; popupState={}; _blockEduPopupShown=true; gameSpeedIdx=SPEED_DEFAULT_IDX;
+  }
+  if(activePopup) return; // don't paint the bubble over any popup
+  const [_wx,_wy]=getTrainCarPos(t,0);
+  const [_sx,_sy]=w2s(_wx,_wy);
+  const _txt=(_blockEduReason==='range')
+    ? 'The destination is OUT OF RANGE for this ENGINE!'
+    : 'TRAINS cannot travel directly across a STAR';
+  ctx.save();
+  const _font='10px "Exo 2",sans-serif'; ctx.font=_font;
+  const _toks=_objTokenize(_txt);
+  for(const _tk of _toks){ const w=_tk.text.replace(/[^A-Za-z]/g,''); if(w.length>=2 && w===w.toUpperCase()) _tk.bold=true; }
+  const _tw=_objLineWidth(_toks,_font);
+  const _pad=12,_bH=28,_bR=7,_tailH=10;
+  const _bW=_tw+_pad*2;
+  let _bx=Math.round(_sx-_bW/2);
+  _bx=Math.max(8,Math.min(W-PANEL_W-8-_bW,_bx));
+  let _by=_sy-22-_tailH-_bH-6; let _below=false;
+  if(_by<TOP_H+6){ _by=_sy+22+_tailH; _below=true; if(_by+_bH>GH-6) _by=Math.max(TOP_H+6,GH-6-_bH); }
+  const _tailX=Math.max(_bx+_bR+8,Math.min(_sx,_bx+_bW-_bR-8));
+  _clearTextOverlayRect(_bx-2,_by-2,_bW+4,_bH+4);
+  ctx.shadowColor='rgba(200,40,40,0.6)'; ctx.shadowBlur=9;
+  ctx.fillStyle='rgba(240,70,70,0.97)';
+  ctx.beginPath(); ctx.roundRect(_bx,_by,_bW,_bH,_bR); ctx.fill();
+  ctx.beginPath();
+  if(_below){ ctx.moveTo(_tailX-7,_by); ctx.lineTo(_tailX+7,_by); ctx.lineTo(_tailX,_sy+18); }
+  else { ctx.moveTo(_tailX-7,_by+_bH); ctx.lineTo(_tailX+7,_by+_bH); ctx.lineTo(_tailX,_sy-18); }
+  ctx.closePath(); ctx.fill();
+  ctx.shadowBlur=0; ctx.textBaseline='middle';
+  _objDrawLineCentered(_toks,_bx+_bW/2,_by+_bH/2,_font,'#fff');
+  ctx.textBaseline='alphabetic';
+  ctx.restore();
+}
+// The educational popup: how routes get blocked + the AUTO RE-ROUTE behaviour.
+function drawBlockedEduPopup(){
+  if(activePopup!=='blocked_edu') return;
+  const pw=474, ph=320;
+  const [px,py]=drawPopupBase(pw,ph,'rgba(255,90,90,0.72)');
+  ctx.save();
+  ctx.font='bold 16px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='rgba(255,120,110,0.97)'; ctx.shadowColor='rgba(200,40,40,0.9)'; ctx.shadowBlur=10;
+  ctx.fillText('ROUTE BLOCKED',px+pw/2,py+30); ctx.shadowBlur=0;
+  ctx.textAlign='right'; ctx.font='10px "Exo 2",sans-serif';
+  ctx.fillStyle=popupState.escHover?'rgba(255,255,255,0.92)':'rgba(210,130,130,0.6)';
+  ctx.fillText('[ESC] close',px+pw-10,py+22);
+  popupState.escBounds={x:px+pw-86,y:py+12,w:76,h:14};
+  // Body lines — caps keywords auto-bolded.
+  const _font='12px "Exo 2",sans-serif';
+  const _eduLine=(line,x,y)=>{
+    const toks=_objTokenize(line);
+    for(const tk of toks){ const w=tk.text.replace(/[^A-Za-z]/g,''); if(w.length>=2 && w===w.toUpperCase()) tk.bold=true; }
+    ctx.textAlign='left'; ctx.textBaseline='alphabetic'; ctx.font=_font;
+    _objDrawLine(toks,x,y,_font,'rgba(205,214,230,0.95)');
+  };
+  const _lx=px+28; let _y=py+62;
+  _eduLine('A route segment becomes BLOCKED when either:',_lx,_y); _y+=28;
+  ctx.font=_font; ctx.textAlign='left'; ctx.fillStyle='rgba(255,140,120,0.95)';
+  ctx.fillText('1.',_lx+4,_y); _eduLine('It passes directly across a STAR, or',_lx+24,_y); _y+=22;
+  ctx.font=_font; ctx.fillStyle='rgba(255,140,120,0.95)';
+  ctx.fillText('2.',_lx+4,_y); _eduLine('It is longer than the ENGINE’s RANGE.',_lx+24,_y); _y+=32;
+  for(const ln of [
+    'A train that stays BLOCKED for too long will',
+    'automatically AUTO RE-ROUTE to its destination',
+    'via a MULTI-HOP path — hopping through other',
+    'planets to get around the obstacle.'
+  ]){ _eduLine(ln,_lx,_y); _y+=20; }
+  // GOT IT button
+  const _bw=128,_bh=34,_bx=px+pw/2-_bw/2,_by=py+ph-_bh-18;
+  const _hov=!!popupState.blockEduOkHover;
+  ctx.fillStyle=_hov?'rgba(70,120,220,0.97)':'rgba(40,80,170,0.92)';
+  ctx.beginPath(); ctx.roundRect(_bx,_by,_bw,_bh,5); ctx.fill();
+  ctx.strokeStyle=_hov?'rgba(150,200,255,0.95)':'rgba(90,160,255,0.8)'; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.roundRect(_bx,_by,_bw,_bh,5); ctx.stroke();
+  ctx.fillStyle='rgba(220,235,255,0.98)'; ctx.font='bold 12px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText('GOT IT',_bx+_bw/2,_by+_bh/2+1);
+  ctx.textBaseline='alphabetic';
+  _blockEduOkBounds={x:_bx,y:_by,w:_bw,h:_bh};
+  ctx.restore();
+}
+
 // Split-throttle design:
 //   • Intro-gate scans (mission-trigger conditions like "did the player visit
 //     a rocky planet", "total hazmat produced >= 2") run at most once per
@@ -19942,10 +23550,22 @@ function updateMissions(dtSd){
   const _doIntroGates=_missionTickAcc>=0.01;
   if(_doIntroGates) _missionTickAcc=0;
   if(_doIntroGates){
+  // IRON FOUNDRY unlock: fires the moment the player ACCEPTS the build_foundry
+  // mission (it lands in `missions` with status 'active'). Unlocks the upgrade so
+  // the foundry is buildable for the mission they just accepted. The popup is NOT
+  // shown here anymore — it's deferred until the foundry is actually BUILT and the
+  // player closes that planet's details window (see _foundryConstructedPopupPending),
+  // where it appears with the title "NEW UPGRADE CONSTRUCTED".
+  if(!_foundryUnlocked && missions.some(mx=>mx.id==='build_foundry'&&mx.status==='active')){
+    _foundryUnlocked=true;
+    _chatMsg('IRON FOUNDRY UPGRADE UNLOCKED','rgba(255,210,120,1)');
+  }
   // "Build a Foundry" intro: 10 real-time seconds after the create_route
   // mission completes. _findOreTimerMs (legacy name — was for the removed
   // Find Molten Ore mission) is stamped when create_route's status flips to
-  // 'completed' in the mission-complete block below.
+  // 'completed' in the mission-complete block below. (No foundry-unlocked gate:
+  // the foundry now unlocks WHEN this mission is accepted, so the intro must be
+  // able to appear first.)
   if(_findOreTimerMs>0&&Date.now()-_findOreTimerMs>=10000&&!_missionPending('build_foundry')&&!missions.some(mx=>mx.id==='build_foundry'&&mx.status==='completed')){
     pendingMissionIntros.push({defId:'build_foundry',readySd:stardate});
   }
@@ -19954,34 +23574,43 @@ function updateMissions(dtSd){
     const _totalHazProd=galaxy.planets.reduce((s,p)=>s+((p.upgradeData?.iron_foundry?.hazmatTotal)||0),0);
     if(_totalHazProd>=2.0) pendingMissionIntros.push({defId:'dispose_hazmat',readySd:stardate});
   }
-  // create_route intro: 5 real-time seconds after the visit_planet mission
-  // ACTUALLY completes (the new 4th objective `await_arrival` means the
-  // mission no longer auto-completes on click — it waits for the train to
-  // reach its destination). _visitPlanetCompletedMs is stamped in the
-  // mission-complete block when m.id==='visit_planet' flips to 'completed'.
-  if(_visitPlanetCompletedMs>0&&Date.now()-_visitPlanetCompletedMs>=5000&&!_missionPending('create_route')&&!missions.some(mx=>mx.id==='create_route'&&mx.status==='completed')){
-    pendingMissionIntros.push({defId:'create_route',readySd:stardate});
+  // create_route intro: QUEUED as soon as the player first OPENS the ORIJEN details
+  // window. The popup can't overlay that window, so it appears the moment the window
+  // closes — then the lava-station walkthrough follows the accept. The lava-station-
+  // built condition is kept as a safety fallback.
+  {
+    const _crLava=(galaxy && _tutorialLavaPlanetId>=0)?galaxy.planets[_tutorialLavaPlanetId]:null;
+    // Deferred until the first-train tutorial segment completes (was queued on
+    // first Orijen-details open). Lava-station-built remains a safety fallback.
+    if((_ftFirstTrainTutDone || (_crLava && _crLava.playerBuiltStation))
+       && !_missionPending('create_route') && !missions.some(mx=>mx.id==='create_route'&&mx.status==='completed')){
+      pendingMissionIntros.push({defId:'create_route',readySd:stardate});
+    }
   }
-  // upgrade_station intro: 10 real-time seconds after buy_second_train completes
-  if(_buyTrainCompletedMs>0&&Date.now()-_buyTrainCompletedMs>=10000&&!_missionPending('upgrade_station')){
+  // Stamp the IRON CAR unlock time (one-shot), robust to wherever it unlocks.
+  if(_ironCarUnlocked && _ironCarUnlockedMs===0) _ironCarUnlockedMs=Date.now();
+  // upgrade_station intro: 10 real-time seconds after the IRON CAR unlocks.
+  if(_ironCarUnlockedMs>0&&Date.now()-_ironCarUnlockedMs>=10000&&!_missionPending('upgrade_station')){
     pendingMissionIntros.push({defId:'upgrade_station',readySd:stardate});
   }
-  // visit_planet intro: held back at game start; introduced only after the
-  // full new-game tutorial chain finishes (phase reaches 'done', which the
-  // tutorial sets 1 s after the player returns to galaxy view post-builder).
-  // Loaded games skip the chain entirely (phase pre-set to 'done').
-  if(!_missionPending('visit_planet')&&!missions.some(mx=>mx.id==='visit_planet'&&mx.status==='completed')){
-    if(_tutorialPhase==='done'){
-      pendingMissionIntros.push({defId:'visit_planet',readySd:stardate});
-    }
-  }
-  // buy_second_train intro: 10 real-time seconds after the produce_iron
-  // ("Make Iron") mission completes. Only introduced if the player still
-  // has fewer than 2 player trains at that point.
-  if(_produceIronTimerMs>0&&Date.now()-_produceIronTimerMs>=10000&&!_missionPending('buy_second_train')&&!missions.some(mx=>mx.id==='buy_second_train'&&mx.status==='completed')){
-    if(trains.filter(t=>t.isPlayer).length<2){
+  // (visit_planet mission removed — its game-start held-back intro is gone.
+  //  create_route is introduced via the Lava-details open+close gate above.)
+  // buy_second_train ("Buy an Iron-delivery Train") intro: at least 10 real-time
+  // seconds after produce_iron completes AND not before S.D. 832.1. If, by the
+  // time the gate opens, the player has ALREADY delivered iron to a non-desert
+  // planet, skip the mission entirely. (upgrade_station no longer depends on this
+  // mission — it's gated on the Iron Car unlock — so skipping it breaks nothing.)
+  if(_produceIronTimerMs>0&&Date.now()-_produceIronTimerMs>=10000&&stardate>=832.1&&!_missionPending('buy_second_train')&&!missions.some(mx=>mx.id==='buy_second_train')){
+    if(!_ironDeliveredToNonDesert && trains.filter(t=>t.isPlayer).length<2){
       pendingMissionIntros.push({defId:'buy_second_train',readySd:stardate});
     }
+  }
+  // produce_iron intro: 15 real-time seconds after build_foundry completes
+  // (timer armed in the prerequisite-unlock loop). The delay lets the
+  // "Add Molten Ore + Water cars" train-builder tutorial step fire before the
+  // NEW MISSION popup steals focus. Guarded so it's queued exactly once.
+  if(_produceIronIntroAtMs>0&&Date.now()>=_produceIronIntroAtMs&&!_missionPending('produce_iron')&&!missions.some(mx=>mx.id==='produce_iron'&&mx.status==='completed')){
+    pendingMissionIntros.push({defId:'produce_iron',readySd:stardate});
   }
   // design_better_train intro: requires BOTH (a) steel has been produced
   // AND (b) the Class J engine is ALREADY unlocked. The 10-second real-time
@@ -20047,9 +23676,11 @@ function updateMissions(dtSd){
     pendingMissionIntros.push({defId:'ancient_schematics',readySd:stardate,sourcePlanetId:_ancientSchematicsPlanetId});
     _ancientSchematicsTimerMs=0;
   }
-  // sandstorm_relief: 0.5% chance per 0.1 SD once player has a station on a desert planet
-  if(!_missionPending('sandstorm_relief')){
-    if(_sandstormCheckSd===0) _sandstormCheckSd=_gameStartSd;
+  // sandstorm_relief: 0.5% chance per 0.1 SD once player has a station on a desert
+  // planet — blocked until S.D. 832.1 (no early-game sandstorm), and the lottery
+  // clock starts there so it can't "catch up" a backlog of rolls on first eligibility.
+  if(stardate>=832.1 && !_missionPending('sandstorm_relief')){
+    if(_sandstormCheckSd===0) _sandstormCheckSd=832.1;
     const _dstp=galaxy.planets.filter(p=>p.type.id==='desert'&&p.playerBuiltStation);
     if(_dstp.length){
       while(stardate-_sandstormCheckSd>=0.1){
@@ -20087,16 +23718,16 @@ function updateMissions(dtSd){
       _bhResearchTimerMs=0; // a gate condition lapsed before firing — disarm
     }
   }
-  // mad_scientist: fires 60 real-time seconds after the player PURCHASES
-  // their first Large Station. The timer is armed at the purchase-button
-  // click (see draw... build handler) — NOT from detecting the persistent
-  // hasLargeStation state — so loading a save that already has a Large
-  // Station won't fire it on game start. Timer not persisted: if the
-  // player reloads during the 60 s window the mission simply won't fire
-  // (acceptable edge case; avoids the load-time false trigger). Source =
-  // a random URBAN planet 20k–60k SU from the home star (Gigi Prime) with
-  // no rival/AI station.
-  if(_madScientistTimerMs>0&&Date.now()-_madScientistTimerMs>=60000&&
+  // mad_scientist: fires 15 real-time seconds after the player has built their
+  // SECOND Large Station. The timer is armed at the purchase-button click of the
+  // 2nd large station (see draw... build handler) — NOT from detecting the
+  // persistent hasLargeStation state — so loading a save that already has 2+
+  // Large Stations won't fire it on game start. Timer not persisted: if the
+  // player reloads during the 15 s window the mission simply won't fire until
+  // the next large-station purchase (acceptable edge case; avoids the load-time
+  // false trigger). Source = a random URBAN planet 20k–60k SU from the home star
+  // (Gigi Prime) with no rival/AI station.
+  if(_madScientistTimerMs>0&&Date.now()-_madScientistTimerMs>=15000&&
      !_missionPending('mad_scientist')&&!missions.some(mx=>mx.id==='mad_scientist')){
     const _msHomeP=galaxy.planets[galaxy.origenId];
     const _msHs=_msHomeP?galaxy.stars[_msHomeP.starId]:null;
@@ -20124,6 +23755,36 @@ function updateMissions(dtSd){
       pendingMissionIntros.push({defId:'another_dimension',readySd:stardate});
       _anotherDimTimerMs=0;
     }
+  }
+  // ── v0.4.7 Project Helios arc entry ──────────────────────────────────
+  // helios_directive: fires 20 real-time seconds after "More scientists
+  // needed!" completes, provided the Ancient Schematics have ALSO been
+  // deciphered (OR 2 SD have passed since more_scientists completed — a
+  // fallback so a player who never stumbled on an ancient world isn't
+  // locked out of the mid-game). Arms/fires like the another_dimension
+  // timer; not persisted (re-arms on load).
+  if(!_heliosArcStarted&&!_missionPending('helios_directive')&&!missions.some(mx=>mx.id==='helios_directive')){
+    const _msDone=missions.find(mx=>mx.id==='more_scientists'&&mx.status==='completed');
+    if(_msDone){
+      const _asDone=missions.some(mx=>mx.id==='ancient_schematics'&&mx.status==='completed');
+      const _sdFallback=(stardate-(_msDone.completedSd||stardate))>=2.0;
+      if(_asDone||_sdFallback){
+        if(_heliosTimerMs===0) _heliosTimerMs=Date.now();
+        else if(Date.now()-_heliosTimerMs>=20000){
+          _heliosArcStarted=true;
+          _initHeliosSites();
+          pendingMissionIntros.push({defId:'helios_directive',readySd:stardate});
+          _heliosTimerMs=0;
+        }
+      }
+    }
+  }
+  // helios_ignition: fires once all three sphere chains are complete.
+  if(_heliosArcStarted&&!_portalActive&&!_missionPending('helios_ignition')&&!missions.some(mx=>mx.id==='helios_ignition')){
+    const _f=missions.some(mx=>mx.id==='helios_frame'&&mx.status==='completed');
+    const _mi=missions.some(mx=>mx.id==='helios_mirror'&&mx.status==='completed');
+    const _h=missions.some(mx=>mx.id==='helios_heart'&&mx.status==='completed');
+    if(_f&&_mi&&_h) pendingMissionIntros.push({defId:'helios_ignition',readySd:stardate});
   }
   } // end of throttled intro-gate block — active-mission sweep below runs every frame
   if(!missions.length) return;
@@ -20174,16 +23835,13 @@ function updateMissions(dtSd){
       m.status='completed'; m.completedSd=stardate; _recomputeMissionTargets();
       _ga('mission_complete',{mission_id:m.id, mission_name:m.name, sd:Math.floor(stardate)});
       _newsLog('mission_complete',{missionId:m.id,missionName:m.name});
-      if(m.reward){ credits=Math.min(credits+m.reward,999999999); pendingCreditDeltas.push({timer:60,amount:m.reward}); }
+      if(m.reward){ credits=Math.min(credits+m.reward,999999999); pendingCreditDeltas.push({timer:60,amount:m.reward}); pendingMissionRewards.push({name:m.name,reward:m.reward}); }
       _chatMsg('MISSION COMPLETE: '+m.name.toUpperCase(),'rgba(255,220,80,1)');
       // Start build_foundry countdown when create_route completes
       // (var name _findOreTimerMs is legacy from the removed Find Molten Ore mission)
       if(m.id==='create_route'&&_findOreTimerMs===0) _findOreTimerMs=Date.now();
-      // Completing the repeating-route mission UNLOCKS the IRON FOUNDRY upgrade.
-      if(m.id==='create_route'&&!_foundryUnlocked){
-        _foundryUnlocked=true; pendingUpgradeUnlocks.push({key:'iron_foundry'});
-        _chatMsg('IRON FOUNDRY UPGRADE UNLOCKED','rgba(255,210,120,1)');
-      }
+      // (The IRON FOUNDRY upgrade is NO LONGER unlocked here — it now unlocks the
+      //  moment the player ACCEPTS the build_foundry mission; see updateMissions.)
       // Stamp build_foundry completion — arms the 10 s buy_second_train intro.
       if(m.id==='build_foundry'&&_foundryCompletedMs===0) _foundryCompletedMs=Date.now();
       // Legacy stamp (no longer gates anything — kept so any saved scripts /
@@ -20213,7 +23871,7 @@ function updateMissions(dtSd){
       if(m.id==='research_royal_car'&&!_royalCarUnlocked){
         _royalCarUnlocked=true;
         _ga('car_unlocked',{car_type:'royal', cargo:'royal', sd:Math.floor(stardate)});
-        pendingCarUnlocks.push({sprite:'car_royal',displayName:'Royal Car'});
+        pendingCarUnlocks.push({sprite:'car_royal',displayName:'Royal Car',planetId:m.targetPlanetId});
         _chatMsg('ROYAL CAR UNLOCKED','rgba(220,170,255,1)');
       }
       // Designing a better space train: unlock Class J and Class R engines.
@@ -20283,9 +23941,41 @@ function updateMissions(dtSd){
           pendingMissionIntros.push({defId:'more_scientists',readySd:stardate,targetPlanetId:_outpost,scientistSourceIds:_sci});
         }
       }
+      // ── v0.4.7 Project Helios completion effects ─────────────────
+      if(m.id==='helios_frame'&&_heliosEngDiscount===0){
+        _heliosEngDiscount=0.15;
+        _chatMsg('SHIPYARD EFFICIENCY: ENGINE PURCHASE COSTS PERMANENTLY -15%','rgba(100,220,160,1)');
+      }
+      if(m.id==='helios_mirror'&&!_sensorUpgrade2Active){
+        _sensorUpgrade2Active=true;
+        fogStampCanvas=null; // force stamp regeneration at the new radius
+        _chatMsg('SENSOR UPGRADE II ACTIVATED — FOG REVEAL RADIUS ×2','rgba(100,200,255,1)');
+      }
+      if(m.id==='helios_heart'&&!_heliosEngineUnlocked){
+        _heliosEngineUnlocked=true;
+        pendingEngineUnlocks.push({sprite:'engine_helios',displayName:'Helios Engine'});
+        _chatMsg('HELIOS ENGINE UNLOCKED','rgba(255,204,68,1)');
+        _ga('engine_unlocked',{engine:'helios', sd:Math.floor(stardate)});
+      }
+      if(m.id==='helios_ignition'&&!_portalActive){
+        _igniteBlackHolePortal();
+      }
       // Unlock any missions whose prerequisite was this mission
       for(const _pd of MISSION_DEFS){
         if(_pd.prerequisite===m.id&&!_missionPending(_pd.id)){
+          // produce_iron's NEW MISSION popup is delayed an extra 15 s (armed
+          // here, fired in the timed-intro block in updateMissions) so it
+          // doesn't preempt the "Add Molten Ore + Water cars" train-builder
+          // tutorial step. All other prerequisite chains queue immediately.
+          if(_pd.id==='produce_iron'){ if(_produceIronIntroAtMs===0) _produceIronIntroAtMs=Date.now()+15000; continue; }
+          // Helios sphere chains: attach each mission's construction depot as
+          // its targetPlanetId so {TARGET} resolves to the depot planet name.
+          if(_pd.id==='helios_frame'||_pd.id==='helios_mirror'||_pd.id==='helios_heart'){
+            const _hsKey={helios_frame:'frame',helios_mirror:'mirror',helios_heart:'heart'}[_pd.id];
+            const _hsDp=_heliosDepot(_hsKey);
+            pendingMissionIntros.push({defId:_pd.id,readySd:stardate,targetPlanetId:_hsDp?_hsDp.id:null});
+            continue;
+          }
           pendingMissionIntros.push({defId:_pd.id,readySd:stardate});
         }
       }
@@ -20293,6 +23983,63 @@ function updateMissions(dtSd){
   }
 }
 
+// Progress data for a quantified ("do X N times") objective → {cur,max,label,pct?}
+// or null for objectives without a count. Shared by the [M] Missions window AND
+// the on-screen Mission Objectives Tracker so both stay in sync.
+function _mObjProgress(m,objId){
+    if(objId==='deliver_20_livestock') return {cur:m._famineDeliveries||0,   max:10, label:'Food delivered'};
+    if(objId==='deliver_4_medical')    return {cur:m._medicalDeliveries||0,  max:4,  label:'Supplies delivered'};
+    if(objId==='deliver_50_to_origen') return {cur:m._origenPassengersCount||0, max:50, label:'Passengers delivered'};
+    if(objId==='deliver_flowers_10')   return galaxy?{cur:Math.min(galaxy.planets.filter(p=>p.flowerUnlocked&&!p.isFlowersOrigin).length,10), max:10, label:'Planets seeded'}:null;
+    if(objId==='incinerate_hazmat')    return {cur:Math.min((_totalHazmatIncinerated-(m.hazmatIncineratedSnapshot||0)),2), max:2, label:'Hazmat incinerated'};
+    if(objId==='visit_5_systems')      return galaxy?{cur:Math.min(new Set(galaxy.planets.filter(p=>visitedPlanetIds.has(p.id)&&!m.visitedSnapshot?.has(p.id)).map(p=>p.starId)).size,5), max:5, label:'Systems visited'}:null;
+    if(objId==='deliver_10_sand')      return {cur:Math.min(m._sandDeliveries||0,10), max:10, label:'Sand removed'};
+    if(objId==='visit_50_planets')     return {cur:Math.min(visitedPlanetIds.size,50), max:50, label:'Planets visited'};
+    // count only the player's own stations/trains (mirrors corporate_expansion checkObj).
+    if(objId==='stations_7')           return galaxy?{cur:Math.min(galaxy.planets.filter(p=>p.playerBuiltStation||p.isStarter).length,7), max:7, label:'Stations built'}:null;
+    if(objId==='trains_profitable_1sd'){
+      let _pn=0;
+      for(const t of trains){
+        if(!t.isPlayer||!t._revLog||!t._revLog.length) continue;
+        while(t._revLog.length&&stardate-t._revLog[0].sd>1.0) t._revLog.shift();
+        let _net=0;
+        for(const _e of t._revLog) _net+=_e.rev;
+        if(_net>0) _pn++;
+      }
+      return {cur:Math.min(_pn,5), max:5, label:'Profitable trains'};
+    }
+    if(objId==='deliver_5_chemical')   return {cur:Math.min(m._chemicalDeliveries||0,5), max:5, label:'Chemical delivered'};
+    if(objId==='wait_alignment'){
+      // Hidden 1.0-SD alignment countdown shown only as a % bar.
+      const _asd0=m._alignStartSd!=null?m._alignStartSd:stardate;
+      const _afrac=Math.max(0,Math.min(1,(stardate-_asd0)/1.0));
+      return {cur:Math.floor(_afrac*100), max:100, label:'Beam alignment', pct:true};
+    }
+    if(objId==='survey_sites'){
+      let _sv=0;
+      if(galaxy&&Array.isArray(galaxy.heliosSites)) for(const hs of galaxy.heliosSites){
+        const _st=galaxy.stars[hs.starId];
+        if(_st&&_st.planetIds&&_st.planetIds.some(pid=>visitedPlanetIds.has(pid))) _sv++;
+      }
+      return {cur:_sv, max:3, label:'Sites surveyed'};
+    }
+    if(objId==='depot_steel') return {cur:Math.min(m._depotSteel||0,10), max:10, label:'Steel delivered'};
+    if(objId==='depot_glass') return {cur:Math.min(m._depotGlass||0,10), max:10, label:'Glass delivered'};
+    if(objId==='deliver_trusses'){ const _dp=_heliosDepot('frame');  return {cur:Math.min(_dp?.dysonDelivered?.truss||0,40), max:40, label:'Trusses delivered'}; }
+    if(objId==='deliver_panels'){ const _dp=_heliosDepot('mirror'); return {cur:Math.min(_dp?.dysonDelivered?.solar_panel||0,40), max:40, label:'Panels delivered'}; }
+    if(objId==='deliver_supercon'){ const _dp=_heliosDepot('heart'); return {cur:Math.min(_dp?.dysonDelivered?.superconductor||0,25), max:25, label:'Superconductors'}; }
+    if(objId==='deliver_cores'){ const _dp=_heliosDepot('heart');   return {cur:Math.min(_dp?.dysonDelivered?.reactor_core||0,15), max:15, label:'Reactor cores'}; }
+    if(objId==='wait_research'){
+      // Hidden 2.0-SD research countdown shown only as a % bar.
+      const _sd0=m._researchStartSd!=null?m._researchStartSd:stardate;
+      const _frac=Math.max(0,Math.min(1,(stardate-_sd0)/2.0));
+      return {cur:Math.floor(_frac*100), max:100, label:'Research progress', pct:true};
+    }
+    if(objId==='deliver_10_steel_home')   return {cur:Math.min(m._homeSteelDelivered  ||0,20), max:20, label:'Steel delivered'};
+    if(objId==='deliver_10_battery_home') return {cur:Math.min(m._homeBatteryDelivered||0,20), max:20, label:'Batteries delivered'};
+    if(objId==='deliver_10_oil_home')     return {cur:Math.min(m._homeOilDelivered    ||0,20), max:20, label:'Oil delivered'};
+    return null;
+}
 function drawMissionsPopup(){
   if(activePopup!=='missions') return;
   const pw=480,ph=360;
@@ -20340,47 +24087,6 @@ function drawMissionsPopup(){
   const _mCbW=Math.round(ctx.measureText('○').width)+5;
 
   // --- Progress-bar helper: returns {cur,max,label} for quantified objectives, else null ---
-  const _mObjProgress=(m,objId)=>{
-    if(objId==='deliver_20_livestock') return {cur:m._famineDeliveries||0,   max:10, label:'Food delivered'};
-    if(objId==='deliver_4_medical')    return {cur:m._medicalDeliveries||0,  max:4,  label:'Supplies delivered'};
-    if(objId==='deliver_50_to_origen') return {cur:m._origenPassengersCount||0, max:50, label:'Passengers delivered'};
-    if(objId==='deliver_flowers_10')   return galaxy?{cur:Math.min(galaxy.planets.filter(p=>p.flowerUnlocked&&!p.isFlowersOrigin).length,10), max:10, label:'Planets seeded'}:null;
-    if(objId==='incinerate_hazmat')    return {cur:Math.min((_totalHazmatIncinerated-(m.hazmatIncineratedSnapshot||0)),2), max:2, label:'Hazmat incinerated'};
-    if(objId==='visit_5_systems')      return galaxy?{cur:Math.min(new Set(galaxy.planets.filter(p=>visitedPlanetIds.has(p.id)&&!m.visitedSnapshot?.has(p.id)).map(p=>p.starId)).size,5), max:5, label:'Systems visited'}:null;
-    if(objId==='deliver_10_sand')      return {cur:Math.min(m._sandDeliveries||0,10), max:10, label:'Sand removed'};
-    if(objId==='visit_50_planets')     return {cur:Math.min(visitedPlanetIds.size,50), max:50, label:'Planets visited'};
-    // Must mirror the corporate_expansion checkObj filters above (lines ~577-578):
-    // count only the player's own stations and trains — `p.hasStation` alone
-    // would include alien-relic stations, and the trains filter without
-    // `t.isPlayer` would include the AI rival's fleet.
-    if(objId==='stations_7')           return galaxy?{cur:Math.min(galaxy.planets.filter(p=>p.playerBuiltStation||p.isStarter).length,7), max:7, label:'Stations built'}:null;
-    if(objId==='trains_profitable_1sd'){
-      // Match the rolling-window NET-profit logic from checkObj above —
-      // count trains where revenue earned exceeds maintenance costs across
-      // the last 1 SD (sum of {sd,rev} entries in _revLog > 0).
-      let _pn=0;
-      for(const t of trains){
-        if(!t.isPlayer||!t._revLog||!t._revLog.length) continue;
-        while(t._revLog.length&&stardate-t._revLog[0].sd>1.0) t._revLog.shift();
-        let _net=0;
-        for(const _e of t._revLog) _net+=_e.rev;
-        if(_net>0) _pn++;
-      }
-      return {cur:Math.min(_pn,5), max:5, label:'Profitable trains'};
-    }
-    if(objId==='deliver_5_chemical')   return {cur:Math.min(m._chemicalDeliveries||0,5), max:5, label:'Chemical delivered'};
-    if(objId==='wait_research'){
-      // Hidden 2.0-SD research countdown shown only as a % bar (the exact
-      // duration is deliberately not surfaced to the player).
-      const _sd0=m._researchStartSd!=null?m._researchStartSd:stardate;
-      const _frac=Math.max(0,Math.min(1,(stardate-_sd0)/2.0));
-      return {cur:Math.floor(_frac*100), max:100, label:'Research progress', pct:true};
-    }
-    if(objId==='deliver_10_steel_home')   return {cur:Math.min(m._homeSteelDelivered  ||0,20), max:20, label:'Steel delivered'};
-    if(objId==='deliver_10_battery_home') return {cur:Math.min(m._homeBatteryDelivered||0,20), max:20, label:'Batteries delivered'};
-    if(objId==='deliver_10_oil_home')     return {cur:Math.min(m._homeOilDelivered    ||0,20), max:20, label:'Oil delivered'};
-    return null;
-  };
   const PROG_H=20; // px added per objective that has a progress bar (label+bar+margins)
   // --- Pre-compute per-row heights (needs font measuring) ---
   // cMaxW must leave room for the reward pill (right-anchored).
@@ -20405,7 +24111,7 @@ function drawMissionsPopup(){
     }
     ctx.font='11px "Exo 2",sans-serif';
     for(const obj of (m.objectives||[])){
-      let txt=obj.text;
+      let txt=_objDisplayText(m,obj);
       const wds=txt.split(' '); let ln='',nl=1;
       for(const w of wds){const t=ln?ln+' '+w:w;if(ctx.measureText(t).width<=(cMaxW2-_mCbW))ln=t;else{nl++;ln=w;}}
       h+=nl*_mObjLH;
@@ -20502,13 +24208,15 @@ function drawMissionsPopup(){
     }
     // Details — italic 12px, word-wrapped
     let _mRowY=ry+29;
+    // Per-mission planet-name styles (biome-coloured), shared by details + objectives.
+    const _mPStyles=_missionPlanetStyles(m);
     if(m.details){
       ctx.textAlign='left';
       // Tokenised so ORIJEN / LAVA PLANET / DESERT PLANET get uppercased +
       // biome-coloured here too (same as the objectives below).
       const _mDtFontStr='italic 12px "Exo 2",sans-serif';
       const _mDtBaseCol=isDone?'rgba(68,70,78,0.50)':'rgba(138,162,200,0.72)';
-      const _mDtLines=_objWrapTokens(_objTokenize(m.details), cMaxW, _mDtFontStr);
+      const _mDtLines=_objWrapTokens(_objTokenize(m.details,_mPStyles), cMaxW, _mDtFontStr);
       for(let _li=0;_li<_mDtLines.length;_li++){
         _objDrawLine(_mDtLines[_li], cX, _mRowY, _mDtFontStr, _mDtBaseCol);
         if(_li<_mDtLines.length-1) _mRowY+=_mDtLH;
@@ -20527,7 +24235,7 @@ function drawMissionsPopup(){
       else               _col='rgba(180,200,235,0.78)';
       // Tokenize for colored [Name] segments, then word-wrap by tokens.
       const _objFontStrM='11px "Exo 2",sans-serif';
-      const _objTokensM=_objTokenize(obj.text);
+      const _objTokensM=_objTokenize(_objDisplayText(m,obj),_mPStyles);
       const _objLines=_objWrapTokens(_objTokensM,cMaxW-_mCbW,_objFontStrM);
       const _objTotalH=_objLines.length*_mObjLH;
       const _prog=_mObjProgress(m,obj.id);
@@ -20608,14 +24316,34 @@ function drawMissionsPopup(){
   ctx.restore();
 }
 
+// Header tab bar shared by the PLANET + STAR registries (same pattern as the
+// Trains/Routes/Stations `_drawWindowTabs`). `active` is 'pokedex' | 'starregistry'.
+// Registers popupState.registryTabBounds for the click + hover handlers.
+function _drawRegistryTabs(px,py,pw,active){
+  const _tabs=[['pokedex','PLANETS','#4af'],['starregistry','STARS','#ffc060']];
+  popupState.registryTabBounds=[];
+  const _tw=96,_th=22,_ty=py+5,_gap=4; let _tx=px+12;
+  for(const [id,label,col] of _tabs){
+    const _isAct=(active===id), _hov=(popupState.regTabHover===id);
+    ctx.fillStyle=_isAct?'rgba(28,52,116,0.96)':(_hov?'rgba(18,36,82,0.9)':'rgba(9,18,46,0.85)');
+    ctx.beginPath(); ctx.roundRect(_tx,_ty,_tw,_th,4); ctx.fill();
+    ctx.strokeStyle=_isAct?col:(_hov?'rgba(90,140,230,0.6)':'rgba(45,75,140,0.45)'); ctx.lineWidth=_isAct?1.6:1;
+    ctx.beginPath(); ctx.roundRect(_tx,_ty,_tw,_th,4); ctx.stroke();
+    ctx.font='bold 10px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillStyle=_isAct?col:(_hov?'rgba(180,205,245,0.92)':'rgba(120,150,200,0.7)');
+    ctx.fillText(label,_tx+_tw/2,_ty+_th/2+1); ctx.textBaseline='alphabetic';
+    popupState.registryTabBounds.push({x:_tx,y:_ty,w:_tw,h:_th,id});
+    _tx+=_tw+_gap;
+  }
+  ctx.textAlign='left';
+}
 function drawPokedex(){
   if(activePopup!=='pokedex'||!galaxy) return;
   const pw=460, ph=390;
   const [px,py]=drawPopupBase(pw,ph,'rgba(80,160,255,0.7)');
   ctx.save();
-  // Header
-  ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
-  ctx.fillStyle='#4af'; ctx.fillText('PLANET REGISTRY',px+pw/2,py+21);
+  // Header: PLANETS / STARS tab bar (switch via the click handler).
+  _drawRegistryTabs(px,py,pw,'pokedex');
   ctx.font='10px "Exo 2",sans-serif'; ctx.textAlign='right';
   popupState.escBounds={x:px+pw-88,y:py+11,w:78,h:14};
   ctx.fillStyle=popupState.escHover?'rgba(255,255,255,0.92)':'rgba(90,130,190,0.55)';
@@ -20731,8 +24459,8 @@ function drawStarRegistry(){
   const pw=460, ph=390;
   const [px,py]=drawPopupBase(pw,ph,'rgba(255,180,60,0.7)');
   ctx.save();
-  ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
-  ctx.fillStyle='#ffc060'; ctx.fillText('STAR REGISTRY',px+pw/2,py+21);
+  // Header: PLANETS / STARS tab bar (switch via the click handler).
+  _drawRegistryTabs(px,py,pw,'starregistry');
   ctx.font='10px "Exo 2",sans-serif'; ctx.textAlign='right';
   popupState.escBounds={x:px+pw-88,y:py+11,w:78,h:14};
   ctx.fillStyle=popupState.escHover?'rgba(255,255,255,0.92)':'rgba(180,130,60,0.55)';
@@ -20778,7 +24506,7 @@ function drawStarRegistry(){
     ctx.fillText('#'+(i+1),px+32,ry+ROW/2+4);
     const dr=9;
     if(vis){
-      ctx.save(); drawStar(px+46,ry+ROW/2,dr,s.color,!!s.hasDysonSphere); ctx.restore();
+      ctx.save(); drawStar(px+46,ry+ROW/2,dr,s.color,_starDysonArg(s)); ctx.restore();
     } else {
       ctx.fillStyle='rgba(10,8,4,0.9)';
       ctx.beginPath(); ctx.arc(px+46,ry+ROW/2,dr,0,Math.PI*2); ctx.fill();
@@ -20816,6 +24544,59 @@ function drawStarRegistry(){
   ctx.restore();
 }
 
+// Horizontal volume slider for the Options SOUND panes: dark track + accent
+// fill + round handle, with a 0-100 value label right-aligned at valX. `val` is
+// 0..1. Returns the slider's hit-track {x,y,w,h} (taller than the visible track
+// so it's easy to grab). Drawn with the shared global ctx.
+function _drawOptionsSlider(x, midY, w, val, accent, hot, valX){
+  const _h=6, _y=midY-_h/2;
+  ctx.save();
+  ctx.fillStyle='rgba(0,0,0,0.82)';
+  ctx.beginPath(); ctx.roundRect(x,_y,w,_h,3); ctx.fill();
+  ctx.fillStyle=accent;
+  ctx.beginPath(); ctx.roundRect(x,_y,Math.max(2,w*val),_h,3); ctx.fill();
+  ctx.strokeStyle='rgba(80,140,210,0.55)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.roundRect(x,_y,w,_h,3); ctx.stroke();
+  const _hx=x+w*Math.max(0,Math.min(1,val));
+  ctx.fillStyle=hot?'#e6f6ff':'#bde6ff';
+  ctx.strokeStyle='rgba(40,90,160,0.9)'; ctx.lineWidth=1.2;
+  ctx.beginPath(); ctx.arc(_hx,midY,5.5,0,Math.PI*2); ctx.fill(); ctx.stroke();
+  // 0-100 value label, right-aligned.
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='right'; ctx.textBaseline='middle';
+  ctx.fillStyle='rgba(170,210,245,0.92)';
+  ctx.fillText(String(Math.round(val*100)), valX, midY+0.5);
+  ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+  ctx.restore();
+  return {x, y:midY-11, w, h:22};
+}
+// Shared click handler for the OPTIONS popup — used both in-game and from the
+// title screen (where popupState.noSave hides the SAVE GAME button). Returns
+// true when the click was consumed so the caller can stop processing it.
+function _handleOptionsPopupClick(cp){
+  if(activePopup!=='options'||!popupState) return false;
+  const _in=(b)=>!!(b&&cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h);
+  const _onSlider=(b)=>!!(b&&cp.x>=b.x-6&&cp.x<=b.x+b.w+6&&cp.y>=b.y&&cp.y<=b.y+b.h);
+  if(_in(popupState.optionsEscBounds)){ activePopup=null; popupState={}; return true; }
+  if(_in(popupState.controlsBtnBounds)){ activePopup='controls'; popupState={}; playSound('click'); return true; }
+  if(_in(popupState.optionsSaveBtnBounds)){ saveGame(); return true; }
+  if(_in(popupState.optionsFullscreenBtnBounds)){ _toggleFullscreen(); return true; }
+  if(_in(popupState.autosaveToggleBounds)){ autosaveEnabled=!autosaveEnabled; return true; }
+  if(_in(popupState.missionTrackerToggleBounds)){ missionTrackerEnabled=!missionTrackerEnabled; return true; }
+  if(_in(_optsSfxMuteBtnBounds)){ _sfxMuted=!_sfxMuted; if(!_sfxMuted) playSound('button'); return true; }
+  if(_onSlider(_optsSfxSliderBounds)){ const b=_optsSfxSliderBounds; _optsSliderDrag='sfx'; _sfxVol=Math.max(0,Math.min(1,(cp.x-b.x)/b.w)); return true; }
+  if(_in(_optsMuteBtnBounds)){ _toggleMusicMute(); return true; }
+  if(_onSlider(_optsMusicSliderBounds)){ const b=_optsMusicSliderBounds; _optsSliderDrag='music'; _soundtrack.volume=Math.max(0,Math.min(1,(cp.x-b.x)/b.w)); return true; }
+  if(_in(_optsPrevBtnBounds)){ _musicPrev(); return true; }
+  if(_in(_optsNextBtnBounds)){ _musicNext(); return true; }
+  // Click/drag anywhere on the progress bar → seek to that timestamp; the drag
+  // is released on mouseup (which clears _optsSliderDrag).
+  if(_onSlider(_optsMusicProgressBounds)){ const b=_optsMusicProgressBounds; _optsSliderDrag='seek'; const _dur=_soundtrack.duration; if(isFinite(_dur)&&_dur>0){ _soundtrack.currentTime=Math.max(0,Math.min(1,(cp.x-b.x)/b.w))*_dur; } return true; }
+  // Consume any other click inside the (opaque) popup frame so it can't fall
+  // through to the title-screen buttons or the galaxy behind it.
+  const _opw=300, _oph=448-((popupState.noSave)?36:0), _opx=(W-_opw)/2, _opy=(H-_oph)/2;
+  if(cp.x>=_opx&&cp.x<=_opx+_opw&&cp.y>=_opy&&cp.y<=_opy+_oph) return true;
+  return false;
+}
 function drawOptionsPopup(){
   if(activePopup!=='options') return;
   // Options is now intentionally minimal: Controls/How-To-Play shortcut +
@@ -20823,7 +24604,11 @@ function drawOptionsPopup(){
   // (Add Credits, Flower Planet, Colony Planet, Rival) AND the Fog of War
   // toggle all live in the hidden Cheats popup accessed by pressing 'C' while
   // Options is open.
-  const pw=300, ph=332; // +12 vs prior 320 to fit the 'a.o.huge' artist credit under the track title
+  // When opened from the TITLE screen (popupState.noSave) the SAVE GAME button
+  // is omitted and everything below it shifts up by _dy so there's no gap.
+  const _noSave=!!(popupState&&popupState.noSave);
+  const _dy=_noSave?36:0;
+  const pw=300, ph=448-_dy; // taller to fit the split SOUND EFFECTS + MUSIC panes (each: mute + volume slider) at the bottom
   const [px,py]=drawPopupBase(pw,ph,'rgba(80,160,255,0.7)');
   ctx.save();
   ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
@@ -20858,21 +24643,45 @@ function drawOptionsPopup(){
   // ── SAVE GAME button — same shape/size as CONTROLS but green. Clicking
   // calls saveGame() (identical behavior to the SAVE GAME button in the
   // quit-confirm popup). Hover state lives on popupState.optionsSaveBtnHover.
-  const _saveX=_ctlX, _saveY=py+80, _saveW=_ctlW, _saveH=_ctlH;
-  const _saveHov=!!popupState.optionsSaveBtnHover;
-  ctx.fillStyle=_saveHov?'rgba(45,200,90,0.97)':'rgba(30,160,70,0.85)';
-  ctx.beginPath(); ctx.roundRect(_saveX,_saveY,_saveW,_saveH,4); ctx.fill();
-  ctx.strokeStyle=_saveHov?'rgba(80,240,110,0.95)':'rgba(50,220,90,0.75)'; ctx.lineWidth=_saveHov?1.5:1;
-  ctx.beginPath(); ctx.roundRect(_saveX,_saveY,_saveW,_saveH,4); ctx.stroke();
-  ctx.font='bold 10px Orbitron,sans-serif'; ctx.textAlign='center';
-  ctx.fillStyle=_saveHov?'rgba(230,255,235,0.98)':'rgba(195,240,210,0.95)';
-  ctx.fillText('SAVE GAME',_saveX+_saveW/2,_saveY+_saveH/2+4);
-  popupState.optionsSaveBtnBounds={x:_saveX,y:_saveY,w:_saveW,h:_saveH};
-  // Divider after the two top buttons
+  // Omitted entirely when the popup is opened from the title screen (_noSave).
+  if(_noSave){ popupState.optionsSaveBtnBounds=null; }
+  else {
+    const _saveX=_ctlX, _saveY=py+80, _saveW=_ctlW, _saveH=_ctlH;
+    const _saveHov=!!popupState.optionsSaveBtnHover;
+    ctx.fillStyle=_saveHov?'rgba(45,200,90,0.97)':'rgba(30,160,70,0.85)';
+    ctx.beginPath(); ctx.roundRect(_saveX,_saveY,_saveW,_saveH,4); ctx.fill();
+    ctx.strokeStyle=_saveHov?'rgba(80,240,110,0.95)':'rgba(50,220,90,0.75)'; ctx.lineWidth=_saveHov?1.5:1;
+    ctx.beginPath(); ctx.roundRect(_saveX,_saveY,_saveW,_saveH,4); ctx.stroke();
+    ctx.font='bold 10px Orbitron,sans-serif'; ctx.textAlign='center';
+    ctx.fillStyle=_saveHov?'rgba(230,255,235,0.98)':'rgba(195,240,210,0.95)';
+    ctx.fillText('SAVE GAME',_saveX+_saveW/2,_saveY+_saveH/2+4);
+    popupState.optionsSaveBtnBounds={x:_saveX,y:_saveY,w:_saveW,h:_saveH};
+  }
+  // Divider after the top button(s)
   ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.moveTo(px,py+124); ctx.lineTo(px+pw,py+124); ctx.stroke();
-  // Autosave row — pushed down to make room for the new SAVE GAME button.
-  const ry=py+154;
+  ctx.beginPath(); ctx.moveTo(px,py+124-_dy); ctx.lineTo(px+pw,py+124-_dy); ctx.stroke();
+  // ── FULLSCREEN row (thin — no subtitle) ─────────────────────
+  // Label + the same bracket toggle button as the title screen. Enters / exits
+  // browser fullscreen (F11 equivalent); the glyph reflects the current state.
+  {
+    const _fsRowY=py+150-_dy; // label baseline
+    ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
+    ctx.fillStyle='rgba(160,200,255,0.9)'; ctx.fillText('Fullscreen',px+18,_fsRowY);
+    const _ofsSz=24, _ofsX=px+pw-18-_ofsSz, _ofsY=_fsRowY-19;
+    const _ofsHov=!!popupState.optionsFullscreenHover;
+    ctx.save();
+    ctx.globalAlpha=_ofsHov?0.95:0.75;
+    ctx.fillStyle='rgba(20,40,80,0.85)';
+    ctx.strokeStyle=_ofsHov?'rgba(120,200,255,0.9)':'rgba(60,120,200,0.55)';
+    ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.roundRect(_ofsX,_ofsY,_ofsSz,_ofsSz,4); ctx.fill(); ctx.stroke();
+    ctx.globalAlpha=_ofsHov?1.0:0.85;
+    _drawFullscreenGlyph(_ofsX+_ofsSz/2,_ofsY+_ofsSz/2,6,_ofsHov?'#cfeaff':'#8cf',2);
+    ctx.restore();
+    popupState.optionsFullscreenBtnBounds={x:_ofsX,y:_ofsY,w:_ofsSz,h:_ofsSz};
+  }
+  // Autosave row — pushed down (+30) to make room for the FULLSCREEN row above.
+  const ry=py+184-_dy;
   ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
   ctx.fillStyle='rgba(160,200,255,0.9)'; ctx.fillText('Autosave',px+18,ry);
   ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,130,180,0.5)';
@@ -20888,13 +24697,13 @@ function drawOptionsPopup(){
   popupState.autosaveToggleBounds={x:asTX,y:asTT,w:asTW,h:asTH};
   // Divider before Mission Objectives Tracker
   ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.moveTo(px,py+191); ctx.lineTo(px+pw,py+191); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(px,py+221-_dy); ctx.lineTo(px+pw,py+221-_dy); ctx.stroke();
   // Fog toggle has moved to the Cheats popup — clear its bounds so the
   // Options-popup click branch can't hit a stale rectangle from a previous
   // frame's render.
   popupState.fogToggleBounds=null;
   // Mission Objectives Tracker row
-  const ry7=py+221;
+  const ry7=py+251-_dy;
   ctx.textAlign='left'; ctx.font='12px "Exo 2",sans-serif';
   ctx.fillStyle='rgba(160,200,255,0.9)'; ctx.fillText('Mission Objectives Tracker',px+18,ry7);
   ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(100,130,180,0.5)';
@@ -20908,43 +24717,59 @@ function drawOptionsPopup(){
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
   ctx.fillStyle='#fff'; ctx.fillText(missionTrackerEnabled?'ON':'OFF',mtTX+mtTW/2,mtTT+mtTH/2+4);
   popupState.missionTrackerToggleBounds={x:mtTX,y:mtTT,w:mtTW,h:mtTH};
-  // ── SOUND pane ──────────────────────────────────────────────
-  // Divider + label + control row (mute / prev / progress bar / next) + track title.
-  // All four music controls (mute/prev/next + bar click-seek not yet wired) live
-  // here. Mute shares state with the title-screen + intro-cutscene mute buttons.
+  // ── SOUND EFFECTS pane ──────────────────────────────────────
+  // Divider + label + a row with a mute button (left) and a 0-100 volume slider
+  // controlling EVERY non-music sound (playSound reads _sfxMuted / _sfxVol).
+  const _mSz=22;                 // mute-button size — shared by both panes
+  const _muteX=px+18;
+  const _sliderX=_muteX+_mSz+12;
+  const _valX=px+pw-16;          // right-aligned 0-100 value label
+  const _sliderW=(_valX-22)-_sliderX;
+  // Reusable mute-button drawer (rounded square, 🔊/🔇, red when muted).
+  const _drawMuteBtn=(x,y,muted,hot)=>{
+    ctx.save();
+    ctx.globalAlpha=hot?0.92:0.70;
+    ctx.fillStyle=muted?'rgba(90,30,30,0.92)':'rgba(20,40,80,0.85)';
+    ctx.strokeStyle=muted?'rgba(255,100,100,0.8)':(hot?'rgba(120,200,255,0.9)':'rgba(60,120,200,0.55)');
+    ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.roundRect(x,y,_mSz,_mSz,4); ctx.fill(); ctx.stroke();
+    ctx.globalAlpha=hot?1.0:0.80;
+    ctx.fillStyle=muted?'#f88':'#8cf';
+    ctx.font='bold 13px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(muted?'🔇':'🔊',x+_mSz/2,y+_mSz/2+1);
+    ctx.restore();
+    ctx.textBaseline='alphabetic';
+  };
   {
     ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
-    ctx.beginPath(); ctx.moveTo(px,py+253); ctx.lineTo(px+pw,py+253); ctx.stroke();
-    // Section label, centered + same color as the OPTIONS header at the top.
+    ctx.beginPath(); ctx.moveTo(px,py+283-_dy); ctx.lineTo(px+pw,py+283-_dy); ctx.stroke();
     ctx.textAlign='center'; ctx.font='bold 11px Orbitron,sans-serif';
-    ctx.fillStyle='#4af'; ctx.fillText('MUSIC',px+pw/2,py+270);
-    // Control row geometry: mute + prev (each 22×22) on the left, bar centered,
-    // next (22×22) on the right. Match the rounded-square style of the
-    // title-screen mute button.
-    const _spSz=22, _spY=py+280;
-    const _spMuteX=px+18;
-    const _spPrevX=_spMuteX+_spSz+10;
+    ctx.fillStyle='#4af'; ctx.fillText('SOUND EFFECTS',px+pw/2,py+299-_dy);
+    const _rowMid=py+316-_dy, _btnY=_rowMid-_mSz/2;
+    _optsSfxMuteBtnBounds={x:_muteX,y:_btnY,w:_mSz,h:_mSz};
+    _drawMuteBtn(_muteX,_btnY,_sfxMuted,!!_optsSfxMuteBtnHover);
+    _optsSfxSliderBounds=_drawOptionsSlider(_sliderX,_rowMid,_sliderW,_sfxVol,'rgba(120,200,255,0.92)',_optsSliderDrag==='sfx',_valX);
+  }
+  // ── MUSIC pane ──────────────────────────────────────────────
+  // Row 1: mute button (left) + 0-100 music-volume slider. Row 2: prev / next +
+  // a full-width progress bar. Track title + artist centered below.
+  {
+    ctx.strokeStyle='rgba(40,90,180,0.35)'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(px,py+335-_dy); ctx.lineTo(px+pw,py+335-_dy); ctx.stroke();
+    ctx.textAlign='center'; ctx.font='bold 11px Orbitron,sans-serif';
+    ctx.fillStyle='#4af'; ctx.fillText('MUSIC',px+pw/2,py+351-_dy);
+    // Row 1 — mute + volume slider.
+    const _volMid=py+368-_dy, _volBtnY=_volMid-_mSz/2;
+    _optsMuteBtnBounds={x:_muteX,y:_volBtnY,w:_mSz,h:_mSz};
+    _drawMuteBtn(_muteX,_volBtnY,_musicMuted,!!_optsMuteBtnHover);
+    _optsMusicSliderBounds=_drawOptionsSlider(_sliderX,_volMid,_sliderW,_soundtrack.volume,'rgba(120,200,255,0.92)',_optsSliderDrag==='music',_valX);
+    // Row 2 — prev (◀) | full-width progress bar | next (▶).
+    const _spSz=_mSz, _spY=py+387-_dy;
+    const _spPrevX=px+18;
     const _spNextX=px+pw-18-_spSz;
     const _spBarX=_spPrevX+_spSz+8;
-    const _spBarW=_spNextX-8-_spBarX;
+    const _spBarW=(_spNextX-8)-_spBarX;
     const _spBarH=6, _spBarY=_spY+(_spSz-_spBarH)/2;
-    // ── Mute button ──
-    _optsMuteBtnBounds={x:_spMuteX,y:_spY,w:_spSz,h:_spSz};
-    {
-      const _h=!!_optsMuteBtnHover;
-      ctx.save();
-      ctx.globalAlpha=_h?0.92:0.70;
-      ctx.fillStyle=_musicMuted?'rgba(90,30,30,0.92)':'rgba(20,40,80,0.85)';
-      ctx.strokeStyle=_musicMuted?'rgba(255,100,100,0.8)':(_h?'rgba(120,200,255,0.9)':'rgba(60,120,200,0.55)');
-      ctx.lineWidth=1.5;
-      ctx.beginPath(); ctx.roundRect(_spMuteX,_spY,_spSz,_spSz,4); ctx.fill(); ctx.stroke();
-      ctx.globalAlpha=_h?1.0:0.80;
-      ctx.fillStyle=_musicMuted?'#f88':'#8cf';
-      ctx.font='bold 13px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
-      ctx.fillText(_musicMuted?'🔇':'🔊',_spMuteX+_spSz/2,_spY+_spSz/2+1);
-      ctx.restore();
-      ctx.textBaseline='alphabetic';
-    }
     // ── Prev button (left arrow ◀) ──
     _optsPrevBtnBounds={x:_spPrevX,y:_spY,w:_spSz,h:_spSz};
     {
@@ -20979,9 +24804,7 @@ function drawOptionsPopup(){
       ctx.restore();
       ctx.textBaseline='alphabetic';
     }
-    // ── Progress bar ──
-    // Black track + light-blue fill showing currentTime / duration. duration
-    // may be NaN until enough of the track has loaded; guard with isFinite.
+    // ── Progress bar (full width between prev/next) ──
     ctx.save();
     ctx.fillStyle='rgba(0,0,0,0.85)';
     ctx.beginPath(); ctx.roundRect(_spBarX,_spBarY,_spBarW,_spBarH,2); ctx.fill();
@@ -20994,9 +24817,9 @@ function drawOptionsPopup(){
     ctx.strokeStyle='rgba(80,140,210,0.55)'; ctx.lineWidth=1;
     ctx.beginPath(); ctx.roundRect(_spBarX,_spBarY,_spBarW,_spBarH,2); ctx.stroke();
     ctx.restore();
-    // ── Timestamp m:ss — tiny, follows the right edge of the fill ──
-    // Sits ABOVE the bar so the track-title row below has room for the
-    // animated waves. Clamped to stay over the bar at the extremes.
+    // Click-to-seek hit area (taller than the thin visual bar for easy clicking).
+    _optsMusicProgressBounds={x:_spBarX,y:_spBarY-5,w:_spBarW,h:_spBarH+10};
+    // ── Timestamp m:ss — tiny, above the bar, follows the fill edge ──
     {
       const _ct=isFinite(_soundtrack.currentTime)?Math.max(0,_soundtrack.currentTime):0;
       const _mm=Math.floor(_ct/60);
@@ -21005,20 +24828,17 @@ function drawOptionsPopup(){
       const _tsX=Math.max(_spBarX+6,Math.min(_spBarX+_spBarW-6,_spBarX+_spBarW*_frac));
       ctx.font='7px Orbitron,sans-serif'; ctx.textAlign='center';
       ctx.fillStyle='rgba(180,210,240,0.80)';
-      ctx.fillText(_tsTxt,_tsX,_spY+7);
+      // Anchor relative to the bar top (_spBarY) so it floats just ABOVE the
+      // bar with a small 3px gap, rather than well above it.
+      ctx.fillText(_tsTxt,_tsX,_spBarY-3);
     }
     // ── Track title row — animated sound wave + centered title ──
-    // Title styled to match the OPTIONS header (#4af, small all-caps).
-    // The wave is two short animated sine segments either side of the
-    // title — drawn first so the title text sits cleanly on top with
-    // no wave pixels directly behind it.
+    // Now that the bar spans the full popup width, the title centers on the
+    // popup itself (px+pw/2), with the waves bounded by the bar's edges.
     const _trk=_MUSIC_TRACKS[_musicIdx];
     const _title=(_trk&&_trk.title?_trk.title:'').toUpperCase();
-    // Centered on the progress bar (not the popup center, which is offset
-    // from the bar by the mute+prev buttons on the left). _titleY sits just
-    // below the bar (bar bottom at _spY+14, baseline at _spY+24 = ~4px gap).
-    const _titleCx=_spBarX+_spBarW/2;
-    const _titleY=_spY+24;
+    const _titleCx=px+pw/2;
+    const _titleY=_spY+_spSz+13;
     // Set the title font BEFORE measureText so the wave-gap math uses the
     // same width the title will actually render at. Same Exo 2 family as the
     // "Mission Objectives Tracker" row above.
@@ -21076,7 +24896,7 @@ function drawOptionsPopup(){
     // Sits close under the title (gap tightened ~2/3 vs the original +10 offset).
     ctx.font='7px "Exo 2",sans-serif'; ctx.textAlign='center';
     ctx.fillStyle='rgba(255,214,70,0.9)';
-    ctx.fillText('a.o.huge',_titleCx,_titleY+7);
+    ctx.fillText((_trk&&_trk.artist?_trk.artist:'a.o.huge'),_titleCx,_titleY+7);
   }
   // Clear cheat-button bounds — they belong to the (separate) cheats popup now.
   popupState.addCreditsBtnBounds=null;
@@ -21583,91 +25403,149 @@ function drawTrainDetailPopup(){
   // Galaxy-view metrics (de-stretched, area-consistent, tightly coupled,
   // bottom-aligned) via the shared strip renderer.
   // scale 0.8 = sprites rendered 20% smaller in the Train Details preview.
-  _drawTrainCarStrip(ctx, t, px+14, SY, SW, SH, {scale:0.8});
+  const _tdLay=_drawTrainCarStrip(ctx, t, px+14, SY, SW, SH, {scale:0.8});
   // Fade right edge
   const fg=ctx.createLinearGradient(px+14+SW*0.6,0,px+14+SW,0);
   fg.addColorStop(0,'rgba(3,6,20,0)'); fg.addColorStop(1,'rgba(3,6,20,0.95)');
   ctx.fillStyle=fg; ctx.fillRect(px+14,SY,SW,SH);
   ctx.restore();
-  // Edit overlay (shown on hover)
+  // ── EDIT TRAIN label — always shown over the pane's lower-right corner ──
+  // Replaces the old big "EDIT" hover overlay: a small clickable label that's
+  // visible at all times and brightens whenever the cursor is anywhere over
+  // the pane (the whole pane is the click target → opens the Train Builder).
   popupState.trainVizBounds={x:px+14,y:SY,w:SW,h:SH};
-  if(popupState.hoverTrainViz){
+  {
+    const _etHov=!!popupState.hoverTrainViz;
     ctx.save();
-    ctx.fillStyle='rgba(0,0,0,0.48)';
-    ctx.fillRect(px+14,SY,SW,SH);
-    ctx.font='bold 13px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
-    ctx.shadowColor='rgba(120,200,255,0.8)'; ctx.shadowBlur=14;
-    ctx.fillStyle='rgba(200,235,255,0.97)';
-    ctx.fillText('EDIT',px+14+SW/2,SY+SH/2);
+    ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='right'; ctx.textBaseline='alphabetic';
+    if(_etHov){ ctx.shadowColor='rgba(120,200,255,0.85)'; ctx.shadowBlur=10; }
+    ctx.fillStyle=_etHov?'rgba(205,238,255,0.98)':'rgba(150,195,235,0.72)';
+    ctx.fillText('EDIT TRAIN',px+14+SW-8,SY+SH-7);
     ctx.restore();
+  }
+  // Per-car hover bounds (for the car tooltip) from the strip layout.
+  popupState.tdCarBounds=[];
+  if(_tdLay&&_tdLay.cars){
+    for(let ci=0;ci<_tdLay.cars.length;ci++){
+      const lc=_tdLay.cars[ci]; if(!lc||!lc.m) continue;
+      const _ccx=px+14+lc.cx, _chw=Math.max(6,lc.m.halfW);
+      const _x0=Math.max(px+14,_ccx-_chw), _x1=Math.min(px+14+SW,_ccx+_chw);
+      if(_x1<=_x0) continue;
+      popupState.tdCarBounds.push({x:_x0,y:SY,w:_x1-_x0,h:SH,ci});
+    }
   }
   ctx.strokeStyle='rgba(80,60,30,0.4)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(px,py+104); ctx.lineTo(px+pw,py+104); ctx.stroke();
-  // Stats
-  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
-  ctx.fillStyle='rgba(200,140,60,0.75)'; ctx.fillText('TRAIN STATS',px+14,py+118);
-  ctx.font='12px "Exo 2",sans-serif';
-  // 1. Currently at (now the first stat row)
-  const pl=_gp(t.planetId);
-  if(pl){
-    const _plStar=galaxy.stars[pl.starId];
-    ctx.fillStyle='rgba(150,180,220,0.75)';
-    ctx.fillText('Currently at:  '+(pl.isStarProxy?'[star orbit] '+(_plStar?.name||'?'):pl.name+' · '+(_plStar?.name||'?')),px+14,py+136);
+  // ── AT A GLANCE / STATS tabs (replace the old "TRAIN STATS" header) ──
+  const _tdTab=(popupState.trainDetailTab==='stats')?'stats':'glance';
+  {
+    const _tabs=[['glance','AT A GLANCE'],['stats','STATS']];
+    const _tabY=py+110, _tabH=20; let _tabX=px+14; popupState.tdTabBounds=[];
+    for(const [id,label] of _tabs){
+      ctx.font='bold 9px Orbitron,sans-serif'; ctx.textBaseline='middle';
+      const _tw=ctx.measureText(label).width+20;
+      const _act=(_tdTab===id), _hov=(popupState.tdTabHover===id);
+      ctx.fillStyle=_act?'rgba(70,42,12,0.96)':(_hov?'rgba(50,32,12,0.9)':'rgba(24,18,10,0.85)');
+      ctx.beginPath(); ctx.roundRect(_tabX,_tabY,_tw,_tabH,4); ctx.fill();
+      ctx.strokeStyle=_act?'rgba(255,180,90,0.9)':(_hov?'rgba(200,140,70,0.6)':'rgba(120,85,40,0.45)'); ctx.lineWidth=_act?1.5:1;
+      ctx.beginPath(); ctx.roundRect(_tabX,_tabY,_tw,_tabH,4); ctx.stroke();
+      ctx.textAlign='center';
+      ctx.fillStyle=_act?'rgba(255,200,110,0.97)':(_hov?'rgba(230,190,140,0.92)':'rgba(170,140,95,0.7)');
+      ctx.fillText(label,_tabX+_tw/2,_tabY+_tabH/2+1);
+      popupState.tdTabBounds.push({x:_tabX,y:_tabY,w:_tw,h:_tabH,id});
+      _tabX+=_tw+5;
+    }
+    ctx.textBaseline='alphabetic';
+  }
+  // ── Tab content ──────────────────────────────────────────────
+  popupState.tdCarsTextBounds=null;
+  // Small blue Orbitron caption (LOCATION / CARGO / CARS), returns its width.
+  const _tdCap=(txt,x,y)=>{ ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='left'; ctx.fillStyle='rgba(110,170,230,0.92)'; ctx.fillText(txt,x,y); return ctx.measureText(txt).width; };
+  if(_tdTab==='glance'){
+    // LOCATION
+    {
+      const _lw=_tdCap('LOCATION',px+14,py+148);
+      const pl=_gp(t.planetId);
+      let _loc;
+      if(pl){ const _plStar=galaxy.stars[pl.starId]; _loc=pl.isStarProxy?('[star orbit] '+(_plStar?.name||'?')):(pl.name+' · '+(_plStar?.name||'?')); }
+      else _loc='in transit';
+      ctx.font='12px "Exo 2",sans-serif'; ctx.textAlign='left'; ctx.fillStyle='rgba(150,180,220,0.85)';
+      ctx.fillText(_loc,px+14+_lw+8,py+148);
+    }
+    // CARGO — one entry per cargo-CAR type carried (incl. empties): a sprite
+    // (33% larger than the old inline list) + "xFull/Total", sorted by total
+    // count desc, vertically centred on the CARGO caption line.
+    {
+      const _lw=_tdCap('CARGO',px+14,py+166);
+      const _ccGroups={};
+      for(let ci=0;ci<t.cars.length;ci++){
+        const cr=t.cars[ci];
+        if(isEngineType(cr)||cr==='caboose') continue;
+        if(!_ccGroups[cr]) _ccGroups[cr]={total:0,full:0};
+        _ccGroups[cr].total++;
+        if(t.carFull&&t.carFull[ci]) _ccGroups[cr].full++;
+      }
+      const _ccSorted=Object.entries(_ccGroups).sort((a,b)=>b[1].total-a[1].total);
+      const _cMid=py+162, _bw=29, _bh=26;
+      if(_ccSorted.length===0){
+        ctx.font='12px "Exo 2",sans-serif'; ctx.textAlign='left'; ctx.textBaseline='alphabetic'; ctx.fillStyle='rgba(150,165,195,0.7)';
+        ctx.fillText('(none)',px+14+_lw+10,py+166);
+      } else {
+        let _cx=px+14+_lw+10;
+        for(const [cr,info] of _ccSorted){
+          if(_cx+_bw>px+pw-12) break;
+          const _spr=getCarSprite(cr,true);
+          if(imgs[_spr]) ctx.drawImage(imgs[_spr],_cx,_cMid-_bh/2,_bw,_bh);
+          ctx.font='bold 11px "Exo 2",sans-serif'; ctx.textAlign='left'; ctx.textBaseline='middle';
+          ctx.fillStyle='rgba(210,220,240,0.92)';
+          const _txt='x'+info.full+'/'+info.total;
+          ctx.fillText(_txt,_cx+_bw+1,_cMid+1);
+          _cx+=_bw+2+ctx.measureText(_txt).width+10;
+        }
+        ctx.textBaseline='alphabetic';
+      }
+    }
+    // CARS: N/max  +  load-penalty (to the RIGHT, same line)
+    {
+      const _engMax=_engMaxCars(t.cars?.[0]);
+      const _lw=_tdCap('CARS:',px+14,py+186);
+      const _valTxt=' '+t.cars.length+'/'+_engMax;
+      ctx.font='bold 12px "Exo 2",sans-serif'; ctx.textAlign='left'; ctx.fillStyle='rgba(222,228,240,0.96)';
+      ctx.fillText(_valTxt,px+14+_lw+3,py+186);
+      const _valW=ctx.measureText(_valTxt).width;
+      const _carsRight=px+14+_lw+3+_valW;
+      popupState.tdCarsTextBounds={x:px+14,y:py+176,w:_carsRight-(px+14)+4,h:15};
+      // Load penalty (−5% speed & accel per car beyond 4) — small orange caps,
+      // to the RIGHT of the CARS value, vertically centred on the same line.
+      const _penPct=Math.max(0,t.cars.length-4)*5;
+      if(_penPct>0){
+        ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='left'; ctx.textBaseline='middle'; ctx.fillStyle='rgba(255,150,55,0.95)';
+        ctx.fillText('-'+_penPct+'% SPEED, -'+_penPct+'% ACCELERATION',_carsRight+12,py+182);
+        ctx.textBaseline='alphabetic';
+      }
+    }
   } else {
-    ctx.fillStyle='rgba(150,180,220,0.55)';
-    ctx.fillText('Currently at:  in transit',px+14,py+136);
-  }
-  // 2. Current cargo — loaded cars only, grouped by cargo type (e.g. "PSNGR x3, MAIL x1")
-  {
-    const _filled=_trainCargoFilledCounts(t);
-    const _cargoTxt=Object.entries(_filled).sort((a,b)=>b[1]-a[1])
-      .map(([ct,n])=>(CARGO_SHORT[ct]||ct.slice(0,5).toUpperCase())+' x'+n).join(', ')||'(empty)';
-    ctx.fillStyle='rgba(200,180,140,0.85)';
-    ctx.fillText('Current cargo:  '+_cargoTxt,px+14,py+154);
-  }
-  // 3. Car count + load penalty: every mid car past the 2nd shaves 5% off both
-  // acceleration and max speed (see _trainLoadMult). Only show the penalty
-  // suffix when it's nonzero so short trains read cleanly without "(0% / 0%)".
-  {
-    const _midCars=Math.max(0,t.cars.length-2);
-    const _penPct=Math.round(Math.max(0,_midCars-2)*5);
-    const _baseCarsTxt=t.cars.length+' cars';
-    const _accelTxt=_penPct>0?('  (-'+_penPct+'% acceleration, '):'';
-    const _maxSpeedTxt=_penPct>0?('-'+_penPct+'% max speed)'):'';
-    const _carsTxt=_baseCarsTxt+_accelTxt+_maxSpeedTxt;
-    ctx.fillStyle='rgba(200,180,140,0.85)';
-    ctx.fillText(_carsTxt,px+14,py+172);
-    // Track the "-X% max speed" portion bounds for the tutorial bubble that
-    // points up at this text after the player CONFIRMs their train edits.
-    if(_penPct>0){
-      const _prefixW=ctx.measureText(_baseCarsTxt+_accelTxt).width;
-      const _msW=ctx.measureText(_maxSpeedTxt).width;
-      popupState.maxSpeedTextBounds={x:px+14+_prefixW, y:py+161, w:_msW, h:14};
-    } else {
-      popupState.maxSpeedTextBounds=null;
+    // STATS tab — distance / planets visited / most orbited.
+    ctx.font='12px "Exo 2",sans-serif'; ctx.textAlign='left'; ctx.fillStyle='rgba(200,180,140,0.85)';
+    const dist=Math.round(t.totalDist||0);
+    ctx.fillText('Total distance traveled:  '+dist.toLocaleString()+' SU',px+14,py+148);
+    const _planetsVisited=Object.keys(t.orbitCounts||{}).length;
+    ctx.fillText('Total planets visited:  '+_planetsVisited,px+14,py+166);
+    const oc=Object.entries(t.orbitCounts||{}).sort((a,b)=>b[1]-a[1]);
+    if(oc.length>0){
+      const [pid,cnt]=oc[0];
+      const pn=galaxy.planets[pid]?.name||'?';
+      ctx.fillText('Most orbited:  '+pn+'  ('+cnt+' orbit'+(cnt!==1?'s':'')+')',px+14,py+184);
     }
   }
-  // 4. Total distance
-  const dist=Math.round(t.totalDist||0);
-  ctx.fillStyle='rgba(200,180,140,0.85)';
-  ctx.fillText('Total distance:  '+dist.toLocaleString()+' SU',px+14,py+190);
-  // 5. Planets visited (distinct planets this train has orbited)
-  const _planetsVisited=Object.keys(t.orbitCounts||{}).length;
-  ctx.fillText('Planets visited:  '+_planetsVisited,px+14,py+208);
-  // 6. Most orbited
-  const oc=Object.entries(t.orbitCounts||{}).sort((a,b)=>b[1]-a[1]);
-  if(oc.length>0){
-    const [pid,cnt]=oc[0];
-    const pn=galaxy.planets[pid]?.name||'?';
-    ctx.fillText('Most orbited:  '+pn+'  ('+cnt+' orbit'+(cnt!==1?'s':'')+')',px+14,py+226);
-  }
-  // ── Maintenance section ──────────────────────────────────────
+  popupState.maxSpeedTextBounds=null;
+  // ── Maintenance + Engine Age section ─────────────────────────
   ctx.strokeStyle='rgba(80,60,30,0.4)'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.moveTo(px,py+236); ctx.lineTo(px+pw,py+236); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(px,py+210); ctx.lineTo(px+pw,py+210); ctx.stroke();
   ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
-  ctx.fillStyle='rgba(200,140,60,0.75)'; ctx.fillText('MAINTENANCE',px+14,py+250);
+  ctx.fillStyle='rgba(200,140,60,0.75)'; ctx.fillText('MAINTENANCE',px+14,py+222);
   { const maint=t.maintenance??1;
-    const barW=200, barH=8, barX=px+14, barY=py+258;
+    const barW=200, barH=8, barX=px+14, barY=py+228;
     const mCol=maint>=0.75?'rgba(60,220,100,0.85)':maint>=0.40?'rgba(255,200,60,0.85)':'rgba(255,80,60,0.85)';
     ctx.fillStyle='rgba(20,30,60,0.8)'; ctx.beginPath(); ctx.roundRect(barX,barY,barW,barH,2); ctx.fill();
     ctx.fillStyle=mCol; ctx.beginPath(); ctx.roundRect(barX,barY,barW*maint,barH,2); ctx.fill();
@@ -21679,6 +25557,31 @@ function drawTrainDetailPopup(){
     const _dsm=Math.round(t.distSinceMaint||0);
     ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(140,160,200,0.55)';
     ctx.fillText(_dsm.toLocaleString()+' SU since last service',barX+barW+50,barY+barH/2+3.5);
+  }
+  // Engine Age — non-repairable; counts down toward the pre-rolled engine
+  // failure (_engineFailureSd). Full when the engine is new, empties as the
+  // train ages toward an inevitable CRITICAL ENGINE FAILURE (replace engine).
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
+  ctx.fillStyle='rgba(200,140,60,0.75)'; ctx.fillText('ENGINE AGE',px+14,py+250);
+  { let _ageFrac=1, _sdLeft=null;
+    if(t._engineFailed){ _ageFrac=0; }
+    else if(t._engineFailureSd!=null){
+      const _born=(t._engineBornSd!=null)?t._engineBornSd:(t._engineFailureSd-15);
+      const _life=Math.max(0.0001,t._engineFailureSd-_born);
+      _ageFrac=Math.max(0,Math.min(1,(t._engineFailureSd-stardate)/_life));
+      _sdLeft=Math.max(0,t._engineFailureSd-stardate);
+    }
+    const barW=200, barH=8, barX=px+14, barY=py+258;
+    const aCol=_ageFrac>=0.75?'rgba(60,220,100,0.85)':_ageFrac>=0.40?'rgba(255,200,60,0.85)':'rgba(255,80,60,0.85)';
+    ctx.fillStyle='rgba(20,30,60,0.8)'; ctx.beginPath(); ctx.roundRect(barX,barY,barW,barH,2); ctx.fill();
+    ctx.fillStyle=aCol; ctx.beginPath(); ctx.roundRect(barX,barY,barW*_ageFrac,barH,2); ctx.fill();
+    ctx.strokeStyle='rgba(80,100,160,0.35)'; ctx.lineWidth=0.7;
+    ctx.beginPath(); ctx.roundRect(barX,barY,barW,barH,2); ctx.stroke();
+    ctx.font='bold 10px "Exo 2",sans-serif'; ctx.textAlign='left'; ctx.fillStyle=aCol;
+    ctx.fillText(Math.round(_ageFrac*100)+'%',barX+barW+8,barY+barH/2+3.5);
+    ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(140,160,200,0.55)';
+    const _ageNote=t._engineFailed?'engine failed — replace':(_sdLeft!=null?_sdLeft.toFixed(1)+' SD until breakdown':'—');
+    ctx.fillText(_ageNote,barX+barW+50,barY+barH/2+3.5);
   }
   // ── Financial Performance section ────────────────────────────
   ctx.strokeStyle='rgba(80,60,30,0.4)'; ctx.lineWidth=1;
@@ -21709,41 +25612,60 @@ function drawTrainDetailPopup(){
     _finRow('PROFIT', profit, py+348);
   }
   // ── Current Route section ─────────────────────────────────────
-  // The whole panel is a single click target: clicking anywhere inside it
-  // opens the [R] ROUTES popup, scrolled so this train's row is visible.
-  // Bounds + hover highlight are painted FIRST so subsequent label / strip
-  // drawing sits on top of the wash.
-  popupState.currentRouteBounds={x:px+1,y:py+366,w:pw-2,h:ph-366-1};
-  if(popupState.hoverCurrentRoute){
-    ctx.fillStyle='rgba(120,210,180,0.10)';
-    ctx.fillRect(px+1,py+367,pw-2,ph-366-2);
-    ctx.strokeStyle='rgba(120,210,180,0.45)'; ctx.lineWidth=1;
-    ctx.beginPath(); ctx.rect(px+1.5,py+366.5,pw-3,ph-366-2); ctx.stroke();
-  }
+  // Divider (always). When the train has NO route, show a centred "ASSIGN
+  // ROUTE" button (no [R]-open hover behaviour). Otherwise the whole pane is a
+  // click target that opens the [R] ROUTES popup, with the route strip.
+  const _tdNoRoute = !(t.route&&t.route.stops&&t.route.stops.length>=2) && !(t.queuedRoute&&t.queuedRoute.stops&&t.queuedRoute.stops.length>=2);
   ctx.strokeStyle='rgba(80,60,30,0.4)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(px,py+366); ctx.lineTo(px+pw,py+366); ctx.stroke();
-  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
-  ctx.fillStyle=popupState.hoverCurrentRoute?'rgba(220,200,120,0.95)':'rgba(200,140,60,0.75)';
-  ctx.fillText('CURRENT ROUTE',px+14,py+380);
-  if(popupState.hoverCurrentRoute){
-    ctx.font='9px "Exo 2",sans-serif'; ctx.textAlign='right';
-    ctx.fillStyle='rgba(180,230,210,0.80)';
-    ctx.fillText('click to open [R] ROUTES →',px+pw-14,py+380);
-    ctx.textAlign='left';
+  if(_tdNoRoute){
+    popupState.currentRouteBounds=null; popupState.hoverCurrentRoute=false;
+    ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
+    ctx.fillStyle='rgba(200,140,60,0.75)'; ctx.fillText('CURRENT ROUTE',px+14,py+380);
+    // ASSIGN ROUTE — blue pill, centred vertically + horizontally in the pane.
+    const _arHov=!!popupState.assignRouteBtnHover;
+    const _abw=150, _abh=30, _paneTop=py+388, _paneBot=py+ph-10;
+    const _abx=Math.round(px+(pw-_abw)/2), _aby=Math.round((_paneTop+_paneBot)/2-_abh/2);
+    ctx.fillStyle=_arHov?'rgb(70,150,250)':'rgb(45,110,220)';
+    ctx.beginPath(); ctx.roundRect(_abx,_aby,_abw,_abh,5); ctx.fill();
+    ctx.strokeStyle=_arHov?'rgba(180,225,255,1)':'rgba(120,190,255,0.9)'; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.roundRect(_abx,_aby,_abw,_abh,5); ctx.stroke();
+    ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillStyle='#fff'; ctx.fillText('ASSIGN ROUTE',_abx+_abw/2,_aby+_abh/2+0.5);
+    ctx.textBaseline='alphabetic'; ctx.textAlign='left';
+    popupState.assignRouteBtnBounds={x:_abx,y:_aby,w:_abw,h:_abh};
+  } else {
+    popupState.assignRouteBtnBounds=null;
+    popupState.currentRouteBounds={x:px+1,y:py+366,w:pw-2,h:ph-366-1};
+    if(popupState.hoverCurrentRoute){
+      ctx.fillStyle='rgba(120,210,180,0.10)';
+      ctx.fillRect(px+1,py+367,pw-2,ph-366-2);
+      ctx.strokeStyle='rgba(120,210,180,0.45)'; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.rect(px+1.5,py+366.5,pw-3,ph-366-2); ctx.stroke();
+    }
+    ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left';
+    ctx.fillStyle=popupState.hoverCurrentRoute?'rgba(220,200,120,0.95)':'rgba(200,140,60,0.75)';
+    ctx.fillText('CURRENT ROUTE',px+14,py+380);
+    if(popupState.hoverCurrentRoute){
+      ctx.font='9px "Exo 2",sans-serif'; ctx.textAlign='right';
+      ctx.fillStyle='rgba(180,230,210,0.80)';
+      ctx.fillText('click to open [R] ROUTES →',px+pw-14,py+380);
+      ctx.textAlign='left';
+    }
+    if(t.route&&t.route.isTempRoute&&t.route.phase==='transit'&&t.queuedRoute){
+      ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(255,160,60,0.6)';
+      ctx.fillText('(completing segment — new route queued)',px+130,py+380);
+    } else if(t.route&&t.queuedRoute){
+      ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(255,160,60,0.6)';
+      ctx.fillText('(temp route — heading to start)',px+130,py+380);
+    } else if(t.route&&t.route.isTempRoute){
+      ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(255,160,60,0.6)';
+      ctx.fillText('(repositioning)',px+130,py+380);
+    }
+    ctx.save();
+    drawRouteStrip(t, px+14, py+397, pw-28);
+    ctx.restore();
   }
-  if(t.route&&t.route.isTempRoute&&t.route.phase==='transit'&&t.queuedRoute){
-    ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(255,160,60,0.6)';
-    ctx.fillText('(completing segment — new route queued)',px+130,py+380);
-  } else if(t.route&&t.queuedRoute){
-    ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(255,160,60,0.6)';
-    ctx.fillText('(temp route — heading to start)',px+130,py+380);
-  } else if(t.route&&t.route.isTempRoute){
-    ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(255,160,60,0.6)';
-    ctx.fillText('(repositioning)',px+130,py+380);
-  }
-  ctx.save();
-  drawRouteStrip(t, px+14, py+397, pw-28);
-  ctx.restore();
   if(t.route&&t.route.phase==='transit'){
     const r3=t.route;
     const fP4=_gp(r3.stops[r3.fromIdx]), tP4=_gp(r3.stops[r3.toIdx]);
@@ -21753,6 +25675,51 @@ function drawTrainDetailPopup(){
     const spd4=r3.transitSpeed||0, spdPct4=Math.min(999,Math.round(spd4/_engMax4*100));
     ctx.font='10px "Exo 2",sans-serif'; ctx.fillStyle='rgba(160,200,240,0.65)'; ctx.textAlign='left';
     ctx.fillText('Seg: '+pct4+'%  ·  '+spd4.toFixed(2)+' SU/s  ('+spdPct4+'% max)',px+14,py+415);
+  }
+  // ── Hover tooltips (drawn last so they sit above all popup content) ──
+  // Small dark box anchored near (ax, ayTop); clamped inside the popup; clears
+  // the HD text overlay under its footprint (opaque-UI discipline).
+  const _tdTip=(lines, ax, ayTop)=>{
+    const _pad=7, _lh=13;
+    let _w=0; for(const ln of lines){ ctx.font=(ln.bold?'bold ':'')+(ln.size||9)+'px "Exo 2",sans-serif'; _w=Math.max(_w,ctx.measureText(ln.t).width); }
+    const _bw=_w+_pad*2, _bh=lines.length*_lh+_pad*2-3;
+    let _bx=Math.max(px+4,Math.min(px+pw-4-_bw,ax));
+    let _by=ayTop; if(_by+_bh>py+ph-4) _by=ayTop-_bh-12; // flip above if it would overflow
+    _by=Math.max(py+4,Math.min(py+ph-4-_bh,_by));
+    _clearTextOverlayRect(_bx,_by,_bw,_bh);
+    ctx.save();
+    ctx.fillStyle='rgba(8,12,26,0.97)'; ctx.beginPath(); ctx.roundRect(_bx,_by,_bw,_bh,5); ctx.fill();
+    ctx.strokeStyle='rgba(120,160,230,0.55)'; ctx.lineWidth=1; ctx.beginPath(); ctx.roundRect(_bx,_by,_bw,_bh,5); ctx.stroke();
+    ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+    let _ty=_by+_pad+8;
+    for(const ln of lines){ ctx.font=(ln.bold?'bold ':'')+(ln.size||9)+'px "Exo 2",sans-serif'; ctx.fillStyle=ln.col||'rgba(210,225,250,0.95)'; ctx.fillText(ln.t,_bx+_pad,_ty); _ty+=_lh; }
+    ctx.restore();
+  };
+  // (a) Car hover — name + status (+ origin if FULL). Shows after 0.1 s.
+  if(popupState.tdCarHoverIdx!=null && popupState.tdCarHoverIdx>=0 && popupState.tdCarHoverSince!=null
+     && (Date.now()-popupState.tdCarHoverSince)>=100 && popupState.tdCarHoverIdx<t.cars.length){
+    const _ci=popupState.tdCarHoverIdx;
+    const _cn=CAR_LABELS[t.cars[_ci]]||t.cars[_ci];
+    const _full=!!(t.carFull&&t.carFull[_ci]);
+    const _lines=[{t:_cn,col:'rgba(255,210,140,0.97)',bold:true,size:10},
+                  {t:_full?'FULL':'(empty)',col:_full?'rgba(120,235,150,0.95)':'rgba(150,165,195,0.85)',size:9}];
+    if(_full){
+      const _src=(t.carCargoSource&&t.carCargoSource[_ci]!=null)?_gp(t.carCargoSource[_ci]):null;
+      _lines.push({t:'Origin: '+(_src&&_src.name?_src.name:'?'),col:'rgba(190,205,235,0.9)',size:9});
+    }
+    const _cb=(popupState.tdCarBounds||[]).find(b=>b.ci===_ci);
+    _tdTip(_lines, _cb?_cb.x:px+24, SY+SH+8);
+  }
+  // (b) CARS-text hover — engine tow capacity + load-penalty rules.
+  if(popupState.tdCarsTextHover && popupState.tdCarsTextBounds && _tdTab==='glance'){
+    const _engName=CAR_LABELS[t.cars?.[0]]||'ENGINE';
+    const _engMax=_engMaxCars(t.cars?.[0]);
+    const _b=popupState.tdCarsTextBounds;
+    _tdTip([
+      {t:'The '+_engName+' engine can tow up to '+_engMax+' cargo cars',size:9,col:'rgba(210,225,250,0.95)'},
+      {t:'1–4 cars: 100% speed, 100% acceleration',size:9,col:'rgba(150,215,165,0.92)'},
+      {t:'5+ cars: -5% speed, -5% acceleration per car',size:9,col:'rgba(255,180,90,0.93)'},
+    ], _b.x, _b.y+_b.h+6);
   }
   ctx.restore();
   // Draw color picker if open for this train
@@ -22266,7 +26233,7 @@ function drawStarDetailPopup(){
   const lx=starCX+sDR+8;
   ctx.save();
   ctx.beginPath(); ctx.rect(px,py+46,pw,150); ctx.clip(); // clamp to body section
-  if(vis){ drawStar(starCX,starCY,sDR,s.color,!!s.hasDysonSphere); }
+  if(vis){ drawStar(starCX,starCY,sDR,s.color,_starDysonArg(s)); }
   else {
     // Unvisited: subtle dark orb visible near left edge of clip
     ctx.fillStyle='rgba(8,6,2,0.92)'; ctx.beginPath(); ctx.arc(px+40,starCY,28,0,Math.PI*2); ctx.fill();
@@ -22381,6 +26348,8 @@ function drawStarDetailPopup(){
       else if(p.type.id==='ancient'&&pr>=3) drawAncientRuins(pcx2,stripMidY,pr);
       if(p.hasGold&&p.goldRevealed&&pr>3) _drawGoldPatch(pcx2,stripMidY,pr,p.goldPatch);
       if(p.hasDiamond&&p.diamondRevealed&&pr>3) _drawDiamondPatch(pcx2,stripMidY,pr,p.diamondPatch);
+      if(p.hasUranium&&p.uraniumRevealed&&pr>3) _drawUraniumPatch(pcx2,stripMidY,pr,p.uraniumPatch);
+      if(p.hasArtifact&&p.artifactRevealed&&pr>3) _drawArtifactPatch(pcx2,stripMidY,pr,p.artifactPatch);
       if(p.hasStation){
         const iY=Math.max(py+223,stripMidY-pr-3);
         ctx.fillStyle='rgba(160,220,255,0.85)';
@@ -22460,6 +26429,12 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
     // which the cheat path doesn't satisfy, leaving a permanently greyed
     // button on a visible card.
     if(uId==='glassworks') return !_glassworksUnlocked;
+    // v0.4.7 gates: heavy industry needs a Large Station; the Reactor
+    // Assembly additionally needs a uranium vein discovered somewhere.
+    if(uId==='orbital_shipyard') return !(p.hasLargeStation||p.hasTerminal);
+    if(uId==='armory')           return !(p.hasLargeStation||p.hasTerminal);
+    if(uId==='reactor_assembly') return !(galaxy&&galaxy.planets.some(q=>q.hasUranium&&q.uraniumRevealed));
+    if(uId==='xenoforge')        return !_warpsteelRecipeKnown;
     return false;
   };
   // Station card title reflects the planet's current tier — STATION while
@@ -22544,6 +26519,12 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
       const _cd=!!(galaxy&&galaxy.planets.some(q=>q.type.id==='chemical'&&visitedPlanetIds.has(q.id)));
       return [{ok:_sd,txt:'Sand planet discovered'},{ok:_cd,txt:'Chemical planet discovered'}];
     }
+    if(uId==='orbital_shipyard'||uId==='armory')
+      return [{ok:!!(p.hasLargeStation||p.hasTerminal),txt:'Large Station built here'}];
+    if(uId==='reactor_assembly')
+      return [{ok:!!(galaxy&&galaxy.planets.some(q=>q.hasUranium&&q.uraniumRevealed)),txt:'Uranium vein discovered'}];
+    if(uId==='xenoforge')
+      return [{ok:!!_warpsteelRecipeKnown,txt:'Combine campaign resolved'}];
     return null;
   };
   // Register a hover target + "insufficient credits" tooltip for an upgrade
@@ -22674,6 +26655,9 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
       continue;
     }
     if(u.isStation){
+      // Expose the Station upgrade card's bounds so the new-game tutorial can
+      // draw a highlight box around it.
+      popupState._stationCardBounds={x:upX,y:itemY,w:upW,h:ITEM_H};
       // Mini station visualization (right corner)
       const _mvx=upX+upW-34, _mvy=itemY+ITEM_H-26, _mvr=10;
       ctx.save(); ctx.globalAlpha=isBuilt?0.9:0.35;
@@ -22776,17 +26760,13 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
           if(_tHov) popupState._terminalTooltip={bx:_tBtnX,by:_tBtnY,bw:_tBtnW,upX,upW,lvlOk:_tLvlOk,steelOk:_tSteelOk,credOk:_tCredOk,dl:p.devLevel||0,steel:p.steelDelivered||0};
           } // end if(_terminalUnlocked)
         } else {
-          // Description bullet (same word-wrap style as unbuilt items)
-          ctx.font='9px "Exo 2",sans-serif';
+          // Description — fixed two-line layout: the orbit clause is forced onto
+          // the 2nd line and italicised, with LOW ORBIT in caps.
           ctx.fillStyle='rgba(110,145,195,0.60)';
-          const _stDescW=upW-26, _stDescWds='Allows loading + unloading of cargo in LOW orbit only'.split(' ');
-          let _stDescCur='', _stDescY=itemY+30;
-          for(const _stDW of _stDescWds){
-            const _stT=_stDescCur?_stDescCur+' '+_stDW:_stDW;
-            if(ctx.measureText(_stT).width<=_stDescW) _stDescCur=_stT;
-            else{if(_stDescCur)ctx.fillText(_stDescCur,upX+12,_stDescY); _stDescCur=_stDW; _stDescY+=11;}
-          }
-          if(_stDescCur) ctx.fillText(_stDescCur,upX+12,_stDescY);
+          ctx.font='9px "Exo 2",sans-serif';
+          ctx.fillText('Allows loading + unloading of cargo',upX+12,itemY+30);
+          ctx.font='italic 9px "Exo 2",sans-serif';
+          ctx.fillText('in LOW ORBIT only',upX+12,itemY+41);
           // UPGRADE → Large Station button. Hidden until the player COMPLETES
           // the "Produce Iron" mission (_largeStationUnlocked). Until then the
           // STATION description shows but no upgrade button / hit-target exists.
@@ -23408,13 +27388,53 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
         else _regUnaffordableBtn(u.id,btnX,btnY,btnW,btnH,_uCostRd);
       }
     } else {
-      // Generic upgrade -- built or unbuilt
+      // Generic upgrade -- built or unbuilt. v0.4.7: honors the generic
+      // _isUpgradeGateLocked gate (LOCKED button + ✓/✗ tooltip) so new
+      // upgrades (Orbital Shipyard / Armory / Reactor Assembly / Xenoforge)
+      // don't need bespoke card branches.
       if(isBuilt){
         ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='center';
         ctx.fillStyle='rgba(50,190,80,0.88)';
         ctx.fillText('● BUILT',upX+upW/2,itemY+52);
+        // v0.4.7 refinery bins: show input storage levels for generic
+        // refinery cards (small text rows, keeps the card compact).
+        const _v47rcG=V47_RECIPES.find(_r=>_r.id===u.id);
+        if(_v47rcG&&p.upgradeData?.[u.id]){
+          const _gb=p.upgradeData[u.id];
+          ctx.font='7px "Exo 2",sans-serif'; ctx.textAlign='left';
+          let _gy=itemY+62;
+          for(const _ik of _v47rcG.inputs){
+            ctx.fillStyle='rgba(160,200,230,0.72)';
+            ctx.fillText((CARGO_SHORT[_ik]||_ik.toUpperCase())+' '+Math.floor(_gb[_ik]||0)+'/10',upX+12,_gy);
+            _gy+=9;
+          }
+          if((_gb.progress||0)>0){
+            const _gfrac=1-(_gb.progress||0)/(FOUNDRY_PROD_TIME*(_v47rcG.tm||1));
+            ctx.fillStyle='rgba(255,200,60,0.85)';
+            ctx.fillText('WORKING '+Math.round(_gfrac*100)+'%',upX+12,_gy);
+          }
+        }
+        // Armory: show what it's assembling + component stock.
+        if(u.id==='armory'&&p.upgradeData?.armory){
+          const _ab=p.upgradeData.armory;
+          ctx.font='7px "Exo 2",sans-serif'; ctx.textAlign='left';
+          if(_ab.building&&(_ab.progress||0)>0){
+            ctx.fillStyle='rgba(255,150,90,0.9)';
+            ctx.fillText('ASSEMBLING '+(CAR_LABELS[_ab.building]||_ab.building),upX+12,itemY+62);
+          } else {
+            ctx.fillStyle='rgba(160,200,230,0.72)';
+            ctx.fillText('Awaiting components',upX+12,itemY+62);
+          }
+        }
+        // Defense battery: shell magazine readout.
+        if(u.id==='defense_battery'){
+          ctx.font='7px "Exo 2",sans-serif'; ctx.textAlign='left';
+          ctx.fillStyle='rgba(255,176,96,0.85)';
+          ctx.fillText('SHELLS '+(p.defenseShells||0)+'/12',upX+12,itemY+62);
+        }
       } else {
-        const _uCost=_upgradeBuildCost(u); const canAfford=credits>=_uCost;
+        const _gnLocked=_isUpgradeGateLocked(u.id);
+        const _uCost=_upgradeBuildCost(u); const canAfford=credits>=_uCost&&!_gnLocked;
         const _gnHov=canAfford&&popupState.upgradeBtnHover===u.id;
         const btnW=86, btnH=20, btnX=upX+(upW-btnW)/2, btnY=itemY+ITEM_H-btnH-8;
         ctx.fillStyle=_gnHov?'rgba(45,110,230,0.97)':canAfford?'rgba(20,70,180,0.92)':'rgba(20,20,40,0.70)';
@@ -23423,14 +27443,21 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
         ctx.lineWidth=1; ctx.beginPath(); ctx.roundRect(btnX,btnY,btnW,btnH,3); ctx.stroke();
         ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
         ctx.fillStyle=canAfford?'#adf':'rgba(80,80,110,0.7)';
-        ctx.fillText('PURCHASE',btnX+btnW/2,btnY+btnH/2+3.5);
-        {const _cTxt='-'+_fmtCr(_uCost)+' cr'; ctx.font='8px "Exo 2",sans-serif';
+        ctx.fillText(_gnLocked?'LOCKED':'PURCHASE',btnX+btnW/2,btnY+btnH/2+3.5);
+        if(!_gnLocked){const _cTxt='-'+_fmtCr(_uCost)+' cr'; ctx.font='8px "Exo 2",sans-serif';
         const _cPW=ctx.measureText(_cTxt).width+10, _cPH=13;
         const _cPX=btnX+(btnW-_cPW)/2, _cPY=btnY-_cPH/2-3;
         ctx.fillStyle='rgba(110,18,18,0.92)'; ctx.beginPath(); ctx.roundRect(_cPX,_cPY,_cPW,_cPH,4); ctx.fill();
         ctx.fillStyle='rgba(255,255,255,0.97)'; ctx.textAlign='center'; ctx.textBaseline='middle';
         ctx.fillText(_cTxt,_cPX+_cPW/2,_cPY+_cPH/2); ctx.textBaseline='alphabetic';}
-        if(canAfford) popupState.upgradeBuildBounds.push({x:btnX,y:btnY,w:btnW,h:btnH,upgradeId:u.id});
+        if(_gnLocked){
+          const _hidG='__locked_'+u.id+'__';
+          popupState._upgradeBtnLockedBounds.push({x:btnX,y:btnY,w:btnW,h:btnH,hoverId:_hidG});
+          if(popupState.upgradeBtnHover===_hidG){
+            const _reqsG=_upLockReqs(u.id);
+            if(_reqsG) popupState._upUnlockTooltip={by:btnY,upX,upW,label:u.label,reqs:_reqsG};
+          }
+        } else if(canAfford) popupState.upgradeBuildBounds.push({x:btnX,y:btnY,w:btnW,h:btnH,upgradeId:u.id});
         else _regUnaffordableBtn(u.id,btnX,btnY,btnW,btnH,_uCost);
       }
     }
@@ -23596,13 +27623,19 @@ function drawPlanetDetailPopup(){
     else if(p.type.id==='ancient') drawAncientRuins(pcx,pcy,pr);
     if(p.hasGold&&p.goldRevealed) _drawGoldPatch(pcx,pcy,pr,p.goldPatch);
     if(p.hasDiamond&&p.diamondRevealed) _drawDiamondPatch(pcx,pcy,pr,p.diamondPatch);
-    if(p.hasStation) drawPlanetStation(pcx,pcy,pr,p.stationAngle||0,pr,p.isAlienRelic,p.hasLargeStation||false,null,p.hasTerminal||false);
+    if(p.hasUranium&&p.uraniumRevealed) _drawUraniumPatch(pcx,pcy,pr,p.uraniumPatch);
+    if(p.hasArtifact&&p.artifactRevealed) _drawArtifactPatch(pcx,pcy,pr,p.artifactPatch);
+    if(p.hasStation) drawPlanetStation(pcx,pcy,pr,p.stationAngle||0,pr,p.isAlienRelic||p.combineStation,p.hasLargeStation||false,null,p.hasTerminal||false);
     if(_pUpg(p,'iron_foundry')) drawFoundryBuilding(pcx,pcy,pr,p.foundryAngle||Math.PI*0.75,pr,(p.upgradeData?.iron_foundry?.progress||0)>0,'iron_foundry');
     if(_pUpg(p,'blast_furnace')) drawFoundryBuilding(pcx,pcy,pr,p.blastFurnaceAngle||Math.PI*1.4,pr,(p.upgradeData?.blast_furnace?.progress||0)>0,'blast_furnace');
     if(_pUpg(p,'glassworks')) drawFoundryBuilding(pcx,pcy,pr,p.glassworksAngle||Math.PI*1.6,pr,(p.upgradeData?.glassworks?.progress||0)>0,'glassworks');
     if(_pUpg(p,'factory')) drawFoundryBuilding(pcx,pcy,pr,p.factoryAngle||Math.PI*0.55,pr,(p.upgradeData?.factory?.progress||0)>0,'factory');
     if(_pUpg(p,'bakery')) drawFoundryBuilding(pcx,pcy,pr,p.bakeryAngle||Math.PI*0.95,pr,(p.upgradeData?.bakery?.progress||0)>0,'bakery');
     if(_pUpg(p,'juicery')) drawFoundryBuilding(pcx,pcy,pr,p.juiceryAngle||Math.PI*0.95,pr,(p.upgradeData?.juicery?.progress||0)>0,'juicery');
+    { // v0.4.7 refineries: draw ONE structure for the first-built new upgrade
+      const _v47s=_v47FirstStruct(p);
+      if(_v47s) drawFoundryBuilding(pcx,pcy,pr,p.v47StructAngle||Math.PI*1.15,pr,_v47s.active,_v47s.kind);
+    }
     {const _hasGr=_pUpg(p,'granary'),_hasFm=_pUpg(p,'farm'),_hasOr=_pUpg(p,'orchard');
     const _ba=p.agriStructAngle||Math.PI*0.95;
     const _structs=[_hasGr&&'granary',_hasFm&&'farm',_hasOr&&'orchard'].filter(Boolean);
@@ -23612,6 +27645,27 @@ function drawPlanetDetailPopup(){
     else if(_structs.length===2){_sDraw(_structs[0],_ba-0.55);_sDraw(_structs[1],_ba+0.55);}
     else if(_structs.length===3){_structs.forEach((id,i)=>_sDraw(id,_ba+_sOff[i]));}}
     if(_ppras) drawPlanetRing(pcx,pcy,pr,p.ring,true);
+    // Hover hit-areas for each on-planet upgrade structure (for the name tooltip).
+    // Anchors mirror the structure draws above: surface point at the angle,
+    // nudged outward so the hit circle covers the building.
+    popupState.upgradeVizBounds=[];
+    {
+      const _hitR=Math.max(15,pr*0.34);
+      const _pushUpg=(ang,name)=>{ popupState.upgradeVizBounds.push({cx:pcx+Math.cos(ang)*pr*1.08, cy:pcy+Math.sin(ang)*pr*1.08, r:_hitR, name}); };
+      if(p.hasStation) _pushUpg(p.stationAngle||0, p.isAlienRelic?'ALIEN RELIC':(p.hasTerminal?'TERMINAL':(p.hasLargeStation?'LARGE STATION':'STATION')));
+      if(_pUpg(p,'iron_foundry'))  _pushUpg(p.foundryAngle||Math.PI*0.75,'IRON FOUNDRY');
+      if(_pUpg(p,'blast_furnace')) _pushUpg(p.blastFurnaceAngle||Math.PI*1.4,'BLAST FURNACE');
+      if(_pUpg(p,'glassworks'))    _pushUpg(p.glassworksAngle||Math.PI*1.6,'GLASSWORKS');
+      if(_pUpg(p,'factory'))       _pushUpg(p.factoryAngle||Math.PI*0.55,'FACTORY');
+      if(_pUpg(p,'bakery'))        _pushUpg(p.bakeryAngle||Math.PI*0.95,'BAKERY');
+      if(_pUpg(p,'juicery'))       _pushUpg(p.juiceryAngle||Math.PI*0.95,'JUICERY');
+      // Agri structures share agriStructAngle with the same spread offsets as the draw.
+      const _uBa=p.agriStructAngle||Math.PI*0.95, _uOff=[-1.15,0,1.15];
+      const _aStructs=[_pUpg(p,'granary')&&'GRANARY',_pUpg(p,'farm')&&'FARM',_pUpg(p,'orchard')&&'ORCHARD'].filter(Boolean);
+      if(_aStructs.length===1) _pushUpg(_uBa,_aStructs[0]);
+      else if(_aStructs.length===2){ _pushUpg(_uBa-0.55,_aStructs[0]); _pushUpg(_uBa+0.55,_aStructs[1]); }
+      else if(_aStructs.length===3){ _aStructs.forEach((nm,i)=>_pushUpg(_uBa+_uOff[i],nm)); }
+    }
   } else {
     // Blacked-out disc — same size/position, no color
     ctx.save();
@@ -23821,7 +27875,7 @@ function drawPlanetDetailPopup(){
     const _cpFont='italic 9px “Exo 2”,sans-serif';
     ctx.font=_cpFont;
     const _cpMaxW=pw-(lx-px)-14;
-    const _cpText='”'+(p.catchphrase||'')+'”';
+    const _cpText='“'+(p.catchphrase||'')+'”'; // “ opening … ” closing
     const _cpWords=_cpText.split(' ');
     const _cpLines=[];
     let _cpCur='';
@@ -23883,44 +27937,59 @@ function drawPlanetDetailPopup(){
   if(activeTab==='station'){
     {
       // Supply/demand visualization — shown for both station-built and no-station (dimmed)
-      const sprH=40, sprW=~~(sprH*(CAR_W/CAR_H)); // ~56px wide sprites
-      const rowPitch=44; // row step (sprH + 4px gap)
+      const sprH=26, sprW=~~(sprH*(CAR_W/CAR_H)); // ~36px wide sprites (shrunk so 5 rows fit)
+      const rowPitch=28; // row step (sprH + 2px gap)
+      const MAX_ROWS=5;  // up to 5 supplied/demanded resources per pane; rest fold into "… and N more"
       const colW=pw/2, pad=10;
       const maxSpr=Math.max(1,Math.floor((colW-pad-40)/sprW)); // sprites that fit per row
       const allCargo=['passengers','livestock','grain','fruit','cargo','mail','water','ice','sand','molten_ore','iron','steel','glass','machinery','gold','hazmat','oil','battery','chemical','flowers','medical'];
 
-      function _drawCargoStrip(cx,cy,cargoType,amount,labelCol){
+      // capCars  — max train-cars of sprite to draw before fading out (default maxSpr).
+      //            When the MORE panel is showing it's 3.5 so the strip clears its area.
+      // labelLimitX — clamp the ×N label's right edge so it can't run under the MORE panel.
+      function _drawCargoStrip(cx,cy,cargoType,amount,labelCol,capCars,labelLimitX){
         const sprKey=CARGO_CAR_SPRITE[cargoType];
         const _dk=sprKey?getCarSprite(sprKey,true):null;
         const img=_dk?imgs[_dk]:null;
-        const full=Math.floor(amount), frac=amount-full;
-        const overflow=full>=maxSpr;
-        const n=overflow?maxSpr:full;
+        const _cap=(capCars==null?maxSpr:capCars);
+        // Round DOWN to the nearest tenth of a car for the sprite visualization
+        // (3.15 supply → 3.1 cars: 3 full sprites + a 0.1-wide clipped sprite).
+        const tenth=Math.floor(amount*10)/10;
+        const overflow=tenth>_cap+1e-6;
+        const shown=overflow?_cap:tenth;             // cars actually drawn
+        const full=Math.floor(shown+1e-6);
+        const frac=Math.max(0,Math.round((shown-full)*10)/10); // 0..0.9 (0.5 at a 3.5 cap)
         let sx=cx;
         // Each icon de-stretched (galaxy-view proportions), bottom-aligned in
         // the row and tiled by the fixed sprW cell width.
         let _iconMet=null;
         const _icon=(ix)=>{ const _r=_drawFittedSprite(ctx, sprKey, ix+sprW/2, cy+sprH, sprW, sprH, _dk); if(_r) _iconMet=_r; };
         if(img){
-          for(let i=0;i<n;i++){ _icon(sx); sx+=sprW; }
-          if(!overflow&&frac>=0.5){
-            ctx.save();ctx.beginPath();ctx.rect(sx,cy,sprW/2,sprH);ctx.clip();
-            _icon(sx);ctx.restore();sx+=sprW/2;
+          for(let i=0;i<full;i++){ _icon(sx); sx+=sprW; }
+          if(frac>0.001){
+            const _pwF=sprW*frac;
+            ctx.save();ctx.beginPath();ctx.rect(sx,cy,_pwF,sprH);ctx.clip();
+            _icon(sx);ctx.restore();sx+=_pwF;
           }
           if(overflow){
-            const fadeX=sx-sprW/2;
+            const _fadeW=Math.min(sprW*0.5,sx-cx);
+            const fadeX=sx-_fadeW;
             const _fg=ctx.createLinearGradient(fadeX,0,sx,0);
             _fg.addColorStop(0,'rgba(3,6,20,0)'); _fg.addColorStop(1,'rgba(3,6,20,1)');
-            ctx.fillStyle=_fg; ctx.fillRect(fadeX,cy,sprW/2,sprH);
+            ctx.fillStyle=_fg; ctx.fillRect(fadeX,cy,_fadeW,sprH);
           }
         }
         // Vertically centre the ×N label on the SPRITE's visible body (which is
         // bottom-aligned in the cell), not on the cell — otherwise it floats too
-        // high above the shorter de-stretched sprites.
+        // high above the shorter de-stretched sprites. The label shows the TRUE
+        // amount (floored to a tenth) even when the sprites are capped/faded.
         const _lblCY = _iconMet ? (_iconMet.top + _iconMet.visH/2) : (cy+sprH/2);
         ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='left'; ctx.textBaseline='middle';
         ctx.fillStyle=labelCol||'rgba(180,220,255,0.9)';
-        ctx.fillText('\xd7'+(amount%1===0?amount.toFixed(0):amount.toFixed(1)),sx+2,_lblCY);
+        const _lblTxt='\xd7'+(tenth%1===0?tenth.toFixed(0):tenth.toFixed(1));
+        let _lblX=sx+2;
+        if(labelLimitX!=null){ const _lw=ctx.measureText(_lblTxt).width; if(_lblX+_lw>labelLimitX) _lblX=Math.max(cx,labelLimitX-_lw); }
+        ctx.fillText(_lblTxt,_lblX,_lblCY);
         ctx.textBaseline='alphabetic';
       }
 
@@ -23952,39 +28021,87 @@ function drawPlanetDetailPopup(){
         if(ctype==='diamond'&&!p.diamondRevealed) continue;
         const rawSup=((p.supply||{})[ctype]||0);
         const rawDem=((p.demand||{})[ctype]||0);
-        const sup=Math.floor(rawSup*2)/2;
-        const dem=Math.floor(rawDem*2)/2;
+        const sup=Math.round(rawSup*10)/10; // nearest tenth (was nearest half)
+        const dem=Math.round(rawDem*10)/10;
         // Supply: show all cargo with supply ≥0.5
         if(sup>=0.5) _supItems.push({ctype,sup,rawSup});
-        // Demand: show resource-type cargo only (no hazmat, no passengers/mail)
+        // Demand: show resource-type cargo (and passengers/mail) — no hazmat.
         // Flowers demand is hidden until flowers have been discovered (flowers car unlocked)
         const _flowerDemVisible=ctype==='flowers'&&_flowersCarUnlocked;
         const _medicalDemVisible=ctype==='medical'&&_medicalCarUnlocked;
         const _grainDemVisible=ctype==='grain'&&_grainCarUnlocked;
         const _fruitDemVisible=ctype==='fruit'&&_fruitCarUnlocked;
         const _machineryDemVisible=ctype==='machinery'&&_machineryCarUnlocked;
-        if(ctype!=='hazmat'&&(ctype==='water'||ctype==='livestock'||ctype==='grain'||ctype==='fruit'||ctype==='ice'||ctype==='sand'||ctype==='gold'||ctype==='oil'||ctype==='battery'||ctype==='chemical'||_flowerDemVisible||_medicalDemVisible||_grainDemVisible||_fruitDemVisible||_machineryDemVisible)&&dem>=0.5) _demItems.push({ctype,dem,rawDem});
+        if(ctype!=='hazmat'&&(ctype==='passengers'||ctype==='mail'||ctype==='water'||ctype==='livestock'||ctype==='grain'||ctype==='fruit'||ctype==='ice'||ctype==='sand'||ctype==='gold'||ctype==='oil'||ctype==='battery'||ctype==='chemical'||_flowerDemVisible||_medicalDemVisible||_grainDemVisible||_fruitDemVisible||_machineryDemVisible)&&dem>=0.5) _demItems.push({ctype,dem,rawDem});
       }
       if(p.isFlowersOrigin) _supItems.sort((a,b)=>(a.ctype==='flowers'?-1:b.ctype==='flowers'?1:b.sup-a.sup));
       else _supItems.sort((a,b)=>b.sup-a.sup);
       _demItems.sort((a,b)=>b.dem-a.dem);
       const _stRowBounds=[];
-      for(let si=0;si<_supItems.length;si++){
-        const {ctype,sup,rawSup}=_supItems[si];
-        const ry=tcY+20+si*rowPitch;
-        if(ry+sprH<=tcY+tcH){
-          _drawCargoStrip(px+pad,ry,ctype,sup,'rgba(140,200,255,0.9)');
-          if(!_noStation) _stRowBounds.push({x:px+pad,y:ry,w:colW-pad-2,h:sprH,ctype,isSupply:true,rawAmt:rawSup});
+      const CAP_CARS=3.5; // top-5 sprites truncate after 3.5 cars (fade) when a MORE panel shows
+      // Tooltip-style "MORE" panel anchored to the lower-right corner of a pane,
+      // listing every overflow resource (beyond the top-5) in a single column with
+      // no sprites — same look as the old hover tooltip, but always visible.
+      const _moreGeo=(items,rightX)=>{
+        if(_noStation||!items.length) return null;
+        const _mpad=5,_mrowH=12,_mhdH=15,_mvalW=24;
+        ctx.font='8px "Exo 2",sans-serif';
+        let _mlw=0;
+        for(const it of items){ const _l=CARGO_LABEL[it.ctype]||it.ctype.toUpperCase(); const lw=ctx.measureText(_l).width; if(lw>_mlw)_mlw=lw; }
+        _mlw=Math.min(_mlw,56);
+        const _w=_mpad*2+_mlw+_mvalW+5;
+        const _h=_mhdH+items.length*_mrowH+_mpad;
+        const _y=Math.max(tcY+23,(tcY+tcH-5)-_h); // keep below the SUPPLY/DEMAND header + divider
+        return {x:rightX-_w,y:_y,w:_w,h:_h,rowH:_mrowH,hdH:_mhdH,pad:_mpad,mlw:_mlw,items};
+      };
+      const _drawMorePanel=(geo,isSupply)=>{
+        if(!geo) return;
+        const sideCol=isSupply?'rgba(150,205,255,0.95)':'rgba(255,178,98,0.95)';
+        const brd=isSupply?'rgba(80,140,255,0.5)':'rgba(255,140,60,0.5)';
+        ctx.fillStyle='rgba(8,14,32,0.97)'; ctx.beginPath(); ctx.roundRect(geo.x,geo.y,geo.w,geo.h,4); ctx.fill();
+        ctx.strokeStyle=brd; ctx.lineWidth=0.8; ctx.beginPath(); ctx.roundRect(geo.x,geo.y,geo.w,geo.h,4); ctx.stroke();
+        ctx.fillStyle=sideCol; ctx.font='bold 7px Orbitron,sans-serif'; ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+        ctx.fillText('+ '+geo.items.length+' MORE',geo.x+geo.pad,geo.y+11);
+        ctx.strokeStyle=brd; ctx.lineWidth=0.5;
+        ctx.beginPath(); ctx.moveTo(geo.x+geo.pad,geo.y+geo.hdH-1); ctx.lineTo(geo.x+geo.w-geo.pad,geo.y+geo.hdH-1); ctx.stroke();
+        ctx.font='8px "Exo 2",sans-serif';
+        for(let i=0;i<geo.items.length;i++){
+          const it=geo.items[i];
+          const amt=Math.floor(((it.rawSup??it.rawDem??0))*10)/10;
+          const ry=geo.y+geo.hdH+i*geo.rowH+8;
+          let _lbl=CARGO_LABEL[it.ctype]||it.ctype.toUpperCase();
+          while(ctx.measureText(_lbl).width>geo.mlw&&_lbl.length>3) _lbl=_lbl.slice(0,-1);
+          ctx.fillStyle='rgba(195,218,255,0.85)'; ctx.textAlign='left';
+          ctx.fillText(_lbl,geo.x+geo.pad,ry);
+          ctx.fillStyle='rgba(232,242,255,0.96)'; ctx.textAlign='right';
+          ctx.fillText(amt.toFixed(1),geo.x+geo.w-geo.pad,ry);
         }
-      }
-      for(let di=0;di<_demItems.length;di++){
-        const {ctype,dem,rawDem}=_demItems[di];
-        const ry=tcY+20+di*rowPitch;
-        if(ry+sprH<=tcY+tcH){
-          _drawCargoStrip(px+colW+pad,ry,ctype,dem,'rgba(255,170,90,0.9)');
-          if(!_noStation) _stRowBounds.push({x:px+colW+pad,y:ry,w:colW-pad-2,h:sprH,ctype,isSupply:false,rawAmt:rawDem});
+        ctx.textAlign='left';
+      };
+      // Draw the top-5 rows of one side, then its MORE panel. Rows whose sprite
+      // band would vertically overlap the panel get their sprites capped at 3.5
+      // cars and their labels clamped left of the panel — no overlap.
+      const _drawSide=(items,colX,rightX,isSupply,col)=>{
+        const _over=items.slice(MAX_ROWS);
+        const _geo=_moreGeo(_over,rightX);
+        const _shown=Math.min(items.length,MAX_ROWS);
+        for(let i=0;i<_shown;i++){
+          const it=items[i];
+          const raw=isSupply?it.rawSup:it.rawDem;
+          const ry=tcY+20+i*rowPitch;
+          const _intersect=_geo&&(ry+sprH)>_geo.y;
+          const _cap=_geo?CAP_CARS:undefined;
+          const _limit=_intersect?(_geo.x-3):undefined;
+          _drawCargoStrip(colX,ry,it.ctype,raw,col,_cap,_limit);
+          if(!_noStation){
+            const _bw=_intersect?Math.max(20,_geo.x-3-colX):(rightX-colX);
+            _stRowBounds.push({kind:'row',x:colX,y:ry,w:_bw,h:sprH,ctype:it.ctype,isSupply,rawAmt:raw});
+          }
         }
-      }
+        _drawMorePanel(_geo,isSupply);
+      };
+      _drawSide(_supItems,px+pad,px+colW-4,true,'rgba(140,200,255,0.9)');
+      _drawSide(_demItems,px+colW+pad,px+pw-4,false,'rgba(255,170,90,0.9)');
       popupState.stationTabRowBounds=_stRowBounds;
       ctx.restore();
 
@@ -24125,6 +28242,7 @@ function drawPlanetDetailPopup(){
 }
 
 let trainsPopupAddBounds=null;
+let routesPopupAddBounds=null, _routeAddHover=false; // Routes window "+ NEW ROUTE" button
 let trainsPopupRowBounds=[]; // [{x,y,w,h, trainIdx}] for dbl-click name edit
 let trainsPopupReorderBounds=[]; // [{x,y,w,h, trainObj, dir, ri}] hover up/down reorder arrows
 let routesPopupRowBounds=[]; // [{x,y,w,h, trainIdx}] for ROUTES popup click hit-tests
@@ -25003,8 +29121,11 @@ function drawTrainBuilderPopup(){
   ctx.beginPath(); ctx.moveTo(px,py+26); ctx.lineTo(px+pw,py+26); ctx.stroke();
 
   const BTN_W=76, BTN_H=60;
-  const ENGINE_TYPES=['engine_constellation','engine_galaxy','engine_classJ','engine_classR','engine_N700'];
-  const ALL_MID_CARS=['car_passenger','car_mail','car_water_tank','car_ore','car_livestock','car_grain','car_fruit','car_cargo','car_royal','car_sand','car_chemical','car_oil','car_battery','car_ice','car_iron','car_steel','car_glass','car_machinery','car_gold','car_diamond','car_hazmat','car_medical','car_flowers'];
+  const ENGINE_TYPES=ENGINE_TYPES_ALL;
+  const ALL_MID_CARS=['car_passenger','car_mail','car_water_tank','car_ore','car_livestock','car_grain','car_fruit','car_cargo','car_royal','car_sand','car_chemical','car_oil','car_battery','car_ice','car_iron','car_steel','car_glass','car_machinery','car_gold','car_diamond','car_hazmat','car_medical','car_flowers',
+    'car_uranium','car_helium3','car_solar','car_supercon','car_truss','car_reactor',
+    'car_aetherium','car_titanium','car_biomass','car_artifact','car_titanplate','car_warpsteel',
+    'car_cannon','car_laser','car_shield'];
   const CARS_PER_ROW=6;
   const _goldUnlocked=galaxy&&galaxy.planets.some(p=>p.hasGold&&p.goldRevealed);
   const _diamondUnlocked=galaxy&&galaxy.planets.some(p=>p.hasDiamond&&p.diamondRevealed);
@@ -25043,6 +29164,25 @@ function drawTrainBuilderPopup(){
     if(t==='car_grain')    return !_grainCarUnlocked;
     if(t==='car_fruit')    return !_fruitCarUnlocked;
     if(t==='car_cargo')    return !_cargoCarUnlocked;
+    if(t==='car_uranium')  return !(galaxy&&galaxy.planets.some(p=>p.hasUranium&&p.uraniumRevealed));
+    if(t==='car_helium3')  return !_heliumCarUnlocked;
+    if(t==='car_solar')    return !_solarCarUnlocked;
+    if(t==='car_supercon') return !_superconCarUnlocked;
+    if(t==='car_truss')    return !_trussCarUnlocked;
+    if(t==='car_reactor')  return !_reactorCarUnlocked;
+    if(t==='car_aetherium')return !(galaxy&&galaxy.planets.some(p=>p.type.id==='crystal'&&visitedPlanetIds.has(p.id)));
+    if(t==='car_titanium') return !(galaxy&&galaxy.planets.some(p=>p.type.id==='obsidian'&&visitedPlanetIds.has(p.id)));
+    if(t==='car_biomass')  return !(galaxy&&galaxy.planets.some(p=>p.type.id==='fungal'&&visitedPlanetIds.has(p.id)));
+    if(t==='car_artifact') return !(galaxy&&galaxy.planets.some(p=>p.hasArtifact&&p.artifactRevealed));
+    if(t==='car_titanplate') return !_titanplateCarUnlocked;
+    if(t==='car_warpsteel')  return !_warpsteelCarUnlocked;
+    // Military cars can't be BOUGHT at all — they're assembled at an Armory
+    // into the trainyard. They show unlocked once assembled at least once;
+    // the click handler additionally refuses to add one with no trainyard
+    // stock (see the military-stock gate in the builder click handler).
+    if(t==='car_cannon')   return !_cannonCarUnlocked;
+    if(t==='car_laser')    return !_laserCarUnlocked;
+    if(t==='car_shield')   return !_shieldCarUnlocked;
     return false;
   };
   // Stable sort: unlocked cars first, locked cars at end, preserving original order within each group
@@ -25059,28 +29199,37 @@ function drawTrainBuilderPopup(){
   // locked, the button is rendered greyed with a "LOCKED" overlay (matching
   // the car-button locked treatment) and the click handler refuses to select.
   const _engLocked=(t)=>{
+    if(_cheatUnlockAllCars) return false;
     if(t==='engine_classJ') return !_classJEngineUnlocked;
     if(t==='engine_classR') return !_classREngineUnlocked;
     if(t==='engine_N700')   return !_N700EngineUnlocked;
+    if(t==='engine_helios') return !_heliosEngineUnlocked;
+    if(t==='engine_vex')    return !_vexEngineUnlocked;
+    if(t==='engine_singularity') return !_singularityEngineUnlocked;
     return false;
   };
+  // Engine button width shrinks so the whole roster (now 8 engines) fits in
+  // the row between the left edge and the caboose block. Width available =
+  // caboose left edge − divider margin − left pad.
+  const _engAvailW=(pw-12-BTN_W)-30-12;
+  const ENG_BTN_W=Math.min(BTN_W, Math.floor((_engAvailW-(ENGINE_TYPES.length-1)*ENG_GAP)/ENGINE_TYPES.length));
   s.engineBtnBounds=[];
   for(let i=0;i<ENGINE_TYPES.length;i++){
-    const bx=px+12+i*(BTN_W+ENG_GAP), by=py+53;
+    const bx=px+12+i*(ENG_BTN_W+ENG_GAP), by=py+53;
     const _et=ENGINE_TYPES[i];
     const _eLocked=_engLocked(_et);
-    s.engineBtnBounds.push({x:bx,y:by,w:BTN_W,h:BTN_H,type:_et,locked:_eLocked});
-    _drawCarBtn(bx,by,BTN_W,BTN_H,_et,s.engine===_et,_eLocked,_effTY(_et),!_eLocked&&s.hoverEngineType===_et&&s.engine!==_et);
+    s.engineBtnBounds.push({x:bx,y:by,w:ENG_BTN_W,h:BTN_H,type:_et,locked:_eLocked});
+    _drawCarBtn(bx,by,ENG_BTN_W,BTN_H,_et,s.engine===_et,_eLocked,_effTY(_et),!_eLocked&&s.hoverEngineType===_et&&s.engine!==_et);
     if(_eLocked){
       ctx.save();
       ctx.font='bold 7px Orbitron,sans-serif'; ctx.textAlign='center';
       ctx.fillStyle='rgba(170,175,185,0.80)';
-      ctx.fillText('LOCKED',bx+BTN_W/2,by+BTN_H*0.54);
+      ctx.fillText('LOCKED',bx+ENG_BTN_W/2,by+BTN_H*0.54);
       ctx.restore();
     }
   }
   // Vertical divider between engine block and caboose
-  const _engBlockEnd=px+12+ENGINE_TYPES.length*(BTN_W+ENG_GAP)-ENG_GAP;
+  const _engBlockEnd=px+12+ENGINE_TYPES.length*(ENG_BTN_W+ENG_GAP)-ENG_GAP;
   ctx.save(); ctx.strokeStyle='rgba(55,85,140,0.35)'; ctx.lineWidth=1; ctx.setLineDash([3,4]);
   ctx.beginPath(); ctx.moveTo(_engBlockEnd+18,py+43); ctx.lineTo(_engBlockEnd+18,py+112); ctx.stroke();
   ctx.setLineDash([]); ctx.restore();
@@ -25217,7 +29366,7 @@ function drawTrainBuilderPopup(){
       const drawY=trkTop-m.boxH*(1-m.bot);    // bottom-align visible body on rail
       const isHov=s.hoverVizIdx===i;
       // Hit rect: tight to the visible body so coupled cars don't overlap.
-      s.vizCarBounds.push({x:scx-m.halfW, y:drawY, w:m.bodyW, h:m.boxH, vizIdx:i});
+      s.vizCarBounds.push({x:scx-m.halfW, y:drawY, w:m.bodyW, h:m.boxH, vizIdx:i, type:vizCars[i].type});
       ctx.save();
       if(isHov) ctx.filter='brightness(1.8) saturate(1.15)';
       const _vcsn=getCarSprite(vizCars[i].type,true);
@@ -25316,6 +29465,42 @@ function drawTrainBuilderPopup(){
     ctx.restore();
   }
 
+  // ── Hover tooltip over a previewed engine / car / caboose ──
+  // After 0.1 s of hover, show the part's NAME and a short flavour quip
+  // ([Cargo] tokens coloured). Anchored above the hovered car (flips below if
+  // it would clip the popup top).
+  if(s.hoverVizIdx!=null && (Date.now()-(s._vizHoverStartMs||0))>=100){
+    const _hb=(s.vizCarBounds||[]).find(b=>b.vizIdx===s.hoverVizIdx);
+    if(_hb){
+      const _ht=_hb.type;
+      const _name=_ht==='caboose'?'Caboose':(CAR_LABELS[_ht]||(_ht||'').toUpperCase());
+      const _quip=_BUILDER_QUIPS[_ht]||'';
+      const _tpad=8, _nameF='bold 11px Orbitron,sans-serif', _quipF='10px "Exo 2",sans-serif';
+      const _maxTW=210, _nameLH=15, _quipLH=13;
+      ctx.font=_nameF; const _nameW=ctx.measureText(_name).width;
+      const _qLines=_quip?_objWrapTokens(_objTokenize(_quip),_maxTW,_quipF):[];
+      let _qMaxW=0; for(const _ln of _qLines){ const _w=_objLineWidth(_ln,_quipF); if(_w>_qMaxW)_qMaxW=_w; }
+      const _ttW=Math.ceil(Math.max(_nameW,_qMaxW))+_tpad*2;
+      const _ttH=_tpad+_nameLH+(_qLines.length?6+_qLines.length*_quipLH:0)+_tpad-4;
+      let _ttX=Math.round(_hb.x+_hb.w/2-_ttW/2);
+      let _ttY=Math.round(_hb.y-_ttH-8);
+      _ttX=Math.max(px+6,Math.min(px+pw-_ttW-6,_ttX));
+      if(_ttY<py+6) _ttY=Math.round(_hb.y+_hb.h+8);
+      _clearTextOverlayRect(_ttX,_ttY,_ttW,_ttH);
+      ctx.save();
+      ctx.fillStyle='rgba(8,16,34,0.97)';
+      ctx.beginPath(); ctx.roundRect(_ttX,_ttY,_ttW,_ttH,5); ctx.fill();
+      ctx.strokeStyle='rgba(90,150,235,0.7)'; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.roundRect(_ttX,_ttY,_ttW,_ttH,5); ctx.stroke();
+      ctx.textAlign='center'; ctx.textBaseline='alphabetic';
+      ctx.font=_nameF; ctx.fillStyle='rgba(212,232,255,0.98)';
+      ctx.fillText(_name,_ttX+_ttW/2,_ttY+_tpad+11);
+      let _qy=_ttY+_tpad+_nameLH+9;
+      for(const _ln of _qLines){ _objDrawLineCentered(_ln,_ttX+_ttW/2,_qy,_quipF,'rgba(168,192,228,0.92)'); _qy+=_quipLH; }
+      ctx.restore();
+    }
+  }
+
   ctx.restore();
 }
 
@@ -25350,24 +29535,301 @@ function _reorderPlayerTrain(trainObj, dir){
   return true;
 }
 
-function drawTrainsPopup(){
-  if(activePopup!=='trains'||!galaxy) return;
-  const pw=580, ph=430;
-  const [px,py]=drawPopupBase(pw,ph,'rgba(255,160,80,0.6)');
+// ════════ Unified TRAINS / ROUTES / STATIONS window ════════════════════════
+// All three share one frame size + a header tab bar so the player can flip
+// between them once any one is open. ('U' opens Stations directly.)
+const WIN_PW=648, WIN_PH=476;
+let _stationFilters=new Set(); // cargo types toggled in the Stations filter bar (OR/union)
+let _stStationsSpriteHover=null; // {cargo, cx, y, hgt, enterTime} — hovering a sprite in the Stations window (cargo-name tooltip)
+
+// Global form of the train-builder's local _carLocked: is this mid-car type
+// currently unlocked? Drives the Stations filter bar (one button per unlocked cargo).
+function _carTypeUnlocked(t){
+  if(_cheatUnlockAllCars) return true;
+  const _vis=(bio)=>!!(galaxy&&galaxy.planets.some(p=>p.type.id===bio&&visitedPlanetIds.has(p.id)));
+  switch(t){
+    case 'car_gold':     return !!(galaxy&&galaxy.planets.some(p=>p.hasGold&&p.goldRevealed));
+    case 'car_diamond':  return !!(galaxy&&galaxy.planets.some(p=>p.hasDiamond&&p.diamondRevealed));
+    case 'car_oil':      return _vis('oil');
+    case 'car_battery':  return _vis('storm');
+    case 'car_chemical': return _vis('chemical');
+    case 'car_sand':     return _vis('desert');
+    case 'car_ice':      return _vis('ice');
+    case 'car_ore':      return true;
+    case 'car_livestock':return _livestockCarUnlocked;
+    case 'car_iron':     return _ironCarUnlocked;
+    case 'car_steel':    return _steelCarUnlocked;
+    case 'car_glass':    return _glassCarUnlocked;
+    case 'car_machinery':return _machineryCarUnlocked;
+    case 'car_hazmat':   return _hazmatCarUnlocked;
+    case 'car_royal':    return _royalCarUnlocked;
+    case 'car_flowers':  return _flowersCarUnlocked;
+    case 'car_medical':  return _medicalCarUnlocked;
+    case 'car_grain':    return _grainCarUnlocked;
+    case 'car_fruit':    return _fruitCarUnlocked;
+    case 'car_cargo':    return _cargoCarUnlocked;
+    default:             return true; // passenger / mail / water_tank — always available
+  }
+}
+// Distinct unlocked cargo types, one per filter button: {cargo, car}.
+function _unlockedFilterCargos(){
+  const _ALL=['car_passenger','car_mail','car_water_tank','car_ore','car_livestock','car_grain','car_fruit','car_cargo','car_sand','car_chemical','car_oil','car_battery','car_ice','car_iron','car_steel','car_glass','car_machinery','car_gold','car_diamond','car_hazmat','car_medical','car_flowers'];
+  const _seen=new Set(), out=[];
+  for(const ct of _ALL){
+    if(!_carTypeUnlocked(ct)) continue;
+    const cargo=CAR_CARGO_TYPE[ct]; if(!cargo||_seen.has(cargo)) continue;
+    _seen.add(cargo); out.push({cargo,car:ct});
+  }
+  return out;
+}
+// Header tab bar shared by the Trains / Routes / Stations windows. Registers
+// popupState.windowTabBounds for the click + hover handlers.
+function _drawWindowTabs(px,py,pw,active){
+  const _tabs=[['trains','TRAINS','#ffaa80'],['routes','ROUTES','#7eddc8'],['stations','STATIONS','#7ab8ff']];
+  popupState.windowTabBounds=[];
+  const _tw=96,_th=22,_ty=py+5,_gap=4; let _tx=px+12;
+  for(const [id,label,col] of _tabs){
+    const _isAct=(active===id), _hov=(popupState.winTabHover===id);
+    ctx.fillStyle=_isAct?'rgba(28,52,116,0.96)':(_hov?'rgba(18,36,82,0.9)':'rgba(9,18,46,0.85)');
+    ctx.beginPath(); ctx.roundRect(_tx,_ty,_tw,_th,4); ctx.fill();
+    ctx.strokeStyle=_isAct?col:(_hov?'rgba(90,140,230,0.6)':'rgba(45,75,140,0.45)'); ctx.lineWidth=_isAct?1.6:1;
+    ctx.beginPath(); ctx.roundRect(_tx,_ty,_tw,_th,4); ctx.stroke();
+    ctx.font='bold 10px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillStyle=_isAct?col:(_hov?'rgba(180,205,245,0.92)':'rgba(120,150,200,0.7)');
+    ctx.fillText(label,_tx+_tw/2,_ty+_th/2+1); ctx.textBaseline='alphabetic';
+    popupState.windowTabBounds.push({x:_tx,y:_ty,w:_tw,h:_th,id});
+    _tx+=_tw+_gap;
+  }
+  ctx.textAlign='left';
+}
+
+// ── STATIONS window ─────────────────────────────────────────
+// Based on the right-panel Stations tab but with full sprite-based supply/demand
+// (up to 10 each, 2 columns, to the tenth) and a cargo filter bar (OR/union).
+function drawStationsPopup(){
+  if(activePopup!=='stations'||!galaxy) return;
+  const pw=WIN_PW, ph=WIN_PH;
+  const [px,py]=drawPopupBase(pw,ph,'rgba(120,180,255,0.6)');
   ctx.save();
-  ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
-  ctx.fillStyle='#fa8'; ctx.fillText('TRAINS',px+pw/2,py+21);
+  _drawWindowTabs(px,py,pw,'stations');
   ctx.font='10px "Exo 2",sans-serif'; ctx.textAlign='right';
   popupState.escBounds={x:px+pw-88,y:py+11,w:78,h:14};
   ctx.fillStyle=popupState.escHover?'rgba(255,255,255,0.92)':'rgba(90,130,190,0.55)';
   ctx.fillText('[ESC] close',px+pw-10,py+21);
-  // + button
-  const abx=px+10, aby=py+9, abw=26, abh=18;
+  ctx.strokeStyle='rgba(40,80,160,0.4)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(px,py+30); ctx.lineTo(px+pw,py+30); ctx.stroke();
+
+  // ── Filter bar — one toggle per unlocked cargo (1.5× sprite only; cargo name shows on hover) ──
+  const _filters=_unlockedFilterCargos();
+  popupState.stFilterBounds=[];
+  const _FSP=24; // sprite cell width — 1.5× the old 16px
+  let _fx=px+10, _fy=py+35; const _fh=_FSP+5, _fpad=5, _fgap=5;
+  for(const f of _filters){
+    const _bw=_FSP+_fpad*2;
+    if(_fx+_bw>px+pw-10){ _fx=px+10; _fy+=_fh+4; } // wrap to a new row
+    const _on=_stationFilters.has(f.cargo);
+    ctx.fillStyle=_on?'rgba(40,110,210,0.92)':'rgba(14,26,58,0.85)';
+    ctx.beginPath(); ctx.roundRect(_fx,_fy,_bw,_fh,4); ctx.fill();
+    ctx.strokeStyle=_on?'rgba(120,190,255,0.95)':'rgba(50,80,150,0.5)'; ctx.lineWidth=_on?1.5:1;
+    ctx.beginPath(); ctx.roundRect(_fx,_fy,_bw,_fh,4); ctx.stroke();
+    const _spK=getCarSprite(f.car,true);
+    if(_spK&&imgs[_spK]) _drawFittedSprite(ctx,f.car,_fx+_bw/2,_fy+_fh-4,_FSP,_fh-7,_spK);
+    popupState.stFilterBounds.push({x:_fx,y:_fy,w:_bw,h:_fh,cargo:f.cargo});
+    _fx+=_bw+_fgap;
+  }
+  const _listY=_fy+_fh+8;
+
+  // ── Station list (filtered: supply OR demand of ANY selected cargo) ──
+  // Threshold matches the force-include in _drawSide below so a planet only
+  // passes the filter when it has ENOUGH of the cargo to actually display a row
+  // (>= 0.1 → at least ×0.1). Using a lower filter threshold than the top-10
+  // display caused planets like Orijen — which demand a trace of the cargo,
+  // ranked outside their top-10 — to appear with no visible/highlighted row.
+  const _STF_MIN=0.1;
+  let _stations=galaxy.planets.filter(p=>p.hasStation&&(!p.isAlienRelic||visitedPlanetIds.has(p.id)));
+  if(_stationFilters.size){
+    _stations=_stations.filter(p=>{ for(const c of _stationFilters){ if((p.supply?.[c]||0)>=_STF_MIN||(p.demand?.[c]||0)>=_STF_MIN) return true; } return false; });
+  }
+  const PANE_H=136, _listH=py+ph-_listY-8, _scroll=popupState.scroll||0;
+  popupState.stationsRowBounds=[]; popupState.stSpriteBounds=[];
+  // Planet viz: partially off the left edge, station pointing right — mirrors the
+  // right-panel Stations pane / bottom-bar selected-planet style.
+  const ST_VIZ_R={XS:20,S:26,M:32,L:39,XL:46,XXL:53};
+  const _vizRightX=px+10+Math.round(ST_VIZ_R['L']*1.14); // outer rail ends here for every size
+  // Supply/demand multi-car strips — 1.5× sprites (≈24px wide), to the tenth, ≤4.5 cars then fade.
+  const _CAR_H=17, _CAR_W=Math.round(_CAR_H*CAR_W/CAR_H), _CAP=4.5;
+  const _drawStrip=(ct,amount,sx,baseY)=>{
+    const _sp=CARGO_CAR_SPRITE[ct], _dk=_sp?getCarSprite(_sp,true):null;
+    if(!_dk||!imgs[_dk]) return _CAR_W;
+    const _tenth=Math.floor(amount*10)/10, _ovf=_tenth>_CAP+1e-6, _shown=_ovf?_CAP:_tenth;
+    const _full=Math.floor(_shown+1e-6), _frac=Math.max(0,Math.round((_shown-_full)*10)/10);
+    let x=sx;
+    for(let i=0;i<_full;i++){ _drawFittedSprite(ctx,_sp,x+_CAR_W/2,baseY,_CAR_W,_CAR_H,_dk); x+=_CAR_W; }
+    if(_frac>0.001){ const _pwF=_CAR_W*_frac; ctx.save(); ctx.beginPath(); ctx.rect(x,baseY-_CAR_H,_pwF,_CAR_H); ctx.clip(); _drawFittedSprite(ctx,_sp,x+_CAR_W/2,baseY,_CAR_W,_CAR_H,_dk); ctx.restore(); x+=_pwF; }
+    if(_ovf){ const _fw=Math.min(_CAR_W*0.5,x-sx), _fxx=x-_fw; const _fg=ctx.createLinearGradient(_fxx,0,x,0); _fg.addColorStop(0,'rgba(7,12,28,0)'); _fg.addColorStop(1,'rgba(7,12,28,0.95)'); ctx.fillStyle=_fg; ctx.fillRect(_fxx,baseY-_CAR_H,_fw,_CAR_H); }
+    return Math.max(_CAR_W,x-sx);
+  };
+  ctx.save(); ctx.beginPath(); ctx.rect(px+1,_listY,pw-2,_listH); ctx.clip();
+  if(!_stations.length){
+    ctx.font='11px "Exo 2",sans-serif'; ctx.textAlign='center'; ctx.fillStyle='rgba(90,130,200,0.5)';
+    ctx.fillText(_stationFilters.size?'No stations match the selected filters':'No stations built yet',px+pw/2,_listY+40);
+  }
+  for(let ri=0;ri<_stations.length;ri++){
+    const p=_stations[ri];
+    const ry=_listY+ri*PANE_H-_scroll;
+    if(ry+PANE_H<_listY||ry>_listY+_listH) continue;
+    popupState.stationsRowBounds.push({x:px+2,y:ry,w:pw-4,h:PANE_H,planetId:p.id,ri});
+    if(popupState.stationsRowHover===ri){ ctx.fillStyle='rgba(30,55,120,0.32)'; ctx.fillRect(px+2,ry,pw-4,PANE_H); }
+    else if(ri%2===0){ ctx.fillStyle='rgba(14,24,54,0.30)'; ctx.fillRect(px+2,ry,pw-4,PANE_H); }
+    const star=galaxy.stars[p.starId];
+    // Planet + station viz — planet CENTERED ON THE WINDOW'S LEFT EDGE (px), so
+    // its LEFT HALF is cut off (same look as the bottom UI bar when a planet is
+    // selected). The station/structures point RIGHT (east) and the clip is wide
+    // (only the row height + short of the DEMAND column), so the ring/structures
+    // are NOT cut off — they render beneath the SUPPLY strips drawn afterward.
+    const _vR=ST_VIZ_R[p.size]||32, _vCx=px, _vCy=ry+PANE_H/2;
+    ctx.save(); ctx.beginPath(); ctx.rect(px+1,ry,Math.round(pw*0.5)-2,PANE_H); ctx.clip();
+    if(p.ring) drawPlanetRing(_vCx,_vCy,_vR,p.ring,false);
+    drawPlanet(_vCx,_vCy,_vR,p.type,p.ring,2.0,undefined,undefined,!!p.ring,p.flowerPositions||null);
+    if(p.type.id==='urban') drawCityscape(_vCx,_vCy,_vR); else if(p.type.id==='ancient') drawAncientRuins(_vCx,_vCy,_vR);
+    if(p.hasGold&&p.goldRevealed) _drawGoldPatch(_vCx,_vCy,_vR,p.goldPatch);
+    if(p.hasDiamond&&p.diamondRevealed) _drawDiamondPatch(_vCx,_vCy,_vR,p.diamondPatch);
+    if(p.hasUranium&&p.uraniumRevealed) _drawUraniumPatch(_vCx,_vCy,_vR,p.uraniumPatch);
+    if(p.hasArtifact&&p.artifactRevealed) _drawArtifactPatch(_vCx,_vCy,_vR,p.artifactPatch);
+    drawPlanetStation(_vCx,_vCy,_vR,0,_vR,p.isAlienRelic||p.combineStation,p.hasLargeStation||false,null,p.hasTerminal||false);
+    { // surface structures (mirrors the right Stations pane)
+      const _ups=p.upgrades||[], _sd=[];
+      if(_ups.includes('iron_foundry')) _sd.push(a=>drawFoundryBuilding(_vCx,_vCy,_vR,a,_vR,(p.upgradeData?.iron_foundry?.progress||0)>0,'iron_foundry'));
+      if(_ups.includes('blast_furnace')) _sd.push(a=>drawFoundryBuilding(_vCx,_vCy,_vR,a,_vR,(p.upgradeData?.blast_furnace?.progress||0)>0,'blast_furnace'));
+      if(_ups.includes('glassworks')) _sd.push(a=>drawFoundryBuilding(_vCx,_vCy,_vR,a,_vR,(p.upgradeData?.glassworks?.progress||0)>0,'glassworks'));
+      if(_ups.includes('factory')) _sd.push(a=>drawFoundryBuilding(_vCx,_vCy,_vR,a,_vR,(p.upgradeData?.factory?.progress||0)>0,'factory'));
+      if(_ups.includes('bakery')) _sd.push(a=>drawFoundryBuilding(_vCx,_vCy,_vR,a,_vR,(p.upgradeData?.bakery?.progress||0)>0,'bakery'));
+      if(_ups.includes('juicery')) _sd.push(a=>drawFoundryBuilding(_vCx,_vCy,_vR,a,_vR,(p.upgradeData?.juicery?.progress||0)>0,'juicery'));
+      if(_ups.includes('granary')) _sd.push(a=>drawGranaryBuilding(_vCx,_vCy,_vR,a,_vR));
+      if(_ups.includes('farm')) _sd.push(a=>drawFarmBuilding(_vCx,_vCy,_vR,a,_vR));
+      if(_ups.includes('orchard')) _sd.push(a=>drawOrchardBuilding(_vCx,_vCy,_vR,a,_vR));
+      const _slots=[-1.05,1.05,-2.0,2.0];
+      for(let _si=0;_si<_sd.length&&_si<_slots.length;_si++) _sd[_si](_slots[_si]);
+    }
+    if(p.ring) drawPlanetRing(_vCx,_vCy,_vR,p.ring,true);
+    ctx.restore();
+    // Name + star + station tier. Measure the name in ITS OWN font (bold 11px
+    // Orbitron) BEFORE switching to the small font, so the star/size text always
+    // starts to the right of the name no matter how long the name is.
+    const _nx=_vizRightX+14;
+    ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='left'; ctx.textBaseline='alphabetic'; ctx.fillStyle='rgba(170,215,255,0.95)';
+    const _nm=p.name+(p.isStarter?' [HOME]':'');
+    const _nmW=ctx.measureText(_nm).width;
+    ctx.fillText(_nm,_nx,ry+16);
+    ctx.font='8px "Exo 2",sans-serif'; ctx.fillStyle='rgba(110,155,220,0.6)';
+    ctx.fillText(' · '+star.name+'  ·  '+(p.hasTerminal?'TERMINAL':p.hasLargeStation?'LARGE STATION':'STATION'),_nx+_nmW+6,ry+16);
+    // SUPPLY / DEMAND — 2 columns × up to 5 rows each, multi-car strips (hover a strip for the cargo name).
+    const _blkY=ry+30, _supX=_nx, _demX=px+Math.round(pw*0.52)+8;
+    ctx.font='bold 7px Orbitron,sans-serif'; ctx.textAlign='left';
+    ctx.fillStyle='rgba(90,200,255,0.78)'; ctx.fillText('SUPPLY',_supX,_blkY);
+    ctx.fillStyle='rgba(255,170,60,0.78)'; ctx.fillText('DEMAND',_demX,_blkY);
+    const _drawSide=(side,baseX,maxW,labCol)=>{
+      let _ents=_planetTopN(p,side,10);
+      // Filter-selected cargoes float to the top of the list (stable), so e.g.
+      // with WATER toggled the water row leads any list that contains water.
+      if(_stationFilters.size){
+        const _sideSrc=side==='supply'?(p.supply||{}):(p.demand||{});
+        // Force any filtered cargo the planet actually has on THIS side into the
+        // list even when it ranks outside the natural top-10 — otherwise a planet
+        // that passed the filter could show no row for the cargo you filtered.
+        for(const c of _stationFilters){
+          if((_sideSrc[c]||0)<_STF_MIN) continue;
+          if(c==='gold'&&!p.goldRevealed) continue;
+          if(c==='diamond'&&!p.diamondRevealed) continue;
+          if(!_ents.some(e=>e[0]===c)) _ents.push([c,_sideSrc[c]]);
+        }
+        const _sel=[],_rest=[];
+        for(const e of _ents){ (_stationFilters.has(e[0])?_sel:_rest).push(e); }
+        _ents=_sel.concat(_rest).slice(0,10); // selected rows first; cap at 2 cols × 5
+      }
+      const _colW=maxW/2;
+      for(let i=0;i<_ents.length;i++){
+        const [ct,v]=_ents[i];
+        // Sprites moved up (less gap under the header, more below the 5th row).
+        const ex=baseX+(i<5?0:1)*_colW, eBot=_blkY+5+_CAR_H+(i%5)*19;
+        const _t=Math.floor(v*10)/10;
+        const _lblTxt='×'+(_t%1===0?_t.toFixed(0):_t.toFixed(1));
+        // Filter highlight: light-blue wash behind the whole row. Height = one car
+        // row (leaves a ~2px gap between adjacent highlighted rows so they no longer
+        // touch); width is computed to cover the ×N.N label so it can't spill past
+        // the rectangle (the supply column is narrower, where this used to clip).
+        if(_stationFilters.has(ct)){
+          ctx.font='bold 8px "Exo 2",sans-serif';
+          const _ovfH=_t>_CAP+1e-6, _shH=_ovfH?_CAP:_t, _flH=Math.floor(_shH+1e-6), _frH=Math.max(0,Math.round((_shH-_flH)*10)/10);
+          const _predW=Math.max(_CAR_W,(_flH+(_frH>0.001?_frH:0))*_CAR_W);
+          const _bRight=ex+_predW+5+ctx.measureText(_lblTxt).width+4;
+          ctx.fillStyle='rgba(70,140,235,0.26)'; ctx.fillRect(ex-3,eBot-_CAR_H,_bRight-(ex-3),_CAR_H);
+        }
+        const _w=_drawStrip(ct,v,ex,eBot);
+        popupState.stSpriteBounds.push({x:ex,y:eBot-_CAR_H,w:_w,h:_CAR_H,cargo:ct});
+        // ×N.N amount (floored to the tenth) — right of the row, vertically centred.
+        ctx.font='bold 8px "Exo 2",sans-serif'; ctx.textAlign='left'; ctx.textBaseline='middle'; ctx.fillStyle=labCol;
+        ctx.fillText(_lblTxt,ex+_w+5,eBot-_CAR_H/2+0.5);
+        ctx.textBaseline='alphabetic';
+      }
+      if(!_ents.length){ ctx.font='8px "Exo 2",sans-serif'; ctx.textAlign='left'; ctx.fillStyle='rgba(100,130,180,0.4)'; ctx.fillText('none',baseX,_blkY+18); }
+    };
+    _drawSide('supply',_supX,_demX-_supX-12,'rgba(150,215,255,0.92)');
+    _drawSide('demand',_demX,px+pw-12-_demX,'rgba(255,190,110,0.92)');
+    if(ri<_stations.length-1){ ctx.strokeStyle='rgba(40,80,160,0.25)'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(px+8,ry+PANE_H-1); ctx.lineTo(px+pw-8,ry+PANE_H-1); ctx.stroke(); }
+  }
+  ctx.restore();
+  // Scrollbar.
+  const _totalH=_stations.length*PANE_H;
+  if(_totalH>_listH){
+    const _sbH=Math.max(22,_listH*(_listH/_totalH)), _maxSc=Math.max(1,_totalH-_listH);
+    const _sbY=_listY+(((popupState.scroll||0)/_maxSc)*(_listH-_sbH));
+    ctx.fillStyle='rgba(40,70,140,0.3)'; ctx.fillRect(px+pw-6,_listY,4,_listH);
+    ctx.fillStyle='rgba(100,160,255,0.55)'; ctx.fillRect(px+pw-6,_sbY,4,_sbH);
+    _regScrollbar({x:px+pw-6,y:_listY,w:4,h:_listH,thumbY:_sbY,thumbH:_sbH,maxScroll:_maxSc,setScroll:(v)=>{popupState.scroll=v;}});
+  }
+  popupState._stListMaxScroll=Math.max(0,_totalH-_listH);
+  // Cargo-name tooltip — appears 0.05 s after hovering any sprite (filter or supply/demand).
+  if(_stStationsSpriteHover && Date.now()-_stStationsSpriteHover.enterTime>=50){
+    const _h=_stStationsSpriteHover, _nm2=(CARGO_LABEL[_h.cargo]||_h.cargo).toUpperCase();
+    ctx.font='bold 8px Orbitron,sans-serif';
+    const _twN=ctx.measureText(_nm2).width, _pad2=7, _hh=16, _ww=_twN+_pad2*2;
+    let _ttx=Math.round(_h.cx-_ww/2), _tty=Math.round(_h.y-_hh-6);
+    _ttx=Math.max(px+4,Math.min(px+pw-_ww-4,_ttx));
+    if(_tty<py+32) _tty=Math.round(_h.y+_h.hgt+6);
+    _clearTextOverlayRect(_ttx,_tty,_ww,_hh);
+    ctx.fillStyle='rgba(8,16,34,0.97)'; ctx.beginPath(); ctx.roundRect(_ttx,_tty,_ww,_hh,4); ctx.fill();
+    ctx.strokeStyle='rgba(90,150,235,0.7)'; ctx.lineWidth=1; ctx.beginPath(); ctx.roundRect(_ttx,_tty,_ww,_hh,4); ctx.stroke();
+    ctx.fillStyle='rgba(212,232,255,0.98)'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(_nm2,_ttx+_ww/2,_tty+_hh/2+0.5); ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+  }
+  ctx.restore();
+}
+
+function drawTrainsPopup(){
+  if(activePopup!=='trains'||!galaxy) return;
+  const pw=WIN_PW, ph=WIN_PH;
+  const [px,py]=drawPopupBase(pw,ph,'rgba(255,160,80,0.6)');
+  ctx.save();
+  _drawWindowTabs(px,py,pw,'trains');
+  ctx.font='10px "Exo 2",sans-serif'; ctx.textAlign='right';
+  const _escW=ctx.measureText('[ESC] close').width;
+  const _escLeft=px+pw-10-_escW;
+  popupState.escBounds={x:_escLeft-4,y:py+11,w:_escW+8,h:14};
+  ctx.fillStyle=popupState.escHover?'rgba(255,255,255,0.92)':'rgba(90,130,190,0.55)';
+  ctx.fillText('[ESC] close',px+pw-10,py+21);
+  // "+ NEW TRAIN" button — wide green pill just left of [ESC] (small buffer).
+  ctx.font='bold 9px Orbitron,sans-serif';
+  const _ntLabel='+ NEW TRAIN';
+  const abw=Math.round(ctx.measureText(_ntLabel).width)+16, abh=18;
+  const abx=_escLeft-7-abw, aby=py+6;
   trainsPopupAddBounds={x:abx,y:aby,w:abw,h:abh};
-  ctx.fillStyle=_trainAddHover?'rgba(45,200,90,0.97)':'rgba(30,160,70,0.85)'; ctx.fillRect(abx,aby,abw,abh);
-  ctx.strokeStyle=_trainAddHover?'rgba(80,240,120,0.90)':'rgba(50,220,90,0.7)'; ctx.lineWidth=1; ctx.strokeRect(abx,aby,abw,abh);
-  ctx.font='bold 14px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.fillStyle='#fff';
-  ctx.fillText('+',abx+abw/2,aby+abh/2+5);
+  ctx.fillStyle=_trainAddHover?'rgba(45,200,90,0.97)':'rgba(30,160,70,0.85)';
+  ctx.beginPath(); ctx.roundRect(abx,aby,abw,abh,4); ctx.fill();
+  ctx.strokeStyle=_trainAddHover?'rgba(80,240,120,0.90)':'rgba(50,220,90,0.7)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.roundRect(abx,aby,abw,abh,4); ctx.stroke();
+  ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillStyle='#fff';
+  ctx.fillText(_ntLabel,abx+abw/2,aby+abh/2+0.5); ctx.textBaseline='alphabetic';
   ctx.strokeStyle='rgba(80,50,20,0.4)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(px,py+30); ctx.lineTo(px+pw,py+30); ctx.stroke();
 
@@ -25376,6 +29838,7 @@ function drawTrainsPopup(){
   const playerTrains=_playerTrainList();
   trainsPopupRowBounds=[];
   trainsPopupReorderBounds=[];
+  _trainsWinAddPaneBounds=null;
   ctx.save(); ctx.beginPath(); ctx.rect(px+1,listY,pw-2,listH); ctx.clip();
   for(let ri=0;ri<playerTrains.length;ri++){
     const {t:train,i:ti}=playerTrains[ri];
@@ -25495,9 +29958,26 @@ function drawTrainsPopup(){
       ctx.beginPath(); ctx.moveTo(px+10,ry+ROW-2); ctx.lineTo(px+pw-10,ry+ROW-2); ctx.stroke();
     }
   }
+  // "+ Add new train" pseudo-slot below the last train — mirrors the right
+  // Trains panel's add-pane (centered text, soft accent, hover highlight).
+  // Click routes to the Train Builder via openTrainBuilder().
+  {
+    const _addRy=listY+playerTrains.length*ROW-scroll;
+    if(_addRy+ROW>listY && _addRy<listY+listH){
+      if(_trainsWinAddPaneHover){
+        ctx.fillStyle='rgba(80,140,255,0.10)'; ctx.fillRect(px+2,_addRy,pw-4,ROW-2);
+        ctx.strokeStyle='rgba(80,160,255,0.30)'; ctx.lineWidth=1; ctx.strokeRect(px+2,_addRy,pw-4,ROW-2);
+      }
+      ctx.font='bold 13px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillStyle=_trainsWinAddPaneHover?'rgba(180,220,255,1.0)':'rgba(130,180,240,0.80)';
+      ctx.fillText('+ Add new train',px+pw/2,_addRy+ROW/2);
+      ctx.textBaseline='alphabetic';
+      _trainsWinAddPaneBounds={x:px+2,y:_addRy,w:pw-4,h:ROW-2};
+    }
+  }
   ctx.restore();
-  // Scrollbar
-  const totalH=playerTrains.length*ROW;
+  // Scrollbar (+1 ROW for the "Add new train" pseudo-slot, so it scrolls into view)
+  const totalH=(playerTrains.length+1)*ROW;
   if(totalH>listH){
     const sbH=Math.max(20,listH*(listH/totalH));
     const _maxSt=Math.max(1,totalH-listH);
@@ -25519,11 +29999,10 @@ function drawTrainsPopup(){
 // visible window. Double-click any panel to open that train's detail popup.
 function drawRoutesPopup(){
   if(activePopup!=='routes'||!galaxy) return;
-  const pw=620, ph=464;
+  const pw=WIN_PW, ph=WIN_PH;
   const [px,py]=drawPopupBase(pw,ph,'rgba(100,210,170,0.6)');
   ctx.save();
-  ctx.font='bold 11px Orbitron,sans-serif'; ctx.textAlign='center';
-  ctx.fillStyle='#7eddc8'; ctx.fillText('ROUTES',px+pw/2,py+21);
+  _drawWindowTabs(px,py,pw,'routes');
   // [ESC] close in upper-right (clickable, like other popups)
   ctx.font='10px "Exo 2",sans-serif';
   const _rEscTxt='[ESC] close';
@@ -25533,6 +30012,18 @@ function drawRoutesPopup(){
   ctx.textAlign='left';
   ctx.fillStyle=popupState.routesEscHover?'rgba(255,255,255,0.92)':'rgba(90,160,140,0.65)';
   ctx.fillText(_rEscTxt,_rEscX,py+21);
+  // "+ NEW ROUTE" button — green pill just left of [ESC] (mirrors +NEW TRAIN).
+  ctx.font='bold 9px Orbitron,sans-serif';
+  const _nrLabel='+ NEW ROUTE';
+  const _nrBw=Math.round(ctx.measureText(_nrLabel).width)+16, _nrBh=18;
+  const _nrBx=_rEscX-10-_nrBw, _nrBy=py+6;
+  routesPopupAddBounds={x:_nrBx,y:_nrBy,w:_nrBw,h:_nrBh};
+  ctx.fillStyle=_routeAddHover?'rgba(45,200,90,0.97)':'rgba(30,160,70,0.85)';
+  ctx.beginPath(); ctx.roundRect(_nrBx,_nrBy,_nrBw,_nrBh,4); ctx.fill();
+  ctx.strokeStyle=_routeAddHover?'rgba(80,240,120,0.90)':'rgba(50,220,90,0.7)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.roundRect(_nrBx,_nrBy,_nrBw,_nrBh,4); ctx.stroke();
+  ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillStyle='#fff';
+  ctx.fillText(_nrLabel,_nrBx+_nrBw/2,_nrBy+_nrBh/2+0.5); ctx.textBaseline='alphabetic'; ctx.textAlign='left';
   ctx.strokeStyle='rgba(40,140,110,0.40)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(px,py+30); ctx.lineTo(px+pw,py+30); ctx.stroke();
 
@@ -26372,6 +30863,72 @@ function drawPanelTabs(){
   ctx.fillStyle=!showTrains?'rgba(130,200,255,0.95)':_stationTabHov?'rgba(110,165,240,0.80)':'rgba(65,100,160,0.55)';
   ctx.fillText('STATIONS',px+tabW+tabW/2,TOP_H/2);
 
+  // Expand / collapse arrow beside the ACTIVE tab's label. Collapsed → a LEFT
+  // arrow to the LEFT of the label (click widens the panel to 2×). Expanded → a
+  // RIGHT arrow to the RIGHT of the label (click restores normal width). Same
+  // bright colour as the selected tab label; same little triangle as the
+  // leaderboard's rank pager.
+  {
+    const _atCx=showTrains?(px+tabW/2):(px+tabW+tabW/2);
+    const _atLbl=showTrains?'TRAINS':'STATIONS';
+    ctx.font='bold 8px Orbitron,sans-serif';
+    const _atHW=ctx.measureText(_atLbl).width/2;
+    const _arX=_panelExpanded?(_atCx+_atHW+9):(_atCx-_atHW-9);
+    const _arY=TOP_H/2;
+    ctx.fillStyle=_panelArrowHover?'rgba(210,235,255,1)':'rgba(130,200,255,0.95)';
+    ctx.beginPath();
+    if(_panelExpanded){ ctx.moveTo(_arX-2.5,_arY-4); ctx.lineTo(_arX+3.5,_arY); ctx.lineTo(_arX-2.5,_arY+4); } // ▶ collapse
+    else             { ctx.moveTo(_arX+2.5,_arY-4); ctx.lineTo(_arX-3.5,_arY); ctx.lineTo(_arX+2.5,_arY+4); } // ◀ expand
+    ctx.closePath(); ctx.fill();
+    _panelExpandArrowBounds={x:_arX-8,y:_arY-9,w:16,h:18};
+  }
+
+  // "SELECT A TRAIN" banner — shown over BOTH tabs while the player is in the
+  // route-assignment state (assignPending / routeHerePending). Replaces the old
+  // in-bar ASSIGN / SELECT-A-TRAIN button: the player clicks a train row in the
+  // panel below to assign. Blue fill, black text, covering the whole tab strip.
+  if(assignPending||routeHerePending){
+    // The TRAINS / STATIONS labels are drawn to the HD text overlay (composited
+    // LAST), so an opaque main-canvas fill alone won't hide them — wipe the
+    // overlay over the tab strip first.
+    _clearTextOverlayRect(px, 0, PANEL_W, TOP_H);
+    ctx.fillStyle='rgb(4,8,20)'; ctx.fillRect(px,0,PANEL_W,TOP_H);
+    // Solid blue tab that reads as the TOP of the panel-highlight rectangle:
+    // SQUARE corners, the EXACT width of that rectangle (px+1 .. px+PANEL_W-1),
+    // a matching blue border on the left/top/right (NO white outline) and an
+    // OPEN bottom so it flows seamlessly into the highlight rectangle below.
+    ctx.fillStyle='rgb(80,170,255)';
+    ctx.fillRect(px+1, 0, PANEL_W-2, TOP_H+2);
+    ctx.strokeStyle='rgba(120,200,255,0.85)'; ctx.lineWidth=2;
+    ctx.beginPath();
+    ctx.moveTo(px+1, TOP_H+1); ctx.lineTo(px+1, 1);
+    ctx.lineTo(px+PANEL_W-1, 1); ctx.lineTo(px+PANEL_W-1, TOP_H+1);
+    ctx.stroke();
+    ctx.font='bold 10px Orbitron,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillStyle='#000';
+    ctx.fillText('SELECT A TRAIN',px+PANEL_W/2,TOP_H/2+0.5);
+  } else if(_assignRouteTrainIdx!=null||_newRouteMode){
+    // YELLOW variant of the banner for the route-stop-picking flows (assign to a
+    // known train, OR +NEW ROUTE). Header text steps through the route-building
+    // prompts. Modeled on the blue SELECT A TRAIN banner above (opaque, square,
+    // reads as the box top).
+    _clearTextOverlayRect(px, 0, PANEL_W, TOP_H);
+    ctx.fillStyle='rgb(4,8,20)'; ctx.fillRect(px,0,PANEL_W,TOP_H);
+    ctx.fillStyle='rgb(255,205,55)';
+    ctx.fillRect(px+1, 0, PANEL_W-2, TOP_H+2);
+    ctx.strokeStyle='rgba(255,225,90,0.9)'; ctx.lineWidth=2;
+    ctx.beginPath();
+    ctx.moveTo(px+1, TOP_H+1); ctx.lineTo(px+1, 1);
+    ctx.lineTo(px+PANEL_W-1, 1); ctx.lineTo(px+PANEL_W-1, TOP_H+1);
+    ctx.stroke();
+    const _arHdr=(routeStops.length===0)?'SELECT A PLANET':'SHIFT + CLICK TO ADD A STOP';
+    let _arFs=10; ctx.font='bold '+_arFs+'px Orbitron,sans-serif';
+    while(_arFs>7 && ctx.measureText(_arHdr).width>PANEL_W-12){ _arFs--; ctx.font='bold '+_arFs+'px Orbitron,sans-serif'; }
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillStyle='#000';
+    ctx.fillText(_arHdr,px+PANEL_W/2,TOP_H/2+0.5);
+  }
+
   ctx.textBaseline='alphabetic';
   ctx.restore();
 }
@@ -26485,27 +31042,54 @@ function drawTopBar(){
     ctx.fillStyle=_creditsHover?'rgba(220,235,255,1.0)':'rgba(185,215,255,0.92)';
     ctx.fillText(val,crTX+lw,cy);
 
-    // Delta arrow + text immediately right of the credits value
-    const dAbs=Math.abs(Math.round(creditDelta));
-    const dStr=(creditDelta>=0?'+':'-')+_fmtCr(dAbs);
-    const dCol=creditDelta>=0?'#40e060':'#e04040';
-    ctx.font='9px "Exo 2",sans-serif';
-    const dStartX=crTX+lw+vw+12;
-    const arX=dStartX+4.5, arY=cy;
-    ctx.beginPath();
-    if(creditDelta>=0){
-      ctx.moveTo(arX,arY-3.5); ctx.lineTo(arX+4.5,arY+2.5); ctx.lineTo(arX-4.5,arY+2.5);
-    } else {
-      ctx.moveTo(arX,arY+3.5); ctx.lineTo(arX+4.5,arY-2.5); ctx.lineTo(arX-4.5,arY-2.5);
+    // Delta arrow + text immediately right of the credits value. Hidden while
+    // the right panel is EXPANDED — the narrower top bar has no room for it.
+    if(!_panelExpanded){
+      const dAbs=Math.abs(Math.round(creditDelta));
+      const dStr=(creditDelta>=0?'+':'-')+_fmtCr(dAbs);
+      const dCol=creditDelta>=0?'#40e060':'#e04040';
+      ctx.font='9px "Exo 2",sans-serif';
+      const dStartX=crTX+lw+vw+12;
+      const arX=dStartX+4.5, arY=cy;
+      ctx.beginPath();
+      if(creditDelta>=0){
+        ctx.moveTo(arX,arY-3.5); ctx.lineTo(arX+4.5,arY+2.5); ctx.lineTo(arX-4.5,arY+2.5);
+      } else {
+        ctx.moveTo(arX,arY+3.5); ctx.lineTo(arX+4.5,arY-2.5); ctx.lineTo(arX-4.5,arY-2.5);
+      }
+      ctx.closePath(); ctx.fillStyle=dCol; ctx.fill();
+      ctx.fillStyle=dCol; ctx.textAlign='left';
+      ctx.fillText(dStr,dStartX+11,cy);
     }
-    ctx.closePath(); ctx.fillStyle=dCol; ctx.fill();
-    ctx.fillStyle=dCol; ctx.textAlign='left';
-    ctx.fillText(dStr,dStartX+11,cy);
   }
 
   ctx.restore();
 }
 
+// v0.4.7: portal swirl ring — two counter-rotating dashed rings + a soft
+// glow. Overlaid on the ignited black hole (magenta) and drawn standalone
+// at the Zeta exit portal (cyan).
+function _drawPortalRing(cx,cy,r,ts,col){
+  if(r<2) return;
+  ctx.save();
+  const _t=(typeof ts==='number'?ts:0)*0.0012;
+  const _g=ctx.createRadialGradient(cx,cy,r*0.4,cx,cy,r*1.5);
+  _g.addColorStop(0,'rgba(0,0,0,0)');
+  _g.addColorStop(0.6,hex2rgba(col,0.10));
+  _g.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=_g;
+  ctx.beginPath(); ctx.arc(cx,cy,r*1.5,0,Math.PI*2); ctx.fill();
+  ctx.lineWidth=Math.max(1,r*0.05);
+  ctx.setLineDash([Math.max(3,r*0.18),Math.max(3,r*0.13)]);
+  ctx.strokeStyle=hex2rgba(col,0.85);
+  ctx.lineDashOffset=-_t*r;
+  ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke();
+  ctx.strokeStyle=hex2rgba(col,0.45);
+  ctx.lineDashOffset=_t*r*0.7;
+  ctx.beginPath(); ctx.arc(cx,cy,r*1.22,0,Math.PI*2); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+}
 function drawBlackHole(cx,cy,sr,ts){
   if(sr<0.5) return;
   const diskOuter=sr*1.58, diskInner=sr*1.08, diskTilt=0.30, diskRot=0.22;
@@ -26615,7 +31199,7 @@ function drawGalaxy(ts,dt){
     const sr=s.radius*cam.scale;
     const glowR=Math.max(sr*2.8,8);
     if(sx+glowR<0||sx-glowR>W||sy+glowR<0||sy-glowR>GH) continue;
-    drawStar(sx,sy,sr,s.color,!!s.hasDysonSphere);
+    drawStar(sx,sy,sr,s.color,_starDysonArg(s));
     // High orbit ring (HazMat disposal zone)
     const _horR=sr*1.6;
     if(_horR>4){
@@ -26627,7 +31211,12 @@ function drawGalaxy(ts,dt){
     }
     if(sr>5){
       ctx.save();
-      const fs=Math.min(13,Math.max(10,sr*.14+9));
+      // Integer font size: fs is part of the _getTextBM cache key (via the
+      // font string). Left as a raw float it changes every frame while the
+      // camera zooms, so EVERY visible star label misses the bitmap cache
+      // every frame — an offscreen canvas alloc + rasterise per label per
+      // frame, exactly during the motion the smooth path exists to serve.
+      const fs=Math.round(Math.min(13,Math.max(10,sr*.14+9)));
       ctx.font=`${fs}px "Exo 2",sans-serif`; ctx.textAlign='center';
       ctx.fillStyle='rgba(255,230,150,0.85)'; _smoothTextMode=true; ctx.fillText(s.name,sx,sy+sr+14); _smoothTextMode=false;
       ctx.restore();
@@ -26635,12 +31224,46 @@ function drawGalaxy(ts,dt){
   }
 
   // Black holes (4 total — one per quadrant)
-  for(const _bh of (galaxy.blackHoles||[])){
+  for(let _bhi=0;_bhi<(galaxy.blackHoles||[]).length;_bhi++){
+    const _bh=galaxy.blackHoles[_bhi];
     const [_bhsx,_bhsy]=w2s(_bh.x,_bh.y);
     const _bhsr=_bh.radius*cam.scale;
     const _bhGlowR=_bhsr*4.2;
     if(!(_bhsx+_bhGlowR<0||_bhsx-_bhGlowR>W||_bhsy+_bhGlowR<0||_bhsy-_bhGlowR>GH)){
       drawBlackHole(_bhsx,_bhsy,_bhsr,ts);
+      // v0.4.7: blackHoles[0] is the ignited portal — draw its swirl ring.
+      if(_bhi===0&&_portalActive) _drawPortalRing(_bhsx,_bhsy,_bhsr*1.6,ts,'#ff70ff');
+    }
+  }
+  // v0.4.7: the Zeta-side exit portal (a free-floating swirl ring).
+  if(_portalActive&&galaxy.zetaPortal){
+    const [_zpx,_zpy]=w2s(galaxy.zetaPortal.x,galaxy.zetaPortal.y);
+    const _zpr=galaxy.zetaPortal.radius*cam.scale;
+    if(!(_zpx+_zpr*3<0||_zpx-_zpr*3>W||_zpy+_zpr*3<0||_zpy-_zpr*3>GH)){
+      _drawPortalRing(_zpx,_zpy,_zpr*1.6,ts,'#70e0ff');
+    }
+  }
+  // v0.4.7: one-shot ignition FX — expanding rings + white flash at the
+  // portal black hole for ~4 s after ignition.
+  if(_ignitionFxStartMs>0&&galaxy.blackHoles&&galaxy.blackHoles[0]){
+    const _ifxT=(Date.now()-_ignitionFxStartMs)/4000;
+    if(_ifxT>=1){ _ignitionFxStartMs=0; }
+    else {
+      const _ib=galaxy.blackHoles[0];
+      const [_ix,_iy]=w2s(_ib.x,_ib.y);
+      ctx.save();
+      for(let _ri=0;_ri<3;_ri++){
+        const _rt=Math.max(0,Math.min(1,_ifxT*1.4-_ri*0.18));
+        if(_rt<=0||_rt>=1) continue;
+        ctx.strokeStyle='rgba(255,'+(120+_ri*40)+',255,'+(0.75*(1-_rt)).toFixed(3)+')';
+        ctx.lineWidth=Math.max(1,4*(1-_rt));
+        ctx.beginPath(); ctx.arc(_ix,_iy,_ib.radius*cam.scale*(0.5+_rt*8),0,Math.PI*2); ctx.stroke();
+      }
+      if(_ifxT<0.25){
+        ctx.fillStyle='rgba(255,255,255,'+(0.55*(1-_ifxT/0.25)).toFixed(3)+')';
+        ctx.fillRect(0,0,W,GH);
+      }
+      ctx.restore();
     }
   }
 
@@ -26778,6 +31401,8 @@ function drawGalaxy(ts,dt){
     else if(p.type.id==='ancient'&&sr>2) drawAncientRuins(sx,sy,sr);
     if(p.hasGold&&p.goldRevealed&&sr>3) _drawGoldPatch(sx,sy,sr,p.goldPatch,ORBIT_TIERS[p.size]['LOW']*cam.scale*0.88);
     if(p.hasDiamond&&p.diamondRevealed&&sr>3) _drawDiamondPatch(sx,sy,sr,p.diamondPatch,ORBIT_TIERS[p.size]['LOW']*cam.scale*0.88);
+    if(p.hasUranium&&p.uraniumRevealed&&sr>3) _drawUraniumPatch(sx,sy,sr,p.uraniumPatch,ORBIT_TIERS[p.size]['LOW']*cam.scale*0.88);
+    if(p.hasArtifact&&p.artifactRevealed&&sr>3) _drawArtifactPatch(sx,sy,sr,p.artifactPatch,ORBIT_TIERS[p.size]['LOW']*cam.scale*0.88);
     // Cloud-skip threshold raised from sr>4 to sr>8: at sub-8-px screen
     // radius, cloud bands are at most a couple pixels wide and read as
     // visual noise rather than weather. Drops drawPlanetClouds's call
@@ -26786,7 +31411,7 @@ function drawGalaxy(ts,dt){
     if(p.clouds&&sr>8) drawPlanetClouds(sx,sy,sr,p);
     if(p.hasStation) drawPlanetStation(
       sx,sy,sr,p.stationAngle||0,SIZE_R['M']*cam.scale,
-      p.isAlienRelic,
+      p.isAlienRelic||p.combineStation,
       p.hasLargeStation||false,
       (p.hasLargeStation||p.hasTerminal)?ORBIT_TIERS[p.size]['MED']*cam.scale:null,
       p.hasTerminal||false,
@@ -26797,12 +31422,10 @@ function drawGalaxy(ts,dt){
     );
     if(p.aiHasStation){
       // AI station rendered with the same large-station + terminal geometry
-      // as the player's, then tinted via canvas filter to the AI's orange
-      // palette. Mirrors the player drawPlanetStation call above (including
-      // the tier radii for the large/terminal towers) so an AI-owned Large
-      // Station looks structurally identical, just orange.
-      ctx.save();
-      ctx.filter='sepia(1) hue-rotate(-10deg) saturate(2.5) brightness(1.1)';
+      // as the player's, in the rival corp's orange palette (aiTint param).
+      // Mirrors the player drawPlanetStation call above (including the tier
+      // radii for the large/terminal towers) so an AI-owned Large Station
+      // looks structurally identical, just orange.
       drawPlanetStation(
         sx,sy,sr,
         (p.aiStationAngle!==undefined?p.aiStationAngle:Math.PI*0.65),
@@ -26812,10 +31435,9 @@ function drawGalaxy(ts,dt){
         (p.hasLargeStation||p.hasTerminal)?ORBIT_TIERS[p.size]['MED']*cam.scale:null,
         p.hasTerminal||false,
         p.hasTerminal?ORBIT_TIERS[p.size]['HIGH']*cam.scale:null,
-        (p.hasLargeStation||p.hasTerminal)?ORBIT_TIERS[p.size]['LOW']*cam.scale:null
+        (p.hasLargeStation||p.hasTerminal)?ORBIT_TIERS[p.size]['LOW']*cam.scale:null,
+        true // aiTint
       );
-      ctx.filter='none';
-      ctx.restore();
     }
     if(sr>2){
       // Bulk structure draw: gate the whole block on sr>2, then do a single
@@ -26857,7 +31479,9 @@ function drawGalaxy(ts,dt){
     }
     if(sr>13){
       ctx.save();
-      const fs=Math.min(14,Math.max(10,sr*.38));
+      // Integer font size — same _getTextBM cache-key reasoning as the star
+      // labels above.
+      const fs=Math.round(Math.min(14,Math.max(10,sr*.38)));
       ctx.font=`${fs}px "Exo 2",sans-serif`; ctx.textAlign='center';
       // textBaseline='top' makes the y-coord we pass to fillText the TOP
       // edge of the label box (rather than the alphabetic baseline, which
@@ -27149,15 +31773,15 @@ function drawGalaxy(ts,dt){
   }
   // In-progress route planning segment lines (planet-centre to planet-centre)
   if(routeStops.length>=2){
-    ctx.save(); ctx.setLineDash([2,8]); ctx.lineWidth=1.5;
+    ctx.save(); ctx.setLineDash([3,7]); ctx.lineWidth=3; ctx.lineCap='round';
     // Determine max range of the currently relevant train (for segment colouring)
     const _selTrain=(sel?.type==='car'&&trains[sel.data.trainIdx])||null;
     const _selRange=_selTrain?(ENGINE_MAX_RANGE[_selTrain.cars?.[0]]??Infinity):ENGINE_MAX_RANGE.engine_constellation;
     for(let i=0;i<routeStops.length-1;i++){
       const dist=Math.hypot(routeStops[i+1].x-routeStops[i].x,routeStops[i+1].y-routeStops[i].y);
       const longRange=dist>_selRange;
-      ctx.strokeStyle=longRange?'rgba(255,80,80,0.55)':'rgba(255,245,140,0.28)';
-      ctx.shadowColor=longRange?'rgba(255,60,60,0.95)':'rgba(255,240,80,0.85)';
+      ctx.strokeStyle=longRange?'rgba(255,80,80,0.55)':'rgba(255,217,15,0.62)'; // Simpsons-yellow, brighter
+      ctx.shadowColor=longRange?'rgba(255,60,60,0.95)':'rgba(255,217,15,0.9)';
       ctx.shadowBlur=longRange?18:14;
       const [ax,ay]=w2s(routeStops[i].x,routeStops[i].y);
       const [bx,by]=w2s(routeStops[i+1].x,routeStops[i+1].y);
@@ -27172,6 +31796,7 @@ function drawGalaxy(ts,dt){
   // _orbCullM / _orbVMin* / _orbVMax* are computed once near the top of this
   // function (the correct viewport-corner AABB) and reused here.
   for(const train of trains){
+    if(train._destroyed) continue; // v0.4.7: combat wrecks never render
     // Show departure-planet orbit dash (always visible; trailing cars may still orbit it during transit)
     const showOrbitDash=!train.route||train.route.phase==='orbit'||train.route.phase==='waiting'||train.route.phase==='transit';
     if(showOrbitDash){
@@ -27204,6 +31829,34 @@ function drawGalaxy(ts,dt){
         }
       }
     }
+    // ── Sprite-vs-rectangle decision (PER TRAIN, applied to ALL its cars) ──
+    // Different car types have different box widths at the same zoom, so a
+    // per-car (_wcw>8) cutoff dropped narrow cars to rectangles while wide cars
+    // kept their sprites — an awkward mix. Decide ONCE from the NARROWEST car
+    // (and require every drawn sprite to be loaded) so at any zoom it's ALL
+    // sprites or ALL rectangles — never in-between.
+    let _galCarsAsSprites;
+    {
+      const _carBoxW=(_t,_full)=>{
+        const _es2=getCarSprite(_t,_full);
+        const _vf2=(_t==='caboose'?0.66:(_t&&_t.indexOf('engine_')===0)?0.66*(ENGINE_GALAXY_H_TIER[_t]||1.0):0.60)*_GAL_SCALE;
+        const _dk2=(typeof SPRITE_SOLID!=='undefined'&&SPRITE_SOLID[_es2])?_es2:_t;
+        const _sc2=(typeof SPRITE_CONTENT!=='undefined')?SPRITE_CONTENT[_dk2]:null;
+        const _sn2=(typeof SPRITE_NATURAL!=='undefined')?SPRITE_NATURAL[_dk2]:null;
+        const _ssD2=(typeof SPRITE_SOLID!=='undefined')?SPRITE_SOLID[_dk2]:null;
+        const _bhB2=(_ssD2&&_ssD2[2])?_ssD2[2]:(_sc2?_sc2[3]:160);
+        const _fileAR2=(_sn2&&_sn2[1])?(_sn2[0]/_sn2[1]):1.0;
+        const _af2=_carGalAreaFactor(_dk2);
+        return _vf2*ch*_af2*160/Math.max(1,_bhB2)*_fileAR2;     // == _wcw in the draw loop
+      };
+      let _minBoxW=Infinity, _allLoaded=true;
+      for(let _ci=0;_ci<train.cars.length;_ci++){
+        const _full2=train.carFull?.[_ci]??false;
+        const _w2=_carBoxW(train.cars[_ci],_full2); if(_w2<_minBoxW)_minBoxW=_w2;
+        if(!imgs[getCarSprite(train.cars[_ci],_full2)]) _allLoaded=false;
+      }
+      _galCarsAsSprites = _minBoxW>8 && _allLoaded;
+    }
     // Draw cars BACK-TO-FRONT (tail first, engine last) so each forward
     // car renders ON TOP of the car behind it — matching the reference
     // where the engine overlaps car 2, car 2 overlaps car 3, etc.
@@ -27212,10 +31865,28 @@ function drawGalaxy(ts,dt){
       const [sx,sy]=w2s(wx,wy);
       if(i===0&&train.isPlayer){
         const ti=trains.indexOf(train);
-        trainGalaxyBounds.push({x:sx,y:sy,r:Math.max(cw*0.8,20),trainIdx:ti});
+        // Engine click radius: full while traveling a segment (interplanetary /
+        // interstellar transit, away from planets), but HALVED when the train is
+        // arriving / departing / in orbit of a planet — so a click in a planet's
+        // orbital zone is far likelier to select the PLANET than the train.
+        const _r0=Math.max(cw*0.8,20);
+        let _nearPlanet=false;
+        const _rt=train.route, _ph=_rt&&_rt.phase;
+        if(!_rt || _ph==='orbit' || _ph==='descending' || _ph==='queueing' || _ph==='waiting'){
+          _nearPlanet=true; // in orbit / arriving above orbit
+        } else if(_ph==='transit' && _rt.stops){
+          // Departing or arriving along a segment: still within the orbital zone
+          // of the planet just left (from) or being approached (to).
+          const _chk=(pid)=>{ const _p=_gp(pid); if(!_p) return false; const _tiers=ORBIT_TIERS[_p.size]; const _hi=_tiers?_tiers.HIGH:_p.radius*3; return Math.hypot(wx-_p.x,wy-_p.y)<=_hi*1.15; };
+          if(_chk(_rt.stops[_rt.fromIdx])||_chk(_rt.stops[_rt.toIdx])) _nearPlanet=true;
+        }
+        trainGalaxyBounds.push({x:sx,y:sy,r:_nearPlanet?_r0*0.5:_r0,trainIdx:ti});
       }
       const _styp=train.cars[i];
-      const _esn=getCarSprite(_styp,train.carFull?.[i]??false);
+      let _esn=getCarSprite(_styp,train.carFull?.[i]??false);
+      // v0.4.7: Combine trains render every sprite through the green-washed
+      // 'zx_' variant (lazily baked + mip-cached like any other sprite).
+      if(train.isCombine) _esn=_zxName(_esn);
       const _ebp=SPRITE_BOT[_esn]||SPRITE_BOT[_styp]||0; // transparent bottom fraction
       // Unified sizing: EVERY sprite — engine, car, and caboose — renders
       // at its TRUE source content aspect (box aspect = source file aspect,
@@ -27260,11 +31931,13 @@ function drawGalaxy(ts,dt){
       const _bodyCx=_ssD?(_ssD[0]+_ssD[1]/2):80;        // solid body centre in bundle px
       const _drawX=-(_bodyCx/160)*_wcw;                 // so body centre maps to x=0
       ctx.save(); ctx.translate(sx,sy); ctx.rotate(rot); ctx.scale(-1,1);
-      if(imgs[_esn]&&_wcw>8) ctx.drawImage(_sprForSize(_esn,_wcw,_ech),_drawX,-_ech*(1-_ebp),_wcw,_ech);
+      // v0.4.7: combat-disabled cars render ghosted (dim + desaturated read).
+      if(train.carDisabled?.[i]) ctx.globalAlpha=0.40;
+      if(imgs[_esn]&&_galCarsAsSprites) ctx.drawImage(_sprForSize(_esn,_wcw,_ech),_drawX,-_ech*(1-_ebp),_wcw,_ech);
       else{ ctx.fillStyle=i===0?'#4af':i===train.cars.length-1?'#f84':'#ccc'; ctx.fillRect(_drawX,-_ech*(1-_ebp),_wcw,_ech*(1-_ebp)); }
       ctx.restore();
       // Hazmat warning light: flashing yellow glow when car is full
-      if(_styp==='car_hazmat'&&(train.carFull?.[i]??false)&&_wcw>8){
+      if(_styp==='car_hazmat'&&(train.carFull?.[i]??false)&&_galCarsAsSprites){
         const _ft=Date.now()*0.009;
         const _fint=Math.pow(Math.max(0,Math.sin(_ft)),0.5); // quick on, gradual fade
         const _lx=sx+_ech*(1-_ebp)*0.8*Math.sin(rot);
@@ -27285,24 +31958,36 @@ function drawGalaxy(ts,dt){
         ctx.restore();
       }
       // Mission escort car (Ancient Schematics cargo / Mad Scientist
-      // passenger): pulsing gold outline around the car until it's unloaded at
-      // Orijen. Outlines the visible solid body (x∈[-bw/2,bw/2], y∈[-_visH,0]
-      // in the rotated car frame).
-      if(_wcw>8 && _isEscortCar(train,i)){
+      // passenger): instead of a yellow outline box, the car looks BACKLIT —
+      // as if a very bright light source sits directly behind it, its glow
+      // creeping around the edges of the opaque body. Achieved by redrawing the
+      // car sprite as its own multi-pass blurred halo (warm gold → near-white)
+      // ON TOP of the already-drawn crisp body: drawImage paints the opaque
+      // sprite over its own shadow, so only the blurred fringe that extends past
+      // the body's silhouette shows. The whole thing pulses.
+      if(_galCarsAsSprites && _isEscortCar(train,i) && imgs[_esn]){
         const _gpls=Math.pow(Math.max(0,Math.sin(Date.now()*0.006)),0.6); // 0..1 pulse
-        const _sbw=((_ssD&&_ssD[1])?_ssD[1]:148)/160*_wcw; // visible body width (screen px)
-        const _spad=Math.max(2,2.2*cam.scale);
+        const _img=_sprForSize(_esn,_wcw,_ech);
+        const _cs=Math.min(2.5,Math.max(0.8,cam.scale));
+        const _gx=_drawX, _gy=-_ech*(1-_ebp);
+        const _bu=(7+13*_gpls)*_cs; // base blur unit (grows with the pulse)
         ctx.save();
         ctx.translate(sx,sy); ctx.rotate(rot); ctx.scale(-1,1);
-        ctx.globalAlpha=0.55+0.45*_gpls;
-        ctx.shadowColor='#ffcf3a'; ctx.shadowBlur=8+16*_gpls;
-        ctx.strokeStyle='#ffd24a'; ctx.lineWidth=Math.max(1.5,2.2*cam.scale*(0.7+0.6*_gpls));
-        ctx.beginPath(); ctx.roundRect(-_sbw/2-_spad, -_visH-_spad, _sbw+2*_spad, _visH+2*_spad, Math.max(2,3*cam.scale)); ctx.stroke();
+        // Outer warm-gold bloom → tighter bright-white rim. Several passes per
+        // tier accumulate the glow so the backlight reads as genuinely bright.
+        const _passes=[['#ffc62a',2.4,0.85],['#ffd24a',1.7,0.9],['#ffe98c',1.1,0.95],['#fffaf0',0.65,1.0]];
+        for(const [_col,_bm,_am] of _passes){
+          ctx.shadowColor=_col; ctx.shadowBlur=_bu*_bm;
+          ctx.globalAlpha=(0.45+0.5*_gpls)*_am;
+          ctx.drawImage(_img,_gx,_gy,_wcw,_ech);
+          ctx.drawImage(_img,_gx,_gy,_wcw,_ech); // 2× per tier for punch
+        }
         ctx.restore();
       }
     }
   }
   _drawCargoParticles();
+  _drawCombatFX();          // v0.4.7: projectiles / lasers / shields / explosions
   _drawCreditFloats();      // world-space (cargo revenue at planets)
   _drawCreditFloats(true);  // screen-space (UI refunds etc.) — drawn here so
                             // BOTH variants sit UNDER any open popup window.
@@ -27498,12 +32183,31 @@ function drawGalaxy(ts,dt){
   // ── info bar ─────────────────────────────────────────────────
   // Wipe any earlier-drawn world text from the overlay over the info-bar
   // strip so it can't bleed onto the corp name / planet name display.
-  _clearTextOverlayRect(0, GH, W, BAR_H);
-  ctx.fillStyle='rgb(6,10,26)'; ctx.fillRect(0,GH,W,BAR_H);
+  // Bottom info bar spans only the galaxy width (0 → W-PANEL_W); the right panel
+  // now extends full-height (TOP_H → H) and owns the area to its right. Drawing
+  // (and overlay-clearing) only the left part avoids erasing the panel's text /
+  // painting over its bottom rows.
+  _clearTextOverlayRect(0, GH, W-PANEL_W, BAR_H);
+  ctx.fillStyle='rgb(6,10,26)'; ctx.fillRect(0,GH,W-PANEL_W,BAR_H);
   ctx.strokeStyle='rgba(50,100,200,0.4)'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.moveTo(0,GH); ctx.lineTo(W,GH); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0,GH); ctx.lineTo(W-PANEL_W,GH); ctx.stroke();
 
   assignBtnBounds=null; routeHereBtnBounds=null; cancelRouteBtnBounds=null; planetStarNameBounds=null; starPanelPlanetBounds=[]; planetDetailsBtnBounds=null;
+  let _pdRightEdge=0; // set by the PLANET DETAILS button so ROUTE TRAIN HERE can sit just right of it (lower-left bar)
+  // When the side-by-side PLANET DETAILS + ROUTE TRAIN HERE buttons can't fit in
+  // the available bottom-bar width (e.g. the right panel is EXPANDED, shrinking
+  // W-PANEL_W), we stack ROUTE TRAIN HERE beneath PLANET DETAILS instead. The
+  // PLANET DETAILS block decides this (it knows _infoRight) and hands the shared
+  // x/width/lower-y to the ROUTE block below.
+  let _stackInfoBtns=false, _stackBtnX=0, _stackBtnW=0, _stackBtnLowerY=0;
+  // Safety net: a STAR PROXY (50000+, lives only in starProxyMap) must never be
+  // presented as a selected PLANET — it would show "<star> / OCEAN / Orbit 0".
+  // If any path selected one (e.g. toggling a train parked at a star), coerce
+  // the selection to the actual star instead.
+  if(sel&&sel.type==='planet'&&sel.data&&sel.data.isStarProxy){
+    const _coerceS=galaxy.stars[sel.data.starId];
+    sel=_coerceS?{type:'star',data:_coerceS}:null;
+  }
   if((sel&&(sel.type==='planet'||sel.type==='star')&&routeStops.length>=2)||routeHerePending){
     // Compute per-segment distances and total
     const segDists=[];
@@ -27550,38 +32254,16 @@ function drawGalaxy(ts,dt){
     } else if(starNames.length>1){
       ctx.fillText(starNames.join(' → '),14,GH+54);
     }
-    if(trains.some(t=>t.isPlayer)){
-      const bx=W-PANEL_W, bw=PANEL_W, by=GH, bh=BAR_H;
-      assignBtnBounds={x:bx,y:by,w:bw,h:bh};
-      ctx.save();
-      // Fill matching the trains panel background
-      const _selPending=assignPending||routeHerePending;
-      ctx.fillStyle=_selPending?'rgba(12,28,72,0.97)':'rgba(4,8,20,0.93)';
-      ctx.fillRect(bx,by,bw,bh);
-      // Border (continuation of panel edge)
-      ctx.strokeStyle=_selPending?'rgba(120,200,255,0.85)':'rgba(50,100,200,0.4)';
-      ctx.lineWidth=_selPending?2:1;
-      if(_selPending){
-        // Full inset box aligned with panel's active strokeRect: left at x=bx+1, seam at y=by-1
-        ctx.strokeRect(bx+1,by-1,bw-2,bh);
-      } else {
-        ctx.beginPath(); ctx.moveTo(bx,by); ctx.lineTo(bx,by+bh); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(bx,by); ctx.lineTo(bx+bw,by); ctx.stroke();
-      }
-      // Button rect inside
-      const ibx=bx+8, ibw=bw-16, iby=by+14, ibh=bh-28;
-      ctx.fillStyle=_selPending?'rgba(20,60,140,0.97)':_assignBtnHover?'rgba(45,95,195,0.97)':'rgba(30,70,160,0.88)';
-      ctx.beginPath(); ctx.roundRect(ibx,iby,ibw,ibh,4); ctx.fill();
-      ctx.strokeStyle=_selPending?'rgba(120,200,255,1)':_assignBtnHover?'rgba(130,195,255,0.95)':'rgba(80,160,255,0.85)';
-      ctx.lineWidth=_selPending?2:_assignBtnHover?1.5:1;
-      ctx.beginPath(); ctx.roundRect(ibx,iby,ibw,ibh,4); ctx.stroke();
-      ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
-      ctx.fillStyle=_selPending?'#fff':_assignBtnHover?'#d0eeff':'#adf';
-      ctx.fillText(_selPending?'SELECT A TRAIN...':'ASSIGN TO TRAIN',ibx+ibw/2,iby+ibh/2+4);
-      ctx.restore();
-    } else {
-      assignBtnBounds=null;
+    // Route builder: a 1+ segment route is set up → drop straight into the
+    // SELECT-A-TRAIN state (flip to the Trains panel) — EXCEPT when the route is
+    // being built from the STATIONS panel. In that case keep Stations open and
+    // let the player click the ASSIGN TO TRAIN button at the bottom of that
+    // panel (drawn in drawTrainsPanel); only then do we flip.
+    if(trains.some(t=>t.isPlayer) && _routeAutoAssign() && !assignPending && panelTab!=='stations'){
+      assignPending=true;
+      if(panelTab!=='trains'&&!activePopup) panelTab='trains';
     }
+    assignBtnBounds=null;
   } else if(!sel){
     // No selection — render a very faint two-line "SPACE TRAIN / TYCOON"
     // watermark inside the bottom bar, sitting on top of a muted ringed-
@@ -27678,7 +32360,7 @@ function drawGalaxy(ts,dt){
     ctx.save();
     ctx.beginPath(); ctx.rect(0,GH,W-PANEL_W,BAR_H); ctx.clip();
     if(_ibSVis){
-      drawStar(0,GH+BAR_H/2,sDR,s.color,!!s.hasDysonSphere);
+      drawStar(0,GH+BAR_H/2,sDR,s.color,_starDysonArg(s));
     } else {
       ctx.fillStyle='rgba(4,6,16,0.97)';
       ctx.beginPath(); ctx.arc(0,GH+BAR_H/2,sDR,0,Math.PI*2); ctx.fill();
@@ -27701,7 +32383,10 @@ function drawGalaxy(ts,dt){
       ctx.fillText('Orbit a planet in this system to reveal.',textX,GH+56);
     }
     // ── Planet strip (visited stars only) ────────────────────
-    if(_ibSVis){
+    // Suppressed while the right panel is EXPANDED — the narrowed bottom bar
+    // doesn't have room for the strip (the discs/names would crowd the ROUTE
+    // TRAIN HERE button). The expanded Stations panel already lists them.
+    if(_ibSVis && !_panelExpanded){
     ctx.font='bold 12px Orbitron,sans-serif';
     const nW=ctx.measureText(s.name).width;
     ctx.font='12px "Exo 2",sans-serif';
@@ -27724,6 +32409,7 @@ function drawGalaxy(ts,dt){
     ctx.beginPath(); ctx.rect(stripX,GH,availW,BAR_H); ctx.clip();
     const nShow=Math.min(sPlanets.length,8);
     let xCursor=stripX;
+    let _starContentRight=stripX; // rightmost edge of the drawn planet discs / names
     for(let i=0;i<nShow;i++){
       const p=sPlanets[i];
       const pr=p.radius*psc;
@@ -27742,6 +32428,8 @@ function drawGalaxy(ts,dt){
         else if(p.type.id==='ancient'&&pr>=3) drawAncientRuins(cx,barCY,pr);
         if(p.hasGold&&p.goldRevealed&&pr>3) _drawGoldPatch(cx,barCY,pr,p.goldPatch);
         if(p.hasDiamond&&p.diamondRevealed&&pr>3) _drawDiamondPatch(cx,barCY,pr,p.diamondPatch);
+        if(p.hasUranium&&p.uraniumRevealed&&pr>3) _drawUraniumPatch(cx,barCY,pr,p.uraniumPatch);
+        if(p.hasArtifact&&p.artifactRevealed&&pr>3) _drawArtifactPatch(cx,barCY,pr,p.artifactPatch);
         if(p.hasStation){
           const iY=Math.max(GH+7,barCY-pr-3);
           ctx.fillStyle='rgba(160,220,255,0.85)';
@@ -27762,17 +32450,44 @@ function drawGalaxy(ts,dt){
         ctx.save(); ctx.strokeStyle='rgba(180,220,255,0.65)'; ctx.lineWidth=1.2;
         ctx.beginPath(); ctx.arc(cx,barCY,pr+3,0,Math.PI*2); ctx.stroke(); ctx.restore();
       }
-      // Planet name overlaid just below the planet disc
-      const nameY=Math.min(barCY+pr+8,GH+BAR_H-4);
+      // Planet name overlaid just below the planet disc, word-wrapped to the
+      // slot width so long multi-word names (e.g. "New Saturn Terminal") break
+      // onto multiple lines instead of overlapping neighbouring slots.
       ctx.font='9px "Exo 2",sans-serif'; ctx.textAlign='center';
-      ctx.fillStyle='rgba(0,0,0,0.6)';
       const _nameStr=_pVis2?p.name:'???';
-      ctx.fillText(_nameStr,cx+1,nameY+1);
-      ctx.fillStyle=_panelPHov&&_pVis2?'rgba(255,255,255,0.95)':_pVis2?'rgba(215,225,255,0.88)':'rgba(60,80,130,0.65)';
-      ctx.fillText(_nameStr,cx,nameY);
+      const _nameMaxW=Math.max(40, sw-8);
+      const _nmLines=[];
+      {
+        let _cur='';
+        for(const _w of _nameStr.split(' ')){
+          const _try=_cur?_cur+' '+_w:_w;
+          if(_cur && ctx.measureText(_try).width>_nameMaxW){ _nmLines.push(_cur); _cur=_w; }
+          else _cur=_try;
+        }
+        if(_cur) _nmLines.push(_cur);
+      }
+      const _lineH=9.5;
+      // Stack downward from just below the disc, clamped so the LAST line stays
+      // inside the bar (GH+BAR_H-4).
+      const _firstLineY=Math.min(barCY+pr+8, GH+BAR_H-4-(_nmLines.length-1)*_lineH);
+      let _maxLineW=0;
+      for(let _li=0;_li<_nmLines.length;_li++){
+        const _ly=_firstLineY+_li*_lineH;
+        ctx.fillStyle='rgba(0,0,0,0.6)';
+        ctx.fillText(_nmLines[_li],cx+1,_ly+1);
+        ctx.fillStyle=_panelPHov&&_pVis2?'rgba(255,255,255,0.95)':_pVis2?'rgba(215,225,255,0.88)':'rgba(60,80,130,0.65)';
+        ctx.fillText(_nmLines[_li],cx,_ly);
+        _maxLineW=Math.max(_maxLineW,ctx.measureText(_nmLines[_li]).width);
+      }
+      // Track the rightmost VISIBLE content (disc edge or centred name) so the
+      // ROUTE TRAIN HERE button can sit clear of the planet strip.
+      _starContentRight=Math.max(_starContentRight, cx+Math.max(pr+5, _maxLineW/2+5));
       xCursor+=sw;
     }
     ctx.restore();
+    // Anchor the ROUTE TRAIN HERE button (drawn below) just right of the strip,
+    // reusing _pdRightEdge (no PLANET DETAILS button exists for a star).
+    _pdRightEdge=Math.round(_starContentRight);
     } // end if(_ibSVis) for planet strip
   } else if(sel.type==='planet'){
     const p=sel.data;
@@ -27801,7 +32516,9 @@ function drawGalaxy(ts,dt){
       else if(p.type.id==='ancient') drawAncientRuins(0,_pCy,pDR);
       if(p.hasGold&&p.goldRevealed) _drawGoldPatch(0,_pCy,pDR,p.goldPatch);
       if(p.hasDiamond&&p.diamondRevealed) _drawDiamondPatch(0,_pCy,pDR,p.diamondPatch);
-      if(p.hasStation) drawPlanetStation(0,_pCy,pDR,0,pDR,p.isAlienRelic,p.hasLargeStation||false,null,p.hasTerminal||false);
+      if(p.hasUranium&&p.uraniumRevealed) _drawUraniumPatch(0,_pCy,pDR,p.uraniumPatch);
+      if(p.hasArtifact&&p.artifactRevealed) _drawArtifactPatch(0,_pCy,pDR,p.artifactPatch);
+      if(p.hasStation) drawPlanetStation(0,_pCy,pDR,0,pDR,p.isAlienRelic||p.combineStation,p.hasLargeStation||false,null,p.hasTerminal||false);
       if(_bras) drawPlanetRing(0,_pCy,pDR,p.ring,true);
     } else {
       // Blacked-out disc
@@ -27812,11 +32529,14 @@ function drawGalaxy(ts,dt){
     }
     ctx.restore();
     const textX=Math.round(pDR*pGM*0.5); // ~120px — halfway through glow
-    const rightColX=textX+296;            // preserved for layout reference (Planet Details button starts here)
+    let _infoRight=textX; // rightmost extent of the planet-info text (all rows) — the
+                          // PLANET DETAILS / ROUTE TRAIN HERE buttons anchor just after it
     ctx.textAlign='left'; ctx.font='bold 12px Orbitron,sans-serif';
     if(_ibPVis){
       ctx.fillStyle=p.type.hi;
-      ctx.fillText(p.name+(p.isStarter?' [HOME]':''),textX,GH+22);
+      const _nmStr=p.name+(p.isStarter?' [HOME]':'');
+      ctx.fillText(_nmStr,textX,GH+22);
+      _infoRight=Math.max(_infoRight,textX+ctx.measureText(_nmStr).width);
       ctx.font='12px "Exo 2",sans-serif'; ctx.fillStyle='#8bc';
       // Row 2: Type · Size · Orbit (Orbit appended on the same left-column row).
       // SU rendered separately at 8 px bold (4 sizes smaller than the 12 px
@@ -27829,6 +32549,7 @@ function drawGalaxy(ts,dt){
         const _preW=ctx.measureText(_pre).width;
         ctx.font='bold 8px "Exo 2",sans-serif';
         ctx.fillText(' SU',textX+_preW,GH+40);
+        _infoRight=Math.max(_infoRight,textX+_preW+ctx.measureText(' SU').width);
       }
       // Row 3: Star: NAME · Coords: (X, Y) — Star name remains clickable
       ctx.fillStyle='#8bc';
@@ -27841,29 +32562,44 @@ function drawGalaxy(ts,dt){
       if(_planetStarNameHover){ctx.save();ctx.strokeStyle='rgba(255,255,255,0.6)';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(textX+starLabelW,GH+57);ctx.lineTo(textX+starLabelW+starNameW,GH+57);ctx.stroke();ctx.restore();}
       planetStarNameBounds={x:textX+starLabelW,y:GH+44,w:starNameW,h:16,star};
       ctx.fillStyle='#8bc';
-      ctx.fillText(`  ·  Coords: (${Math.round(p.x/100)}, ${Math.round(p.y/100)})`,textX+starLabelW+starNameW,GH+56);
+      const _coordsStr=`  ·  Coords: (${Math.round(p.x/100)}, ${Math.round(p.y/100)})`;
+      ctx.fillText(_coordsStr,textX+starLabelW+starNameW,GH+56);
+      _infoRight=Math.max(_infoRight,textX+starLabelW+starNameW+ctx.measureText(_coordsStr).width);
     } else {
       ctx.fillStyle='rgba(60,80,140,0.6)';
       ctx.fillText('UNKNOWN PLANET',textX,GH+22);
+      _infoRight=Math.max(_infoRight,textX+ctx.measureText('UNKNOWN PLANET').width);
       ctx.font='12px "Exo 2",sans-serif'; ctx.fillStyle='rgba(50,70,120,0.5)';
       ctx.fillText('Type: ???  ·  Size: ???',textX,GH+40);
       ctx.fillText('Star: ???',textX,GH+56);
     }
-    // ── Planet Details button — sits where the Orbit/Coords column used to
-    // live. Same shape as ROUTE TRAIN HERE (rounded blue rectangle) but with
-    // blue theming and half the height, vertically centered in the bar.
+    // ── Planet Details button — compact blue pill. The PLANET DETAILS and
+    // ROUTE TRAIN HERE buttons ALWAYS stack (PLANET DETAILS on top, ROUTE TRAIN
+    // HERE beneath) at a shared smaller width + 8px font, and ALWAYS anchor to
+    // the RIGHT — just left of the right UI panel after a buffer — regardless
+    // of whether the panel is in its normal or expanded state.
     {
-      const _pdH=22, _pdY=GH+(BAR_H-_pdH)/2;
-      const _pdX=rightColX;
-      const _pdW=Math.max(120,(W-PANEL_W)-_pdX-12);
-      planetDetailsBtnBounds={x:_pdX,y:_pdY,w:_pdW,h:_pdH,planetId:p.id};
+      _stackInfoBtns=true;
+      ctx.font='bold 8px Orbitron,sans-serif';
+      const _sw=Math.max(ctx.measureText('PLANET DETAILS').width,ctx.measureText('ROUTE TRAIN HERE').width);
+      const _sbW=Math.round(_sw)+14;
+      const _sbH=22, _gap=4, _topY=GH+(BAR_H-(_sbH*2+_gap))/2;
+      // Centre the stacked buttons horizontally under the "#X" game-speed
+      // multiplier text (cached by drawSpeedIndicator last frame). Both the
+      // speed cluster and these buttons are anchored to W-PANEL_W, so this keeps
+      // them centred under #X in BOTH normal and expanded panel states. Falls
+      // back to a just-left-of-panel anchor on the very first frame.
+      const _sbX=Math.round(_speedValCenterX>0 ? (_speedValCenterX-_sbW/2) : ((W-PANEL_W)-_sbW-12));
+      _stackBtnX=_sbX; _stackBtnW=_sbW; _stackBtnLowerY=_topY+_sbH+_gap;
+      planetDetailsBtnBounds={x:_sbX,y:_topY,w:_sbW,h:_sbH,planetId:p.id};
+      _pdRightEdge=_sbX+_sbW;
       ctx.fillStyle=_planetDetailsBtnHover?'rgba(35,95,200,0.97)':'rgba(20,60,150,0.92)';
-      ctx.beginPath(); ctx.roundRect(_pdX,_pdY,_pdW,_pdH,4); ctx.fill();
+      ctx.beginPath(); ctx.roundRect(_sbX,_topY,_sbW,_sbH,4); ctx.fill();
       ctx.strokeStyle=_planetDetailsBtnHover?'rgba(140,210,255,0.95)':'rgba(80,160,255,0.80)'; ctx.lineWidth=_planetDetailsBtnHover?1.5:1;
-      ctx.beginPath(); ctx.roundRect(_pdX,_pdY,_pdW,_pdH,4); ctx.stroke();
-      ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
+      ctx.beginPath(); ctx.roundRect(_sbX,_topY,_sbW,_sbH,4); ctx.stroke();
+      ctx.textAlign='center'; ctx.textBaseline='middle';
       ctx.fillStyle=_planetDetailsBtnHover?'rgba(220,240,255,0.98)':'rgba(170,220,255,0.95)';
-      ctx.fillText('PLANET DETAILS',_pdX+_pdW/2,_pdY+_pdH/2+3.5);
+      ctx.fillText('PLANET DETAILS',_sbX+_sbW/2,_topY+_sbH/2+0.5); ctx.textBaseline='alphabetic';
     }
   } else {
     const d=sel.data;
@@ -27950,23 +32686,33 @@ function drawGalaxy(ts,dt){
     }
   }
 
-  // ── Route Train Here button — shown in right panel area for star/planet selections ──
-  // Only when no multi-stop route is being planned and no assign/route pending is already active
-  if(sel&&(sel.type==='planet'||sel.type==='star')&&routeStops.length<2&&!routeHerePending&&!assignPending&&trains.some(t=>t.isPlayer)){
-    const bx=W-PANEL_W, bw=PANEL_W, by=GH, bh=BAR_H;
-    routeHereBtnBounds={x:bx,y:by,w:bw,h:bh};
+  // ── Route Train Here button — compact green pill in the LOWER-LEFT bar,
+  // just right of PLANET DETAILS (or where it would be, for a star). Only when
+  // no multi-stop route is being planned and nothing's pending.
+  if(sel&&(sel.type==='planet'||sel.type==='star')&&routeStops.length<2&&!routeHerePending&&!assignPending&&_assignRouteTrainIdx==null&&!_newRouteMode&&trains.some(t=>t.isPlayer)){
+    let _rhX,_rhY,_rhW,_rhH,_rhFont;
+    if(_stackInfoBtns){
+      // Stacked beneath PLANET DETAILS — share its x/width + the smaller 8px font.
+      _rhFont='bold 8px Orbitron,sans-serif'; _rhH=22;
+      _rhX=_stackBtnX; _rhW=_stackBtnW; _rhY=_stackBtnLowerY;
+    } else {
+      _rhFont='bold 9px Orbitron,sans-serif'; _rhH=26; _rhY=GH+(BAR_H-_rhH)/2;
+      ctx.font=_rhFont;
+      _rhW=Math.round(ctx.measureText('ROUTE TRAIN HERE').width)+16;
+      // For a planet, sit just right of PLANET DETAILS; for a star (no PD button)
+      // fall back to a left-of-centre spot. Capped so it never reaches the panel.
+      _rhX=_pdRightEdge>0?(_pdRightEdge+12):430;
+      _rhX=Math.min(_rhX, (W-PANEL_W)-_rhW-12);
+    }
+    ctx.font=_rhFont;
+    routeHereBtnBounds={x:_rhX,y:_rhY,w:_rhW,h:_rhH};
     ctx.save();
-    ctx.fillStyle='rgba(8,30,14,0.93)'; ctx.fillRect(bx,by,bw,bh);
-    ctx.strokeStyle='rgba(50,100,200,0.4)'; ctx.lineWidth=1;
-    ctx.beginPath(); ctx.moveTo(bx,by); ctx.lineTo(bx,by+bh); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(bx,by); ctx.lineTo(bx+bw,by); ctx.stroke();
-    const ibx=bx+8, ibw=bw-16, iby=by+14, ibh=bh-28;
-    ctx.fillStyle=_routeHereBtnHover?'rgba(24,100,52,0.98)':'rgba(18,72,38,0.92)'; ctx.beginPath(); ctx.roundRect(ibx,iby,ibw,ibh,4); ctx.fill();
+    ctx.fillStyle=_routeHereBtnHover?'rgba(24,100,52,0.98)':'rgba(18,72,38,0.92)'; ctx.beginPath(); ctx.roundRect(_rhX,_rhY,_rhW,_rhH,4); ctx.fill();
     ctx.strokeStyle=_routeHereBtnHover?'rgba(90,230,140,0.95)':'rgba(60,200,110,0.80)'; ctx.lineWidth=_routeHereBtnHover?1.5:1;
-    ctx.beginPath(); ctx.roundRect(ibx,iby,ibw,ibh,4); ctx.stroke();
-    ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
+    ctx.beginPath(); ctx.roundRect(_rhX,_rhY,_rhW,_rhH,4); ctx.stroke();
+    ctx.textAlign='center'; ctx.textBaseline='middle';
     ctx.fillStyle=_routeHereBtnHover?'rgba(150,255,200,0.98)':'rgba(100,230,150,0.95)';
-    ctx.fillText('ROUTE TRAIN HERE',ibx+ibw/2,iby+ibh/2+4);
+    ctx.fillText('ROUTE TRAIN HERE',_rhX+_rhW/2,_rhY+_rhH/2+0.5); ctx.textBaseline='alphabetic';
     ctx.restore();
   }
 
@@ -28038,7 +32784,11 @@ function drawGalaxy(ts,dt){
           // treats them as atomic, then restore and tokenize each wrapped
           // line for colored rendering. (NBSP U+00A0 also matches \s+ in
           // JS so it can't be used as the placeholder.)
-          const _safe=(_obj.text||'').replace(/\[([^\]]+)\]/g,(m2,inner)=>'['+inner.replace(/ /g,'\u0001')+']');
+          let _safe=(_objDisplayText(m,_obj)||'').replace(/\[([^\]]+)\]/g,(m2,inner)=>'['+inner.replace(/ /g,'\u0001')+']');
+          // Per-mission planet names (biome-coloured). Protect multi-word names
+          // ("San Pentarusor") so they stay atomic across the wrap and keep colour.
+          const _trkStyles=_missionPlanetStyles(m);
+          if(_trkStyles) for(const _ps of _trkStyles){ if(_ps.name.indexOf(' ')>=0) _safe=_safe.split(_ps.name).join(_ps.name.replace(/ /g,String.fromCharCode(1))); }
           // Protect two-word planet phrases (LAVA / DESERT PLANET) from being
           // split across tracker lines (which would drop their colour). The
           // protector char is the same one restored to a space below.
@@ -28047,10 +32797,29 @@ function drawGalaxy(ts,dt){
           const _trkFontStr='8px "Exo 2",sans-serif';
           for(let li=0;li<_trkLines.length;li++){
             const _restored=_trkLines[li].replace(/\u0001/g,' ');
-            const _toks=_objTokenize(_restored);
+            const _toks=_objTokenize(_restored,_trkStyles);
             _objDrawLine(_toks,_mtX+(li===0?0:6),_rowBottom+8+li*_mtLH,_trkFontStr,_trkCol);
           }
           _rowBottom+=_trkLines.length*_mtLH;
+          // Quantified objective → mini progress bar (label + bar) under the
+          // objective text, mirroring the [M] Missions window's bars.
+          const _trkProg=_mObjProgress(m,_obj.id);
+          if(_trkProg){
+            const _pct=Math.max(0,Math.min(1,_trkProg.cur/Math.max(1,_trkProg.max)));
+            const _pgX=_mtX+6, _pgW=Math.min(_mtW-12,150);
+            const _pgLblY=_rowBottom+8;
+            ctx.font='7px "Exo 2",sans-serif'; ctx.textAlign='left';
+            ctx.fillStyle=_hov?'rgba(205,222,250,0.92)':'rgba(170,196,232,0.72)';
+            ctx.fillText(_trkProg.pct?(_trkProg.label+': '+_trkProg.cur+'%'):(_trkProg.label+': '+_trkProg.cur+' / '+_trkProg.max),_pgX,_pgLblY+4);
+            const _pgBarY=_pgLblY+7;
+            ctx.fillStyle='rgba(18,30,22,0.62)'; ctx.fillRect(_pgX,_pgBarY,_pgW,4);
+            if(_pct>0){
+              ctx.fillStyle=_pct>=0.75?'rgba(140,220,140,0.85)':_pct>=0.4?'rgba(200,210,80,0.82)':'rgba(120,195,245,0.82)';
+              ctx.fillRect(_pgX,_pgBarY,Math.max(2,Math.round(_pgW*_pct)),4);
+            }
+            ctx.strokeStyle='rgba(65,100,75,0.42)'; ctx.lineWidth=1; ctx.strokeRect(_pgX,_pgBarY,_pgW,4);
+            _rowBottom+=16; // label line + bar block
+          }
         }
         _missionTrackerBounds.push({x:_mtX-2,y:_nameY-2,w:_mtW+4,h:(_rowBottom-_nameY)+4,missionIdx:_mi});
         _mtCursorY=_rowBottom+_mtGap;
@@ -28229,16 +32998,20 @@ function drawGalaxy(ts,dt){
 
   // ── Bottom hint bar ──────────────────────────────────────────
   ctx.textAlign='left'; ctx.font='9px "Exo 2",sans-serif';
+  // [Y] stars dropped from the hint row — the Star Registry is now reachable via
+  // the STARS tab inside the PLANETS ([P]) registry. The [Y] key still opens it.
   const _hints=[
-    {label:'[P] planets',  popup:'pokedex',    initState:()=>({scroll:0})},
-    {label:'[Y] stars',    popup:'starregistry',initState:()=>({starScroll:0})},
     {label:'[T] trains',   popup:'trains',     initState:()=>({scroll:0})},
     {label:'[R] routes',   popup:'routes',     initState:()=>({scroll:0})},
-    {label:'[I] tech tree',popup:'techtree',   initState:()=>({})},
+    {label:'[U] stations', popup:'stations',   initState:()=>({scroll:0})},
     {label:'[M] missions', popup:'missions',   initState:()=>({mScroll:0})},
+    {label:'[I] tech tree',popup:'techtree',   initState:()=>({})},
+    {label:'[P] planets',  popup:'pokedex',    initState:()=>({scroll:0})},
     {label:'[L] leaderboard',popup:'leaderboard',initState:()=>({})},
-    {label:'[O] options',  popup:'options',    initState:()=>({})},
-  ];
+  // When the right panel is EXPANDED it eats into the bottom bar's width, so
+  // drop [P] planets and [L] leaderboard from the row to avoid overlap — the
+  // row then ends with [I] tech tree. Their hotkeys (P / L) still work.
+  ].filter(h=>!(_panelExpanded&&(h.popup==='pokedex'||h.popup==='leaderboard')));
   _hintBounds=[];
   let _hx=8; const _hy=GH-8;
   for(let i=0;i<_hints.length;i++){
@@ -28286,9 +33059,8 @@ function drawGalaxy(ts,dt){
   // Popups render over everything
   drawPokedex();
   drawStarRegistry();
-  drawOptionsPopup();
-  drawControlsPopup();
-  drawCheatsPopup();
+  // drawOptionsPopup / drawControlsPopup / drawCheatsPopup moved AFTER drawTopBar
+  // (see below) — the taller Options window was being clipped under the top bar.
   drawSaveManagerPopup();
   drawTrainDetailPopup();
   // Reset the foundry-card bounds each frame BEFORE the planet popup draws;
@@ -28299,9 +33071,9 @@ function drawGalaxy(ts,dt){
   drawPlanetDetailPopup();
   _drawFoundryCallout();
   drawStarDetailPopup();
-  drawTrainsPopup();
-  // drawRoutesPopup moved AFTER drawTopBar (see below) so the popup paints
-  // over the top stats bar — matches drawCarDetailPopup. Per user request.
+  // drawTrainsPopup / drawRoutesPopup / drawStationsPopup all moved AFTER
+  // drawTopBar (see below) so the tall unified window paints OVER the top
+  // stats bar instead of being clipped underneath it. Per user request.
   drawPreDepartureChecklistPopup();
   // Blue "Click here to purchase a second train" callout removed per design —
   // the yellow `_drawBuyTrainPlusHintCallout` (mission-gated) covers this
@@ -28315,10 +33087,15 @@ function drawGalaxy(ts,dt){
   drawNewMissionPopup();
   drawGoldDiscoveryPopup();
   drawDiamondDiscoveryPopup();
+  drawUraniumDiscoveryPopup();
+  drawArtifactDiscoveryPopup();
   drawCarUnlockPopup();
   drawEngineUnlockPopup();
   drawUpgradeUnlockPopup();
+  drawMissionRewardPopup();
+  drawFirstDeliveryPopup();
   drawRivalFoundedPopup();
+  drawBlockedEduPopup();
   drawAncientMessagePopup();
   drawMissionsPopup();
   drawLeaderboardPopup();
@@ -28345,17 +33122,27 @@ function drawGalaxy(ts,dt){
   // bar in any vertical overlap region (the rest of the popups are intentionally
   // beneath the top bar — this one is the exception per user request).
   drawCarDetailPopup();
-  // Routes popup also drawn AFTER drawTopBar (per user request) so the top
-  // of the popup isn't clipped by the top stats bar when the list is tall.
+  // Options / Controls / Cheats drawn AFTER drawTopBar so the (tall) Options
+  // window paints OVER the top stats bar instead of being clipped under it.
+  drawOptionsPopup();
+  drawControlsPopup();
+  drawCheatsPopup();
+  // Trains / Routes / Stations unified window drawn AFTER drawTopBar (per user
+  // request) so the top of the (tall) window isn't clipped by the top stats bar.
+  drawTrainsPopup();
   drawRoutesPopup();
+  drawStationsPopup();
   // Finance popup drawn last so its dropdown renders above the top stats bar
   drawFinancesPopup();
   _drawVisitHint();
+  _drawMadSciStationHint();
+  _drawBlockEduCallout();
   // (_drawOrbitHintCallout moved to the pre-popup callout block above so it
   // renders BEHIND any open popup window.)
   // Supply/Demand hover tooltip drawn LAST so it floats on top of any
   // tutorial highlight box/bubble that overlaps the same area.
   _drawStationHoverTooltipOverlay();
+  _drawPlanetUpgradeTooltipOverlay();
   // ROUTES train-viz cargo tooltip — drawn LAST so it sits above the top
   // bar, panel tabs, all popups, and any tutorial bubbles. Only fires when
   // the user has hovered a train viz strip in the ROUTES popup for ≥500ms.
@@ -28459,7 +33246,12 @@ function galaxyClick(sx,sy,shiftKey){
             const fromP=_gp(selTrain.planetId);
             const _isStarTarget=!!(nearestP.isStar||nearestP.isStarProxy);
             if(fromP&&(_isStarTarget||fromP.id!==nearestP.id)){
-              routeStops=[fromP,nearestP]; sel={type:'planet',data:fromP}; panelTab='trains'; return;
+              // fromP may be a star PROXY (train parked at a star) — select the
+              // real star, never the proxy as a planet. routeStops still seeds
+              // from the proxy for correct routing.
+              routeStops=[fromP,nearestP];
+              sel=fromP.isStarProxy?{type:'star',data:galaxy.stars[fromP.starId]}:{type:'planet',data:fromP};
+              panelTab='trains'; return;
             }
           }
           // Train is mid-route (or has no usable orbiting-planet to seed from):
@@ -28477,7 +33269,7 @@ function galaxyClick(sx,sy,shiftKey){
           }
           sel={type:'planet',data:nearestP}; routeStops=[nearestP]; return;
         }
-        routeStops.push(nearestP); if(routeStops.length>=2) panelTab='trains'; return;
+        routeStops.push(nearestP); if(routeStops.length>=2 && _assignRouteTrainIdx==null && !_newRouteMode) panelTab='trains'; return;
       }
       if(nearestP.isStar){
         // Raw star object (fallback if no proxy) — still select as star type
@@ -28512,8 +33304,16 @@ function galaxyClick(sx,sy,shiftKey){
         if(_alreadySel && _inOrbit){
           const _op=_gp(train.planetId);
           if(_op){
-            sel={type:'planet',data:_op}; routeStops=[]; assignPending=false; routeHerePending=false;
-            return;
+            // If the train is parked at a STAR, its planetId is a star PROXY —
+            // never select the proxy as a planet (it'd show "Gigi Prime / OCEAN
+            // / Orbit 0"); select the actual star instead.
+            if(_op.isStarProxy){
+              const _ops=galaxy.stars[_op.starId];
+              if(_ops){ sel={type:'star',data:_ops}; routeStops=[]; assignPending=false; routeHerePending=false; return; }
+            } else {
+              sel={type:'planet',data:_op}; routeStops=[]; assignPending=false; routeHerePending=false;
+              return;
+            }
           }
         }
         sel={type:'car',data:{trainIdx:ti,carIdx:i,car:train.cars[i]}}; routeStops=[]; assignPending=false; routeHerePending=false;
@@ -28548,10 +33348,36 @@ function galaxyClick(sx,sy,shiftKey){
 // ── panel click ──────────────────────────────────────────────
 function panelClick(sx,sy,shiftKey){
   if(!galaxy) return;
+  // Expand / collapse arrow (in the header strip) — checked before the tab
+  // switch so a click on the arrow toggles panel width instead of switching tabs.
+  if(_panelExpandArrowBounds){const a=_panelExpandArrowBounds;if(sx>=a.x&&sx<=a.x+a.w&&sy>=a.y&&sy<=a.y+a.h){_togglePanelExpand();return;}}
   // Tab switch: header area (y < TOP_H), only when not in assignPending mode
   if(sy<TOP_H&&!assignPending){
     panelTab=sx<W-PANEL_W/2?'trains':'stations';
     return;
+  }
+  // ASSIGN TO TRAIN button at the bottom of the Stations panel (route built from
+  // here) → flip to the Trains panel + SELECT-A-TRAIN state. Checked before the
+  // station-row hit-test since it sits over the bottom rows.
+  if(panelTab==='stations' && _stationsAssignBtnBounds){
+    const b=_stationsAssignBtnBounds;
+    if(sx>=b.x&&sx<=b.x+b.w&&sy>=b.y&&sy<=b.y+b.h){
+      // "Assign route to a known train" flow (started from Train Details): the
+      // target train is already chosen, so assign the built route to it directly
+      // and fire the green "ROUTE confirmed" callout pointing at that train.
+      if(_assignRouteTrainIdx!=null){
+        const _tr=trains[_assignRouteTrainIdx];
+        if(_tr && routeStops.length>=2){
+          assignRouteToTrain(_tr); // clears routeStops / sel / assignPending
+          _routeHereResultMs=Date.now(); _routeHereResultOk=true; _routeHereResultTrain=_tr;
+        }
+        _assignRouteTrainIdx=null;
+        return;
+      }
+      // +NEW ROUTE flow OR generic build-from-Stations: hand off to SELECT A
+      // TRAIN (the player picks the train next).
+      _newRouteMode=false; assignPending=true; panelTab='trains'; return;
+    }
   }
   if(panelTab==='stations'){
     const stationPlanets=galaxy.planets.filter(p=>p.hasStation&&(!p.isAlienRelic||visitedPlanetIds.has(p.id)));
@@ -28612,11 +33438,13 @@ function panelClick(sx,sy,shiftKey){
       _rhDest=_rhs.proxyPlanetId!=null?galaxy.starProxyMap?.[_rhs.proxyPlanetId]:null;
     }
     const _rhOk=routeTrainHere(train, _rhDest);
-    _routeHereResultMs=Date.now(); _routeHereResultOk=!!_rhOk;
+    _routeHereResultMs=Date.now(); _routeHereResultOk=!!_rhOk; _routeHereResultTrain=train;
     return;
   }
   if(assignPending){
+    const _ok=routeStops.length>=2;
     assignRouteToTrain(train);
+    if(_ok){ _routeHereResultMs=Date.now(); _routeHereResultOk=true; _routeHereResultTrain=train; }
     return;
   }
   const alreadySelected=sel&&sel.type==='car'&&sel.data.trainIdx===ti;
@@ -28758,8 +33586,11 @@ function assignRouteToTrain(train){
     train.route=tempRoute;
     train.queuedRoute=realRoute;
   }
-  // Flag active create_route mission objective
-  {const _crM=missions.find(mx=>mx.id==='create_route'&&mx.status==='active'); if(_crM) _crM._routeAssigned=true;}
+  // Flag active create_route mission objective — only for a genuine 3-planet
+  // route (matches the renamed "Create a 3-planet train route"). A 2-stop route
+  // (e.g. the first-train tutorial's Orijen↔Desert) must NOT complete it.
+  {const _crM=missions.find(mx=>mx.id==='create_route'&&mx.status==='active');
+   if(_crM && new Set(routeStops.filter(Boolean).map(p=>p.id)).size>=3) _crM._routeAssigned=true;}
   routeStops=[]; sel=null; assignPending=false;
 }
 
@@ -28860,6 +33691,24 @@ function findMultiHopPath(sourcePlanetId, destPlanetId, train){
     if(!_cp || _cp.length<2) return _cp;        // null / single-node — trust as-is
     if(_edgeOk(_cp[0],_cp[1],0)) return _cp;     // first hop still traversable → reuse
     // else: stale first hop — fall through and recompute
+  }
+  // ── v0.4.7 cross-region routing: through the ignited portal pair ──────
+  // If source and destination lie in different regions, the ONLY crossing is
+  // the black-hole↔zeta portal pair: plan each side independently and splice
+  // the two portal proxies in as adjacent stops. The pA→pB hop itself is the
+  // portal transit (range-exempt — see transitPathBlocked).
+  {
+    const _sp0=_gp(sourcePlanetId);
+    if(_sp0&&dp&&_regionOfX(_sp0.x)!==_regionOfX(dp.x)){
+      if(!_portalActive||!galaxy.starProxyMap[PORTAL_PROXY_ALPHA]||!galaxy.starProxyMap[PORTAL_PROXY_ZETA]) return null;
+      const _srcZeta=_regionOfX(_sp0.x)==='zeta';
+      const _pAid=_srcZeta?PORTAL_PROXY_ZETA:PORTAL_PROXY_ALPHA;
+      const _pBid=_srcZeta?PORTAL_PROXY_ALPHA:PORTAL_PROXY_ZETA;
+      const _leg1=sourcePlanetId===_pAid?[_pAid]:findMultiHopPath(sourcePlanetId,_pAid,train);
+      const _leg2=destPlanetId===_pBid?[_pBid]:findMultiHopPath(_pBid,destPlanetId,train);
+      if(_leg1&&_leg2) return _store(_leg1.concat(_leg2));
+      return null;
+    }
   }
   // Direct hop at time 0
   if(_edgeOk(sourcePlanetId,destPlanetId,0)) return _store([sourcePlanetId,destPlanetId]);
@@ -29056,9 +33905,15 @@ canvas.addEventListener('wheel',e=>{
     // Must match drawTrainsPopup's geometry exactly (ph=430 → listH=ph-44=386,
     // ROW=162). Using stale values (370 / 145) made the wheel's max-scroll fall
     // short of the scrollbar-drag max, clipping the last row at the bottom.
-    const listH=430-44, ROW=162;
+    const listH=WIN_PH-44, ROW=162;
     const maxScroll=Math.max(0,playerCount*ROW-listH);
     popupState.scroll=Math.max(0,Math.min(maxScroll,(popupState.scroll||0)+e.deltaY*0.6));
+    return;
+  }
+  if(activePopup==='stations'){
+    // Scroll the station list; max is cached by drawStationsPopup (filter-aware).
+    const _max=popupState._stListMaxScroll||0;
+    popupState.scroll=Math.max(0,Math.min(_max,(popupState.scroll||0)+e.deltaY*0.6));
     return;
   }
   if(activePopup==='routes'){
@@ -29070,7 +33925,7 @@ canvas.addEventListener('wheel',e=>{
       if((t.route       && !t.route.isTempRoute       && (t.route.stops||[]).length>=2) ||
          (t.queuedRoute && !t.queuedRoute.isTempRoute && (t.queuedRoute.stops||[]).length>=2)) _rc++;
     }
-    const listH=420, ROW=224;
+    const listH=WIN_PH-44, ROW=224;
     const maxScroll=Math.max(0,_rc*ROW-listH);
     popupState.scroll=Math.max(0,Math.min(maxScroll,(popupState.scroll||0)+e.deltaY*0.6));
     return;
@@ -29111,16 +33966,18 @@ canvas.addEventListener('wheel',e=>{
   if(activePopup) return; // block zoom when any popup open
   // Panel scroll (right sidebar, no popup open)
   const cp2=getCP(e);
-  if(cp2.x>=W-PANEL_W&&cp2.y<GH&&galaxy){
+  if(cp2.x>=W-PANEL_W&&cp2.y<H&&galaxy){
+    // Panel is full-height now (TOP_H → H), so the visible height is H-TOP_H.
+    const _panViewH=H-TOP_H;
     if(panelTab==='stations'){
       const stCount=galaxy.planets.filter(p=>p.hasStation&&(!p.isAlienRelic||visitedPlanetIds.has(p.id))).length;
-      const maxStScroll=Math.max(0,stCount*82-(GH-TOP_H));
+      const maxStScroll=Math.max(0,stCount*82-_panViewH);
       stationPanelScroll=Math.max(0,Math.min(maxStScroll,stationPanelScroll+e.deltaY*0.6));
     } else {
       const playerCount2=trains.filter(t=>t.isPlayer).length;
       // +1 row for the "Add new train" pseudo-slot drawn after the last train,
       // so wheel-scrolling reaches the bottom of that slot.
-      const maxScroll2=Math.max(0,(playerCount2+1)*82-(GH-TOP_H));
+      const maxScroll2=Math.max(0,(playerCount2+1)*82-_panViewH);
       panelScroll=Math.max(0,Math.min(maxScroll2,panelScroll+e.deltaY*0.6));
     }
     return;
@@ -29205,7 +34062,7 @@ canvas.addEventListener('mousedown',e=>{
   if(gs==='galaxy'&&cp.y>=TOP_H&&cp.y<GH&&cp.x<W-PANEL_W){
     drag=true; dragDist=0; dragFrom={x:cp.x,y:cp.y}; dragCam={x:cam.x,y:cam.y}; dragStarPan={x:starPan.x,y:starPan.y};
     // Don't kill tracking when clicking UI buttons (speed arrows, cancel route, assign)
-    const onSpeedBtn=(speedLeftBounds&&cp.x>=speedLeftBounds.x&&cp.x<=speedLeftBounds.x+speedLeftBounds.w&&cp.y>=speedLeftBounds.y&&cp.y<=speedLeftBounds.y+speedLeftBounds.h)||(speedRightBounds&&cp.x>=speedRightBounds.x&&cp.x<=speedRightBounds.x+speedRightBounds.w&&cp.y>=speedRightBounds.y&&cp.y<=speedRightBounds.y+speedRightBounds.h);
+    const onSpeedBtn=(speedLeftBounds&&cp.x>=speedLeftBounds.x&&cp.x<=speedLeftBounds.x+speedLeftBounds.w&&cp.y>=speedLeftBounds.y&&cp.y<=speedLeftBounds.y+speedLeftBounds.h)||(speedRightBounds&&cp.x>=speedRightBounds.x&&cp.x<=speedRightBounds.x+speedRightBounds.w&&cp.y>=speedRightBounds.y&&cp.y<=speedRightBounds.y+speedRightBounds.h)||(_optsGearBtnBounds&&cp.x>=_optsGearBtnBounds.x&&cp.x<=_optsGearBtnBounds.x+_optsGearBtnBounds.w&&cp.y>=_optsGearBtnBounds.y&&cp.y<=_optsGearBtnBounds.y+_optsGearBtnBounds.h);
     if(!onSpeedBtn && !activePopup){
       // Remember to re-lock onto a tracked car after the drag completes
       relockAfterDrag=(tracking && sel && sel.type==='car');
@@ -29247,9 +34104,10 @@ canvas.addEventListener('mousemove',e=>{
     let _found=null;
     if(_bounds){ for(const b of _bounds){ if(cp.x>=b.x&&cp.x<b.x+b.w&&cp.y>=b.y&&cp.y<b.y+b.h){_found=b;break;} } }
     if(_found){
-      if(!_stationHoverInfo||_stationHoverInfo.ctype!==_found.ctype||_stationHoverInfo.isSupply!==_found.isSupply){
-        _stationHoverInfo={ctype:_found.ctype,isSupply:_found.isSupply,rawAmt:_found.rawAmt,
-                           tx:_found.x,ty:_found.y,enterTime:Date.now()};
+      const _fk=_found.kind||'row';
+      if(!_stationHoverInfo||_stationHoverInfo.kind!==_fk||_stationHoverInfo.ctype!==_found.ctype||_stationHoverInfo.isSupply!==_found.isSupply){
+        _stationHoverInfo={kind:_fk,ctype:_found.ctype,isSupply:_found.isSupply,rawAmt:_found.rawAmt,
+                           items:_found.items||null,tx:_found.tx??_found.x,ty:_found.ty??_found.y,enterTime:Date.now()};
       }
     } else { _stationHoverInfo=null; }
   }
@@ -29381,7 +34239,11 @@ canvas.addEventListener('mousemove',e=>{
       for(const b of trainBuilderState.vizCarBounds){
         if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ newHov=b.vizIdx; break; }
       }
-      trainBuilderState.hoverVizIdx=newHov;
+      // Stamp the moment hover begins (per car) so the tooltip can wait 0.1 s.
+      if(newHov!==trainBuilderState.hoverVizIdx){
+        trainBuilderState.hoverVizIdx=newHov;
+        trainBuilderState._vizHoverStartMs=newHov==null?0:Date.now();
+      }
     }
     // Engine button hover
     let _hEng=null;
@@ -29428,7 +34290,23 @@ canvas.addEventListener('mousemove',e=>{
     // CURRENT ROUTE panel — clickable region that opens the [R] ROUTES popup.
     const _crb=popupState.currentRouteBounds;
     popupState.hoverCurrentRoute=!!(_crb&&cp.x>=_crb.x&&cp.x<=_crb.x+_crb.w&&cp.y>=_crb.y&&cp.y<=_crb.y+_crb.h);
-    if(popupState.namePencilHover||popupState.colorSquareHover||popupState.hoverCurrentRoute) canvas.style.cursor='pointer';
+    // ASSIGN ROUTE button (shown when the train has no route).
+    const _arb=popupState.assignRouteBtnBounds;
+    popupState.assignRouteBtnHover=!!(_arb&&cp.x>=_arb.x&&cp.x<=_arb.x+_arb.w&&cp.y>=_arb.y&&cp.y<=_arb.y+_arb.h);
+    if(popupState.assignRouteBtnHover) canvas.style.cursor='pointer';
+    // AT A GLANCE / STATS tab hover.
+    let _tdth=null;
+    if(popupState.tdTabBounds){ for(const tb of popupState.tdTabBounds){ if(cp.x>=tb.x&&cp.x<=tb.x+tb.w&&cp.y>=tb.y&&cp.y<=tb.y+tb.h){ _tdth=tb.id; break; } } }
+    popupState.tdTabHover=_tdth;
+    // CARS-text hover (tow-capacity tooltip).
+    const _ctb=popupState.tdCarsTextBounds;
+    popupState.tdCarsTextHover=!!(_ctb&&cp.x>=_ctb.x&&cp.x<=_ctb.x+_ctb.w&&cp.y>=_ctb.y&&cp.y<=_ctb.y+_ctb.h);
+    // Per-car hover for the car tooltip — reset the 0.1 s timer when the
+    // hovered car index changes (null/-1 = not over any car).
+    let _tdch=-1;
+    if(popupState.tdCarBounds){ for(const cb of popupState.tdCarBounds){ if(cp.x>=cb.x&&cp.x<=cb.x+cb.w&&cp.y>=cb.y&&cp.y<=cb.y+cb.h){ _tdch=cb.ci; break; } } }
+    if(_tdch!==popupState.tdCarHoverIdx){ popupState.tdCarHoverIdx=_tdch; popupState.tdCarHoverSince=(_tdch>=0?Date.now():null); }
+    if(popupState.namePencilHover||popupState.colorSquareHover||popupState.hoverCurrentRoute||_tdth) canvas.style.cursor='pointer';
   } else if(activePopup!=='train'){ if(popupState) { popupState.namePencilHover=false; popupState.hoverCurrentRoute=false; } }
   // Hover tracking for planet detail popup — tabs, star link, name/pencil
   if(activePopup==='planet'){
@@ -29442,11 +34320,22 @@ canvas.addEventListener('mousemove',e=>{
     // Name/pencil hover
     const _pnb=popupState.nameEditBounds, _ppb=popupState.pencilBounds;
     popupState.namePencilHover=!!( (_pnb&&cp.x>=_pnb.x&&cp.x<=_pnb.x+_pnb.w&&cp.y>=_pnb.y&&cp.y<=_pnb.y+_pnb.h)||(_ppb&&cp.x>=_ppb.x&&cp.x<=_ppb.x+_ppb.w&&cp.y>=_ppb.y&&cp.y<=_ppb.y+_ppb.h) );
+    // Upgrade-structure hover on the planet viz → name tooltip after 0.1 s.
+    {
+      let _uHit=null;
+      for(const b of (popupState.upgradeVizBounds||[])){ const _dx=cp.x-b.cx,_dy=cp.y-b.cy; if(_dx*_dx+_dy*_dy<=b.r*b.r){ _uHit=b; break; } }
+      if(_uHit){
+        if(!_planetUpgradeHover||_planetUpgradeHover.name!==_uHit.name||_planetUpgradeHover.cx!==_uHit.cx){
+          _planetUpgradeHover={name:_uHit.name,cx:_uHit.cx,cy:_uHit.cy,enterTime:Date.now()};
+        }
+        canvas.style.cursor='pointer';
+      } else { _planetUpgradeHover=null; }
+    }
     // Build Station overlay button hover
     const _bsob=popupState.buildStationOverlayBounds;
     popupState.buildStationOverlayHover=!!(_bsob&&cp.x>=_bsob.x&&cp.x<=_bsob.x+_bsob.w&&cp.y>=_bsob.y&&cp.y<=_bsob.y+_bsob.h);
     if(_ptHov||popupState.orbitStarLinkHover||popupState.namePencilHover||popupState.buildStationOverlayHover) canvas.style.cursor='pointer';
-  } else { if(popupState) { popupState.hovTabKey=null; popupState.orbitStarLinkHover=false; popupState.buildStationOverlayHover=false; } }
+  } else { if(popupState) { popupState.hovTabKey=null; popupState.orbitStarLinkHover=false; popupState.buildStationOverlayHover=false; } _planetUpgradeHover=null; }
   // Hover tracking for star detail popup — name/pencil, planet thumbs,
   // Construct Dyson Sphere button.
   if(activePopup==='star'){
@@ -29459,9 +34348,30 @@ canvas.addEventListener('mousemove',e=>{
     popupState.dysonBtnHover=!!(_dyb&&cp.x>=_dyb.x&&cp.x<=_dyb.x+_dyb.w&&cp.y>=_dyb.y&&cp.y<=_dyb.y+_dyb.h);
     if(popupState.namePencilHover||_sdpH>=0||popupState.dysonBtnHover) canvas.style.cursor='pointer';
   }
+  // Unified window tab-bar hover (TRAINS / ROUTES / STATIONS).
+  if((activePopup==='trains'||activePopup==='routes'||activePopup==='stations')&&popupState.windowTabBounds){
+    popupState.winTabHover=null;
+    for(const tb of popupState.windowTabBounds){ if(cp.x>=tb.x&&cp.x<=tb.x+tb.w&&cp.y>=tb.y&&cp.y<=tb.y+tb.h){ popupState.winTabHover=tb.id; break; } }
+    if(popupState.winTabHover) canvas.style.cursor='pointer';
+  } else if(popupState){ popupState.winTabHover=null; }
+  // Stations popup hover (filter buttons + station panes).
+  if(activePopup==='stations'){
+    popupState.stationsRowHover=-1;
+    for(const _rb of (popupState.stationsRowBounds||[])){ if(cp.x>=_rb.x&&cp.x<=_rb.x+_rb.w&&cp.y>=_rb.y&&cp.y<=_rb.y+_rb.h){ popupState.stationsRowHover=_rb.ri; break; } }
+    // Sprite hover → cargo-name tooltip (filter buttons + supply/demand strips).
+    let _spHit=null;
+    for(const fb of (popupState.stFilterBounds||[])){ if(cp.x>=fb.x&&cp.x<=fb.x+fb.w&&cp.y>=fb.y&&cp.y<=fb.y+fb.h){ _spHit={cargo:fb.cargo,cx:fb.x+fb.w/2,y:fb.y,hgt:fb.h}; break; } }
+    if(!_spHit) for(const sb of (popupState.stSpriteBounds||[])){ if(cp.x>=sb.x&&cp.x<=sb.x+sb.w&&cp.y>=sb.y&&cp.y<=sb.y+sb.h){ _spHit={cargo:sb.cargo,cx:sb.x+sb.w/2,y:sb.y,hgt:sb.h}; break; } }
+    if(_spHit){
+      if(!_stStationsSpriteHover||_stStationsSpriteHover.cargo!==_spHit.cargo||_stStationsSpriteHover.cx!==_spHit.cx||_stStationsSpriteHover.y!==_spHit.y){ _stStationsSpriteHover={cargo:_spHit.cargo,cx:_spHit.cx,y:_spHit.y,hgt:_spHit.hgt,enterTime:Date.now()}; }
+    } else { _stStationsSpriteHover=null; }
+    if(popupState.stationsRowHover>=0||_spHit) canvas.style.cursor='pointer';
+  } else if(popupState){ popupState.stationsRowHover=-1; _stStationsSpriteHover=null; }
   // Hover tracking for trains popup rows + add button
   if(activePopup==='trains'){
     _trainAddHover=!!(trainsPopupAddBounds&&cp.x>=trainsPopupAddBounds.x&&cp.x<=trainsPopupAddBounds.x+trainsPopupAddBounds.w&&cp.y>=trainsPopupAddBounds.y&&cp.y<=trainsPopupAddBounds.y+trainsPopupAddBounds.h);
+    _trainsWinAddPaneHover=!!(_trainsWinAddPaneBounds&&cp.x>=_trainsWinAddPaneBounds.x&&cp.x<=_trainsWinAddPaneBounds.x+_trainsWinAddPaneBounds.w&&cp.y>=_trainsWinAddPaneBounds.y&&cp.y<=_trainsWinAddPaneBounds.y+_trainsWinAddPaneBounds.h);
+    if(_trainsWinAddPaneHover) canvas.style.cursor='pointer';
     _trainRowHover=-1;
     for(let _ri=0;_ri<trainsPopupRowBounds.length;_ri++){const _rb=trainsPopupRowBounds[_ri];if(cp.x>=_rb.x&&cp.x<=_rb.x+_rb.w&&cp.y>=_rb.y&&cp.y<=_rb.y+_rb.h){_trainRowHover=_rb.ri;break;}}
     // Reorder up/down arrows (only present for the currently hovered row).
@@ -29490,8 +34400,9 @@ canvas.addEventListener('mousemove',e=>{
     if(_vh>=0){ _routesVizHoverCpX=cp.x; _routesVizHoverCpY=cp.y; }
     const _reb=popupState.routesEscBounds;
     popupState.routesEscHover=!!(_reb&&cp.x>=_reb.x&&cp.x<=_reb.x+_reb.w&&cp.y>=_reb.y&&cp.y<=_reb.y+_reb.h);
-    if(_routesRowHover>=0||_routesStopHover>=0||_routesRuleBtnHover>=0||popupState.routesEscHover) canvas.style.cursor='pointer';
-  } else { _routesRowHover=-1; _routesStopHover=-1; _routesRuleBtnHover=-1; _routesVizHover=-1; _routesVizHoverStartMs=0; }
+    _routeAddHover=!!(routesPopupAddBounds&&cp.x>=routesPopupAddBounds.x&&cp.x<=routesPopupAddBounds.x+routesPopupAddBounds.w&&cp.y>=routesPopupAddBounds.y&&cp.y<=routesPopupAddBounds.y+routesPopupAddBounds.h);
+    if(_routesRowHover>=0||_routesStopHover>=0||_routesRuleBtnHover>=0||popupState.routesEscHover||_routeAddHover) canvas.style.cursor='pointer';
+  } else { _routesRowHover=-1; _routesStopHover=-1; _routesRuleBtnHover=-1; _routesVizHover=-1; _routesVizHoverStartMs=0; _routeAddHover=false; }
   // Pre-Departure Checklist popup — hover tracking for ESC, dropdown rows,
   // CREATE RULE button, and existing-rule delete X.
   if(activePopup==='predeparturechecklist'){
@@ -29545,13 +34456,24 @@ canvas.addEventListener('mousemove',e=>{
     for(let _ri=0;_ri<starRegistryRowBounds.length;_ri++){const _rb=starRegistryRowBounds[_ri];if(cp.x>=_rb.x&&cp.x<=_rb.x+_rb.w&&cp.y>=_rb.y&&cp.y<=_rb.y+_rb.h){_starRegistryRowHover=_rb.rowIdx!=null?_rb.rowIdx:_ri;break;}}
     if(_starRegistrySortHover||_starRegistryRowHover>=0) canvas.style.cursor='pointer';
   } else { _starRegistrySortHover=false; _starRegistryRowHover=-1; }
+  // PLANETS/STARS registry tab-bar hover (shared by both popups).
+  if(activePopup==='pokedex'||activePopup==='starregistry'){
+    popupState.regTabHover=null;
+    for(const tb of (popupState.registryTabBounds||[])){ if(cp.x>=tb.x&&cp.x<=tb.x+tb.w&&cp.y>=tb.y&&cp.y<=tb.y+tb.h){ popupState.regTabHover=tb.id; break; } }
+    if(popupState.regTabHover) canvas.style.cursor='pointer';
+  } else if(popupState){ popupState.regTabHover=null; }
   // Hover tracking for discovery + quit confirm popup buttons
   _goldOkHover=!!(activePopup==='gold_discovery'&&_goldDiscoveryOkBounds&&cp.x>=_goldDiscoveryOkBounds.x&&cp.x<=_goldDiscoveryOkBounds.x+_goldDiscoveryOkBounds.w&&cp.y>=_goldDiscoveryOkBounds.y&&cp.y<=_goldDiscoveryOkBounds.y+_goldDiscoveryOkBounds.h);
   _diamondOkHover=!!(activePopup==='diamond_discovery'&&_diamondDiscoveryOkBounds&&cp.x>=_diamondDiscoveryOkBounds.x&&cp.x<=_diamondDiscoveryOkBounds.x+_diamondDiscoveryOkBounds.w&&cp.y>=_diamondDiscoveryOkBounds.y&&cp.y<=_diamondDiscoveryOkBounds.y+_diamondDiscoveryOkBounds.h);
+  _uraniumOkHover=!!(activePopup==='uranium_discovery'&&_uraniumDiscoveryOkBounds&&cp.x>=_uraniumDiscoveryOkBounds.x&&cp.x<=_uraniumDiscoveryOkBounds.x+_uraniumDiscoveryOkBounds.w&&cp.y>=_uraniumDiscoveryOkBounds.y&&cp.y<=_uraniumDiscoveryOkBounds.y+_uraniumDiscoveryOkBounds.h);
+  if(activePopup==='artifact_discovery'&&_artifactDiscoveryOkBounds){const b=_artifactDiscoveryOkBounds; popupState.artifactOkHover=cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h; if(popupState.artifactOkHover) canvas.style.cursor='pointer';}
   _carUnlockOkHover=!!(activePopup==='car_unlock'&&_carUnlockOkBounds&&cp.x>=_carUnlockOkBounds.x&&cp.x<=_carUnlockOkBounds.x+_carUnlockOkBounds.w&&cp.y>=_carUnlockOkBounds.y&&cp.y<=_carUnlockOkBounds.y+_carUnlockOkBounds.h);
   _engineUnlockOkHover=!!(activePopup==='engine_unlock'&&_engineUnlockOkBounds&&cp.x>=_engineUnlockOkBounds.x&&cp.x<=_engineUnlockOkBounds.x+_engineUnlockOkBounds.w&&cp.y>=_engineUnlockOkBounds.y&&cp.y<=_engineUnlockOkBounds.y+_engineUnlockOkBounds.h);
   _upgradeUnlockOkHover=!!(activePopup==='upgrade_unlock'&&_upgradeUnlockOkBounds&&cp.x>=_upgradeUnlockOkBounds.x&&cp.x<=_upgradeUnlockOkBounds.x+_upgradeUnlockOkBounds.w&&cp.y>=_upgradeUnlockOkBounds.y&&cp.y<=_upgradeUnlockOkBounds.y+_upgradeUnlockOkBounds.h);
+  if(activePopup==='mission_reward'&&_missionRewardOkBounds){const b=_missionRewardOkBounds; popupState.mrOkHover=cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h; if(popupState.mrOkHover) canvas.style.cursor='pointer';}
+  if(activePopup==='first_delivery'&&_firstDeliveryOkBounds){const b=_firstDeliveryOkBounds; popupState.fdOkHover=cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h; if(popupState.fdOkHover) canvas.style.cursor='pointer';}
   if(activePopup==='rival_founded'&&_rivalFoundedOkBounds){const b=_rivalFoundedOkBounds; popupState.rivalOkHover=cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h; if(popupState.rivalOkHover) canvas.style.cursor='pointer';}
+  if(activePopup==='blocked_edu'&&_blockEduOkBounds){const b=_blockEduOkBounds; popupState.blockEduOkHover=cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h; if(popupState.blockEduOkHover) canvas.style.cursor='pointer';}
   if(activePopup==='ancient_message'&&_ancientPopupOkBounds){const b=_ancientPopupOkBounds; popupState.ancientOkHover=cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h; if(popupState.ancientOkHover) canvas.style.cursor='pointer';}
   _quitYesHover=!!(activePopup==='quitconfirm'&&quitConfirmYesBounds&&cp.x>=quitConfirmYesBounds.x&&cp.x<=quitConfirmYesBounds.x+quitConfirmYesBounds.w&&cp.y>=quitConfirmYesBounds.y&&cp.y<=quitConfirmYesBounds.y+quitConfirmYesBounds.h);
   _quitNoHover=!!(activePopup==='quitconfirm'&&quitConfirmNoBounds&&cp.x>=quitConfirmNoBounds.x&&cp.x<=quitConfirmNoBounds.x+quitConfirmNoBounds.w&&cp.y>=quitConfirmNoBounds.y&&cp.y<=quitConfirmNoBounds.y+quitConfirmNoBounds.h);
@@ -29581,7 +34503,15 @@ canvas.addEventListener('mousemove',e=>{
     popupState.autosaveToggleHover=!!(_astb&&cp.x>=_astb.x&&cp.x<=_astb.x+_astb.w&&cp.y>=_astb.y&&cp.y<=_astb.y+_astb.h);
     const _mttb=popupState.missionTrackerToggleBounds;
     popupState.missionTrackerToggleHover=!!(_mttb&&cp.x>=_mttb.x&&cp.x<=_mttb.x+_mttb.w&&cp.y>=_mttb.y&&cp.y<=_mttb.y+_mttb.h);
+    const _offb=popupState.optionsFullscreenBtnBounds;
+    popupState.optionsFullscreenHover=!!(_offb&&cp.x>=_offb.x&&cp.x<=_offb.x+_offb.w&&cp.y>=_offb.y&&cp.y<=_offb.y+_offb.h);
     _optsMuteBtnHover=!!(_optsMuteBtnBounds&&cp.x>=_optsMuteBtnBounds.x&&cp.x<=_optsMuteBtnBounds.x+_optsMuteBtnBounds.w&&cp.y>=_optsMuteBtnBounds.y&&cp.y<=_optsMuteBtnBounds.y+_optsMuteBtnBounds.h);
+    _optsSfxMuteBtnHover=!!(_optsSfxMuteBtnBounds&&cp.x>=_optsSfxMuteBtnBounds.x&&cp.x<=_optsSfxMuteBtnBounds.x+_optsSfxMuteBtnBounds.w&&cp.y>=_optsSfxMuteBtnBounds.y&&cp.y<=_optsSfxMuteBtnBounds.y+_optsSfxMuteBtnBounds.h);
+    // Active volume-slider drag (set on mousedown) — keep updating while held,
+    // even if the cursor strays off the track horizontally/vertically.
+    if(_optsSliderDrag==='sfx'&&_optsSfxSliderBounds){ const b=_optsSfxSliderBounds; _sfxVol=Math.max(0,Math.min(1,(cp.x-b.x)/b.w)); canvas.style.cursor='pointer'; }
+    else if(_optsSliderDrag==='music'&&_optsMusicSliderBounds){ const b=_optsMusicSliderBounds; _soundtrack.volume=Math.max(0,Math.min(1,(cp.x-b.x)/b.w)); canvas.style.cursor='pointer'; }
+    else if(_optsSliderDrag==='seek'&&_optsMusicProgressBounds){ const b=_optsMusicProgressBounds; const _dur=_soundtrack.duration; if(isFinite(_dur)&&_dur>0){ _soundtrack.currentTime=Math.max(0,Math.min(1,(cp.x-b.x)/b.w))*_dur; } canvas.style.cursor='pointer'; }
     _optsPrevBtnHover=!!(_optsPrevBtnBounds&&cp.x>=_optsPrevBtnBounds.x&&cp.x<=_optsPrevBtnBounds.x+_optsPrevBtnBounds.w&&cp.y>=_optsPrevBtnBounds.y&&cp.y<=_optsPrevBtnBounds.y+_optsPrevBtnBounds.h);
     _optsNextBtnHover=!!(_optsNextBtnBounds&&cp.x>=_optsNextBtnBounds.x&&cp.x<=_optsNextBtnBounds.x+_optsNextBtnBounds.w&&cp.y>=_optsNextBtnBounds.y&&cp.y<=_optsNextBtnBounds.y+_optsNextBtnBounds.h);
     const _ctlbb=popupState.controlsBtnBounds;
@@ -29590,7 +34520,7 @@ canvas.addEventListener('mousemove',e=>{
     popupState.optionsSaveBtnHover=!!(_osbb&&cp.x>=_osbb.x&&cp.x<=_osbb.x+_osbb.w&&cp.y>=_osbb.y&&cp.y<=_osbb.y+_osbb.h);
     const _oeb=popupState.optionsEscBounds;
     popupState.optionsEscHover=!!(_oeb&&cp.x>=_oeb.x&&cp.x<=_oeb.x+_oeb.w&&cp.y>=_oeb.y&&cp.y<=_oeb.y+_oeb.h);
-    if(popupState.fogToggleHover||popupState.addCreditsHover||popupState.flowerPlanetHover||popupState.colonyPlanetHover||popupState.rivalBtnHover||popupState.exportPlanetHover||popupState.unlockAllHover||popupState.autosaveToggleHover||popupState.missionTrackerToggleHover||popupState.controlsBtnHover||popupState.optionsSaveBtnHover||popupState.optionsEscHover) canvas.style.cursor='pointer';
+    if(popupState.fogToggleHover||popupState.addCreditsHover||popupState.flowerPlanetHover||popupState.colonyPlanetHover||popupState.rivalBtnHover||popupState.exportPlanetHover||popupState.unlockAllHover||popupState.autosaveToggleHover||popupState.missionTrackerToggleHover||popupState.optionsFullscreenHover||popupState.controlsBtnHover||popupState.optionsSaveBtnHover||popupState.optionsEscHover) canvas.style.cursor='pointer';
   }
   // Controls popup — [ESC] close hit detection (lives in its own block since
   // the Options/Cheats hover detector only runs while those two popups are
@@ -29640,9 +34570,9 @@ canvas.addEventListener('mousemove',e=>{
   if(gs==='title'){
     _startBtnHover=!!(startBtnBounds&&cp.x>=startBtnBounds.x&&cp.x<=startBtnBounds.x+startBtnBounds.w&&cp.y>=startBtnBounds.y&&cp.y<=startBtnBounds.y+startBtnBounds.h);
     _loadBtnHover=!!(loadBtnBounds&&cp.x>=loadBtnBounds.x&&cp.x<=loadBtnBounds.x+loadBtnBounds.w&&cp.y>=loadBtnBounds.y&&cp.y<=loadBtnBounds.y+loadBtnBounds.h);
-    _muteBtnHover=!!(_muteBtnBounds&&cp.x>=_muteBtnBounds.x&&cp.x<=_muteBtnBounds.x+_muteBtnBounds.w&&cp.y>=_muteBtnBounds.y&&cp.y<=_muteBtnBounds.y+_muteBtnBounds.h);
+    _settingsBtnHover=!!(_settingsBtnBounds&&cp.x>=_settingsBtnBounds.x&&cp.x<=_settingsBtnBounds.x+_settingsBtnBounds.w&&cp.y>=_settingsBtnBounds.y&&cp.y<=_settingsBtnBounds.y+_settingsBtnBounds.h);
     _leaderboardBtnHover=!!(leaderboardBtnBounds&&cp.x>=leaderboardBtnBounds.x&&cp.x<=leaderboardBtnBounds.x+leaderboardBtnBounds.w&&cp.y>=leaderboardBtnBounds.y&&cp.y<=leaderboardBtnBounds.y+leaderboardBtnBounds.h);
-    canvas.style.cursor=(_startBtnHover||_loadBtnHover||_muteBtnHover||_leaderboardBtnHover)?'pointer':'default';
+    canvas.style.cursor=(_startBtnHover||_loadBtnHover||_settingsBtnHover||_leaderboardBtnHover)?'pointer':'default';
   } else { _startBtnHover=false; _loadBtnHover=false; _leaderboardBtnHover=false; }
   if(gs==='leaderboard'){
     const _in=(b)=>b&&cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h;
@@ -29715,9 +34645,17 @@ canvas.addEventListener('mousemove',e=>{
     _creditsHover=!!(_creditsAreaBounds&&cp.x>=_creditsAreaBounds.x&&cp.x<=_creditsAreaBounds.x+_creditsAreaBounds.w&&cp.y>=_creditsAreaBounds.y&&cp.y<=_creditsAreaBounds.y+_creditsAreaBounds.h);
     // Panel tab hover
     _panelTabHover=(cp.y<TOP_H&&cp.x>=W-PANEL_W)?(cp.x<W-PANEL_W/2?'trains':'stations'):null;
+    // Expand/collapse arrow hover (cursor → pointer; brightens the arrow).
+    _panelArrowHover=!!(_panelExpandArrowBounds&&cp.x>=_panelExpandArrowBounds.x&&cp.x<=_panelExpandArrowBounds.x+_panelExpandArrowBounds.w&&cp.y>=_panelExpandArrowBounds.y&&cp.y<=_panelExpandArrowBounds.y+_panelExpandArrowBounds.h);
+    if(_panelArrowHover) canvas.style.cursor='pointer';
+    _stationsAssignBtnHover=!!(_stationsAssignBtnBounds&&cp.x>=_stationsAssignBtnBounds.x&&cp.x<=_stationsAssignBtnBounds.x+_stationsAssignBtnBounds.w&&cp.y>=_stationsAssignBtnBounds.y&&cp.y<=_stationsAssignBtnBounds.y+_stationsAssignBtnBounds.h);
+    if(_stationsAssignBtnHover) canvas.style.cursor='pointer';
     // Speed arrow hover
     _speedLeftHover=!!(speedLeftBounds&&cp.x>=speedLeftBounds.x&&cp.x<=speedLeftBounds.x+speedLeftBounds.w&&cp.y>=speedLeftBounds.y&&cp.y<=speedLeftBounds.y+speedLeftBounds.h);
     _speedRightHover=!!(speedRightBounds&&cp.x>=speedRightBounds.x&&cp.x<=speedRightBounds.x+speedRightBounds.w&&cp.y>=speedRightBounds.y&&cp.y<=speedRightBounds.y+speedRightBounds.h);
+    // Settings-gear button hover
+    _optsGearBtnHover=!!(_optsGearBtnBounds&&cp.x>=_optsGearBtnBounds.x&&cp.x<=_optsGearBtnBounds.x+_optsGearBtnBounds.w&&cp.y>=_optsGearBtnBounds.y&&cp.y<=_optsGearBtnBounds.y+_optsGearBtnBounds.h);
+    if(_optsGearBtnHover) canvas.style.cursor='pointer';
     // Versus-tab metric dropdown option hover. Reset to -1 (none) every
     // frame, then re-scan when the dropdown is actually open on the VS RIVAL
     // tab. Lets the option panel render a hover highlight so the player
@@ -29767,7 +34705,7 @@ canvas.addEventListener('mousemove',e=>{
     _addTrainPanelHover=!!(panelTab==='trains'&&_addTrainPanelBounds&&cp.x>=_addTrainPanelBounds.x&&cp.x<=_addTrainPanelBounds.x+_addTrainPanelBounds.w&&cp.y>=_addTrainPanelBounds.y&&cp.y<=_addTrainPanelBounds.y+_addTrainPanelBounds.h);
     if(_corpHover||_creditsHover||_panelTabHover||_speedLeftHover||_speedRightHover||_routeHereBtnHover||_planetDetailsBtnHover||_assignBtnHover||_cancelRouteBtnHover||_planetStarNameHover||_starPanelPlanetHover>=0||_addTrainPanelHover||_financeTakeLoanHover||(_financeLoanHover&&!(_financeLoanPaneBounds||[]).find(b=>b.id===_financeLoanHover)?.locked)||(_financeRepayBtnHover>=0&&(_financeRepayBtnBounds||[])[_financeRepayBtnHover]?.affordable)||_versusDropdownOptHover>=0) canvas.style.cursor='pointer';
     else canvas.style.cursor='default';
-  } else { _corpHover=false; _creditsHover=false; _panelTabHover=null; _speedLeftHover=false; _speedRightHover=false; _routeHereBtnHover=false; _planetDetailsBtnHover=false; _assignBtnHover=false; _cancelRouteBtnHover=false; _planetStarNameHover=false; _starPanelPlanetHover=-1; _addTrainPanelHover=false; }
+  } else { _corpHover=false; _creditsHover=false; _panelTabHover=null; _speedLeftHover=false; _speedRightHover=false; _optsGearBtnHover=false; _routeHereBtnHover=false; _planetDetailsBtnHover=false; _assignBtnHover=false; _cancelRouteBtnHover=false; _planetStarNameHover=false; _starPanelPlanetHover=-1; _addTrainPanelHover=false; }
   // Hover tracking for bottom hint bar + chat log
   if(gs==='galaxy'){
     let _hh=null;
@@ -29813,6 +34751,8 @@ canvas.addEventListener('mousemove',e=>{
   clampCamera();
 });
 canvas.addEventListener('mouseup',e=>{
+  // End any active Options drag (SFX/Music volume sliders or the music seek bar).
+  if(_optsSliderDrag){ _optsSliderDrag=null; drag=false; return; }
   // End any active scrollbar drag — and skip the rest of the click cascade
   // so the underlying popup doesn't see a phantom click on whatever was
   // beneath the cursor when the user released.
@@ -29849,7 +34789,15 @@ canvas.addEventListener('mouseup',e=>{
     // closed it as click-outside-popup).
     _tryPlaySoundtrack();
     if(_smHandleClick(cp)) return;
-    if(_muteBtnBounds){const mb=_muteBtnBounds;if(cp.x>=mb.x&&cp.x<=mb.x+mb.w&&cp.y>=mb.y&&cp.y<=mb.y+mb.h){_toggleMusicMute();return;}}
+    // Settings (gear) → Options window opened over the title (Controls reachable
+    // from inside it). Route those popups' clicks before the PLAY/LOAD buttons.
+    if(activePopup==='options'){ if(_handleOptionsPopupClick(cp)) return; }
+    if(activePopup==='controls'){
+      if(popupState.controlsEscBounds){const cb=popupState.controlsEscBounds;if(cp.x>=cb.x&&cp.x<=cb.x+cb.w&&cp.y>=cb.y&&cp.y<=cb.y+cb.h){activePopup='options';popupState={noSave:true};return;}}
+      return; // Controls is modal over the title — swallow other clicks
+    }
+    if(_settingsBtnBounds){const sb=_settingsBtnBounds;if(cp.x>=sb.x&&cp.x<=sb.x+sb.w&&cp.y>=sb.y&&cp.y<=sb.y+sb.h){ if(activePopup==='options'){activePopup=null;popupState={};}else{activePopup='options';popupState={noSave:true,scroll:0};} return; }}
+    if(activePopup==='options') return; // popup open — don't trigger PLAY/LOAD behind it
     const b=startBtnBounds;
     if(b&&cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h) startGame();
     const lb=loadBtnBounds;
@@ -29881,7 +34829,7 @@ canvas.addEventListener('mouseup',e=>{
     // Lower-left QUIT → back to title screen (mirrors the quit-confirm Yes path).
     const qb=_introQuitBtnBounds;
     if(qb&&cp.x>=qb.x&&cp.x<=qb.x+qb.w&&cp.y>=qb.y&&cp.y<=qb.y+qb.h){
-      gs='title'; document.getElementById('refresh-btn').classList.remove('hidden');
+      gs='title';
       return;
     }
     // Lower-left mute → toggle soundtrack (shared with title/options buttons).
@@ -29977,7 +34925,17 @@ canvas.addEventListener('mouseup',e=>{
       return;
     }
     // ── Top bar: corp name (edit) and credits (finances popup) ──
-    if(cp.y<TOP_H&&cp.x<W-PANEL_W){
+    // The TRAINS / ROUTES / STATIONS unified window paints OVER the top bar, so
+    // when one is open and the click lands inside its (centered) frame, let the
+    // window's own handlers below claim it instead of the bar underneath.
+    const _overBarWin=(activePopup==='trains'||activePopup==='routes'||activePopup==='stations');
+    let _inWinFrame=_overBarWin&&cp.x>=(W-WIN_PW)/2&&cp.x<=(W-WIN_PW)/2+WIN_PW&&cp.y>=(H-WIN_PH)/2&&cp.y<=(H-WIN_PH)/2+WIN_PH;
+    // The Options window also paints over the top bar — exclude its frame too.
+    if(!_inWinFrame&&activePopup==='options'){
+      const _oph=448-((popupState&&popupState.noSave)?36:0), _opx=(W-300)/2, _opy=(H-_oph)/2;
+      if(cp.x>=_opx&&cp.x<=_opx+300&&cp.y>=_opy&&cp.y<=_opy+_oph) _inWinFrame=true;
+    }
+    if(cp.y<TOP_H&&cp.x<W-PANEL_W&&!_inWinFrame){
       if(_corpNameBounds&&cp.x>=_corpNameBounds.x&&cp.x<=_corpNameBounds.x+_corpNameBounds.w){
         activePopup=activePopup==='corp'?null:'corp'; popupState=activePopup==='corp'?{}:{};
         return;
@@ -30014,6 +34972,13 @@ canvas.addEventListener('mouseup',e=>{
         const _pb=popupState.lbPrev,_nb=popupState.lbNext;
         if(_pb&&cp.x>=_pb.x&&cp.x<=_pb.x+_pb.w&&cp.y>=_pb.y&&cp.y<=_pb.y+_pb.h){ if(_lbPage>0)_lbPage--; return; }
         if(_nb&&cp.x>=_nb.x&&cp.x<=_nb.x+_nb.w&&cp.y>=_nb.y&&cp.y<=_nb.y+_nb.h){ if(_lbPage<_lbMax)_lbPage++; return; }
+      }
+      // PLANETS/STARS registry tab switch — flip activePopup (keep popupState so
+      // each side's scroll position persists across switches).
+      if((activePopup==='pokedex'||activePopup==='starregistry')&&popupState.registryTabBounds){
+        for(const tb of popupState.registryTabBounds){
+          if(cp.x>=tb.x&&cp.x<=tb.x+tb.w&&cp.y>=tb.y&&cp.y<=tb.y+tb.h){ if(activePopup!==tb.id) activePopup=tb.id; return; }
+        }
       }
       // Pokedex sort click
       if(activePopup==='pokedex'&&pokedexSortBounds){
@@ -30307,7 +35272,7 @@ canvas.addEventListener('mouseup',e=>{
             _gp2.goldRevealed=true;
             _gp2.supply=_gp2.supply||{};
             _gp2.supply.gold=(_gp2.devLevel||0)+1;
-            if(!_hadGold){ _chatMsg('GOLD CAR UNLOCKED','rgba(255,215,60,1)'); pendingCarUnlocks.push({sprite:'car_gold',displayName:'Gold Car'}); }
+            if(!_hadGold){ _chatMsg('GOLD CAR UNLOCKED','rgba(255,215,60,1)'); pendingCarUnlocks.push({sprite:'car_gold',displayName:'Gold Car',planetId:_pid}); }
           }
           pendingGoldDiscoveries.shift();
           activePopup=null; popupState={};
@@ -30325,9 +35290,47 @@ canvas.addEventListener('mouseup',e=>{
             _dp2.diamondRevealed=true;
             _dp2.supply=_dp2.supply||{};
             _dp2.supply.diamond=(_dp2.devLevel||0)+1;
-            if(!_hadDiamond){ _chatMsg('DIAMOND CAR UNLOCKED','rgba(80,220,255,1)'); pendingCarUnlocks.push({sprite:'car_diamond',displayName:'Diamond Car'}); }
+            if(!_hadDiamond){ _chatMsg('DIAMOND CAR UNLOCKED','rgba(80,220,255,1)'); pendingCarUnlocks.push({sprite:'car_diamond',displayName:'Diamond Car',planetId:_pid}); }
           }
           pendingDiamondDiscoveries.shift();
+          activePopup=null; popupState={};
+          return;
+        }}
+        return;
+      }
+      // Uranium vein discovery (v0.4.7)
+      if(activePopup==='uranium_discovery'){
+        if(_uraniumDiscoveryOkBounds){const b=_uraniumDiscoveryOkBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+          const _pid=popupState.uraniumPlanetId;
+          if(_pid!=null&&galaxy?.planets[_pid]){
+            const _hadUranium=galaxy.planets.some(p=>p.uraniumRevealed);
+            const _up2=galaxy.planets[_pid];
+            _up2.uraniumRevealed=true;
+            _up2.supply=_up2.supply||{};
+            _up2.supply.uranium=(_up2.devLevel||0)+1;
+            _up2.supplyRate=computeSupplyRate(_up2);
+            if(!_hadUranium){ _chatMsg('URANIUM CAR UNLOCKED','rgba(170,255,0,1)'); pendingCarUnlocks.push({sprite:'car_uranium',displayName:'Uranium Car',planetId:_pid}); }
+          }
+          pendingUraniumDiscoveries.shift();
+          activePopup=null; popupState={};
+          return;
+        }}
+        return;
+      }
+      // Alien artifact cache discovery (v0.4.7 Zeta)
+      if(activePopup==='artifact_discovery'){
+        if(_artifactDiscoveryOkBounds){const b=_artifactDiscoveryOkBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+          const _pid=popupState.artifactPlanetId;
+          if(_pid!=null&&galaxy?.planets[_pid]){
+            const _hadArtifact=galaxy.planets.some(p=>p.artifactRevealed);
+            const _ap2=galaxy.planets[_pid];
+            _ap2.artifactRevealed=true;
+            _ap2.supply=_ap2.supply||{};
+            _ap2.supply.artifact=(_ap2.devLevel||0)+1;
+            _ap2.supplyRate=computeSupplyRate(_ap2);
+            if(!_hadArtifact){ _chatMsg('ARTIFACT CAR UNLOCKED','rgba(64,255,144,1)'); pendingCarUnlocks.push({sprite:'car_artifact',displayName:'Artifact Car',planetId:_pid}); }
+          }
+          pendingArtifactDiscoveries.shift();
           activePopup=null; popupState={};
           return;
         }}
@@ -30338,6 +35341,14 @@ canvas.addEventListener('mouseup',e=>{
         if(_rivalFoundedOkBounds){const b=_rivalFoundedOkBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
           activePopup=null; popupState={}; return;
         }}
+        return;
+      }
+      // Route-blocked educational popup — GOT IT closes it (ESC / ✕ also close via _fireEsc).
+      if(activePopup==='blocked_edu'){
+        if(_blockEduOkBounds){const b=_blockEduOkBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+          activePopup=null; popupState={}; _blockEduStartMs=0; return;
+        }}
+        if(popupState.escBounds){const eb=popupState.escBounds; if(cp.x>=eb.x&&cp.x<=eb.x+eb.w&&cp.y>=eb.y&&cp.y<=eb.y+eb.h){ _fireEsc(); _blockEduStartMs=0; return; }}
         return;
       }
       // Ancient-world broadcast popup — ACKNOWLEDGED button dequeues and closes
@@ -30372,6 +35383,22 @@ canvas.addEventListener('mouseup',e=>{
         }}
         return;
       }
+      // Mission-reward popup (green)
+      if(activePopup==='mission_reward'){
+        if(_missionRewardOkBounds){const b=_missionRewardOkBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+          pendingMissionRewards.shift();
+          activePopup=null; popupState={}; return;
+        }}
+        return;
+      }
+      // First-delivery popup
+      if(activePopup==='first_delivery'){
+        if(_firstDeliveryOkBounds){const b=_firstDeliveryOkBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+          pendingFirstDeliveries.shift();
+          activePopup=null; popupState={}; return;
+        }}
+        return;
+      }
       // [ESC] text click in any popup
       if(activePopup&&popupState.escBounds){
         const eb=popupState.escBounds;
@@ -30379,7 +35406,7 @@ canvas.addEventListener('mouseup',e=>{
       }
       // Quit confirmation
       if(activePopup==='quitconfirm'){
-        if(quitConfirmYesBounds){const b=quitConfirmYesBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ activePopup=null; popupState={}; gs='title'; document.getElementById('refresh-btn').classList.remove('hidden'); return; }}
+        if(quitConfirmYesBounds){const b=quitConfirmYesBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ activePopup=null; popupState={}; gs='title'; return; }}
         if(saveGameBtnBounds){const b=saveGameBtnBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ saveGame(); return; }}
         if(quitConfirmNoBounds){const b=quitConfirmNoBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ activePopup=null; popupState={}; return; }}
         return; // eat any other click on the popup
@@ -30444,16 +35471,21 @@ canvas.addEventListener('mouseup',e=>{
         const b=popupState.unlockAllBtnBounds;
         if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
           _classJEngineUnlocked=true; _classREngineUnlocked=true; _N700EngineUnlocked=true;
+          _heliosEngineUnlocked=true; _vexEngineUnlocked=true; _singularityEngineUnlocked=true;
           _ironCarUnlocked=true; _steelCarUnlocked=true; _glassCarUnlocked=true;
           _machineryCarUnlocked=true; _cargoCarUnlocked=true; _hazmatCarUnlocked=true;
           _royalCarUnlocked=true; _flowersCarUnlocked=true; _medicalCarUnlocked=true;
           _grainCarUnlocked=true; _livestockCarUnlocked=true; _fruitCarUnlocked=true;
+          _heliumCarUnlocked=true; _solarCarUnlocked=true; _superconCarUnlocked=true;
+          _trussCarUnlocked=true; _reactorCarUnlocked=true; _titanplateCarUnlocked=true;
+          _warpsteelCarUnlocked=true; _cannonCarUnlocked=true; _laserCarUnlocked=true; _shieldCarUnlocked=true;
           // The remaining 7 cars (gold, diamond, oil, battery, chemical, sand,
           // ice) gate on planet visits/discoveries, not flags — this catch-all
           // unlocks them too.
           _cheatUnlockAllCars=true;
           // Also reveal the event-locked planet upgrades (no popups for the cheat).
           _foundryUnlocked=true; _largeStationUnlocked=true; _terminalUnlocked=true; _bakeryUnlocked=true; _glassworksUnlocked=true;
+          _heliosArcStarted=true; _militaryArcStarted=true; _warpsteelRecipeKnown=true;
           _chatMsg('ALL ENGINES & TRAIN CARS UNLOCKED','rgba(180,235,255,1)');
           return;
         }
@@ -30551,63 +35583,9 @@ canvas.addEventListener('mouseup',e=>{
           }
         }
       }
-      // Options popup: [ESC] close — clicking closes the popup outright.
-      if(activePopup==='options'&&popupState.optionsEscBounds){
-        const b=popupState.optionsEscBounds;
-        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
-          activePopup=null; popupState={};
-          return;
-        }
-      }
-      // Options: CONTROLS / HOW TO PLAY button — opens the Controls popup.
-      if(activePopup==='options'&&popupState.controlsBtnBounds){
-        const b=popupState.controlsBtnBounds;
-        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
-          activePopup='controls'; popupState={};
-          playSound('click');
-          return;
-        }
-      }
-      // Options: SAVE GAME button — identical behavior to the SAVE GAME
-      // button in the quit-confirm popup (calls saveGame()).
-      if(activePopup==='options'&&popupState.optionsSaveBtnBounds){
-        const b=popupState.optionsSaveBtnBounds;
-        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
-          saveGame();
-          return;
-        }
-      }
-      // Options: Autosave toggle — flips the global flag; persisted in saves.
-      if(activePopup==='options'&&popupState.autosaveToggleBounds){
-        const b=popupState.autosaveToggleBounds;
-        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
-          autosaveEnabled=!autosaveEnabled;
-          return;
-        }
-      }
-      // Options: Mission Objectives Tracker toggle — flips the global flag.
-      if(activePopup==='options'&&popupState.missionTrackerToggleBounds){
-        const b=popupState.missionTrackerToggleBounds;
-        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
-          missionTrackerEnabled=!missionTrackerEnabled;
-          return;
-        }
-      }
-      // Options: SOUND pane controls — mute / prev track / next track.
-      if(activePopup==='options'){
-        if(_optsMuteBtnBounds){
-          const b=_optsMuteBtnBounds;
-          if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ _toggleMusicMute(); return; }
-        }
-        if(_optsPrevBtnBounds){
-          const b=_optsPrevBtnBounds;
-          if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ _musicPrev(); return; }
-        }
-        if(_optsNextBtnBounds){
-          const b=_optsNextBtnBounds;
-          if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ _musicNext(); return; }
-        }
-      }
+      // Options popup — all controls (ESC, Controls, Save, Fullscreen, toggles,
+      // SOUND panes) handled by the shared click router.
+      if(_handleOptionsPopupClick(cp)) return;
       // Color picker click handling — SV picker, hue strip, hex input, preset swatches
       if(colorPickerState){
         // SV picker mousedown → pick + begin drag. Subsequent mousemove
@@ -30677,6 +35655,25 @@ canvas.addEventListener('mouseup',e=>{
         }
         return;
       }
+      // Train detail ASSIGN ROUTE button → enter "assign route to this known
+      // train" mode: close the popup, jump to galaxy view with the Stations tab
+      // selected + the yellow SELECT-A-PLANET box, and remember the train.
+      if(activePopup==='train'&&popupState.assignRouteBtnBounds){
+        const b=popupState.assignRouteBtnBounds;
+        if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+          _assignRouteTrainIdx=popupState.trainIdx;
+          activePopup=null; popupState={};
+          panelTab='stations'; sel=null; routeStops=[]; assignPending=false; routeHerePending=false;
+          playSound('click');
+          return;
+        }
+      }
+      // Train detail AT A GLANCE / STATS tab click → switch tab.
+      if(activePopup==='train'&&popupState.tdTabBounds){
+        for(const tb of popupState.tdTabBounds){
+          if(cp.x>=tb.x&&cp.x<=tb.x+tb.w&&cp.y>=tb.y&&cp.y<=tb.y+tb.h){ popupState.trainDetailTab=tb.id; playSound('click'); return; }
+        }
+      }
       // Train detail viz overlay click → open edit mode
       if(activePopup==='train'&&popupState.hoverTrainViz&&popupState.trainVizBounds){
         const b=popupState.trainVizBounds;
@@ -30700,7 +35697,7 @@ canvas.addEventListener('mouseup',e=>{
             if(_i===_targetIdx) _ri=_rc;
             _rc++;
           }
-          const _ROW=224, _listH=464-44;
+          const _ROW=224, _listH=WIN_PH-44;
           const _maxScroll=Math.max(0,_rc*_ROW-_listH);
           let _scroll=_ri>=0?_ri*_ROW:0;
           if(_scroll>_maxScroll) _scroll=_maxScroll;
@@ -30794,15 +35791,19 @@ canvas.addEventListener('mouseup',e=>{
             p.hasLargeStation=true;
             _ga('station_upgraded_large',{biome:p.type.id, planet:p.name, sd:Math.floor(stardate)});
             playSound('construction_complete');
-            // A Mad Scientist: arm the 60-second intro timer the moment the
-            // player PURCHASES a Large Station (this click). Armed here — at
-            // the purchase EVENT — rather than from detecting the persistent
-            // hasLargeStation state, so loading a save that already has a
-            // Large Station does NOT fire the mission ("on game start" bug).
-            // Only arms if the mission hasn't already fired/completed and the
-            // timer isn't already running.
-            if(gs==='galaxy'&&_madScientistTimerMs===0&&!_missionPending('mad_scientist')){
-              _madScientistTimerMs=Date.now();
+            // A Mad Scientist: arm the 15-second intro timer the moment this
+            // purchase brings the player's LARGE-STATION count to 2 (this click
+            // included). Armed here — at the purchase EVENT — rather than from
+            // detecting the persistent hasLargeStation state, so loading a save
+            // that already has 2+ Large Stations does NOT fire the mission ("on
+            // game start" bug). Only arms if the mission hasn't already fired/
+            // completed and the timer isn't already running. Counts only the
+            // player's own large stations (AI large stations also set
+            // hasLargeStation — see _aiUpgradeStation — so they're excluded via
+            // playerBuiltStation/isStarter, matching design_better_train's gate).
+            if(gs==='galaxy'&&_madScientistTimerMs===0&&!_missionPending('mad_scientist')&&!missions.some(mx=>mx.id==='mad_scientist')){
+              const _plLargeCount=galaxy.planets.filter(q=>q&&(q.playerBuiltStation||q.isStarter)&&q.hasLargeStation).length;
+              if(_plLargeCount>=2) _madScientistTimerMs=Date.now();
             }
             // User spec #4: queueing trains at MED tier here are now cargo-ready.
             _promoteQueueingTrainsAtPlanet(p);
@@ -30842,10 +35843,12 @@ canvas.addEventListener('mouseup',e=>{
             const p=popupState.planet;
             const u=UPGRADES.find(u2=>u2.id===b.upgradeId);
             const _uPurchaseCost=u?_upgradeBuildCost(u):0;
-            // Blast Furnace is gated: purchase rejected if the player has
-            // not yet produced any iron (`_ironCarUnlocked` doubles as that
-            // signal — it flips true on the first foundry iron produced).
+            // Blast Furnace is gated: purchase rejected if the player has not yet
+            // produced any iron (`_ironCarUnlocked` doubles as that signal — it
+            // flips true on the first foundry iron produced) AND requires a LARGE
+            // STATION (or TERMINAL, the tier above) on THIS planet — same as Factory.
             if(u&&u.id==='blast_furnace'&&!_ironCarUnlocked){ return; }
+            if(u&&u.id==='blast_furnace'&&p&&!(p.hasLargeStation||p.hasTerminal)){ return; }
             // Glassworks is gated on both Sand and Chemical planets being
             // visited (matches the train builder's discovery semantics).
             if(u&&u.id==='glassworks'){
@@ -30880,6 +35883,9 @@ canvas.addEventListener('mouseup',e=>{
                 // First foundry ever built → arm the yellow foundry explainer
                 // callout (one-shot). It points at this just-built foundry card.
                 if(!_foundryCalloutShown){ _foundryCalloutStartMs=Date.now(); _foundryCalloutFadeOutStartMs=0; _foundryCalloutShown=true; }
+                // Defer the upgrade popup (re-titled "NEW UPGRADE CONSTRUCTED") until
+                // the player closes this planet's details window — see the dispatch gate.
+                if(!_foundryConstructedPopupShown) _foundryConstructedPopupPending=true;
               }
               if(u.id==='blast_furnace'){
                 if(!p.upgradeData) p.upgradeData={};
@@ -30908,6 +35914,27 @@ canvas.addEventListener('mouseup',e=>{
               }
               if(u.id==='granary'||u.id==='farm'||u.id==='orchard'){
                 if(p.agriStructAngle===undefined) p.agriStructAngle=(p.stationAngle||0)+Math.PI*0.95;
+              }
+              // ── v0.4.7 new-upgrade purchase effects ──────────────────
+              {
+                const _v47rcP=V47_RECIPES.find(_r=>_r.id===u.id);
+                if(_v47rcP){
+                  if(!p.upgradeData) p.upgradeData={};
+                  if(!p.upgradeData[u.id]){ const _nb={progress:0}; for(const _ik of _v47rcP.inputs) _nb[_ik]=0; p.upgradeData[u.id]=_nb; }
+                  if(p.v47StructAngle===undefined) p.v47StructAngle=(p.stationAngle||0)+Math.PI*1.15;
+                }
+                if(u.id==='gas_siphon'){
+                  if(!_heliumCarUnlocked){ _heliumCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_helium3',displayName:'Helium-3 Tanker',planetId:p.id}); _chatMsg('HELIUM-3 TANKER UNLOCKED','rgba(255,187,85,1)'); }
+                }
+                if(u.id==='armory'){
+                  if(!p.upgradeData) p.upgradeData={};
+                  if(!p.upgradeData.armory){ const _ab={progress:0,building:null}; for(const _ak of ARMORY_BIN_KEYS) _ab[_ak]=0; p.upgradeData.armory=_ab; }
+                }
+                if(u.id==='defense_battery'){ p.defenseShells=p.defenseShells||0; }
+                if(_v47rcP||u.id==='gas_siphon'||u.id==='armory'||u.id==='defense_battery'){
+                  // New chains change this planet's supply/demand profile.
+                  p.supplyRate=computeSupplyRate(p); p.demandRate=computeDemandRate(p);
+                }
               }
               playSound('construction_complete');
             } return;
@@ -30971,18 +35998,56 @@ canvas.addEventListener('mouseup',e=>{
           }
         }
       }
-      // Planet detail name or viz click → select planet & center camera
+      // Planet detail name click → open the name editor (rename); viz (planet
+      // image) click → select planet & center camera.
       if(activePopup==='planet'){
         const p=popupState.planet;
         const hn=popupState.nameClickBounds, hv=popupState.planetVizBounds;
         const inN=hn&&cp.x>=hn.x&&cp.x<=hn.x+hn.w&&cp.y>=hn.y&&cp.y<=hn.y+hn.h;
         const inV=hv&&cp.x>=hv.x&&cp.x<=hv.x+hv.w&&cp.y>=hv.y&&cp.y<=hv.y+hv.h;
-        if(p&&(inN||inV)){
+        if(p&&inN){
+          const eb=popupState.nameEditBounds;
+          if(eb) startEdit(p.name,v=>{ p.name=v; },eb.x,eb.y,eb.w,eb.h,p.isStarter?'#ffcc44':'#4af',16);
+          return;
+        }
+        if(p&&inV){
           sel={type:'planet',data:p}; routeStops=[p]; assignPending=false;
           cam.x=p.x; cam.y=p.y; clampCamera();
           tracking=true; trackingOffset={x:0,y:0};
           return;
         }
+      }
+      // ── Unified window tab bar (TRAINS / ROUTES / STATIONS) — checked first so
+      //    a tab click flips the window before any per-window handler runs. ──
+      if((activePopup==='trains'||activePopup==='routes'||activePopup==='stations')&&popupState.windowTabBounds){
+        for(const tb of popupState.windowTabBounds){
+          if(cp.x>=tb.x&&cp.x<=tb.x+tb.w&&cp.y>=tb.y&&cp.y<=tb.y+tb.h){
+            if(activePopup!==tb.id){ activePopup=tb.id; popupState={scroll:0}; }
+            return;
+          }
+        }
+      }
+      // ── Stations popup interactions ──
+      if(activePopup==='stations'){
+        if(popupState.escBounds){const b=popupState.escBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ activePopup=null; popupState={}; return; }}
+        // Filter toggles (OR/union).
+        for(const fb of (popupState.stFilterBounds||[])){
+          if(cp.x>=fb.x&&cp.x<=fb.x+fb.w&&cp.y>=fb.y&&cp.y<=fb.y+fb.h){
+            if(_stationFilters.has(fb.cargo)) _stationFilters.delete(fb.cargo); else _stationFilters.add(fb.cargo);
+            popupState.scroll=0; return;
+          }
+        }
+        // Station pane → open that planet's details popup.
+        for(const rb of (popupState.stationsRowBounds||[])){
+          if(cp.x>=rb.x&&cp.x<=rb.x+rb.w&&cp.y>=rb.y&&cp.y<=rb.y+rb.h){
+            const _sp=_gp(rb.planetId);
+            if(_sp){ activePopup='planet'; popupState={planet:_sp}; updateCargoSupplyDemand(0); }
+            return;
+          }
+        }
+        // Consume empty clicks INSIDE the window frame (so they don't leak to the
+        // galaxy behind it); let clicks outside the frame fall through.
+        {const _wpx=(W-WIN_PW)/2,_wpy=(H-WIN_PH)/2; if(cp.x>=_wpx&&cp.x<=_wpx+WIN_PW&&cp.y>=_wpy&&cp.y<=_wpy+WIN_PH) return;}
       }
       // Trains popup interactions
       if(activePopup==='trains'){
@@ -31008,6 +36073,11 @@ canvas.addEventListener('mouseup',e=>{
             return;
           }
         }
+        // "+ Add new train" pane below the last train (mirrors the right panel) → Train Builder.
+        if(_trainsWinAddPaneBounds){
+          const b=_trainsWinAddPaneBounds;
+          if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){ openTrainBuilder(); return; }
+        }
         // Double-click row → open train detail popup for that train
         if(isDbl&&trainsPopupRowBounds.length){
           for(const b of trainsPopupRowBounds){
@@ -31020,6 +36090,19 @@ canvas.addEventListener('mouseup',e=>{
       }
       // Routes popup interactions
       if(activePopup==='routes'){
+        // "+ NEW ROUTE" button → enter the build-a-new-route flow: close the
+        // popup, jump to galaxy view with the Stations tab + yellow
+        // SELECT-A-PLANET box; ASSIGN TO TRAIN later hands off to SELECT A TRAIN.
+        if(routesPopupAddBounds){
+          const b=routesPopupAddBounds;
+          if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+            _newRouteMode=true; _assignRouteTrainIdx=null;
+            activePopup=null; popupState={};
+            panelTab='stations'; sel=null; routeStops=[]; assignPending=false; routeHerePending=false;
+            playSound('click');
+            return;
+          }
+        }
         // [ESC] close label
         if(popupState.routesEscBounds){
           const b=popupState.routesEscBounds;
@@ -31099,6 +36182,15 @@ canvas.addEventListener('mouseup',e=>{
           if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
             // Reject if outside the visible clip area
             if(_caSbb&&(cp.y<_caSbb.y||cp.y>_caSbb.y+_caSbb.h)) continue;
+            // Military cars are ASSEMBLED at an Armory, never purchased —
+            // only trainyard stock can be attached. Count how many are
+            // already placed in this session vs. what the yard (plus any
+            // released originals in edit mode) can cover.
+            if(MILITARY_CARS.has(b.type)){
+              const _placed=s.cars.filter(c=>c===b.type).length;
+              const _orig=(s.editTrainIdx!=null&&s.originalComposition)?(s.originalComposition[b.type]||0):0;
+              if(_placed>=(_tyCount(b.type)+_orig)){ playSound('blip'); return; }
+            }
             if(s.cars.length<_engMaxCars(s.engine) && !b.locked) s.cars.push(b.type);
             return;
           }
@@ -31262,6 +36354,7 @@ canvas.addEventListener('mouseup',e=>{
                 if(_etRef){
                   _etRef._engineFailed=false;
                   _etRef._engineFailureSd=_rollEngineFailureSd();
+                  _etRef._engineBornSd=stardate; // fresh engine → reset the Engine Age bar
                 }
               }
               activePopup='train'; popupState={trainIdx:s.editTrainIdx}; trainBuilderState=null;
@@ -31396,6 +36489,11 @@ canvas.addEventListener('mouseup',e=>{
       _stepGameSpeed(1);
       return;
     }
+    // ── settings (gear) button — opens/closes the Options window ──
+    if(_optsGearBtnBounds&&cp.x>=_optsGearBtnBounds.x&&cp.x<=_optsGearBtnBounds.x+_optsGearBtnBounds.w&&cp.y>=_optsGearBtnBounds.y&&cp.y<=_optsGearBtnBounds.y+_optsGearBtnBounds.h){
+      activePopup=activePopup==='options'?null:'options'; popupState=activePopup==='options'?{}:{};
+      return;
+    }
 
     // ── star panel: planet strip clicks ──────────────────────
     for(const b of starPanelPlanetBounds){
@@ -31479,11 +36577,15 @@ canvas.addEventListener('mouseup',e=>{
     }
     // ── assign button ─────────────────────────────────────────
     if(assignBtnBounds&&cp.x>=assignBtnBounds.x&&cp.x<=assignBtnBounds.x+assignBtnBounds.w&&cp.y>=assignBtnBounds.y&&cp.y<=assignBtnBounds.y+assignBtnBounds.h){
+      // In auto SELECT-A-TRAIN mode the bar is just a status indicator — don't
+      // toggle it off (it would only re-arm next frame). Otherwise toggle as before.
+      if(_routeAutoAssign()){ panelTab='trains'; return; }
       assignPending=!assignPending; assignPending&&(routeHerePending=false); if(assignPending) panelTab='trains'; return;
     }
 
     // ── panel (single or double click) ────────────────────────
-    if(cp.x>=W-PANEL_W&&cp.y<GH){
+    // Panel now extends full-height (TOP_H → H), so accept clicks down to H.
+    if(cp.x>=W-PANEL_W&&cp.y<H){
       if(isDbl){
         panelDblClick(cp.x,cp.y);
       } else {
@@ -31562,7 +36664,8 @@ function _fireEsc(){
   // (mirrors the clickable [ESC] label in its top-right corner).
   if(activePopup==='controls'){ activePopup='options'; popupState={}; return; }
   if(activePopup==='ancient_message'){ pendingAncientPopups.shift(); activePopup=null; popupState={}; return; }
-  if(routeHerePending||assignPending){ routeHerePending=false; assignPending=false; return; }
+  if(_assignRouteTrainIdx!=null||_newRouteMode){ _assignRouteTrainIdx=null; _newRouteMode=false; routeStops=[]; assignPending=false; routeHerePending=false; return; }
+  if(routeHerePending||assignPending){ routeHerePending=false; assignPending=false; routeStops=[]; return; }
   if(activePopup){ activePopup=null; popupState={}; colorPickerState=null; return; }
   activePopup='quitconfirm'; popupState={};
 }
@@ -31575,6 +36678,16 @@ window.addEventListener('keyup',e=>{ heldKeys.delete((e.key||'').toLowerCase());
 window.addEventListener('blur',()=>{ heldKeys.clear(); _sbDrag=null; });
 document.addEventListener('keydown',e=>{
   if(nameEditEl.style.display==='block') return; // don't intercept while name editing
+  // X is a universal alias for Escape: wrap the event so every downstream
+  // `e.key==='Escape'` check (plus preventDefault/stopPropagation) sees it as
+  // Escape. Placed after the name-edit guard so typing "x" into a text field is
+  // unaffected. The fullscreen UI swaps every "ESC" label to "X" to match.
+  if(e.key==='x'||e.key==='X'){
+    const _orig=e;
+    e={key:'Escape',repeat:_orig.repeat,shiftKey:_orig.shiftKey,ctrlKey:_orig.ctrlKey,
+       altKey:_orig.altKey,metaKey:_orig.metaKey,
+       preventDefault:()=>_orig.preventDefault(),stopPropagation:()=>_orig.stopPropagation()};
+  }
   // WASD pan — record held keys so the loop can advance the camera. We register
   // before the gs/popup checks below so e.repeat keystrokes (key held for >0.5s)
   // are also captured. Movement itself is gated in the loop (popup-aware).
@@ -31784,6 +36897,11 @@ document.addEventListener('keydown',e=>{
       if(activePopup==='routes') popupState={scroll:0};
       return;
     }
+    if(e.key==='u'||e.key==='U'){
+      activePopup=activePopup==='stations'?null:'stations';
+      if(activePopup==='stations') popupState={scroll:0};
+      return;
+    }
     if(e.key==='y'||e.key==='Y'){
       activePopup=activePopup==='starregistry'?null:'starregistry';
       if(activePopup==='starregistry') popupState={starScroll:0};
@@ -31827,6 +36945,22 @@ document.addEventListener('keydown',e=>{
     if(e.key==='m'||e.key==='M'){
       activePopup=activePopup==='missions'?null:'missions';
       if(activePopup==='missions') popupState={mScroll:0};
+      return;
+    }
+    // v0.4.7: [Z] jumps the camera between the Alpha galaxy and the Zeta
+    // Quadrant once the portal has ignited. Each side remembers where you
+    // last were; the first Zeta jump lands on the exit portal.
+    if((e.key==='z'||e.key==='Z')&&_portalActive&&galaxy&&galaxy.zetaPortal){
+      const _inZeta=_regionOfX(cam.x)==='zeta';
+      if(_inZeta){
+        _zetaCamMem={x:cam.x,y:cam.y,scale:cam.scale};
+        const _back=_alphaCamMem||(galaxy.origenId!=null?{x:galaxy.planets[galaxy.origenId].x,y:galaxy.planets[galaxy.origenId].y,scale:cam.scale}:null);
+        if(_back){ tracking=false; cam.x=_back.x; cam.y=_back.y; cam.scale=_back.scale; clampCamera(); }
+      } else {
+        _alphaCamMem={x:cam.x,y:cam.y,scale:cam.scale};
+        const _dest=_zetaCamMem||{x:galaxy.zetaPortal.x,y:galaxy.zetaPortal.y,scale:Math.exp(Math.log(MIN_SC)+0.45*(Math.log(MAX_SC)-Math.log(MIN_SC)))};
+        tracking=false; cam.x=_dest.x; cam.y=_dest.y; cam.scale=Math.max(MIN_SC,Math.min(MAX_SC,_dest.scale)); clampCamera();
+      }
       return;
     }
     if(e.key==='l'||e.key==='L'){
@@ -31948,6 +37082,11 @@ function _buildSaveObject(){
     _detourPermanentRoute:t._detourPermanentRoute||null,
     preDepartureRules:t.preDepartureRules||null,
     _ord:(typeof t._ord==='number'?t._ord:null), // user-defined display order
+    // v0.4.7 Combine + combat state
+    isCombine:t.isCombine||false, isAlly:t.isAlly||false,
+    _isPatrol:t._isPatrol||false, _isFlagship:t._isFlagship||false,
+    _destroyed:t._destroyed||false, crippled:t.crippled||false,
+    carAmmo:t.carAmmo||null, carDisabled:t.carDisabled||null,
   }));
   // ── Ledger + newspaper trimming ─────────────────────────────
   // financeLedger and _newspaperArchive both grow linearly with stardates
@@ -32030,13 +37169,22 @@ function _buildSaveObject(){
     _grainCarUnlocked, _livestockCarUnlocked, _fruitCarUnlocked, _cargoCarUnlocked,
     _cheatUnlockAllCars,
     _classJEngineUnlocked, _classREngineUnlocked, _N700EngineUnlocked,
+    _heliosEngineUnlocked, _vexEngineUnlocked, _singularityEngineUnlocked,
+    _heliumCarUnlocked, _solarCarUnlocked, _superconCarUnlocked, _trussCarUnlocked, _reactorCarUnlocked,
+    _titanplateCarUnlocked, _warpsteelCarUnlocked, _cannonCarUnlocked, _laserCarUnlocked, _shieldCarUnlocked,
+    _heliosArcStarted, _militaryArcStarted, _warpsteelRecipeKnown, _v47ProdTotals,
     _steelProdLog,
-    _sensorUpgradeActive, _stationCostDiscount, _sandstormCheckSd, _playerDeliveryCount, _foundryCalloutShown,
+    _sensorUpgradeActive, _sensorUpgrade2Active, _heliosEngDiscount, _portalActive, _zetaGenerated,
+    _combineFounded, _combineHostility, _combineCredits, _hiveTradeUnits, _combineKills,
+    _combineDefeated, _combineArmistice,
+    _stationCostDiscount, _sandstormCheckSd, _playerDeliveryCount, _foundryCalloutShown,
+    _foundryConstructedPopupShown, _ironDeliveredToNonDesert,
     _foundryUnlocked, _largeStationUnlocked, _terminalUnlocked, _bakeryUnlocked, _glassworksUnlocked,
     _totalPassengersDelivered, _totalHazmatIncinerated, _anyCargoProduced,
+    _firstStarBlockShown, _firstRangeBlockShown,
     trainyard, financeLedger:_trimmedFinance, _ledgerSummary:_builtLedgerSummary, purchaseLedger, corpValueHistory, corpStatsHistory, aiCorpStatsHistory, _corp, _ceoHireCandidates,
     creditSnapshots, lastCreditSnapshotSd,
-    galaxy:{homeStarId:galaxy.homeStarId, origenId:galaxy.origenId, blackHoles:galaxy.blackHoles, colonyTrainDestId:galaxy.colonyTrainDestId??null, faminePlanetId:galaxy.faminePlanetId??null, outbreakPlanetId:galaxy.outbreakPlanetId??null, bhResearchPlanetId:galaxy.bhResearchPlanetId??null, bhResearchPlanetIds:galaxy.bhResearchPlanetIds??[], stars:saveStars, planets:savePlanets, nebulas:(galaxy.nebulas||[]).map(n=>({x:_r5(n.x),y:_r5(n.y),rx:n.rx,ry:n.ry,rot:_r5(n.rot),colorIdx:n.colorIdx,secondaryColorIdx:n.secondaryColorIdx,seed:n.seed,name:n.name}))},
+    galaxy:{homeStarId:galaxy.homeStarId, origenId:galaxy.origenId, blackHoles:galaxy.blackHoles, colonyTrainDestId:galaxy.colonyTrainDestId??null, faminePlanetId:galaxy.faminePlanetId??null, outbreakPlanetId:galaxy.outbreakPlanetId??null, bhResearchPlanetId:galaxy.bhResearchPlanetId??null, bhResearchPlanetIds:galaxy.bhResearchPlanetIds??[], heliosSites:galaxy.heliosSites??[], zetaPortal:galaxy.zetaPortal??null, zetaSpireId:galaxy.zetaSpireId??null, stars:saveStars, planets:savePlanets, nebulas:(galaxy.nebulas||[]).map(n=>({x:_r5(n.x),y:_r5(n.y),rx:n.rx,ry:n.ry,rot:_r5(n.rot),colorIdx:n.colorIdx,secondaryColorIdx:n.secondaryColorIdx,seed:n.seed,name:n.name}))},
     trains:saveTrains,
     visitedPlanetIds:[...visitedPlanetIds],
     discoveredPlanetIds:[...discoveredPlanetIds],
@@ -32049,6 +37197,8 @@ function _buildSaveObject(){
     pendingMissionIntros,
     pendingGoldDiscoveries,
     pendingDiamondDiscoveries,
+    pendingUraniumDiscoveries,
+    pendingArtifactDiscoveries,
     _ancientTranslatedWords:[..._ancientTranslatedWords],
     _tutorialPhase, _tutorialLavaPlanetId,
     routeStops:routeStops.map(p=>({id:p.id,isStarProxy:!!p.isStarProxy})),
@@ -32085,7 +37235,7 @@ function _restoreFromSave(save){
     rp._top4Supply=undefined; rp._top4Demand=undefined; rp._top4Stamp=undefined;
     // Re-attach biome-specific procedural fields that are stripped from saves:
     //   resort/agri/oil → _b (landmasses/swatches); storm → _b (lightning bolts);
-    //   any biome → _mtn (mountain ridges).
+    //   lava → _b (volcanoes); any biome → _mtn (mountain ridges).
     // Without this, resort planets render as featureless ocean (no continents).
     _attachBiome(rp);
     rp.clouds=generatePlanetClouds(rp);
@@ -32133,11 +37283,16 @@ function _restoreFromSave(save){
   }
   galaxy={stars, planets, homeStarId:sg.homeStarId, origenId:sg.origenId,
           trainPlanetId:sg.origenId, blackHoles:sg.blackHoles??[], starProxyMap, colonyTrainDestId:sg.colonyTrainDestId??null, faminePlanetId:sg.faminePlanetId??null, outbreakPlanetId:sg.outbreakPlanetId??null, bhResearchPlanetId:sg.bhResearchPlanetId??null, bhResearchPlanetIds:sg.bhResearchPlanetIds??[], rockyMissionPids:sg.rockyMissionPids??[],
+          heliosSites:sg.heliosSites??[], zetaPortal:sg.zetaPortal??null, zetaSpireId:sg.zetaSpireId??null,
           nebulas:(sg.nebulas||[]).map(n=>({...n, _canvas:null,
             // Backfill name for pre-name-feature saves — pick a deterministic
             // entry from the pool keyed by seed so it stays stable forever.
             name:n.name||NEBULA_NAME_POOL[(n.seed||0)%NEBULA_NAME_POOL.length]}))};
   makeGStars();
+  // v0.4.7: rebuild the star→helios-depot runtime links. (The Zeta world
+  // extent + portal proxies are re-applied AFTER the flat-state restore
+  // below, once _zetaGenerated/_portalActive are known.)
+  _linkHeliosSites();
   // Restore flat state
   _invalidateUpgradePlanetCache();
   stardate=save.stardate; credits=save.credits; corpName=save.corpName||'Space Tycoon Corporation';
@@ -32171,9 +37326,27 @@ function _restoreFromSave(save){
   _grainCarUnlocked=!!save._grainCarUnlocked; _livestockCarUnlocked=!!save._livestockCarUnlocked; _fruitCarUnlocked=!!save._fruitCarUnlocked; _cargoCarUnlocked=!!save._cargoCarUnlocked;
   _cheatUnlockAllCars=!!save._cheatUnlockAllCars;
   _classJEngineUnlocked=!!save._classJEngineUnlocked; _classREngineUnlocked=!!save._classREngineUnlocked; _N700EngineUnlocked=!!save._N700EngineUnlocked;
+  // v0.4.7 unlock + arc flags (older saves simply default everything false)
+  _heliosEngineUnlocked=!!save._heliosEngineUnlocked; _vexEngineUnlocked=!!save._vexEngineUnlocked; _singularityEngineUnlocked=!!save._singularityEngineUnlocked;
+  _heliumCarUnlocked=!!save._heliumCarUnlocked; _solarCarUnlocked=!!save._solarCarUnlocked; _superconCarUnlocked=!!save._superconCarUnlocked; _trussCarUnlocked=!!save._trussCarUnlocked; _reactorCarUnlocked=!!save._reactorCarUnlocked;
+  _titanplateCarUnlocked=!!save._titanplateCarUnlocked; _warpsteelCarUnlocked=!!save._warpsteelCarUnlocked; _cannonCarUnlocked=!!save._cannonCarUnlocked; _laserCarUnlocked=!!save._laserCarUnlocked; _shieldCarUnlocked=!!save._shieldCarUnlocked;
+  _heliosArcStarted=!!save._heliosArcStarted; _militaryArcStarted=!!save._militaryArcStarted; _warpsteelRecipeKnown=!!save._warpsteelRecipeKnown;
+  _v47ProdTotals=(save._v47ProdTotals&&typeof save._v47ProdTotals==='object')?save._v47ProdTotals:{};
   _steelProdLog=Array.isArray(save._steelProdLog)?save._steelProdLog:[];
   _steelMissionTimerMs=0; // re-armed by updateMissions() if the design_better_train intro hasn't fired yet
   _sensorUpgradeActive=!!save._sensorUpgradeActive; _stationCostDiscount=save._stationCostDiscount||0;
+  _sensorUpgrade2Active=!!save._sensorUpgrade2Active; _heliosEngDiscount=save._heliosEngDiscount||0;
+  _portalActive=!!save._portalActive; _zetaGenerated=!!save._zetaGenerated;
+  if(_zetaGenerated) _applyZetaWorldExtent(); else WORLD_E_X=WORLD_W;
+  if(_portalActive) _ensurePortalProxies();
+  _combineFounded=!!save._combineFounded;
+  _combineHostility=typeof save._combineHostility==='number'?save._combineHostility:25;
+  _combineCredits=typeof save._combineCredits==='number'?save._combineCredits:0;
+  _hiveTradeUnits=typeof save._hiveTradeUnits==='number'?save._hiveTradeUnits:0;
+  _combineKills=typeof save._combineKills==='number'?save._combineKills:0;
+  _combineDefeated=!!save._combineDefeated; _combineArmistice=!!save._combineArmistice;
+  _combatProjectiles=[]; _combatBeams=[]; _combatFx=[]; _combatScanAcc=99;
+  _heliosTimerMs=0; // intro timer re-arms post-load if conditions still hold
   _playerDeliveryCount=typeof save._playerDeliveryCount==='number'?save._playerDeliveryCount:0;
   _galaxyCensusTimerMs=0; // timer resets on load; updateMissions() will re-arm if needed
   // Ancient Schematics trigger is transient — the saved missions array (gated
@@ -32191,20 +37364,20 @@ function _restoreFromSave(save){
   // early save where the player hasn't built a foundry yet). Restore the shown
   // flag; never resume an in-flight fade.
   _foundryCalloutShown=!!save._foundryCalloutShown; _foundryCalloutStartMs=0; _foundryCalloutFadeOutStartMs=0; _foundryCardScreenBounds=null;
-  pendingUpgradeUnlocks=[];
+  pendingUpgradeUnlocks=[]; pendingMissionRewards=[]; pendingFirstDeliveries=[];
+  _foundryConstructedPopupShown=!!save._foundryConstructedPopupShown; _foundryConstructedPopupPending=false;
+  _ironDeliveredToNonDesert=!!save._ironDeliveredToNonDesert;
   // Loaded games have played before — treat speed-tip as permanently suppressed.
   _speedTipSuppressed=true; _speedTipStartMs=0; _speedTipNextRealMs=0; _speedTipFadeOutStartMs=0;
   _missionTipFired=true; _missionTipStartMs=0; _missionTipPending=false;   // suppress M-tip on loaded games
-  // Re-arm the buy_second_train → upgrade_station 10 s gate if buy_second_train
-  // is completed in the save but upgrade_station hasn't been introduced yet.
-  {
-    const _bstDone=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='buy_second_train'&&m.status==='completed');
-    const _usIntroduced=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='upgrade_station');
-    _buyTrainCompletedMs=(_bstDone && !_usIntroduced)?Date.now():0;
-  }
+  // Re-arm the IRON CAR unlock → upgrade_station 10 s gate. Reset the timer so the
+  // updateMissions one-shot re-stamps it from the restored _ironCarUnlocked flag;
+  // the gate then re-introduces upgrade_station only if it isn't already present.
+  _ironCarUnlockedMs=0; _buyTrainCompletedMs=0;
   _firstNonLowOrbitFired=true; _orbitHintStartMs=0; _orbitHintPlanetId=-1; // suppress orbit-hint on loaded games
   _prevActivePopupForSfx=null;
   _visitPlanetCompletedMs=0;
+  _lavaDetailsWasOpen=false; _lavaClosedTimerMs=0; _orijenDetailsOpenedTut=false; _crOrijenFramed=false;
   _tutorialDoneMs=0;
   _crTutorialDoneMs=0;
   _findOreTimerMs=0;
@@ -32216,16 +37389,34 @@ function _restoreFromSave(save){
   const _crIntroduced=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='create_route');
   const _vpDone=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='visit_planet'&&m.status==='completed');
   if(_vpDone && !_crIntroduced) _visitPlanetCompletedMs=Date.now();
-  if(_tutorialPhase==='done'&&!_crIntroduced) _tutorialDoneMs=Date.now();
+  // create_route is queued once the Orijen window has been opened. For a save taken
+  // at cr_pending_accept (or 'done') before create_route was introduced, set the
+  // opened flag so the intro fires shortly after load.
+  if((_tutorialPhase==='cr_pending_accept'||_tutorialPhase==='done')&&!_crIntroduced){ _tutorialDoneMs=Date.now(); _lavaClosedTimerMs=Date.now(); _orijenDetailsOpenedTut=true; _ftFirstTrainTutDone=true; }
+  // If the save was taken DURING the first-train tutorial segment, restore its
+  // "framed" flag so the camera re-locks on the train after load.
+  if(_tutorialPhase==='ft_focus_train') _ftFocusFramed=false;
   // Re-arm the create_route → build_foundry 10 s gate if create_route is
   // completed in the save but build_foundry hasn't been introduced yet.
   const _bfIntroduced=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='build_foundry');
   const _crDone=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='create_route'&&m.status==='completed');
   if(_crDone && !_bfIntroduced) _findOreTimerMs=Date.now();
+  // IRON FOUNDRY unlocks when build_foundry is ACCEPTED — so a loaded game whose
+  // build_foundry mission is already active or completed should have it unlocked.
+  _foundryUnlockSd=0;
+  const _bfActiveOrDone=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='build_foundry'&&(m.status==='active'||m.status==='completed'));
+  if(_bfActiveOrDone && !_foundryUnlocked) _foundryUnlocked=true;
   // Re-arm the produce_iron → buy_second_train 10 s gate.
   const _bstIntroduced=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='buy_second_train');
   const _pIDone=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='produce_iron'&&m.status==='completed');
   if(_pIDone && !_bstIntroduced) _produceIronTimerMs=Date.now();
+  // Re-arm the build_foundry → produce_iron 15 s intro delay if it was mid-countdown
+  // when the game was saved (build_foundry done, produce_iron not yet introduced).
+  _produceIronIntroAtMs=0;
+  const _bfCompleted=Array.isArray(save.missions)&&save.missions.some(m=>m.id==='build_foundry'&&m.status==='completed');
+  const _pIIntroduced=(Array.isArray(save.missions)&&save.missions.some(m=>m.id==='produce_iron'))
+                    ||(Array.isArray(save.pendingMissionIntros)&&save.pendingMissionIntros.some(e=>e&&e.defId==='produce_iron'));
+  if(_bfCompleted && !_pIIntroduced) _produceIronIntroAtMs=Date.now()+15000;
   if(_tutorialPhase==='all_done'&&!_bstIntroduced) _crTutorialDoneMs=Date.now();
   _newspaper=null; // never show newspaper immediately on load
   _newspaperLastSd=save._newspaperLastSd||Math.floor(save.stardate);
@@ -32239,6 +37430,10 @@ function _restoreFromSave(save){
   _sandstormCheckSd=save._sandstormCheckSd||0; _bhResearchTimerMs=0; _madScientistTimerMs=0; _anotherDimTimerMs=0; // real-time timers: re-arm fresh on load
   _totalPassengersDelivered=save._totalPassengersDelivered||0; _totalHazmatIncinerated=save._totalHazmatIncinerated||0;
   _anyCargoProduced=!!save._anyCargoProduced;
+  // Route-blocked education: persist the once-per-career "seen it" flags; reset the
+  // transient session state so a loaded game never resumes a stale callout/popup.
+  _firstStarBlockShown=!!save._firstStarBlockShown; _firstRangeBlockShown=!!save._firstRangeBlockShown;
+  _blockEduStartMs=0; _blockEduPopupShown=false; _blockEduTrainIdx=-1; _blockEduReason='';
   trainyard=save.trainyard||{}; financeLedger=save.financeLedger||[]; _ledgerSummary=save._ledgerSummary||{totalRevenue:0,totalCost:0,totalInterest:0}; purchaseLedger=save.purchaseLedger||[]; corpValueHistory=save.corpValueHistory||{};
   corpStatsHistory=save.corpStatsHistory||{}; aiCorpStatsHistory=save.aiCorpStatsHistory||{};
   // Migrate old trainyard format {type: count} → {type: [carRecord]} so the
@@ -32292,16 +37487,18 @@ function _restoreFromSave(save){
     const _saveHasUpg=(uid)=>!!(galaxy&&galaxy.planets&&galaxy.planets.some(q=>(q.upgrades||[]).includes(uid)));
     const _missDone=(id)=>missions.some(m=>m.id===id&&m.status==='completed');
     const _anyPlanet=(pred)=>!!(galaxy&&galaxy.planets&&galaxy.planets.some(pred));
-    _foundryUnlocked      = !!save._foundryUnlocked      || _missDone('create_route') || _saveHasUpg('iron_foundry') || !!_ironCarUnlocked;
+    _foundryUnlocked      = true; // IRON FOUNDRY is unlocked by default for all games (new + loaded)
     _largeStationUnlocked = !!save._largeStationUnlocked || _missDone('produce_iron')  || !!_ironCarUnlocked || _anyPlanet(q=>q.hasLargeStation||q.hasTerminal);
     _terminalUnlocked     = !!save._terminalUnlocked     || !!_steelCarUnlocked || _anyPlanet(q=>q.hasTerminal);
     _bakeryUnlocked       = !!save._bakeryUnlocked       || _saveHasUpg('bakery') || _anyPlanet(q=>q.type&&q.type.id==='agri'&&visitedPlanetIds.has(q.id));
     _glassworksUnlocked   = !!save._glassworksUnlocked   || _saveHasUpg('glassworks') || _sandAndChemicalCarsDiscovered();
   }
-  pendingUpgradeUnlocks=[];
+  pendingUpgradeUnlocks=[]; pendingMissionRewards=[]; pendingFirstDeliveries=[];
   pendingMissionIntros=save.pendingMissionIntros||[];
   pendingGoldDiscoveries=save.pendingGoldDiscoveries||[];
   pendingDiamondDiscoveries=save.pendingDiamondDiscoveries||[];
+  pendingUraniumDiscoveries=save.pendingUraniumDiscoveries||[];
+  pendingArtifactDiscoveries=save.pendingArtifactDiscoveries||[];
   pendingCarUnlocks=[];
   pendingEngineUnlocks=[];
   pendingAncientPopups=[]; // queue is transient — never restored from save
@@ -32357,6 +37554,8 @@ function _restoreFromSave(save){
     if(_t.routeCounts){ for(const _k in _t.routeCounts) _sc+=_t.routeCounts[_k]||0; }
     _t._segmentCount=_sc;
   }
+  // v0.4.7: rebuild the Combine train index list from the isCombine flags.
+  _relinkCombineTrains();
   // Restore routeStops (UI route selection)
   routeStops=(save.routeStops||[]).map(r=>_gp(r.id)).filter(Boolean);
   // Restore selection from the saved id-based encoding. Falls back to the
@@ -32406,7 +37605,6 @@ function _restoreFromSave(save){
   _chatLog=[]; _chatLogHover=false; _chatLogHoverA=0; _chatLogLastDrawMs=0;
   _chatMsg('GAME LOADED — STARDATE '+stardate.toFixed(2),'rgba(80,220,130,1)');
   // Transition to game
-  document.getElementById('refresh-btn').classList.add('hidden');
   gs='galaxy';
   _aiDifficulty=save._aiDifficulty||'none';
   if(save._aiCorp){
@@ -32822,7 +38020,7 @@ function startGame(){
   // runs at title PLAY, BEFORE the player picks their corp name in corpsetup,
   // so corpName is still the default placeholder at this point. It fires at
   // the fadein → galaxy transition instead (same as the game_start GA event).
-  activePopup=null; popupState={}; gameSpeedIdx=SPEED_DEFAULT_IDX; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _missionTipPending=false; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _foundryCompletedMs=0; _produceIronTimerMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _ancientSchematicsTimerMs=0; _ancientSchematicsPlanetId=-1; _ancientSchematicsFired=false; _hasZoomed=false; _buyTrainTipStartMs=0; _buyTrainTipShown=false; _prevActivePopupForSfx=null; _missionTipFired=false; _visitPlanetCompletedMs=0; _tutorialDoneMs=0; _crTutorialDoneMs=0; _firstNonLowOrbitFired=false; _orbitHintStartMs=0; _orbitHintPlanetId=-1; _crTrainPreselected=false; _foundryCalloutShown=false; _foundryCalloutStartMs=0; _foundryCalloutFadeOutStartMs=0; _foundryCardScreenBounds=null; _foundryUnlocked=false; _largeStationUnlocked=false; _terminalUnlocked=false; _bakeryUnlocked=false; _glassworksUnlocked=false; pendingUpgradeUnlocks=[];
+  activePopup=null; popupState={}; gameSpeedIdx=SPEED_DEFAULT_IDX; _popupCooldownUntil=0; _prevHadPopup=false; _missionTipStartMs=0; _missionTipPending=false; _speedTipStartMs=0; _speedTipSuppressed=false; _zoomCalloutStartMs=0; _createRouteTimerMs=0; _findOreTimerMs=0; _foundryCompletedMs=0; _produceIronTimerMs=0; _ironCarUnlockedMs=0; _steelMissionTimerMs=0; _galaxyCensusTimerMs=0; _ancientSchematicsTimerMs=0; _ancientSchematicsPlanetId=-1; _ancientSchematicsFired=false; _hasZoomed=false; _buyTrainTipStartMs=0; _buyTrainTipShown=false; _prevActivePopupForSfx=null; _missionTipFired=false; _visitPlanetCompletedMs=0; _tutorialDoneMs=0; _crTutorialDoneMs=0; _firstNonLowOrbitFired=false; _orbitHintStartMs=0; _orbitHintPlanetId=-1; _crTrainPreselected=false; _foundryCalloutShown=false; _foundryCalloutStartMs=0; _foundryCalloutFadeOutStartMs=0; _foundryCardScreenBounds=null; _foundryUnlocked=true; _foundryUnlockSd=0; _largeStationUnlocked=false; _terminalUnlocked=false; _bakeryUnlocked=false; _glassworksUnlocked=false; pendingUpgradeUnlocks=[];
   _newspaper=null; _newspaperLastSd=829; _newspaperPrevSpeed=0; _newspaperNextHover=false; _newspaperNextBounds=null; _newspaperPrevHover=false; _newspaperPrevBounds=null; _newspaperArchive=[]; _newspaperViewIdx=null; _paperMajorUsed=[]; _paperMinorUsed=[]; _paperLayout=0; _paperIssueNum=0; _paperIdx=randInt(0,_PAPER_NAMES.length-1); _newsEventLog=[]; _newsSnapshot=null;
   _speedLeftHover=false; _speedRightHover=false; _panelTabHover=null; _routeHereBtnHover=false; _assignBtnHover=false; _cancelRouteBtnHover=false; _planetStarNameHover=false; _starPanelPlanetHover=-1; _trainAddHover=false; _trainRowHover=-1; _pokedexSortHover=false; _pokedexRowHover=-1; _starRegistrySortHover=false; _starRegistryRowHover=-1; _goldOkHover=false; _diamondOkHover=false; _carUnlockOkHover=false; _quitYesHover=false; _quitNoHover=false; _saveGameBtnHover=false; _startBtnHover=false; _loadBtnHover=false; _htpBtnHover=false; _htpDotHover=-1; _htpSkipHover=false; pokedexRowBounds=[]; starRegistryRowBounds=[]; loadBtnBounds=null; saveGameBtnBounds=null;
   fogPoints=[]; fogGridSet=new Set(); fogCanvas=null;
@@ -32835,24 +38033,38 @@ function startGame(){
   visitedPlanetIds=new Set(); planetOrbitCounts={};
   revealedStarIds=new Set(); revealedStarsInOrder=[]; fogStarReveals=[];
   revealedOrbitedPlanetIds=new Set(); discoveredPlanetIds=new Set();
-  panelScroll=0; stationPanelScroll=0; panelTab='trains';
-  stardate=829.00; credits=250000; creditSnapshots=[]; lastCreditSnapshotSd=829.00; creditDelta=0;
+  panelScroll=0; stationPanelScroll=0; panelTab='trains'; _stationFilters.clear();
+  stardate=829.00; credits=PLAYER_START_CREDITS; creditSnapshots=[]; lastCreditSnapshotSd=829.00; creditDelta=0;
   _rivalCorpWarnTenth=0; // arm the 9 pre-founding chat warnings for the new game
   cargoParticles=[]; creditFloats=[]; pendingCreditDeltas=[]; trainyard={}; zoomReturnPos=null; zoomReturnTimer=0;
   pendingGoldDiscoveries=[];
   pendingDiamondDiscoveries=[];
+  pendingUraniumDiscoveries=[];
+  pendingArtifactDiscoveries=[];
   pendingCarUnlocks=[];
   pendingEngineUnlocks=[];
+  pendingMissionRewards=[]; pendingFirstDeliveries=[];
+  _foundryConstructedPopupPending=false; _foundryConstructedPopupShown=false; _ironDeliveredToNonDesert=false;
   pendingMissionIntros=[];
   pendingAncientPopups=[]; _ancientTranslatedWords=new Set();
   _ironCarUnlocked=false; _steelCarUnlocked=false; _glassCarUnlocked=false; _machineryCarUnlocked=false; _hazmatCarUnlocked=false; _royalCarUnlocked=false; _flowersCarUnlocked=false; _medicalCarUnlocked=false; _grainCarUnlocked=false; _livestockCarUnlocked=false; _fruitCarUnlocked=false; _cargoCarUnlocked=false; _cheatUnlockAllCars=false; _totalPassengersDelivered=0; _totalHazmatIncinerated=0; _anyCargoProduced=false;
+  _heliosEngineUnlocked=false; _vexEngineUnlocked=false; _singularityEngineUnlocked=false;
+  _heliumCarUnlocked=false; _solarCarUnlocked=false; _superconCarUnlocked=false; _trussCarUnlocked=false; _reactorCarUnlocked=false;
+  _titanplateCarUnlocked=false; _warpsteelCarUnlocked=false; _cannonCarUnlocked=false; _laserCarUnlocked=false; _shieldCarUnlocked=false;
+  _heliosArcStarted=false; _militaryArcStarted=false; _warpsteelRecipeKnown=false; _v47ProdTotals={};
+  _firstStarBlockShown=false; _firstRangeBlockShown=false; _blockEduStartMs=0; _blockEduPopupShown=false; _blockEduTrainIdx=-1; _blockEduReason='';
   _classJEngineUnlocked=false; _classREngineUnlocked=false; _N700EngineUnlocked=false;
-  _steelProdLog=[]; _steelMissionTimerMs=0;
+  _steelProdLog=[]; _steelMissionTimerMs=0; _produceIronIntroAtMs=0;
   _sensorUpgradeActive=false; _stationCostDiscount=0; _galaxyCensusTimerMs=0; _sandstormCheckSd=0; _bhResearchTimerMs=0; _madScientistTimerMs=0; _anotherDimTimerMs=0;
+  _sensorUpgrade2Active=false; _heliosEngDiscount=0; _portalActive=false; _zetaGenerated=false; _heliosTimerMs=0; _ignitionFxStartMs=0;
+  WORLD_E_X=WORLD_W; // camera bound retracts to the Alpha galaxy on new game
+  _combineFounded=false; _combineHostility=25; _combineCredits=0; _combineTrainIdxs=[]; _combatProjectiles=[];
+  _combatBeams=[]; _combatFx=[]; _combatScanAcc=99; _hiveTradeUnits=0; _combineKills=0;
+  _combineDefeated=false; _combineArmistice=false; _alphaCamMem=null; _zetaCamMem=null;
   _playerDeliveryCount=0; // new game starts with zero successful deliveries logged
   missions=[]; _recomputeMissionTargets();
   _gameStartSd=stardate;
-  pendingMissionIntros=MISSION_DEFS.filter(def=>!def.prerequisite&&def.id!=='visit_planet'&&def.id!=='build_foundry'&&def.id!=='dispose_hazmat'&&def.id!=='lost_colony'&&def.id!=='seeking_home'&&def.id!=='create_route'&&def.id!=='research_royal_car'&&def.id!=='colony_train'&&def.id!=='spread_the_seed'&&def.id!=='famine'&&def.id!=='outbreak'&&def.id!=='stellar_cartography'&&def.id!=='galaxy_census'&&def.id!=='sandstorm_relief'&&def.id!=='bh_research'&&def.id!=='design_better_train'&&def.id!=='buy_second_train'&&def.id!=='galactic_distance'&&def.id!=='corporate_expansion'&&def.id!=='ancient_schematics'&&def.id!=='another_dimension'&&def.id!=='more_scientists').map(def=>({defId:def.id,readySd:_gameStartSd+(def.startsAfter||0)}));
+  pendingMissionIntros=MISSION_DEFS.filter(def=>!def.prerequisite&&def.id!=='earn_first_credits'&&def.id!=='visit_planet'&&def.id!=='build_foundry'&&def.id!=='dispose_hazmat'&&def.id!=='lost_colony'&&def.id!=='seeking_home'&&def.id!=='create_route'&&def.id!=='research_royal_car'&&def.id!=='colony_train'&&def.id!=='spread_the_seed'&&def.id!=='famine'&&def.id!=='outbreak'&&def.id!=='stellar_cartography'&&def.id!=='galaxy_census'&&def.id!=='sandstorm_relief'&&def.id!=='bh_research'&&def.id!=='design_better_train'&&def.id!=='buy_second_train'&&def.id!=='galactic_distance'&&def.id!=='corporate_expansion'&&def.id!=='ancient_schematics'&&def.id!=='another_dimension'&&def.id!=='more_scientists').map(def=>({defId:def.id,readySd:_gameStartSd+(def.startsAfter||0)}));
   financeLedger=[]; _ledgerSummary={totalRevenue:0,totalCost:0,totalInterest:0}; purchaseLedger=[]; corpValueHistory={}; corpStatsHistory={}; aiCorpStatsHistory={}; _financeScrollY=0; _financeBreakdown='stardate'; _financeDropdownOpen=false; _versusMetric='value'; _versusDropdownOpen=false; _corpId=null; _lbBestRanks={};
   loans=[]; _loanCounter=0; _financeTab='financials'; _financeLoanSelected='small'; _financeLoanHover=null; _financeTakeLoanHover=false;
   // Fresh pool of issuer names per game; assign one to each loan tier
@@ -32904,12 +38116,7 @@ function startGame(){
   // the flow (title PLAY → startGame() runs BEFORE corpsetup + aiselect).
   // It fires later at the fadein → galaxy transition, once setup is final.
   gs='fadeout'; fadeA=0;
-  document.getElementById('refresh-btn').classList.add('hidden');
 }
-
-document.getElementById('refresh-btn').addEventListener('click',()=>{
-  makeTrain(); makeTitlePlanets();
-});
 
 // ─── newspaper functions ────────────────────────────────────────────────────
 // Append a game event to the rolling news event log (called at key game moments)
@@ -33701,6 +38908,10 @@ function _drawNewspaper(){
 // ── init + loop ───────────────────────────────────────────────
 function init(){
   testOrbits();
+  // Bake the tinted derived sprites (new v0.4.7 cars/engines) before anything
+  // renders — all source images are loaded by the time init() runs (onLoad
+  // counter gates it), so every derived canvas registers synchronously.
+  _registerDerivedSprites();
   buildNebula(); makeStars(); makeTitlePlanets(); makeTrain();
   // Bake the per-scheme nebula sheet tiles once at init — the cloud
   // pattern is shared across all four schemes so blending stays seamless.
@@ -33831,6 +39042,10 @@ function loop(ts){
     // Render it on top of the title art when active so the player can pick
     // a slot without leaving the title.
     if(activePopup==='savemanager'){ _sbBounds=[]; drawSaveManagerPopup(); }
+    // Options (gear button) — opens over the title art; SAVE GAME is hidden
+    // here (popupState.noSave). Controls popup can also open from inside it.
+    if(activePopup==='options') drawOptionsPopup();
+    if(activePopup==='controls') drawControlsPopup();
   } else if(gs==='leaderboard'){
     drawLeaderboardScreen();
   } else if(gs==='fadeout'){
@@ -33847,6 +39062,8 @@ function loop(ts){
   } else if(gs==='fadein'){
     _invalidateOccOrbit(); for(const t of trains) updateTrain(t,dtG);
     updateAICorp(dtG);
+    updateCombine(dtG);
+    updateCombat(dtG);
     updatePlanetOrbits(dtG,dt);
     updateFog(_dtSd);
     _updateCargoParticles(dtG);
@@ -33907,6 +39124,8 @@ function loop(ts){
   } else if(gs==='galaxy'){
     _invalidateOccOrbit(); for(const t of trains) updateTrain(t,dtG);
     updateAICorp(dtG);
+    updateCombine(dtG);
+    updateCombat(dtG);
     updatePlanetOrbits(dtG,dt);
     updateFog(_dtSd);
     _updateCargoParticles(dtG);
@@ -33926,6 +39145,9 @@ function loop(ts){
       if(heldKeys.has('w')) _wsdDy-=1;
       if(heldKeys.has('s')) _wsdDy+=1;
       if(_wsdDx||_wsdDy){
+        // On the first frame of a pan, remember when it started and whether we
+        // were following a selection (so a brief nudge can re-lock on release).
+        if(!_wasdPanActivePrev){ _wasdPanStartMs=Date.now(); _wasdPanWasTracking=tracking; _wasdPanActivePrev=true; }
         if(_wsdDx&&_wsdDy){_wsdDx*=0.7071;_wsdDy*=0.7071;}
         const _PAN_PX_FRAME=10; // screen pixels per ~60-fps frame
         const _wsdPx=cam.x,_wsdPy=cam.y;
@@ -33940,6 +39162,25 @@ function loop(ts){
         // cam.scale, same as the tracking branch at line ~21041.
         starPan.x-=(_wsdPx-cam.x)*cam.scale;
         starPan.y-=(_wsdPy-cam.y)*cam.scale;
+      } else if(_wasdPanActivePrev){
+        // WASD pan just released. If it was a brief (<1 s) nudge while following a
+        // selected object that's still (at least partly) on-screen, resume
+        // following it from the current framing (no snap).
+        _wasdPanActivePrev=false;
+        if(_wasdPanWasTracking && sel && (Date.now()-_wasdPanStartMs)<1000){
+          const _rp=getSelWorldPos();
+          if(_rp){
+            const [_rsx,_rsy]=w2s(_rp[0],_rp[1]);
+            let _rR=20;
+            if(sel.type==='planet')    _rR=Math.max(8,(sel.data.radius||30)*cam.scale);
+            else if(sel.type==='star') _rR=Math.max(10,(sel.data.radius||60)*cam.scale);
+            else if(sel.type==='car')  _rR=30;
+            if(_rsx>=-_rR && _rsx<=(W-PANEL_W)+_rR && _rsy>=TOP_H-_rR && _rsy<=GH+_rR){
+              tracking=true; trackingOffset={x:cam.x-_rp[0],y:cam.y-_rp[1]};
+            }
+          }
+        }
+        _wasdPanWasTracking=false;
       }
       // Up/Down arrows: steady zoom around screen center while held. Rate is
       // ~1.015 per 60-fps frame (≈ ×2.4 per real second), tuned to feel
@@ -33973,10 +39214,13 @@ function loop(ts){
     // Show new-mission intro popup (timed or prerequisite-unlocked).
     // Hold while at the active-mission cap, or during the 10 s post-completion
     // release delay — the ready intro just stays queued in pendingMissionIntros.
-    if(!activePopup&&pendingMissionIntros.length>0&&Date.now()>=_popupCooldownUntil
+    // ALSO hold while a "Mission Completed" reward popup is still pending: when a
+    // mission completion ALSO triggers a follow-up mission intro, the completion
+    // popup must be acknowledged first (see the mission_reward gate below).
+    if(!activePopup&&pendingMissionRewards.length===0&&pendingMissionIntros.length>0&&Date.now()>=_popupCooldownUntil
        && Date.now()>=_missionReleaseAtMs
        && missions.filter(m=>m.status==='active').length<_MAX_ACTIVE_MISSIONS){
-      const _nmiIdx=pendingMissionIntros.findIndex(e=>stardate>=e.readySd);
+      const _nmiIdx=pendingMissionIntros.findIndex(e=>stardate>=e.readySd && _missionCarGateOk(e.defId));
       if(_nmiIdx>=0){
         const _nmiE=pendingMissionIntros.splice(_nmiIdx,1)[0];
         const _nmDef=MISSION_DEFS.find(d=>d.id===_nmiE.defId);
@@ -33995,7 +39239,12 @@ function loop(ts){
             _homeSteelDelivered:0,_homeBatteryDelivered:0,_homeOilDelivered:0,
             _rockyDelivered:false,_colonistsLoaded:false,
             _colonistsDelivered:false,_routeAssigned:false,_trainRouted:false,_routeBtnClicked:false,_trainArrivedAtTarget:false,
-            _origenPassengersCount:_totalPassengersDelivered
+            // research_royal_car: ALWAYS start the "deliver 50 to Orijen" count at
+            // 0 when the mission is introduced — it counts only passengers delivered
+            // AFTER acceptance, regardless of how many were delivered before (the
+            // 100-delivery intro gate would otherwise pre-satisfy it and the mission
+            // would silently auto-complete the instant it appeared).
+            _origenPassengersCount:0
           };
           const _preCompObjIds=new Set(_nmDef.objectives.filter(o=>_nmDef.checkObj(o.id,_tmpM)).map(o=>o.id));
           const _allPreDone=_preCompObjIds.size===_nmDef.objectives.length;
@@ -34089,20 +39338,49 @@ function loop(ts){
       const _ae=pendingAncientPopups[0];
       popupState={ancientPlanetId:_ae.planetId, ancientPlanetName:_ae.planetName};
     }
-    // Show diamond discovery popup when nothing else is blocking
-    if(pendingCarUnlocks.length>0&&!activePopup){
+    // Show diamond discovery popup when nothing else is blocking.
+    // (pendingMissionRewards gate: a mission completion that also unlocks a car
+    // must show its "Mission Completed" popup BEFORE the car-unlock window.)
+    if(pendingCarUnlocks.length>0&&!activePopup&&pendingMissionRewards.length===0){
       gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='car_unlock';
       popupState={carUnlock:pendingCarUnlocks[0]};
+      // Focus + select the planet where the discovery was made so the camera
+      // starts tracking it, zoomed to 80% of log scale (mirrors gold/diamond).
+      const _cuPid=pendingCarUnlocks[0].planetId;
+      const _cuP=(_cuPid!=null&&galaxy)?galaxy.planets[_cuPid]:null;
+      if(_cuP){
+        sel={type:'planet',data:_cuP}; routeStops=[]; assignPending=false; routeHerePending=false;
+        const _zTarget=Math.exp(Math.log(MIN_SC)+0.80*(Math.log(MAX_SC)-Math.log(MIN_SC)));
+        cam.scale=Math.max(MIN_SC,Math.min(MAX_SC,_zTarget));
+        cam.x=_cuP.x+(PANEL_W)/(2*cam.scale); cam.y=_cuP.y; clampCamera();
+        tracking=true; trackingOffset={x:cam.x-_cuP.x,y:cam.y-_cuP.y};
+      }
     }
     // Engine-unlock revenue check + popup trigger
     _checkEngineUnlocks();
-    if(pendingEngineUnlocks.length>0&&!activePopup){
+    if(pendingEngineUnlocks.length>0&&!activePopup&&pendingMissionRewards.length===0){
       gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='engine_unlock';
       popupState={engineUnlock:pendingEngineUnlocks[0]};
     }
-    if(pendingUpgradeUnlocks.length>0&&!activePopup){
+    // Iron-foundry "constructed" popup: deferred until the foundry is built AND
+    // the player has closed that planet's details window (so !activePopup). Queues
+    // the upgrade-unlock popup with constructed:true so it shows the re-titled
+    // "NEW UPGRADE CONSTRUCTED" header. Fires once (shown latch).
+    if(_foundryConstructedPopupPending&&!activePopup){
+      _foundryConstructedPopupPending=false; _foundryConstructedPopupShown=true;
+      pendingUpgradeUnlocks.push({key:'iron_foundry',constructed:true});
+    }
+    if(pendingUpgradeUnlocks.length>0&&!activePopup&&pendingMissionRewards.length===0){
       gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='upgrade_unlock';
       popupState={upgradeUnlock:pendingUpgradeUnlocks[0]};
+    }
+    if(pendingMissionRewards.length>0&&!activePopup){
+      gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='mission_reward';
+      popupState={missionReward:pendingMissionRewards[0]};
+    }
+    if(pendingFirstDeliveries.length>0&&!activePopup){
+      gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='first_delivery';
+      popupState={firstDelivery:pendingFirstDeliveries[0]};
     }
     if(pendingDiamondDiscoveries.length>0&&!activePopup){
       playSound('discovery');
@@ -34117,6 +39395,36 @@ function loop(ts){
         cam.scale=Math.max(MIN_SC,Math.min(MAX_SC,_zTarget));
         cam.x=_ddP.x+(PANEL_W)/(2*cam.scale); cam.y=_ddP.y; clampCamera();
         tracking=true; trackingOffset={x:cam.x-_ddP.x,y:cam.y-_ddP.y};
+      }
+    }
+    // Uranium vein discovery popup (v0.4.7) — same flow as gold/diamond
+    if(pendingUraniumDiscoveries.length>0&&!activePopup){
+      playSound('discovery');
+      gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='uranium_discovery';
+      const _udPid=pendingUraniumDiscoveries[0];
+      popupState={uraniumPlanetId:_udPid};
+      const _udP=galaxy?.planets[_udPid];
+      if(_udP){
+        sel={type:'planet',data:_udP}; routeStops=[_udP];
+        const _zTarget=Math.exp(Math.log(MIN_SC)+0.80*(Math.log(MAX_SC)-Math.log(MIN_SC)));
+        cam.scale=Math.max(MIN_SC,Math.min(MAX_SC,_zTarget));
+        cam.x=_udP.x+(PANEL_W)/(2*cam.scale); cam.y=_udP.y; clampCamera();
+        tracking=true; trackingOffset={x:cam.x-_udP.x,y:cam.y-_udP.y};
+      }
+    }
+    // Alien artifact-cache discovery popup (v0.4.7 Zeta)
+    if(pendingArtifactDiscoveries.length>0&&!activePopup){
+      playSound('discovery');
+      gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='artifact_discovery';
+      const _adPid=pendingArtifactDiscoveries[0];
+      popupState={artifactPlanetId:_adPid};
+      const _adP=galaxy?.planets[_adPid];
+      if(_adP){
+        sel={type:'planet',data:_adP}; routeStops=[_adP];
+        const _zTarget=Math.exp(Math.log(MIN_SC)+0.80*(Math.log(MAX_SC)-Math.log(MIN_SC)));
+        cam.scale=Math.max(MIN_SC,Math.min(MAX_SC,_zTarget));
+        cam.x=_adP.x+(PANEL_W)/(2*cam.scale); cam.y=_adP.y; clampCamera();
+        tracking=true; trackingOffset={x:cam.x-_adP.x,y:cam.y-_adP.y};
       }
     }
     // Pre-founding countdown: one red chat-log message per tenth of a
@@ -34189,18 +39497,10 @@ html = f"""<!DOCTYPE html>
   #c{{display:block;image-rendering:pixelated;}}
   #tc{{display:block;image-rendering:auto;-webkit-font-smoothing:antialiased;
        -moz-osx-font-smoothing:grayscale;}}
-  #refresh-btn{{position:fixed;bottom:28px;right:28px;width:48px;height:48px;border-radius:50%;
-    background:rgba(30,40,80,0.85);border:2px solid #4af;color:#4af;font-size:22px;cursor:pointer;
-    display:flex;align-items:center;justify-content:center;transition:background .2s,transform .15s;
-    z-index:10;user-select:none;}}
-  #refresh-btn:hover{{background:rgba(60,80,160,0.95);transform:scale(1.1);}}
-  #refresh-btn:active{{transform:scale(0.95) rotate(30deg);}}
-  #refresh-btn.hidden{{display:none;}}
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<button id="refresh-btn" title="New train">&#x21BB;</button>
 <input id="name-edit" type="text" maxlength="32" autocomplete="off" spellcheck="false"
   style="position:fixed;display:none;background:rgba(4,8,28,0.97);color:#4af;border:1.5px solid rgba(80,160,255,0.7);
   outline:none;font:bold 11px Orbitron,sans-serif;padding:2px 6px;border-radius:2px;z-index:20;"/>

@@ -10,6 +10,10 @@ description: >
   no-UI / clean / cinematic / screenshot variant of the game, port it to a new
   version (e.g. v1.0.0), or asks "rebuild without UI", "make a no-UI version",
   "regenerate build_game_without_UI", "headless view build", "clean galaxy view".
+  Optional cinematic/video variant (Step 4b) ALSO strips all text from the intro
+  cutscene (narration, SKIP button, dim overlay) so the 11-shot camera loops as
+  clean, text-free footage — use for "video-ready", "promo clips", "remove
+  cutscene text", "text-free intro" requests.
 ---
 
 # Rebuild the game without UI
@@ -105,6 +109,44 @@ restore MUST still run — it closes the viewport clip) and END right before
 tracker, chat log, hint bar) uses self-contained `ctx.save()/restore()` pairs, so
 skipping the whole block leaves the canvas state balanced.
 
+### Step 4b — (cinematic / video variant ONLY) strip intro cutscene text
+
+Apply this step **only** when the user wants video-ready / promo / text-free
+cutscene footage. It is OPTIONAL — skip it for a plain no-UI screenshot build if
+the user still wants a readable, skippable intro.
+
+The intro cutscene is a SEPARATE render path (`gs==='howtoplay'`) that the Step-4
+galaxy guards never touch, so by default the no-UI build still plays the full
+narration. The cutscene's looping camera (`_drawCutsceneBg`) draws **no** in-world
+text — line `_clearTextOverlay(); // nothing in the cutscene bg writes HD text`
+confirms it — so the ONLY text in the cutscene is three calls in the intro draw
+function. Gate all three behind `!_NO_UI`.
+
+Find the block (anchor: `_introRenderText(ts);`) and wrap the dim overlay +
+narration + skip button:
+```js
+  // ── Cinematic dim overlay so the narration text reads cleanly. ─
+  if(!_NO_UI){
+    ctx.fillStyle='rgba(0,0,0,0.42)';
+    ctx.fillRect(0, 0, W, H);
+    _introRenderText(ts);     // narration (typed one word at a time)
+    _introRenderSkipBtn(ts);  // SKIP button (bottom-right)
+  }
+```
+(Keep whatever the current dim-overlay alpha/lines are — just wrap the whole
+block.) The dim overlay is gated too: it only exists to make narration legible,
+so with no text it would needlessly darken the footage; skipping it gives
+full-bright cinematic scenes.
+
+**Behavioural notes to relay to the user:**
+- There is NO time-based auto-exit from the cutscene — it leaves only on
+  click/key (advancing past the last `_INTRO_TEXT` paragraph) or ESC. So with
+  text removed the 11-shot camera loops **indefinitely** hands-free — ideal for
+  capture.
+- A click/keypress still silently advances the (now invisible) narration; after
+  ~3 it exits to the game, and ESC exits immediately. Tell the user NOT to touch
+  input during the cutscene if they want the loop.
+
 ### Things to KEEP (do NOT guard)
 - `drawPopupBase` and every popup draw (`drawPokedex`, `drawPlanetDetailPopup`,
   `drawRoutesPopup`, `drawCarDetailPopup`, `drawFinancesPopup`, …) — popups must
@@ -161,6 +203,9 @@ list to check in `index_without_UI.html`:
 8. Pan (WASD/drag) + zoom (Up/Down) — content fills edge-to-edge, no black bands.
 9. `python build_game.py` still produces a normal-UI `index.html` (sanity check
    the original wasn't touched).
+10. **(cinematic variant only)** On load the intro cutscene plays with ZERO text —
+    no narration, no SKIP button, no dim wash; scenes are full-bright and the
+    camera loops indefinitely if you don't touch input.
 
 ## Reference: the v0.4.x baseline
 

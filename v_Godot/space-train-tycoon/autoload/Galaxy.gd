@@ -1,0 +1,403 @@
+extends Node
+## Galaxy — procedural generation + world model. Ported from build_game.py
+## generateGalaxy() (~line 8339). See PLAN Phase 1, code map §15/§13.
+##
+## PHASE 1 SCOPE — LAYOUT GEOMETRY ONLY:
+##   ✔ black-hole placement (4 quadrants)
+##   ✔ star reject-sampling + sizes/colours
+##   ✔ home star (Gigi Prime, M yellow) + closest-to-origin rule
+##   ✔ planets: HOME_BIOMES fixed sequence (home) / bell distribution (others),
+##     sizes, orbit radii, angles (incl. Orijen/lava/desert anchors), biome,
+##     _initialOrbitAngle snapshot, world x/y
+##   ✔ system-overlap correction + close-neighbour "almost touching"
+##   ✔ alien-relic placement (4×4 sector grid, one per sector)
+##
+## STUBBED (TODO Phase 2/5 — they consume RNG in the JS, so bit-exact parity
+## with the JS stream is NOT yet claimed; see PLAN §9):
+##   ✗ population / supply / demand / economic health / cargo seeding (Economy)
+##   ✗ moons / clouds / rings / catchphrase (cosmetic → Phase 5)
+##   ✗ mission-role seeding (flowers/colony/famine/outbreak/bh) + gold/diamond
+##   ✗ AI mirror-system transform (_initAICorp)
+##
+## RNG: mulberry32 (deterministic, seedable). The JS currently uses unseeded
+## Math.random(); swapping it to this same algorithm + matching the call order
+## is what would upgrade us from invariant-parity to bit-exact parity.
+
+# ── World model (populated by generate()) ─────────────────────────────────
+var stars: Array = []        # {id,x,y,size,radius,colorName,name,planetIds[]}
+var planets: Array = []      # {id,starId,orbitRadius,orbitAngle,orbitSpeed,_initialOrbitAngle,x,y,size,radius,type,name,isStarter,hasStation,isAlienRelic}
+var black_holes: Array = []  # {x,y,radius}
+var home_star_id: int = 0
+var origen_id: int = 0       # the starter planet's id
+var _seed: int = 0
+
+# ── Seedable RNG (mulberry32) ─────────────────────────────────────────────
+var _rng_state: int = 0
+
+func _set_seed(s: int) -> void:
+	_seed = s
+	_rng_state = s & 0xFFFFFFFF
+
+func random() -> float:
+	# mulberry32 — matches the canonical JS reference bit-for-bit.
+	_rng_state = (_rng_state + 0x6D2B79F5) & 0xFFFFFFFF
+	var t: int = _rng_state
+	t = (t ^ (t >> 15)) * (t | 1) & 0xFFFFFFFF
+	t = (t ^ (t + ((t ^ (t >> 7)) * (t | 61) & 0xFFFFFFFF))) & 0xFFFFFFFF
+	return float((t ^ (t >> 14)) & 0xFFFFFFFF) / 4294967296.0
+
+func rand(a: float, b: float) -> float:
+	return random() * (b - a) + a
+
+func randInt(a: int, b: int) -> int:
+	return int(floor(rand(float(a), float(b) + 0.999)))
+
+func pick(arr: Array):
+	return arr[int(floor(random() * arr.size()))]
+
+func _pick_size() -> String:
+	var tot := 0
+	for x in Tuning.SIZE_W:
+		tot += x.w
+	var r := random() * tot
+	for x in Tuning.SIZE_W:
+		r -= x.w
+		if r <= 0:
+			return x.s
+	return "M"
+
+func _pick_star_size() -> String:
+	var r := random()
+	if r < 0.55:
+		return "S"
+	if r < 0.85:
+		return "M"
+	return "L"
+
+func _pick_star_color(sz: String) -> String:
+	if sz == "S":
+		return pick(Tuning.STAR_COLORS_S)
+	if sz == "M":
+		return pick(Tuning.STAR_COLORS_M)
+	return pick(Tuning.STAR_COLORS_L)
+
+func _bell_planet_count() -> int:
+	var u := 0.0
+	for i in 6:
+		u += random()
+	return int(clamp(round((u - 3.0) * 2.828 + 4.0), 1, 12))
+
+func _pick_biome_weighted() -> Dictionary:
+	var total := 0.0
+	for pt in Tuning.PTYPES:
+		total += Tuning.BIOME_WEIGHTS.get(pt.id, 1.0)
+	var r := random() * total
+	for pt in Tuning.PTYPES:
+		r -= Tuning.BIOME_WEIGHTS.get(pt.id, 1.0)
+		if r <= 0:
+			return pt
+	return Tuning.PTYPES[0]
+
+# ── Generation ────────────────────────────────────────────────────────────
+func generate(seed: int) -> void:
+	_set_seed(seed)
+	stars = []
+	planets = []
+	black_holes = []
+	var pid := 0
+	var W: float = Tuning.WORLD_W
+	var H: float = Tuning.WORLD_H
+
+	# Black holes: one per quadrant, placed before stars (build_game.py:8362).
+	var bh_quad := [[1, 1], [-1, 1], [-1, -1], [1, -1]]
+	for q in bh_quad:
+		var bhR := randInt(6000, 10000)
+		for _ba in 400:
+			var bx: float = rand(8000.0, W - 14000.0) * float(q[0])
+			var by: float = rand(8000.0, H - 14000.0) * float(q[1])
+			if sqrt(bx * bx + by * by) < 35000.0:
+				continue
+			var apart := true
+			for b in black_holes:
+				if Vector2(b.x - bx, b.y - by).length() < 40000.0:
+					apart = false
+					break
+			if not apart:
+				continue
+			black_holes.append({"x": bx, "y": by, "radius": float(bhR)})
+			break
+
+	# Reject-sample star positions (build_game.py:8378).
+	var attempt := 0
+	while attempt < 25000 and stars.size() < 300:
+		attempt += 1
+		var sz := _pick_star_size()
+		var sr: float = Tuning.STAR_R[sz]
+		var x := rand(-W + 9500.0, W - 9500.0)
+		var y := rand(-H + 9500.0, H - 9500.0)
+		var ok := true
+		for s in stars:
+			if Vector2(s.x - x, s.y - y).length() <= s.radius + sr + 12000.0:
+				ok = false
+				break
+		if not ok:
+			continue
+		for b in black_holes:
+			if Vector2(b.x - x, b.y - y).length() < b.radius + sr + 9000.0:
+				ok = false
+				break
+		if not ok:
+			continue
+		var cn := _pick_star_color(sz)
+		stars.append({
+			"id": stars.size(), "x": x, "y": y, "size": sz, "radius": sr,
+			"colorName": cn, "name": "S%d" % stars.size(), "planetIds": [],
+		})
+
+	# Home star = closest to origin (build_game.py:8390), forced M yellow Gigi Prime.
+	home_star_id = 0
+	var minD := INF
+	for s in stars:
+		var d: float = Vector2(s.x, s.y).length()
+		if d < minD:
+			minD = d
+			home_star_id = s.id
+	if not stars.is_empty():
+		var hs: Dictionary = stars[home_star_id]
+		hs.name = "Gigi Prime"
+		hs.size = "M"
+		hs.radius = Tuning.STAR_R["M"]
+		hs.colorName = "yellow"
+
+	# Planets per star.
+	origen_id = 0
+	for star in stars:
+		var isHome: bool = star.id == home_star_id
+		var np: int = Tuning.HOME_BIOMES.size() if isHome else _bell_planet_count()
+		var orbitCap: float = Tuning.HOME_ORBIT_CAP if isHome else Tuning.STAR_ORBIT_CAP
+		var boundLimit: float = min(W - abs(star.x), H - abs(star.y)) - 400.0
+		var orbitR: float = star.radius * 1.8 + 400.0
+		var dominantDir: int = 1 if random() < 0.5 else -1
+		var homeOrijenAngle: float = (PI if dominantDir > 0 else 0.0) if isHome else 0.0
+		var homeLavaAngle = null
+		for i in np:
+			var isStarter: bool = isHome and i == 1
+			var psz: String = "L" if isStarter else ("M" if (isHome and i == 0) else _pick_size())
+			var pr: float = Tuning.SIZE_R[psz]
+			orbitR += pr + (rand(280.0, 720.0) if isHome else rand(300.0, 1200.0))
+			if not isHome and orbitR > orbitCap:
+				break
+			if orbitR + pr > boundLimit:
+				break
+			var angle := rand(0.0, TAU)
+			if isHome and i == 0:
+				angle = homeOrijenAngle + (random() * 2.0 - 1.0) * (PI / 6.0)
+				homeLavaAngle = angle
+			elif isHome and i == 1:
+				angle = homeOrijenAngle
+			elif isHome and i == 2 and homeLavaAngle != null:
+				angle = homeLavaAngle
+			var forceDominant: bool = isHome and (i == 0 or i == 1)
+			var dir: int = dominantDir if forceDominant else (-dominantDir if random() < 0.02 else dominantDir)
+			var spd := 0.00025 * sqrt(800.0 / orbitR) * dir
+			var typeForSlot: Dictionary = Tuning.ptype(Tuning.HOME_BIOMES[i]) if isHome else _pick_biome_weighted()
+			var p := {
+				"id": pid, "starId": star.id,
+				"orbitRadius": orbitR, "orbitAngle": angle, "orbitSpeed": spd,
+				"_initialOrbitAngle": angle,
+				"x": star.x + orbitR * cos(angle), "y": star.y + orbitR * sin(angle),
+				"size": psz, "radius": pr,
+				"type": typeForSlot,
+				"name": "Orijen" if isStarter else "P%d" % pid,
+				"isStarter": isStarter,
+				"hasStation": false,   # set AFTER demand (JS order: 8532 demand, 8535 station)
+				"isAlienRelic": false,
+			}
+			pid += 1
+			if isStarter:
+				origen_id = p.id
+			_gen_planet_economy(p, isHome, isStarter, i)
+			if isStarter:
+				p.hasStation = true
+			star.planetIds.append(p.id)
+			planets.append(p)
+			orbitR += pr + (rand(180.0, 520.0) if isHome else rand(200.0, 800.0))
+
+	_separate_systems()
+	_place_relics()
+
+# Per-planet economy generation (build_game.py 8498-8534, JS RNG order:
+# population → desert-fix → gold → diamond → devLevel → agri → supply/demand →
+# non-agri pre-built upgrades). Cosmetic RNG (clouds/moons/ring) is skipped.
+func _gen_planet_economy(p: Dictionary, isHome: bool, isStarter: bool, home_idx: int) -> void:
+	if isStarter:
+		p.population = int(round(1e6 + random() * 9e6))
+	else:
+		p.population = Economy.generate_population(p)
+	if isHome and home_idx == 2 and p.type.id == "desert" and int(p.population) == 0:
+		p.population = int(round(5e4 + random() * 2e6))
+	var goldBiomes := ["rocky", "desert", "resort", "jungle", "ocean"]
+	p.hasGold = (not isHome) and (p.type.id in goldBiomes) and random() < 0.05
+	p.hasDiamond = (not isHome) and (p.type.id in goldBiomes) and random() < 0.02
+	if isStarter:
+		p.devLevel = 3
+	elif isHome:
+		p.devLevel = randInt(1, 2)
+	else:
+		p.devLevel = randInt(0, 3)
+	if p.type.id == "agri":
+		var aR := random()
+		if aR < 0.333:
+			p.grainUnlocked = true; p.upgrades = ["granary"]
+		elif aR < 0.667:
+			p.livestockUnlocked = true; p.upgrades = ["farm"]
+		else:
+			p.fruitUnlocked = true; p.upgrades = ["orchard"]
+	p.supplyRate = Economy.compute_supply_rate(p)
+	p.demandRate = Economy.compute_demand_rate(p)
+	p.economicHealth = Economy.compute_economic_health(p)
+	Economy.seed_cargo_planet(p)
+	if p.type.id != "agri":
+		# Only pumping_station has preBuiltBiomes (ocean) (build_game.py:1240).
+		p.upgrades = ["pumping_station"] if p.type.id == "ocean" else []
+
+
+# ── System-overlap correction + close-neighbour (build_game.py:8556-8652) ──
+func _separate_systems() -> void:
+	var W: float = Tuning.WORLD_W
+	var H: float = Tuning.WORLD_H
+	var n := stars.size()
+	var sysR := []
+	sysR.resize(n)
+	sysR.fill(0.0)
+	for p in planets:
+		sysR[p.starId] = max(sysR[p.starId], p.orbitRadius + p.radius)
+
+	var GAP: float = Tuning.SYS_GAP
+	for _pass in 40:
+		var anyOverlap := false
+		for i in n:
+			for j in range(i + 1, n):
+				var si: Dictionary = stars[i]
+				var sj: Dictionary = stars[j]
+				var dx: float = sj.x - si.x
+				var dy: float = sj.y - si.y
+				var dist: float = max(Vector2(dx, dy).length(), 1.0)
+				var need: float = sysR[i] + sysR[j] + GAP
+				if dist >= need:
+					continue
+				anyOverlap = true
+				var push := (need - dist) * 0.5 + 1.0
+				var ux := dx / dist
+				var uy := dy / dist
+				si.x -= ux * push; si.y -= uy * push
+				sj.x += ux * push; sj.y += uy * push
+				var m: float = float(sysR[i]) + 200.0
+				var mj: float = float(sysR[j]) + 200.0
+				si.x = clamp(si.x, -W + m, W - m)
+				si.y = clamp(si.y, -H + m, H - m)
+				sj.x = clamp(sj.x, -W + mj, W - mj)
+				sj.y = clamp(sj.y, -H + mj, H - mj)
+		if not anyOverlap:
+			break
+	_resync_planets()
+
+	# Close-neighbour "almost touching" (build_game.py:8598).
+	var homeMaxOrbit: float = sysR[home_star_id]
+	var home: Dictionary = stars[home_star_id]
+	var nearIdx := -1
+	var nearDist := INF
+	for i in n:
+		if i == home_star_id:
+			continue
+		var d: float = Vector2(stars[i].x - home.x, stars[i].y - home.y).length()
+		if d < nearDist:
+			nearDist = d
+			nearIdx = i
+	if nearIdx >= 0:
+		var nb: Dictionary = stars[nearIdx]
+		var nbSysR: float = sysR[nearIdx]
+		var edgeGap := rand(300.0, 550.0)
+		var targetDist := homeMaxOrbit + nbSysR + edgeGap
+		var dx2: float = nb.x - home.x
+		var dy2: float = nb.y - home.y
+		var cur2: float = max(Vector2(dx2, dy2).length(), 1.0)
+		nb.x = home.x + dx2 * (targetDist / cur2)
+		nb.y = home.y + dy2 * (targetDist / cur2)
+		nb.x = clamp(nb.x, -W + nbSysR + 400.0, W - nbSysR - 400.0)
+		nb.y = clamp(nb.y, -H + nbSysR + 400.0, H - nbSysR - 400.0)
+		for _pass2 in 30:
+			var anyOverlap := false
+			for i in n:
+				for j in range(i + 1, n):
+					if (i == home_star_id and j == nearIdx) or (i == nearIdx and j == home_star_id):
+						continue
+					var si: Dictionary = stars[i]
+					var sj: Dictionary = stars[j]
+					var ddx: float = sj.x - si.x
+					var ddy: float = sj.y - si.y
+					var dd: float = max(Vector2(ddx, ddy).length(), 1.0)
+					var need: float = sysR[i] + sysR[j] + GAP
+					if dd >= need:
+						continue
+					anyOverlap = true
+					var push := (need - dd) * 0.5 + 1.0
+					var ux := ddx / dd
+					var uy := ddy / dd
+					si.x -= ux * push; si.y -= uy * push
+					sj.x += ux * push; sj.y += uy * push
+					si.x = clamp(si.x, -W + sysR[i] + 200.0, W - sysR[i] - 200.0)
+					si.y = clamp(si.y, -H + sysR[i] + 200.0, H - sysR[i] - 200.0)
+					sj.x = clamp(sj.x, -W + sysR[j] + 200.0, W - sysR[j] - 200.0)
+					sj.y = clamp(sj.y, -H + sysR[j] + 200.0, H - sysR[j] - 200.0)
+			if not anyOverlap:
+				break
+		_resync_planets()
+
+## Advance every planet along its orbit (build_game.py updatePlanetOrbits core,
+## ~14467). The JS LOD/viewport-culling is a perf optimisation we don't need —
+## a flat loop over ~1050 planets per tick is trivial. dtG = game-time delta.
+func advance_orbits(dtG: float) -> void:
+	for p in planets:
+		p.orbitAngle += p.orbitSpeed * dtG
+		var star: Dictionary = stars[p.starId]
+		p.x = star.x + p.orbitRadius * cos(p.orbitAngle)
+		p.y = star.y + p.orbitRadius * sin(p.orbitAngle)
+		# TODO(Phase 5): station-angle / cloud-angle / moon spin (cosmetic).
+
+
+func _resync_planets() -> void:
+	for p in planets:
+		var star: Dictionary = stars[p.starId]
+		p.x = star.x + p.orbitRadius * cos(p.orbitAngle)
+		p.y = star.y + p.orbitRadius * sin(p.orbitAngle)
+
+# ── Alien relics: one per 4×4 sector (build_game.py:8657) ──────────────────
+func _place_relics() -> void:
+	var W: float = Tuning.WORLD_W
+	var H: float = Tuning.WORLD_H
+	var homePids := {}
+	if not stars.is_empty():
+		for id in stars[home_star_id].planetIds:
+			homePids[id] = true
+	var relicStarIds := {}
+	for sc in 4:
+		for sr in 4:
+			var sxMin := -W + sc * (W / 2.0)
+			var sxMax := -W + (sc + 1) * (W / 2.0)
+			var syMin := -H + sr * (H / 2.0)
+			var syMax := -H + (sr + 1) * (H / 2.0)
+			var cands := []
+			for p in planets:
+				if p.isStarter or p.hasStation:
+					continue
+				if homePids.has(p.id) or relicStarIds.has(p.starId):
+					continue
+				if p.x >= sxMin and p.x < sxMax and p.y >= syMin and p.y < syMax:
+					cands.append(p)
+			if cands.is_empty():
+				continue
+			var rp: Dictionary = cands[int(floor(random() * cands.size()))]
+			rp.hasStation = true
+			rp.isAlienRelic = true
+			relicStarIds[rp.starId] = true
