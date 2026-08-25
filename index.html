@@ -893,6 +893,21 @@ const SIZE_R   = {XS:24, S:48, M:96, L:192, XL:288, XXL:432};
 
 const WORLD_W  = 204800;
 const WORLD_H  = 153600;
+// ── v0.4.7 Zeta Quadrant world extension ─────────────────────────────────
+// The Zeta Quadrant occupies a band of space EAST of the Alpha galaxy,
+// separated by an impassable void (beyond every engine's range — the ignited
+// black-hole portal is the only crossing). The world's east camera bound is
+// extended only when the portal ignites (`_applyZetaWorldExtent`), so the
+// pre-ignition game is bit-for-bit identical to v0.4.6 behavior.
+const ZETA_VOID_W = 40000;                       // impassable buffer band
+const ZETA_W      = 200000;                      // Zeta band width
+const ZETA_X0     = WORLD_W + ZETA_VOID_W;       // Zeta west edge (244,800)
+const ZETA_X1     = ZETA_X0 + ZETA_W;            // Zeta east edge (444,800)
+let   WORLD_E_X   = WORLD_W;                     // live east camera bound
+function _applyZetaWorldExtent(){ WORLD_E_X = ZETA_X1; }
+function _regionOfX(x){ return x > WORLD_W + ZETA_VOID_W*0.5 ? 'zeta' : 'alpha'; }
+const PORTAL_PROXY_ALPHA = 60000;  // starProxyMap id: black-hole portal (Alpha side)
+const PORTAL_PROXY_ZETA  = 60001;  // starProxyMap id: exit portal (Zeta side)
 
 // ── Google Analytics custom-event helper ─────────────────────────────────
 // Sends events directly to GA4's Measurement Protocol via fetch(), bypassing
@@ -1034,6 +1049,38 @@ const CAR_CARGO_TYPE = {
   car_glass:    'glass',
   car_machinery:'machinery',
   car_cargo:    'cargo',
+  // ── Project Helios (mid-game) cargo cars ──
+  car_uranium:  'uranium',
+  car_helium3:  'helium3',
+  car_solar:    'solar_panel',
+  car_supercon: 'superconductor',
+  car_truss:    'truss',
+  car_reactor:  'reactor_core',
+  // ── Zeta Quadrant (endgame) cargo cars ──
+  car_aetherium:'aetherium',
+  car_titanium: 'titanium',
+  car_biomass:  'biomass',
+  car_artifact: 'artifact',
+  car_titanplate:'titanium_plate',
+  car_warpsteel:'warpsteel',
+  // ── Military cars: the "cargo" they load is their ammo / shield fuel.
+  // 1 unit loaded = 1 full magazine (see _WEAPON_STATS). They never unload
+  // for revenue except at Defense Battery planets (demand floor there).
+  car_cannon:   'cannon_shell',
+  car_laser:    'plasma_cell',
+  car_shield:   'aegis_gel',
+};
+// Military car classification — used by the builder (armory-only purchase),
+// cargo ops (no revenue unload except defense-battery restock) and combat.
+const MILITARY_CARS=new Set(['car_cannon','car_laser','car_shield']);
+const WEAPON_CARS=new Set(['car_cannon','car_laser']);
+// Per-military-car combat stats. mag = shots (or shield charges) granted by
+// loading ONE unit of the matching ammo cargo. range in world units (SU).
+// cdFrames = per-car fire cooldown in dtG frame-units (240 ≈ 4 s at 1×).
+const _WEAPON_STATS={
+  car_cannon:{mag:6, range:1200, dmg:2, cdFrames:240, kind:'cannon'},
+  car_laser: {mag:8, range:2000, dmg:1, cdFrames:90,  kind:'laser'},
+  car_shield:{mag:6, range:0,    dmg:0, cdFrames:0,   kind:'shield'},
 };
 // Fractional cargo units per operation (all others default to 1.0)
 const CAR_CARGO_UNITS = {car_royal: 0.5};
@@ -1061,11 +1108,38 @@ const CARGO_BASE_RATE = {
   glass:      {car_glass:5500},
   machinery:  {car_machinery:9500},
   cargo:      {car_cargo:1800},
+  // Project Helios tier
+  uranium:        {car_uranium:14000},
+  helium3:        {car_helium3:10000},
+  solar_panel:    {car_solar:12000},
+  superconductor: {car_supercon:16000},
+  truss:          {car_truss:15000},
+  reactor_core:   {car_reactor:28000},
+  // Zeta Quadrant tier
+  aetherium:      {car_aetherium:15000},
+  titanium:       {car_titanium:9000},
+  biomass:        {car_biomass:3500},
+  artifact:       {car_artifact:22000},
+  titanium_plate: {car_titanplate:14000},
+  warpsteel:      {car_warpsteel:35000},
+  // Military consumables (revenue only at Defense Battery restock stops)
+  cannon_shell:   {car_cannon:10000},
+  plasma_cell:    {car_laser:16000},
+  aegis_gel:      {car_shield:13000},
 };
 // Which car sprite represents each cargo type in UI
-const CARGO_CAR_SPRITE = {passengers:'car_passenger', livestock:'car_livestock', mail:'car_mail', water:'car_water_tank', ice:'car_ice', sand:'car_sand', molten_ore:'car_ore', iron:'car_iron', gold:'car_gold', diamond:'car_diamond', hazmat:'car_hazmat', oil:'car_oil', battery:'car_battery', chemical:'car_chemical', flowers:'car_flowers', medical:'car_medical', grain:'car_grain', fruit:'car_fruit', steel:'car_steel', glass:'car_glass', machinery:'car_machinery', cargo:'car_cargo'};
-const CARGO_LABEL      = {passengers:'PASSENGERS', livestock:'LIVESTOCK', mail:'MAIL', water:'WATER', ice:'ICE', sand:'SAND', molten_ore:'MOLTEN ORE', iron:'IRON', gold:'GOLD', diamond:'DIAMOND', hazmat:'HAZMAT', oil:'OIL', battery:'BATTERY', chemical:'CHEMICAL', flowers:'FLOWERS', medical:'MEDICAL', grain:'GRAIN', fruit:'FRUIT', steel:'STEEL', glass:'GLASS', machinery:'MACHINERY', cargo:'CARGO', ceo_salary:'CEO SALARY', maintenance:'MAINTENANCE'};
-const CARGO_SHORT      = {passengers:'PSNGR', livestock:'LVSTK', mail:'MAIL', water:'WATER', ice:'ICE', sand:'SAND', molten_ore:'ORE', iron:'IRON', gold:'GOLD', diamond:'DMND', hazmat:'HAZMT', oil:'OIL', battery:'BATT', chemical:'CHEM', flowers:'FLWRS', medical:'MEDCL', grain:'GRAIN', fruit:'FRUIT', steel:'STEEL', glass:'GLASS', machinery:'MACH', cargo:'CARGO'};
+const CARGO_CAR_SPRITE = {passengers:'car_passenger', livestock:'car_livestock', mail:'car_mail', water:'car_water_tank', ice:'car_ice', sand:'car_sand', molten_ore:'car_ore', iron:'car_iron', gold:'car_gold', diamond:'car_diamond', hazmat:'car_hazmat', oil:'car_oil', battery:'car_battery', chemical:'car_chemical', flowers:'car_flowers', medical:'car_medical', grain:'car_grain', fruit:'car_fruit', steel:'car_steel', glass:'car_glass', machinery:'car_machinery', cargo:'car_cargo',
+  uranium:'car_uranium', helium3:'car_helium3', solar_panel:'car_solar', superconductor:'car_supercon', truss:'car_truss', reactor_core:'car_reactor',
+  aetherium:'car_aetherium', titanium:'car_titanium', biomass:'car_biomass', artifact:'car_artifact', titanium_plate:'car_titanplate', warpsteel:'car_warpsteel',
+  cannon_shell:'car_cannon', plasma_cell:'car_laser', aegis_gel:'car_shield'};
+const CARGO_LABEL      = {passengers:'PASSENGERS', livestock:'LIVESTOCK', mail:'MAIL', water:'WATER', ice:'ICE', sand:'SAND', molten_ore:'MOLTEN ORE', iron:'IRON', gold:'GOLD', diamond:'DIAMOND', hazmat:'HAZMAT', oil:'OIL', battery:'BATTERY', chemical:'CHEMICAL', flowers:'FLOWERS', medical:'MEDICAL', grain:'GRAIN', fruit:'FRUIT', steel:'STEEL', glass:'GLASS', machinery:'MACHINERY', cargo:'CARGO', ceo_salary:'CEO SALARY', maintenance:'MAINTENANCE',
+  uranium:'URANIUM', helium3:'HELIUM-3', solar_panel:'SOLAR PANELS', superconductor:'SUPERCONDUCTORS', truss:'TRUSSES', reactor_core:'REACTOR CORES',
+  aetherium:'AETHERIUM', titanium:'TITANIUM', biomass:'BIOMASS', artifact:'ARTIFACTS', titanium_plate:'TITANIUM PLATE', warpsteel:'WARPSTEEL',
+  cannon_shell:'CANNON SHELLS', plasma_cell:'PLASMA CELLS', aegis_gel:'AEGIS GEL'};
+const CARGO_SHORT      = {passengers:'PSNGR', livestock:'LVSTK', mail:'MAIL', water:'WATER', ice:'ICE', sand:'SAND', molten_ore:'ORE', iron:'IRON', gold:'GOLD', diamond:'DMND', hazmat:'HAZMT', oil:'OIL', battery:'BATT', chemical:'CHEM', flowers:'FLWRS', medical:'MEDCL', grain:'GRAIN', fruit:'FRUIT', steel:'STEEL', glass:'GLASS', machinery:'MACH', cargo:'CARGO',
+  uranium:'URAN', helium3:'HE-3', solar_panel:'SOLAR', superconductor:'SPCON', truss:'TRUSS', reactor_core:'REACT',
+  aetherium:'AETHR', titanium:'TITAN', biomass:'BIOMS', artifact:'ARTFT', titanium_plate:'PLATE', warpsteel:'WARP',
+  cannon_shell:'SHELL', plasma_cell:'PLASM', aegis_gel:'AEGIS'};
 // Text-color map for resource / cargo names rendered inline in objective
 // text. Looked up case-insensitively keyed on the displayed name (handles both
 // "iron" and "Molten Ore"). Choose the dominant hue of each cargo's sprite.
@@ -1076,6 +1150,11 @@ const CARGO_TEXT_COLORS = {
   battery:'#ffd744', chemical:'#80e860', flowers:'#ff7acc', medical:'#ff5a78',
   grain:'#d4a76a', fruit:'#ff7a48', steel:'#94a8bc', glass:'#b0e8f0',
   machinery:'#a4acb4', cargo:'#b08858',
+  uranium:'#aaff00', 'helium-3':'#ffbb55', 'solar panels':'#55b8ff',
+  superconductors:'#9070ff', trusses:'#a8c4dc', 'reactor cores':'#40e0c0',
+  aetherium:'#ff50e0', titanium:'#70c8e8', biomass:'#a8e030',
+  artifacts:'#40ff90', 'titanium plate':'#b8e0ff', warpsteel:'#b070ff',
+  'cannon shells':'#ffb060', 'plasma cells':'#ff70ff', 'aegis gel':'#70ffd8',
 };
 function _cargoTextColor(name){
   if(!name) return null;
@@ -1233,12 +1312,65 @@ const UPGRADES=[
    eligibleBiomes:['agri'],preBuiltBiomes:[]},
   {id:'orchard',label:'ORCHARD',desc:'Grows and exports fresh fruit.',cost:10000,
    eligibleBiomes:['agri'],preBuiltBiomes:[]},
+  // ── v0.4.7 Project Helios (mid-game) industry ──
+  {id:'gas_siphon',label:'GAS SIPHON',desc:'Siphons helium-3 from the storm layer.',cost:30000,
+   eligibleBiomes:['storm'],preBuiltBiomes:[]},
+  {id:'panel_fab',label:'PANEL FABRICATOR',desc:'Assembles glass and batteries into solar panels.',cost:35000,
+   eligibleBiomes:['resort','urban'],preBuiltBiomes:[]},
+  {id:'cryo_forge',label:'CRYO FORGE',desc:'Freezes gold and batteries into superconductors.',cost:40000,
+   eligibleBiomes:['ice'],preBuiltBiomes:[]},
+  {id:'orbital_shipyard',label:'ORBITAL SHIPYARD',desc:'Welds steel and machinery into support trusses.',cost:50000,
+   eligibleBiomes:['urban'],preBuiltBiomes:[]},
+  {id:'reactor_assembly',label:'REACTOR ASSEMBLY',desc:'Builds reactor cores from uranium, steel and helium-3.',cost:60000,
+   eligibleBiomes:['lava'],preBuiltBiomes:[]},
+  // ── v0.4.7 Zeta Quadrant (endgame) industry ──
+  {id:'titan_mill',label:'TITAN MILL',desc:'Refines titanium and chemicals into armor plate.',cost:45000,
+   eligibleBiomes:['obsidian'],preBuiltBiomes:[]},
+  {id:'munitions_works',label:'MUNITIONS WORKS',desc:'Presses steel and chemicals into cannon shells.',cost:40000,
+   eligibleBiomes:['rocky','urban'],preBuiltBiomes:[]},
+  {id:'plasma_refinery',label:'PLASMA REFINERY',desc:'Charges aetherium and batteries into plasma cells.',cost:55000,
+   eligibleBiomes:['crystal'],preBuiltBiomes:[]},
+  {id:'bioforge',label:'BIOFORGE',desc:'Cultures biomass, water and chemicals into aegis gel.',cost:50000,
+   eligibleBiomes:['fungal'],preBuiltBiomes:[]},
+  {id:'xenoforge',label:'XENOFORGE',desc:'Fuses titanium plate, aetherium and superconductors into warpsteel.',cost:100000,
+   eligibleBiomes:['urban'],preBuiltBiomes:[]},
   // Repair Drones — universal upgrade available at every station planet. Placed last in the
   // UPGRADES array so it naturally sorts to the bottom of the upgrades pane (the `shown`
   // list filter preserves array order).
   {id:'repair_drones',label:'REPAIR DRONES',desc:'Reduces train maintenance costs by -25% at this planet.',cost:10000,
    eligibleBiomes:[],preBuiltBiomes:[],universal:true},
+  // ── v0.4.7 military (universal, gated on the Zeta military arc) ──
+  {id:'armory',label:'ARMORY',desc:'Assembles military train cars from delivered components.',cost:60000,
+   eligibleBiomes:[],preBuiltBiomes:[],universal:true},
+  {id:'defense_battery',label:'DEFENSE BATTERY',desc:'Station cannon — fires stocked cannon shells at hostile trains.',cost:30000,
+   eligibleBiomes:[],preBuiltBiomes:[],universal:true},
 ];
+// ── v0.4.7 generic refinery recipe table ─────────────────────────────────
+// Drives the generic intake + production tick for every new Helios / Zeta
+// refinery (the six original refineries keep their bespoke blocks in
+// updateFoundries). in: {cargo: units consumed per cycle}, out: cargo
+// produced (1 unit/cycle), tm: production time as a multiple of
+// FOUNDRY_PROD_TIME, car/label: first-player-production car unlock.
+const V47_RECIPES=[
+  {id:'panel_fab',        inputs:['glass','battery'],                 out:'solar_panel',    tm:1, car:'car_solar',     label:'Solar Panel Car',     chatCol:'rgba(85,184,255,1)'},
+  {id:'cryo_forge',       inputs:['gold','battery'],                  out:'superconductor', tm:2, car:'car_supercon',  label:'Superconductor Car',  chatCol:'rgba(144,112,255,1)'},
+  {id:'orbital_shipyard', inputs:['steel','machinery'],               out:'truss',          tm:2, car:'car_truss',     label:'Truss Car',           chatCol:'rgba(168,196,220,1)'},
+  {id:'reactor_assembly', inputs:['uranium','steel','helium3'],       out:'reactor_core',   tm:3, car:'car_reactor',   label:'Reactor Core Car',    chatCol:'rgba(64,224,192,1)'},
+  {id:'titan_mill',       inputs:['titanium','chemical'],             out:'titanium_plate', tm:1, car:'car_titanplate',label:'Titanium Plate Car',  chatCol:'rgba(184,224,255,1)'},
+  {id:'munitions_works',  inputs:['steel','chemical'],                out:'cannon_shell',   tm:1, car:null,            label:null,                  chatCol:'rgba(255,176,96,1)'},
+  {id:'plasma_refinery',  inputs:['aetherium','battery'],             out:'plasma_cell',    tm:1, car:null,            label:null,                  chatCol:'rgba(255,112,255,1)'},
+  {id:'bioforge',         inputs:['biomass','water','chemical'],      out:'aegis_gel',      tm:1, car:null,            label:null,                  chatCol:'rgba(112,255,216,1)'},
+  {id:'xenoforge',        inputs:['titanium_plate','aetherium','superconductor'], out:'warpsteel', tm:3, car:'car_warpsteel', label:'Warpsteel Car', chatCol:'rgba(176,112,255,1)'},
+];
+// Armory assembly recipes — consume component bins, output a military CAR
+// into the trainyard (not planet supply). First recipe with a full component
+// set wins each cycle; deliver components selectively to steer output.
+const ARMORY_RECIPES=[
+  {car:'car_shield', comps:{titanium_plate:3, glass:1, aegis_gel:2},      label:'Shield Car'},
+  {car:'car_cannon', comps:{steel:4, machinery:2, titanium_plate:2},      label:'Cannon Car'},
+  {car:'car_laser',  comps:{titanium_plate:2, superconductor:2, aetherium:2}, label:'Laser Car'},
+];
+const ARMORY_BIN_KEYS=['steel','machinery','titanium_plate','superconductor','aetherium','glass','aegis_gel'];
 const MISSION_DEFS=[
   {id:'visit_planet',
    name:'Visit a 2nd planet',
@@ -1786,6 +1918,100 @@ const MISSION_DEFS=[
      const _srcId=m.scientistSourceIds[_idx];
      return _srcId!=null && m._scientistsDelivered.includes(_srcId);
    }},
+  {id:'helios_directive',
+   name:'The Helios Directive',
+   imageType:'dyson', imageKey:null,
+   objectives:[
+     {id:'survey_sites', text:'Visit a planet in each of the 3 HELIOS CONSTRUCTION SITE star systems marked on your map'},
+   ],
+   details:"The deciphered Ancient Schematics describe the Black Hole as a dormant PORTAL — and the blueprint to open it: THREE DYSON SPHERES built around the stars nearest the Black Hole, each beaming stellar power into the event horizon. Your scientists have marked the three construction sites on your star map. Project HELIOS begins now.",
+   reward:50000, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='survey_sites'){
+       if(!galaxy||!Array.isArray(galaxy.heliosSites)||galaxy.heliosSites.length<3) return false;
+       return galaxy.heliosSites.every(hs=>{
+         const _st=galaxy.stars[hs.starId];
+         return _st&&_st.planetIds&&_st.planetIds.some(pid=>visitedPlanetIds.has(pid));
+       });
+     }
+     return false;
+   }},
+  {id:'helios_groundbreak',
+   name:'Ground Breaking',
+   imageType:'station_large', imageKey:null,
+   prerequisite:'helios_directive',
+   objectives:[
+     {id:'depot_steel', text:'Deliver 10 [Steel] to any HELIOS CONSTRUCTION DEPOT'},
+     {id:'depot_glass', text:'Deliver 10 [Glass] to any HELIOS CONSTRUCTION DEPOT'},
+   ],
+   details:"Three CONSTRUCTION DEPOTS have come online at the Helios sites — pre-built stations that accept component deliveries. Prove out your supply lines by delivering base materials to the ground crews.",
+   reward:40000, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='depot_steel') return (m._depotSteel||0)>=10;
+     if(oid==='depot_glass') return (m._depotGlass||0)>=10;
+     return false;
+   }},
+  {id:'helios_frame',
+   name:'Helios Frame',
+   imageType:'car', imageKey:'car_truss',
+   prerequisite:'helios_groundbreak',
+   objectives:[
+     {id:'build_shipyard',  text:'Build an ORBITAL SHIPYARD on an URBAN planet with a LARGE STATION'},
+     {id:'deliver_trusses', text:'Deliver 40 [Trusses] to the FRAME construction depot at {TARGET}'},
+   ],
+   details:"The first sphere is the skeleton: a lattice of SUPPORT TRUSSES welded from STEEL and MACHINERY at an Orbital Shipyard. Feed the metallurgy chain — lava ore, desert foundries, rocky blast furnaces, urban factories — and raise the frame.",
+   reward:150000, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='build_shipyard') return !!(galaxy&&galaxy.planets.some(p=>(p.playerBuiltUpgrades||[]).includes('orbital_shipyard')));
+     if(oid==='deliver_trusses'){ const _dp=_heliosDepot('frame'); return !!_dp&&(_dp.dysonDelivered?.truss||0)>=40; }
+     return false;
+   }},
+  {id:'helios_mirror',
+   name:'Helios Mirror',
+   imageType:'car', imageKey:'car_solar',
+   prerequisite:'helios_groundbreak',
+   objectives:[
+     {id:'build_panelfab',  text:'Build a PANEL FABRICATOR on a RESORT or URBAN planet'},
+     {id:'deliver_panels',  text:'Deliver 40 [Solar Panels] to the MIRROR construction depot at {TARGET}'},
+   ],
+   details:"The second sphere is the skin: a mirror shell of SOLAR PANELS pressed from GLASS and BATTERY cells. Desert sand and chemical feedstock become glass at your glassworks; storm worlds supply the batteries.",
+   reward:150000, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='build_panelfab') return !!(galaxy&&galaxy.planets.some(p=>(p.playerBuiltUpgrades||[]).includes('panel_fab')));
+     if(oid==='deliver_panels'){ const _dp=_heliosDepot('mirror'); return !!_dp&&(_dp.dysonDelivered?.solar_panel||0)>=40; }
+     return false;
+   }},
+  {id:'helios_heart',
+   name:'Helios Heart',
+   imageType:'car', imageKey:'car_reactor',
+   prerequisite:'helios_groundbreak',
+   objectives:[
+     {id:'build_cryo',       text:'Build a CRYO FORGE on an ICE planet'},
+     {id:'build_siphon',     text:'Build a GAS SIPHON on a STORM planet'},
+     {id:'deliver_supercon', text:'Deliver 25 [Superconductors] to the HEART construction depot at {TARGET}'},
+     {id:'deliver_cores',    text:'Deliver 15 [Reactor Cores] to the HEART construction depot at {TARGET}'},
+   ],
+   details:"The third sphere is the power core: SUPERCONDUCTORS frozen from GOLD and BATTERY at an ice-world Cryo Forge, and REACTOR CORES assembled from URANIUM, STEEL and HELIUM-3 on a lava world. The rarest chain — and the one that makes the portal possible.",
+   reward:200000, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='build_cryo')   return !!(galaxy&&galaxy.planets.some(p=>(p.playerBuiltUpgrades||[]).includes('cryo_forge')));
+     if(oid==='build_siphon') return !!(galaxy&&galaxy.planets.some(p=>(p.playerBuiltUpgrades||[]).includes('gas_siphon')));
+     if(oid==='deliver_supercon'){ const _dp=_heliosDepot('heart'); return !!_dp&&(_dp.dysonDelivered?.superconductor||0)>=25; }
+     if(oid==='deliver_cores'){ const _dp=_heliosDepot('heart'); return !!_dp&&(_dp.dysonDelivered?.reactor_core||0)>=15; }
+     return false;
+   }},
+  {id:'helios_ignition',
+   name:'Ignition',
+   imageType:'blackhole', imageKey:null,
+   objectives:[
+     {id:'wait_alignment', text:'Wait while the three Dyson Spheres align their power beams on the Black Hole'},
+   ],
+   details:"All three spheres are complete. Your scientists are aligning their combined output on the event horizon — enough energy to tear the ancient portal open. Nobody knows exactly what is on the other side. Stand by.",
+   reward:null, timeLimit:null,
+   checkObj:(oid,m)=>{
+     if(oid==='wait_alignment') return m._alignStartSd!=null && (stardate-m._alignStartSd)>=1.0;
+     return false;
+   }},
 ];
 // Missions whose core deliverable requires a specific train car. The mission
 // intro is HELD (kept queued in pendingMissionIntros) until that car is
@@ -1826,24 +2052,28 @@ const CAR_ORB_H = 28;   // radial footprint (height)
 const CAR_ORB_GAP = 53;
 
 // ── Per-engine properties (keyed by car type string) ─────────
-//   Order: constellation → galaxy → classJ → classR → N700
-const ENGINE_COSTS       = {engine_constellation:10000, engine_galaxy:20000, engine_classJ:50000, engine_classR:70000, engine_N700:100000};
-const ENGINE_MAX_SPD     = {engine_constellation:4,     engine_galaxy:6,     engine_classJ:8,     engine_classR:10,    engine_N700:20};
-const ENGINE_ACCEL_RATE  = {engine_constellation:TRANSIT_ACCEL*1, engine_galaxy:TRANSIT_ACCEL*2, engine_classJ:TRANSIT_ACCEL*4, engine_classR:TRANSIT_ACCEL*8, engine_N700:TRANSIT_ACCEL*12};
-const ENGINE_MAINT_DECAY = {engine_constellation:MAINT_DECAY_PER_AU, engine_galaxy:MAINT_DECAY_PER_AU*0.8, engine_classJ:MAINT_DECAY_PER_AU*0.6, engine_classR:MAINT_DECAY_PER_AU*0.4, engine_N700:MAINT_DECAY_PER_AU*0.25};
-const ENGINE_REPAIR_MULT = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.3,   engine_classR:1.6,   engine_N700:2.0};
+//   Order: constellation → galaxy → classJ → classR → N700 → helios → vex → singularity
+// Helios (mid-game, Project Helios reward): solar-sail hybrid — fastest yet,
+// very cheap to run, 12-car capacity. Vex Interceptor (endgame, salvaged
+// Combine drive): warship engine, +25% weapon fire rate (see combat system).
+// Singularity (post-campaign, built from Warpsteel): the ultimate engine.
+const ENGINE_COSTS       = {engine_constellation:10000, engine_galaxy:20000, engine_classJ:50000, engine_classR:70000, engine_N700:100000, engine_helios:160000, engine_vex:220000, engine_singularity:400000};
+const ENGINE_MAX_SPD     = {engine_constellation:4,     engine_galaxy:6,     engine_classJ:8,     engine_classR:10,    engine_N700:20,     engine_helios:24,     engine_vex:30,     engine_singularity:36};
+const ENGINE_ACCEL_RATE  = {engine_constellation:TRANSIT_ACCEL*1, engine_galaxy:TRANSIT_ACCEL*2, engine_classJ:TRANSIT_ACCEL*4, engine_classR:TRANSIT_ACCEL*8, engine_N700:TRANSIT_ACCEL*12, engine_helios:TRANSIT_ACCEL*14, engine_vex:TRANSIT_ACCEL*16, engine_singularity:TRANSIT_ACCEL*20};
+const ENGINE_MAINT_DECAY = {engine_constellation:MAINT_DECAY_PER_AU, engine_galaxy:MAINT_DECAY_PER_AU*0.8, engine_classJ:MAINT_DECAY_PER_AU*0.6, engine_classR:MAINT_DECAY_PER_AU*0.4, engine_N700:MAINT_DECAY_PER_AU*0.25, engine_helios:MAINT_DECAY_PER_AU*0.2, engine_vex:MAINT_DECAY_PER_AU*0.3, engine_singularity:MAINT_DECAY_PER_AU*0.15};
+const ENGINE_REPAIR_MULT = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.3,   engine_classR:1.6,   engine_N700:2.0,   engine_helios:2.2,   engine_vex:2.4,   engine_singularity:2.6};
 // gap engine→car[1] (world units). Set per-engine for a slight ~1-world-unit
 // visible gap between the engine's rear and the first car: spacing =
 // engineHalfWidth + carHalfWidth(~26) + 1. Engine half-widths come from the
 // de-stretched sizes at _GAL_SCALE=1.5 (Constellation ~24.5 … Class R ~42.9,
 // the longest). So the wider/longer engines keep proportionally bigger gaps
 // while every engine→car coupling shows the same ~1-unit slit.
-const ENGINE_ORB_GAP     = {engine_constellation:52, engine_galaxy:53, engine_classJ:55, engine_classR:70, engine_N700:63};
+const ENGINE_ORB_GAP     = {engine_constellation:52, engine_galaxy:53, engine_classJ:55, engine_classR:70, engine_N700:63, engine_helios:63, engine_vex:70, engine_singularity:63};
 // Per-engine visible-height tier for galaxy view (multiplied into the
 // base engine body height). Modest progression so bigger engines read as
 // bigger without the very-wide Class R / N700 sprites ballooning. Caboose
 // and regular cars don't use this (fixed fractions in the draw loop).
-const ENGINE_GALAXY_H_TIER = {engine_constellation:1.0, engine_galaxy:1.05, engine_classJ:1.10, engine_classR:1.06, engine_N700:1.16};
+const ENGINE_GALAXY_H_TIER = {engine_constellation:1.0, engine_galaxy:1.05, engine_classJ:1.10, engine_classR:1.06, engine_N700:1.16, engine_helios:1.16, engine_vex:1.06, engine_singularity:1.16};
 // Galaxy-view train render scale (the draw loop multiplies each sprite's
 // base height fraction by this) and the desired VISIBLE gap (world units)
 // between adjacent units. _carOffset uses per-sprite half-widths so the
@@ -2060,14 +2290,18 @@ function _drawTrainCarStrip(c2, train, stripX, stripY, stripW, stripH, opts){
 // + car_mail_empty sources are now 1254×1254 squares with content aspect
 // ~2.06 — essentially identical to car_passenger — so matching its
 // multipliers gives identical visual proportions in every view.
-const ENGINE_ORB_W_MULT  = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.2,   engine_classR:1.235, engine_N700:1.4,  car_passenger:1.05, car_mail:1.05}; // visual width scale in world view
-const ENGINE_VIZ_W_MULT  = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.2,   engine_classR:1.235, engine_N700:1.4,  car_passenger:1.05, car_mail:1.05}; // visual width scale in UI strips/builder
+const ENGINE_ORB_W_MULT  = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.2,   engine_classR:1.235, engine_N700:1.4,  engine_helios:1.4, engine_vex:1.235, engine_singularity:1.4,  car_passenger:1.05, car_mail:1.05}; // visual width scale in world view
+const ENGINE_VIZ_W_MULT  = {engine_constellation:1.0,   engine_galaxy:1.1,   engine_classJ:1.2,   engine_classR:1.235, engine_N700:1.4,  engine_helios:1.4, engine_vex:1.235, engine_singularity:1.4,  car_passenger:1.05, car_mail:1.05}; // visual width scale in UI strips/builder
 // Asset values for corporation net-worth calculation
 const CAR_ASSET_VALUE = {
   engine_constellation:10000, engine_galaxy:20000, engine_classJ:50000, engine_classR:70000, engine_N700:100000,
+  engine_helios:160000, engine_vex:220000, engine_singularity:400000,
   car_passenger:5000, car_royal:10000, car_water_tank:8000, car_cargo:4000, car_livestock:6000,
   car_mail:4000, car_ice:9000, car_sand:5000, car_ore:8000, car_iron:10000, car_hazmat:7000,
   car_oil:9000, car_battery:11000, car_chemical:9000, car_gold:30000, car_diamond:45000, car_flowers:7000, car_medical:8000, caboose:3000,
+  car_uranium:12000, car_helium3:9000, car_solar:10000, car_supercon:14000, car_truss:12000, car_reactor:20000,
+  car_aetherium:14000, car_titanium:9000, car_biomass:5000, car_artifact:18000, car_titanplate:12000, car_warpsteel:25000,
+  car_cannon:25000, car_laser:30000, car_shield:28000,
 };
 const STATION_ASSET_VALUE = 50000;
 const UPGRADE_ASSET_VALUE = 10000;
@@ -2133,21 +2367,24 @@ function _genCeoCandidate(rosterEntry){
   return {ceoName:rosterEntry.name,ceoSprite:rosterEntry.sprite,logoSprite:'logo_placeholder',
           salary,primaryPerk:perks.primaryPerk,secondaryPerk:perks.secondaryPerk};
 }
-const ENGINE_VIZ_H_MULT  = {engine_constellation:1.000, engine_galaxy:0.957, engine_classJ:0.983, engine_classR:1.460, engine_N700:1.217, car_passenger:1.05}; // visual height multiplier — equalises opaque height across all engines
-const ENGINE_MAX_RANGE   = {engine_constellation:15000, engine_galaxy:25000, engine_classJ:40000, engine_classR:50000, engine_N700:70000};
+const ENGINE_VIZ_H_MULT  = {engine_constellation:1.000, engine_galaxy:0.957, engine_classJ:0.983, engine_classR:1.460, engine_N700:1.217, engine_helios:1.217, engine_vex:1.460, engine_singularity:1.217, car_passenger:1.05}; // visual height multiplier — equalises opaque height across all engines
+const ENGINE_MAX_RANGE   = {engine_constellation:15000, engine_galaxy:25000, engine_classJ:40000, engine_classR:50000, engine_N700:70000, engine_helios:100000, engine_vex:90000, engine_singularity:150000};
 // Per-engine hard cap on mid cars (between engine and caboose). Constellation
 // and Galaxy are the small/starter engines and are capped tighter than the
 // later engines, which use the default of 10. Lookup uses engine type string;
 // `_engMaxCars(null)` returns the global default so the builder still works
 // before an engine is selected.
-const ENGINE_MAX_CARS    = {engine_constellation:6, engine_galaxy:8, engine_classJ:10, engine_classR:10, engine_N700:10};
+const ENGINE_MAX_CARS    = {engine_constellation:6, engine_galaxy:8, engine_classJ:10, engine_classR:10, engine_N700:10, engine_helios:12, engine_vex:10, engine_singularity:14};
 function _engMaxCars(engineType){ return ENGINE_MAX_CARS[engineType] ?? 10; }
 
 // ── Planet development level system ──────────────────────────
 // Cumulative weighted-cargo score required to reach each level (index = level)
 const DEV_LEVEL_THRESHOLDS=[0,500,5000,10000,50000,100000,200000,500000,800000,1200000,2000000];
 // Economic weight of one cargo unit toward a planet's development score
-const DEV_CARGO_VALUES={passengers:200,livestock:150,mail:80,water:60,ice:80,sand:50,molten_ore:180,iron:250,gold:800,diamond:1200,hazmat:0,oil:220,battery:300,chemical:160,flowers:180,medical:200,steel:320,glass:220,machinery:420,cargo:100};
+const DEV_CARGO_VALUES={passengers:200,livestock:150,mail:80,water:60,ice:80,sand:50,molten_ore:180,iron:250,gold:800,diamond:1200,hazmat:0,oil:220,battery:300,chemical:160,flowers:180,medical:200,steel:320,glass:220,machinery:420,cargo:100,
+  uranium:600,helium3:400,solar_panel:500,superconductor:650,truss:600,reactor_core:900,
+  aetherium:650,titanium:400,biomass:150,artifact:900,titanium_plate:600,warpsteel:1200,
+  cannon_shell:400,plasma_cell:650,aegis_gel:500};
 // Supply/demand/population multiplier per dev level
 function _devMult(lv){return[1.0,1.15,1.35,1.6,1.95,2.4,2.95,3.65,4.5,5.5,7.0][Math.max(0,Math.min(10,lv))];}
 
@@ -2232,12 +2469,34 @@ const PTYPES = [
   // disc reads as a "weathered classical world" before the ruin silhouettes
   // even render. 2× rarer than urban → 4× rarer than every other biome.
   {id:'ancient',base:'#a89060', hi:'#d8b878', rim:[230,200,140]},
+  // ── v0.4.7 Zeta Quadrant exclusive biomes ──
+  // CRYSTAL — faceted aetherium-crystal worlds (magenta/cyan shards).
+  {id:'crystal', base:'#8a1878', hi:'#ff50e0', rim:[255,110,230]},
+  // OBSIDIAN — black glassy volcanic worlds veined with glowing teal fissures.
+  {id:'obsidian',base:'#101418', hi:'#2a3a44', rim:[90,200,230]},
+  // FUNGAL — pale spore-forest worlds; biomass supply.
+  {id:'fungal',  base:'#5a6a28', hi:'#a8c05a', rim:[190,220,120]},
+  // HIVE — the Combine's teeming alien city-worlds (green glow, huge demand).
+  {id:'hive',    base:'#123a20', hi:'#39e060', rim:[80,255,140]},
 ];
 // Per-biome relative frequency for galaxy generation. Default is 1.0; Urban
 // is 0.5 (= 2× rarer than every other biome). Ancient is 0.25 (= 2× rarer than
 // urban, 4× rarer than baseline). _pickBiomeWeighted() consults this map and
 // falls back to 1.0 for any biome not listed.
-const BIOME_WEIGHTS = {urban:0.5, ancient:0.25};
+// Zeta-exclusive biomes are weight-0 here so Alpha generation never rolls
+// them; generateZetaQuadrant uses its own _ZETA_BIOME_WEIGHTS table.
+const BIOME_WEIGHTS = {urban:0.5, ancient:0.25, crystal:0, obsidian:0, fungal:0, hive:0};
+const _ZETA_BIOME_WEIGHTS = {urban:0.4, ancient:0.2, crystal:0.9, obsidian:0.9, fungal:0.9, hive:0};
+function _pickBiomeWeightedZeta(){
+  let total=0;
+  for(const pt of PTYPES) total+=(_ZETA_BIOME_WEIGHTS[pt.id]??1.0);
+  let r=Math.random()*total;
+  for(const pt of PTYPES){
+    r-=(_ZETA_BIOME_WEIGHTS[pt.id]??1.0);
+    if(r<=0) return pt;
+  }
+  return PTYPES[0];
+}
 function _pickBiomeWeighted(){
   let total=0;
   for(const pt of PTYPES) total+=(BIOME_WEIGHTS[pt.id]??1.0);
@@ -2258,6 +2517,7 @@ const TRAIN_COLORS = [
 
 const CAR_LABELS = {
   engine_constellation:'CONSTELLATION', engine_galaxy:'GALAXY', engine_classJ:'CLASS J', engine_classR:'CLASS R', engine_N700:'N700',
+  engine_helios:'HELIOS', engine_vex:'VEX INTERCEPTOR', engine_singularity:'SINGULARITY',
   car_passenger:'PASSENGER CAR', car_royal:'ROYAL CAR',
   car_water_tank:'WATER TANK', car_cargo:'CARGO CAR',
   car_livestock:'LIVESTOCK CAR', car_mail:'MAIL CAR', car_hazmat:'HAZMAT CAR', caboose:'CABOOSE',
@@ -2276,7 +2536,22 @@ const CAR_LABELS = {
   car_fruit:    'FRUIT CAR',
   car_steel:    'STEEL CAR',
   car_glass:    'GLASS CAR',
-  car_machinery:'MACHINERY CAR'
+  car_machinery:'MACHINERY CAR',
+  car_uranium:  'URANIUM CAR',
+  car_helium3:  'HELIUM-3 TANKER',
+  car_solar:    'SOLAR PANEL CAR',
+  car_supercon: 'SUPERCONDUCTOR CAR',
+  car_truss:    'TRUSS CAR',
+  car_reactor:  'REACTOR CORE CAR',
+  car_aetherium:'AETHERIUM CAR',
+  car_titanium: 'TITANIUM CAR',
+  car_biomass:  'BIOMASS CAR',
+  car_artifact: 'ARTIFACT CAR',
+  car_titanplate:'TITANIUM PLATE CAR',
+  car_warpsteel:'WARPSTEEL CAR',
+  car_cannon:   'CANNON CAR',
+  car_laser:    'LASER CAR',
+  car_shield:   'SHIELD CAR'
 };
 // Short flavour quips shown in the train-builder hover tooltip. [Cargo] tokens
 // pick up their resource colour via _objTokenize (same as mission/objective text).
@@ -2286,6 +2561,9 @@ const _BUILDER_QUIPS = {
   engine_classJ:'A powerful, efficient mid-tier engine.',
   engine_classR:'A high-speed heavy-duty engine.',
   engine_N700:'The fastest engine out there.',
+  engine_helios:'Solar-sail hybrid. Fast, long-ranged, cheap to run.',
+  engine_vex:'Salvaged Combine drive. Its weapons fire +25% faster.',
+  engine_singularity:'Warpsteel-hulled. The ultimate engine.',
   car_passenger:'Carries [Passengers] between worlds.',
   car_royal:'Carries VIP [Passengers] in luxury.',
   car_livestock:'Carries [Livestock] from AGRICULTURAL PLANETS.',
@@ -2309,6 +2587,21 @@ const _BUILDER_QUIPS = {
   car_glass:'Carries [Glass] made in GLASSWORKS.',
   car_machinery:'Carries [Machinery] built in FACTORIES.',
   car_cargo:'Carries general [Cargo].',
+  car_uranium:'Carries radioactive [Uranium] ore.',
+  car_helium3:'Carries [Helium-3] siphoned from STORM PLANETS.',
+  car_solar:'Carries [Solar Panels] from PANEL FABRICATORS.',
+  car_supercon:'Carries [Superconductors] from CRYO FORGES.',
+  car_truss:'Carries [Trusses] from ORBITAL SHIPYARDS.',
+  car_reactor:'Carries [Reactor Cores] from REACTOR ASSEMBLIES.',
+  car_aetherium:'Carries [Aetherium] from CRYSTAL PLANETS.',
+  car_titanium:'Carries [Titanium] from OBSIDIAN PLANETS.',
+  car_biomass:'Carries [Biomass] from FUNGAL PLANETS.',
+  car_artifact:'Carries priceless alien [Artifacts].',
+  car_titanplate:'Carries [Titanium Plate] from TITAN MILLS.',
+  car_warpsteel:'Carries [Warpsteel] from the XENOFORGE.',
+  car_cannon:'Fires [Cannon Shells] at enemy trains. Assembled at an ARMORY.',
+  car_laser:'Fires [Plasma Cells] at long range. Assembled at an ARMORY.',
+  car_shield:'Projects a shield over the train. Fueled by [Aegis Gel]. Assembled at an ARMORY.',
   caboose:'A required final car on every train. Purely aesthetic.',
 };
 
@@ -2338,13 +2631,146 @@ const CAR_EMPTY_SPRITES = {
   car_steel:      'car_flat_empty',
   car_glass:      'car_glass_empty',
   car_machinery:  'car_flat_empty',
+  // Derived (tinted) car types — empty sprites are tinted copies of their
+  // base car's empty sprite, registered by _registerDerivedSprites().
+  car_uranium:    'car_uranium_empty',
+  car_helium3:    'car_helium3_empty',
+  car_solar:      'car_solar_empty',
+  car_supercon:   'car_supercon_empty',
+  car_truss:      'car_flat_empty',
+  car_reactor:    'car_flat_empty',
+  car_aetherium:  'car_aetherium_empty',
+  car_titanium:   'car_titanium_empty',
+  car_biomass:    'car_biomass_empty',
+  car_artifact:   'car_flat_empty',
+  car_titanplate: 'car_flat_empty',
+  car_warpsteel:  'car_flat_empty',
+  car_cannon:     'car_cannon_empty',
+  car_laser:      'car_laser_empty',
+  car_shield:     'car_shield_empty',
 };
 function getCarSprite(carType, isFull){
   if(!isFull && CAR_EMPTY_SPRITES[carType]) return CAR_EMPTY_SPRITES[carType];
   return carType;
 }
+// ── Derived (tinted) sprite registry ─────────────────────────────────────
+// v0.4.7: Project Helios + Zeta Quadrant add 15 car types and 3 engines.
+// Until dedicated art exists, each is a TINTED COPY of an existing sprite,
+// baked ONCE at init into an offscreen canvas and registered in imgs[] under
+// its own name (with .complete/.naturalWidth stamped on so the mip cache and
+// every drawImage path treat it exactly like a loaded image). The SPRITE_*
+// metric tables are copied from the base sprite so all sizing/spacing math
+// works unchanged. To swap in real art later: add the PNG to assets.json
+// under the same name — registration below skips any name already bundled.
+const DERIVED_SPRITES={
+  car_uranium:   {base:'car_chemical',  tint:'#aaff00', a:0.42},
+  car_helium3:   {base:'car_oil',       tint:'#ffbb55', a:0.50},
+  car_solar:     {base:'car_glass',     tint:'#55b8ff', a:0.42},
+  car_supercon:  {base:'car_battery',   tint:'#9070ff', a:0.48},
+  car_truss:     {base:'car_steel',     tint:'#8fb8d8', a:0.38},
+  car_reactor:   {base:'car_machinery', tint:'#40e0c0', a:0.45},
+  car_aetherium: {base:'car_diamond',   tint:'#ff50e0', a:0.45},
+  car_titanium:  {base:'car_iron',      tint:'#70c8e8', a:0.45},
+  car_biomass:   {base:'car_grain',     tint:'#a8e030', a:0.45},
+  car_artifact:  {base:'car_gold',      tint:'#40ff90', a:0.48},
+  car_titanplate:{base:'car_steel',     tint:'#b8e0ff', a:0.42},
+  car_warpsteel: {base:'car_steel',     tint:'#b070ff', a:0.48},
+  car_cannon:    {base:'car_machinery', tint:'#e05040', a:0.48, overlay:'cannon'},
+  car_laser:     {base:'car_machinery', tint:'#ff60c0', a:0.48, overlay:'laser'},
+  car_shield:    {base:'car_water_tank',tint:'#40d0ff', a:0.48, overlay:'shield'},
+  engine_helios:      {base:'engine_N700',   tint:'#ffcc44', a:0.40},
+  engine_vex:         {base:'engine_classR', tint:'#50e080', a:0.44},
+  engine_singularity: {base:'engine_N700',   tint:'#a060ff', a:0.44},
+  // Tinted EMPTY variants (base = the base car's empty-state sprite).
+  car_uranium_empty:  {base:'car_chemical_empty', tint:'#aaff00', a:0.42},
+  car_helium3_empty:  {base:'car_oil_empty',      tint:'#ffbb55', a:0.50},
+  car_solar_empty:    {base:'car_glass_empty',    tint:'#55b8ff', a:0.42},
+  car_supercon_empty: {base:'car_battery_empty',  tint:'#9070ff', a:0.48},
+  car_aetherium_empty:{base:'car_diamond_empty',  tint:'#ff50e0', a:0.45},
+  car_titanium_empty: {base:'car_flat_empty',     tint:'#70c8e8', a:0.32},
+  car_biomass_empty:  {base:'car_grain_empty',    tint:'#a8e030', a:0.45},
+  car_cannon_empty:   {base:'car_flat_empty',     tint:'#e05040', a:0.38, overlay:'cannon'},
+  car_laser_empty:    {base:'car_flat_empty',     tint:'#ff60c0', a:0.38, overlay:'laser'},
+  car_shield_empty:   {base:'car_water_tank_empty',tint:'#40d0ff', a:0.40},
+};
+// Simple painted markers so the three military cars read as weapons at a
+// glance even with placeholder tints. Baked into the derived canvas once —
+// zero per-frame cost.
+function _paintMilitaryOverlay(g,w,h,kind,tint){
+  g.save();
+  g.globalCompositeOperation='source-over';
+  g.globalAlpha=1.0;
+  const cx=w*0.5;
+  if(kind==='cannon'){
+    g.fillStyle='#2a2e36';
+    g.beginPath(); g.arc(cx, h*0.42, w*0.075, 0, Math.PI*2); g.fill();
+    g.strokeStyle='#3a4048'; g.lineWidth=w*0.045; g.lineCap='round';
+    g.beginPath(); g.moveTo(cx, h*0.42); g.lineTo(cx-w*0.16, h*0.16); g.stroke();
+    g.strokeStyle=tint; g.lineWidth=w*0.018;
+    g.beginPath(); g.moveTo(cx, h*0.42); g.lineTo(cx-w*0.16, h*0.16); g.stroke();
+  } else if(kind==='laser'){
+    g.fillStyle='#2a2e36';
+    g.fillRect(cx-w*0.03, h*0.18, w*0.06, h*0.26);
+    g.fillStyle=tint;
+    g.beginPath();
+    g.moveTo(cx, h*0.10); g.lineTo(cx+w*0.075, h*0.22); g.lineTo(cx-w*0.075, h*0.22);
+    g.closePath(); g.fill();
+  } else if(kind==='shield'){
+    g.strokeStyle=tint; g.globalAlpha=0.65; g.lineWidth=w*0.02;
+    g.beginPath(); g.arc(cx, h*0.62, w*0.42, Math.PI*1.05, Math.PI*1.95); g.stroke();
+    g.globalAlpha=0.18; g.fillStyle=tint;
+    g.beginPath(); g.arc(cx, h*0.62, w*0.42, Math.PI, Math.PI*2); g.closePath(); g.fill();
+  }
+  g.restore();
+}
+function _makeTintedCanvas(src,tint,alpha,overlay){
+  const c=document.createElement('canvas');
+  c.width=src.naturalWidth||src.width; c.height=src.naturalHeight||src.height;
+  const g=c.getContext('2d');
+  g.drawImage(src,0,0);
+  g.globalCompositeOperation='source-atop';
+  g.globalAlpha=alpha; g.fillStyle=tint;
+  g.fillRect(0,0,c.width,c.height);
+  g.globalAlpha=1.0; g.globalCompositeOperation='source-over';
+  if(overlay) _paintMilitaryOverlay(g,c.width,c.height,overlay,tint);
+  // Stamp image-like props so the mip cache + every drawImage path accept it.
+  c.complete=true; c.naturalWidth=c.width; c.naturalHeight=c.height;
+  return c;
+}
+function _copySpriteMetrics(fromName,toName){
+  if(SPRITE_NATURAL[fromName]&&!SPRITE_NATURAL[toName]) SPRITE_NATURAL[toName]=SPRITE_NATURAL[fromName];
+  if(typeof SPRITE_SOLID!=='undefined'&&SPRITE_SOLID[fromName]&&!SPRITE_SOLID[toName]) SPRITE_SOLID[toName]=SPRITE_SOLID[fromName];
+  if(typeof SPRITE_CONTENT!=='undefined'&&SPRITE_CONTENT[fromName]&&!SPRITE_CONTENT[toName]) SPRITE_CONTENT[toName]=SPRITE_CONTENT[fromName];
+  if(SPRITE_BOT[fromName]!=null&&SPRITE_BOT[toName]==null) SPRITE_BOT[toName]=SPRITE_BOT[fromName];
+}
+function _registerDerivedSprites(){
+  for(const name of Object.keys(DERIVED_SPRITES)){
+    if(ASSETS[name]) continue;          // real art bundled — leave it alone
+    const d=DERIVED_SPRITES[name];
+    const src=imgs[d.base];
+    if(!src||!src.complete||!src.naturalWidth) continue;
+    imgs[name]=_makeTintedCanvas(src,d.tint,d.a??0.45,d.overlay);
+    _copySpriteMetrics(d.base,name);
+  }
+}
+// ── Combine (alien corp) green-tinted train sprites ──────────────────────
+// Any sprite a Combine train renders with is swapped for a green-washed copy,
+// registered lazily under 'zx_<name>' so the mip cache and sizing tables keep
+// working (metrics copied from the source name). Replace with real alien art
+// later by bundling sprites named 'zx_engine_galaxy' etc. in assets.json.
+const COMBINE_TINT='#39e060';
+function _zxName(name){
+  const zn='zx_'+name;
+  if(imgs[zn]) return zn;
+  if(ASSETS[zn]){ return zn; } // real alien art bundled under zx_ name
+  const src=imgs[name];
+  if(!src||!src.complete||!src.naturalWidth) return name;
+  imgs[zn]=_makeTintedCanvas(src,COMBINE_TINT,0.50,null);
+  _copySpriteMetrics(name,zn);
+  return zn;
+}
 // Engine-type helpers
-const ENGINE_TYPES_ALL=['engine_constellation','engine_galaxy','engine_classJ','engine_classR','engine_N700'];
+const ENGINE_TYPES_ALL=['engine_constellation','engine_galaxy','engine_classJ','engine_classR','engine_N700','engine_helios','engine_vex','engine_singularity'];
 function isEngineType(t){ return ENGINE_TYPES_ALL.includes(t); }
 function _engGap(train){ return ENGINE_ORB_GAP[train.cars?.[0]]??CAR_ORB_GAP; }
 // Cumulative center-to-center offset (world units) of car `i` behind the
@@ -2398,13 +2824,15 @@ function _engAccel(train){
 function _engMaintDecay(train){ return ENGINE_MAINT_DECAY[train.cars?.[0]]??MAINT_DECAY_PER_AU; }
 function _engRepairMult(train){ return ENGINE_REPAIR_MULT[train.cars?.[0]]??1.0; }
 function _engMaxRange(train){ return ENGINE_MAX_RANGE[train.cars?.[0]]??Infinity; }
-const _ENGINE_TYPE_SET=new Set(['engine_constellation','engine_galaxy','engine_classJ','engine_classR','engine_N700']);
+const _ENGINE_TYPE_SET=new Set(['engine_constellation','engine_galaxy','engine_classJ','engine_classR','engine_N700','engine_helios','engine_vex','engine_singularity']);
 function _carUnitCost(type){
   if(type==='car_royal') return 10000;
   let cost=ENGINE_COSTS[type]??1000;
   if(_ENGINE_TYPE_SET.has(type)){
     if(_corp?.primaryPerk?.cat==='eng_cost_red') cost=Math.round(cost*(1-_corp.primaryPerk.val/100));
     if(_corp?.secondaryPerk?.cat==='eng_cost_red') cost=Math.round(cost*(1-_corp.secondaryPerk.val/100));
+    // v0.4.7: Helios Frame completion — permanent shipyard-efficiency discount.
+    if(_heliosEngDiscount>0) cost=Math.round(cost*(1-_heliosEngDiscount));
   }
   return cost;
 }
@@ -3535,6 +3963,8 @@ let _steelMissionTimerMs=0; // real-time ms when first steel was produced (arms 
 let _steelProdLog=[];
 let pendingGoldDiscoveries=[]; // planetIds queued to show gold discovery popup
 let pendingDiamondDiscoveries=[]; // planetIds queued to show diamond discovery popup
+let pendingUraniumDiscoveries=[]; // planetIds queued to show uranium discovery popup (v0.4.7)
+let pendingArtifactDiscoveries=[]; // planetIds queued to show alien-artifact-cache popup (v0.4.7 Zeta)
 let pendingCarUnlocks=[]; // {sprite,displayName} queued to show car-unlock popup
 let pendingEngineUnlocks=[]; // {sprite,displayName} queued to show engine-unlock popup
 // ── Planet-upgrade unlock gating ─────────────────────────────
@@ -3547,6 +3977,100 @@ let _largeStationUnlocked=false;  // LARGE STATION upgrade button — unlocked b
 let _terminalUnlocked=false;      // TERMINAL upgrade button — unlocked by producing the FIRST steel unit
 let _bakeryUnlocked=false;        // BAKERY card — unlocked by VISITING the first agricultural planet
 let _glassworksUnlocked=false;    // GLASSWORKS card — unlocked once BOTH the Sand car and Chemical car are discovered (desert + chemical planet visited)
+// ── v0.4.7 story-arc flags (all rule-of-three persisted) ──
+let _heliosArcStarted=false;      // "The Helios Directive" intro fired — Helios industry cards visible, Dyson sites revealed
+let _militaryArcStarted=false;    // First Contact fired — Munitions Works / Armory / Defense Battery visible
+let _warpsteelRecipeKnown=false;  // Z-campaign resolved — Xenoforge card visible + buildable
+let _v47ProdTotals={};            // {cargo: cumulative units produced by PLAYER refineries} — Helios mission progress
+let _heliosTimerMs=0;             // transient: 20 s intro delay for helios_directive (re-arms on load)
+let _heliosEngDiscount=0;         // fraction: permanent engine-cost discount from completing Helios Frame
+let _sensorUpgrade2Active=false;  // Sensor Upgrade II from Helios Mirror — fog radius ×2 total
+let _portalActive=false;          // black hole portal ignited — Zeta Quadrant reachable
+let _zetaGenerated=false;         // Zeta Quadrant stars/planets exist in galaxy arrays
+let _ignitionFxStartMs=0;         // transient: ignition flash/ring FX timestamp (0=off)
+// ── Combine (alien corp) + combat globals (Stage: Zeta Quadrant) ──
+let _combineFounded=false;        // Combine trains/stations instantiated (first player transit)
+let _combineHostility=25;         // 0..100 — see the hostility model in updateCombine
+let _combineCredits=0;            // abstract Combine treasury (finances VS display)
+let _combineTrainIdxs=[];         // indices into trains[] owned by the Combine (runtime; rebuilt on load)
+let _combatProjectiles=[];        // live cannon tracer projectiles (transient)
+let _combatBeams=[];              // live laser beam FX (transient)
+let _combatFx=[];                 // explosion / shield-flash FX (transient)
+let _combatScanAcc=99;            // dtG accumulator — targeting scan every 10 frames
+let _hiveTradeUnits=0;            // player revenue-positive unloads at hive worlds (Armistice gate)
+let _combineKills=0;              // combine trains destroyed by the player
+let _combineDefeated=false;       // war ending achieved (flagship destroyed)
+let _combineArmistice=false;      // peace ending achieved
+let _alphaCamMem=null, _zetaCamMem=null; // [Z] hotkey per-region camera memory (transient)
+// ── Helios site helpers ──────────────────────────────────────────────────
+// Site state lives on the DEPOT PLANETS (auto-serialized): p.isDysonDepot,
+// p.dysonSiteKey ('frame'|'mirror'|'heart'), p.dysonNeeds {cargo:need},
+// p.dysonDelivered {cargo:n}, p._dysonComplete. galaxy.heliosSites is the
+// small index [{starId,key,depotPlanetId}] (whitelisted into the save's
+// galaxy object); star._heliosDepotPid is a runtime link rebuilt on load.
+function _heliosDepot(key){
+  if(!galaxy||!Array.isArray(galaxy.heliosSites)) return null;
+  const hs=galaxy.heliosSites.find(h=>h.key===key);
+  return hs?galaxy.planets[hs.depotPlanetId]:null;
+}
+function _linkHeliosSites(){
+  if(!galaxy||!Array.isArray(galaxy.heliosSites)) return;
+  for(const hs of galaxy.heliosSites){
+    const _st=galaxy.stars[hs.starId];
+    if(_st) _st._heliosDepotPid=hs.depotPlanetId;
+  }
+}
+// Pick the 3 small stars nearest the black hole, designate their largest
+// planet as a Construction Depot (pre-built neutral station), and reveal
+// the systems on the star map. Idempotent.
+function _initHeliosSites(){
+  if(!galaxy||(Array.isArray(galaxy.heliosSites)&&galaxy.heliosSites.length)) return;
+  const _bh=galaxy.blackHoles&&galaxy.blackHoles[0];
+  if(!_bh) return;
+  const _aiHomeP=(typeof _aiCorp!=='undefined'&&_aiCorp&&_aiCorp.homePlanetId!=null)?galaxy.planets[_aiCorp.homePlanetId]:null;
+  const _aiHomeSid=_aiHomeP?_aiHomeP.starId:null;
+  const _eligible=(s)=>s&&s.id!==galaxy.homeStarId&&s.id!==_aiHomeSid&&!s.hasDysonSphere&&Array.isArray(s.planetIds)&&s.planetIds.length>0;
+  const _byDist=(a,b)=>Math.hypot(a.x-_bh.x,a.y-_bh.y)-Math.hypot(b.x-_bh.x,b.y-_bh.y);
+  let _picks=galaxy.stars.filter(s=>_eligible(s)&&s.size==='S').sort(_byDist).slice(0,3);
+  if(_picks.length<3){
+    const _more=galaxy.stars.filter(s=>_eligible(s)&&!_picks.includes(s)).sort(_byDist);
+    _picks=_picks.concat(_more.slice(0,3-_picks.length));
+  }
+  const _defs=[
+    {key:'frame',  needs:{truss:40}},
+    {key:'mirror', needs:{solar_panel:40}},
+    {key:'heart',  needs:{superconductor:25, reactor_core:15}},
+  ];
+  galaxy.heliosSites=[];
+  for(let i=0;i<_defs.length&&i<_picks.length;i++){
+    const _st=_picks[i], _d=_defs[i];
+    let _dp=null;
+    for(const pid of _st.planetIds){
+      const q=galaxy.planets[pid];
+      if(!q||q.aiHasStation) continue;
+      if(!_dp||(q.radius||0)>(_dp.radius||0)) _dp=q;
+    }
+    if(!_dp) continue;
+    _dp.hasStation=true;      // pre-built depot station (neutral, like the alien relics)
+    if(_dp.stationAngle===undefined) _dp.stationAngle=rand(0,Math.PI*2);
+    if(!_dp.stationSpeed){ const _big=(_dp.size==='L'||_dp.size==='XL'||_dp.size==='XXL');
+      _dp.stationSpeed=(Math.random()<0.15?-1:1)*Math.PI*2/(_big?rand(4800,14400):rand(2400,7200)); }
+    _dp.isDysonDepot=true;
+    _dp.dysonSiteKey=_d.key;
+    _dp.dysonNeeds=_d.needs;
+    _dp.dysonDelivered={};
+    _dp.supplyRate=computeSupplyRate(_dp);
+    _dp.demandRate=computeDemandRate(_dp);
+    _st._heliosDepotPid=_dp.id;
+    galaxy.heliosSites.push({starId:_st.id, key:_d.key, depotPlanetId:_dp.id});
+    // Reveal the site system on the registries so the survey objective has
+    // a visible target (fog stays — the player still flies out to look).
+    revealedStarIds.add(_st.id);
+    for(const pid of _st.planetIds) discoveredPlanetIds.add(pid);
+  }
+  _invalidateUpgradePlanetCache();
+  _chatMsg('3 HELIOS CONSTRUCTION SITES MARKED ON YOUR STAR MAP','rgba(120,200,255,1)');
+}
 let pendingUpgradeUnlocks=[]; // {key,constructed?} queued to show the upgrade-unlock popup (key ∈ iron_foundry, bakery, glassworks, __large_station__, __terminal__)
 let pendingMissionRewards=[]; // {name,reward} → green "Mission Completed" reward popup (one per +credit mission completion)
 let pendingFirstDeliveries=[]; // {planetId,cargo,carType,sd} → "First Delivery" popup (first ever player cargo unloaded at a planet)
@@ -3569,6 +4093,12 @@ function _isUpgradeUnlocked(uId){
   if(uId==='iron_foundry') return _foundryUnlocked;
   if(uId==='bakery')       return _bakeryUnlocked;
   if(uId==='glassworks')   return _glassworksUnlocked;
+  // v0.4.7: Helios industry cards appear once the Helios Directive arc has
+  // started; military cards appear after First Contact in the Zeta Quadrant;
+  // the Xenoforge appears once the campaign finale reveals the recipe.
+  if(uId==='gas_siphon'||uId==='panel_fab'||uId==='cryo_forge'||uId==='orbital_shipyard'||uId==='reactor_assembly') return _heliosArcStarted;
+  if(uId==='munitions_works'||uId==='armory'||uId==='defense_battery') return _militaryArcStarted;
+  if(uId==='xenoforge') return _warpsteelRecipeKnown;
   return true; // every other upgrade is always visible (existing grey-lock gates still apply)
 }
 // True once BOTH the Sand car (a desert planet visited) and the Chemical car (a
@@ -3607,6 +4137,21 @@ let _medicalCarUnlocked=false; // true once player first visits a Jungle-type pl
 let _grainCarUnlocked=false;   // true once player first visits a granary agri planet
 let _livestockCarUnlocked=false; // true once player first visits a farm agri planet
 let _fruitCarUnlocked=false;   // true once player first visits an orchard agri planet
+// ── v0.4.7 Project Helios (mid-game) unlock flags ──
+let _heliosEngineUnlocked=false;   // Helios engine — completing "The Heart Beats" (Dyson chain H3)
+let _heliumCarUnlocked=false;      // true once the player builds a Gas Siphon on a storm planet
+let _solarCarUnlocked=false;       // true once a player Panel Fabricator first produces solar panels
+let _superconCarUnlocked=false;    // true once a player Cryo Forge first produces superconductors
+let _trussCarUnlocked=false;       // true once a player Orbital Shipyard first produces trusses
+let _reactorCarUnlocked=false;     // true once a player Reactor Assembly first produces a core
+// ── v0.4.7 Zeta Quadrant (endgame) unlock flags ──
+let _vexEngineUnlocked=false;        // Vex Interceptor — campaign mission "Patrol Sweep"
+let _singularityEngineUnlocked=false;// Singularity — epilogue (10 warpsteel to Orijen)
+let _titanplateCarUnlocked=false;  // true once a player Titan Mill first produces plate
+let _warpsteelCarUnlocked=false;   // true once the Xenoforge first produces warpsteel
+let _cannonCarUnlocked=false;      // true once an Armory first assembles a Cannon Car
+let _laserCarUnlocked=false;       // true once an Armory first assembles a Laser Car
+let _shieldCarUnlocked=false;      // true once an Armory first assembles a Shield Car
 // Cheats: "Unlock All" sets this true. The 7 cars gated by planet
 // visits/discoveries rather than _XxxCarUnlocked flags (gold, diamond, oil,
 // battery, chemical, sand, ice) check this flag too, so the cheat unlocks
@@ -3958,7 +4503,7 @@ let _addTrainPanelBounds=null;
 let _addTrainPanelHover=false;
 let _pokedexSortHover=false, _pokedexRowHover=-1;
 let _starRegistrySortHover=false,  _starRegistryRowHover=-1;
-let _goldOkHover=false, _diamondOkHover=false, _carUnlockOkHover=false;
+let _goldOkHover=false, _diamondOkHover=false, _carUnlockOkHover=false, _uraniumOkHover=false;
 let _quitYesHover=false, _quitNoHover=false, _saveGameBtnHover=false;
 let _startBtnHover=false, _loadBtnHover=false;
 let loadBtnBounds=null, saveGameBtnBounds=null;
@@ -3997,8 +4542,10 @@ function s2w(sx,sy){ return [(sx-W/2)/cam.scale+cam.x, (sy-GH/2)/cam.scale+cam.y
 
 function clampCamera(){
   const hw=W/(2*cam.scale), hh=GH/(2*cam.scale);
-  // Right: allow scrolling until galaxy right edge aligns with left edge of trains panel
-  cam.x=Math.max(-WORLD_W+hw,Math.min(WORLD_W-hw+PANEL_W/cam.scale,cam.x));
+  // Right: allow scrolling until galaxy right edge aligns with left edge of
+  // trains panel. WORLD_E_X extends to the Zeta east edge once the portal
+  // has ignited (pre-ignition it equals WORLD_W — unchanged behavior).
+  cam.x=Math.max(-WORLD_W+hw,Math.min(WORLD_E_X-hw+PANEL_W/cam.scale,cam.x));
   cam.y=Math.max(-WORLD_H+hh,Math.min(WORLD_H-hh,cam.y));
 }
 
@@ -5402,7 +5949,7 @@ function _drawCutsceneBg(ts){
     const sr=s.radius*cam.scale;
     const glowR=Math.max(sr*2.8,8);
     if(sx+glowR<0||sx-glowR>W||sy+glowR<0||sy-glowR>H) continue;
-    drawStar(sx,sy,sr,s.color,!!s.hasDysonSphere);
+    drawStar(sx,sy,sr,s.color,_starDysonArg(s));
     if(sr>5){
       ctx.save();
       // Integer font size: fs feeds the _getTextBM cache key, and a raw
@@ -6989,7 +7536,8 @@ function generatePopulation(p){
   if(p.type.id==='ancient') return 0;
   // Biome habitability: ocean/jungle most livable; storm/lava/chemical inhospitable
   const biomeMult={ocean:1.6,jungle:1.5,resort:1.4,agri:1.2,rocky:1.0,desert:0.8,
-                   ice:0.7,oil:0.0,storm:0.35,lava:0.25,chemical:0.3,urban:2.0}[p.type.id]||1.0;
+                   ice:0.7,oil:0.0,storm:0.35,lava:0.25,chemical:0.3,urban:2.0,
+                   hive:2.2,crystal:0.2,obsidian:0.15,fungal:0.6}[p.type.id]||1.0;
   const sizeMult={XS:0.5,S:0.75,M:1.0,L:1.3,XL:1.6,XXL:2.0}[p.size]||1.0;
   const factor=biomeMult*sizeMult;
   // Urban: definitionally a planet-spanning city — always >1B population.
@@ -7129,6 +7677,18 @@ function computeSupplyRate(p){
   if(p.hasGold) r.gold=4;
   // Diamond: only planets with a deposit supply it; even rarer output than gold
   if(p.hasDiamond) r.diamond=3;
+  // ── v0.4.7 supply sources ──────────────────────────────────
+  // Uranium: deposit-only, like gold/diamond (rocky/lava veins).
+  if(p.hasUranium) r.uranium=3;
+  // Helium-3: storm planets, but ONLY once a Gas Siphon is built there.
+  if(bio==='storm'&&(p.upgrades||[]).includes('gas_siphon')) r.helium3=3.0*_szSc;
+  // Zeta Quadrant biome generators.
+  if(bio==='crystal')  r.aetherium=3.0*_szSc;
+  if(bio==='obsidian') r.titanium=4.0*_szSc;
+  if(bio==='fungal')   r.biomass=5.0*_szSc;
+  // Hive worlds trickle out artifacts; buried caches add a deposit bonus.
+  if(bio==='hive')     r.artifact=1.0*_szSc;
+  if(p.hasArtifact)    r.artifact=(r.artifact||0)+2;
   // Dev level: scale all base rates, then unlock new supply types
   const dl=p.devLevel||0;
   if(dl>0){const dm=_devMult(dl); for(const k in r) r[k]*=dm;}
@@ -7324,6 +7884,64 @@ function computeDemandRate(p){
       // simply disappears on non-agri biomes once cargo is online.
     }
   }
+  // ── v0.4.7 demand: Helios + Zeta tier cargos ─────────────────────
+  {
+    const _v47pf=pop>0?Math.min(2,0.5+pop/2e9):0.3;
+    const _urD={lava:1.0,rocky:0.8,urban:0.5}[bio];            if(_urD!==undefined) r.uranium=Math.max(r.uranium||0,_urD*_v47pf);
+    const _heD={urban:1.0,lava:0.8,storm:0.5}[bio];            if(_heD!==undefined) r.helium3=Math.max(r.helium3||0,_heD*_v47pf);
+    const _soD={urban:1.5,resort:0.8,ocean:0.6,hive:1.2}[bio]; if(_soD!==undefined) r.solar_panel=Math.max(r.solar_panel||0,_soD*_v47pf);
+    const _scD={urban:1.0,ice:0.4,hive:1.0}[bio];              if(_scD!==undefined) r.superconductor=Math.max(r.superconductor||0,_scD*_v47pf);
+    const _trD={urban:1.0,rocky:0.5,hive:0.8}[bio];            if(_trD!==undefined) r.truss=Math.max(r.truss||0,_trD*_v47pf);
+    const _rcD={urban:0.6,hive:0.6}[bio];                      if(_rcD!==undefined) r.reactor_core=Math.max(r.reactor_core||0,_rcD*_v47pf);
+    const _aeD={urban:1.8,resort:1.0,hive:2.0}[bio];           if(_aeD!==undefined) r.aetherium=Math.max(r.aetherium||0,_aeD*_v47pf);
+    const _tiD={urban:1.2,rocky:0.8,hive:1.5}[bio];            if(_tiD!==undefined) r.titanium=Math.max(r.titanium||0,_tiD*_v47pf);
+    const _bmD={hive:2.5,urban:0.8,jungle:0.5,agri:0.5}[bio];  if(_bmD!==undefined) r.biomass=Math.max(r.biomass||0,_bmD*_v47pf);
+    const _arD={resort:1.5,urban:1.5,ocean:0.8}[bio];          if(_arD!==undefined) r.artifact=Math.max(r.artifact||0,_arD*_v47pf);
+    const _tpD={hive:0.8,urban:0.5}[bio];                      if(_tpD!==undefined) r.titanium_plate=Math.max(r.titanium_plate||0,_tpD*_v47pf);
+    // Hive worlds are ravenous trade hubs — they consume everything the
+    // Alpha economy exports at scale (the diplomacy lever: trading with
+    // hives lowers Combine hostility — see _combineHostility handling).
+    if(bio==='hive'){
+      for(const _hk of ['water','ice','grain','fruit','livestock','iron','steel','glass','machinery','gold','diamond','medical','flowers','cargo','oil','battery','chemical']){
+        r[_hk]=Math.max(r[_hk]||0, 1.5*_v47pf);
+      }
+    }
+    // ── Building-driven input demand floors (new refinery chains sit on
+    // biomes with no natural demand for their inputs — the floor makes the
+    // input legs profitable, mirroring the juicery/bakery floor pattern) ──
+    const _ups47=p.upgrades||[];
+    const _binOpen=(uid,key)=>((p.upgradeData?.[uid]?.[key]||0)<10);
+    if(_ups47.includes('panel_fab')){ if(_binOpen('panel_fab','glass'))r.glass=Math.max(r.glass||0,1.5); if(_binOpen('panel_fab','battery'))r.battery=Math.max(r.battery||0,1.5); }
+    if(_ups47.includes('cryo_forge')){ if(_binOpen('cryo_forge','gold'))r.gold=Math.max(r.gold||0,1.5); if(_binOpen('cryo_forge','battery'))r.battery=Math.max(r.battery||0,1.5); }
+    if(_ups47.includes('orbital_shipyard')){ if(_binOpen('orbital_shipyard','steel'))r.steel=Math.max(r.steel||0,1.5); if(_binOpen('orbital_shipyard','machinery'))r.machinery=Math.max(r.machinery||0,1.5); }
+    if(_ups47.includes('reactor_assembly')){ if(_binOpen('reactor_assembly','uranium'))r.uranium=Math.max(r.uranium||0,1.5); if(_binOpen('reactor_assembly','steel'))r.steel=Math.max(r.steel||0,1.0); if(_binOpen('reactor_assembly','helium3'))r.helium3=Math.max(r.helium3||0,1.5); }
+    if(_ups47.includes('titan_mill')){ if(_binOpen('titan_mill','titanium'))r.titanium=Math.max(r.titanium||0,1.5); if(_binOpen('titan_mill','chemical'))r.chemical=Math.max(r.chemical||0,1.0); }
+    if(_ups47.includes('munitions_works')){ if(_binOpen('munitions_works','steel'))r.steel=Math.max(r.steel||0,1.5); if(_binOpen('munitions_works','chemical'))r.chemical=Math.max(r.chemical||0,1.0); }
+    if(_ups47.includes('plasma_refinery')){ if(_binOpen('plasma_refinery','aetherium'))r.aetherium=Math.max(r.aetherium||0,1.5); if(_binOpen('plasma_refinery','battery'))r.battery=Math.max(r.battery||0,1.5); }
+    if(_ups47.includes('bioforge')){ if(_binOpen('bioforge','biomass'))r.biomass=Math.max(r.biomass||0,1.5); if(_binOpen('bioforge','water'))r.water=Math.max(r.water||0,1.0); if(_binOpen('bioforge','chemical'))r.chemical=Math.max(r.chemical||0,1.0); }
+    if(_ups47.includes('xenoforge')){ if(_binOpen('xenoforge','titanium_plate'))r.titanium_plate=Math.max(r.titanium_plate||0,1.5); if(_binOpen('xenoforge','aetherium'))r.aetherium=Math.max(r.aetherium||0,1.5); if(_binOpen('xenoforge','superconductor'))r.superconductor=Math.max(r.superconductor||0,1.5); }
+    // Armory bins accept every military component.
+    if(_ups47.includes('armory')){
+      for(const _ak of ['steel','machinery','titanium_plate','superconductor','aetherium','glass','aegis_gel']){
+        if((p.upgradeData?.armory?.[_ak]||0)<10) r[_ak]=Math.max(r[_ak]||0,1.0);
+      }
+    }
+    // Defense Battery: restock demand for cannon shells (magazine cap 12).
+    if(_ups47.includes('defense_battery')&&(p.defenseShells||0)<12) r.cannon_shell=Math.max(r.cannon_shell||0,2.0);
+    // Dyson Construction Depot: demands its outstanding sphere components,
+    // plus steel/glass while the Ground Breaking mission runs.
+    if(p.isDysonDepot&&p.dysonNeeds&&!p._dysonComplete){
+      for(const _dk in p.dysonNeeds){
+        if((p.dysonDelivered?.[_dk]||0)<p.dysonNeeds[_dk]) r[_dk]=Math.max(r[_dk]||0,8.0);
+      }
+      if(typeof missions!=='undefined'&&missions.some(mx=>mx.id==='helios_groundbreak'&&mx.status==='active')){
+        r.steel=Math.max(r.steel||0,3.0); r.glass=Math.max(r.glass||0,3.0);
+      }
+    }
+    // Warpsteel epilogue: Orijen demands warpsteel while the Singularity
+    // engine hasn't been unlocked yet (10-unit delivery mission).
+    if(galaxy&&galaxy.origenId!=null&&p.id===galaxy.origenId&&_warpsteelCarUnlocked&&!_singularityEngineUnlocked) r.warpsteel=Math.max(r.warpsteel||0,3.0);
+  }
   // Ancient Schematics: while that mission is active, ORIJEN always demands ≥1
   // cargo so the one-off Schematics cargo can be delivered there (the cargo car
   // carrying it is restricted to unloading only at Orijen).
@@ -7342,7 +7960,7 @@ function computeDemandRate(p){
 // Planet economic health: multiplier for revenue (0.3–1.5)
 function computeEconomicHealth(p){
   const pop=p.population||0;
-  const bm={urban:1.5,resort:1.4,ocean:1.2,jungle:1.1,agri:1.0,rocky:0.9,desert:0.8,ice:0.7,oil:0.6,storm:0.4,lava:0.3,chemical:0.3}[p.type.id]||1.0;
+  const bm={urban:1.5,resort:1.4,ocean:1.2,jungle:1.1,agri:1.0,rocky:0.9,desert:0.8,ice:0.7,oil:0.6,storm:0.4,lava:0.3,chemical:0.3,hive:1.5,crystal:0.7,obsidian:0.5,fungal:0.8}[p.type.id]||1.0;
   const pm=pop>=1e10?1.5:pop>=1e8?1.2:pop>=1e6?1.0:pop>=1e4?0.7:pop>0?0.5:0.3;
   return Math.round(bm*pm*100)/100;
 }
@@ -7459,6 +8077,8 @@ function _startCargoOps(t, p){
       if(!cargo){ t.carFull[i]=false; continue; } // self-heal orphaned full state
       const _cU=CAR_CARGO_UNITS[t.cars[i]]||1.0;
       if((p.demand?.[cargo]||0)<0.5*_cU) continue;
+      // v0.4.7: shield cars never dump their Aegis Gel charge as freight.
+      if(t.cars[i]==='car_shield') continue;
       // Same-planet unload guard: cargo never unloads at the planet it was
       // originally loaded from, even if there's local demand. Keeps the
       // commodity in transit so it can earn revenue at a real destination.
@@ -7504,6 +8124,10 @@ function _startLoadPhase(t, p){
       if(_emptyRuleCargos.has(cargo)) continue;
       if(cargo==='gold'&&!p.goldRevealed) continue;
       if(cargo==='diamond'&&!p.diamondRevealed) continue;
+      if(cargo==='uranium'&&p.hasUranium&&!p.uraniumRevealed) continue;
+      if(cargo==='artifact'&&p.hasArtifact&&!p.artifactRevealed&&p.type.id!=='hive') continue;
+      // v0.4.7: disabled (combat-damaged) cars can't load until repaired.
+      if(t.carDisabled?.[i]) continue;
       if(!(cargo in _remaining)) _remaining[cargo]=(p.supply?.[cargo]||0);
       if(_remaining[cargo]>=_cU){
         _remaining[cargo]-=_cU;
@@ -7525,6 +8149,8 @@ function _startUnloadPhase(t, p){
       if(!cargo){ t.carFull[i]=false; continue; }
       const _cU=CAR_CARGO_UNITS[t.cars[i]]||1.0;
       if((p.demand?.[cargo]||0)<0.5*_cU) continue;
+      // v0.4.7: shield cars never dump their Aegis Gel charge as freight.
+      if(t.cars[i]==='car_shield') continue;
       // Same-planet unload guard (see _startCargoOps for the full comment) —
       // covers every cargo type, not just passengers.
       if(t.carCargoSource?.[i]===p.id) continue;
@@ -7567,7 +8193,7 @@ function _processCargoQueue(t, p){
         if(_corp?.primaryPerk?.cat==='cargo_rev'&&_corp.primaryPerk.cargo==='hazmat') _ceoM*=1+_corp.primaryPerk.val/100;
         if(_corp?.secondaryPerk?.cat==='cargo_rev'&&_corp.secondaryPerk.cargo==='hazmat') _ceoM*=1+_corp.secondaryPerk.val/100;
         const rev=Math.round(_base*_dM*_shM*_ceoM);
-        if(t.isPlayer) credits+=rev; else if(_aiCorp){_aiCorp.credits+=rev;_aiCorp.totalRevenue+=rev;}
+        if(t.isPlayer) credits+=rev; else if(t.isCombine){_combineCredits+=rev;} else if(_aiCorp){_aiCorp.credits+=rev;_aiCorp.totalRevenue+=rev;}
         if(rev>0&&t.isPlayer){const[_cfx,_cfy]=getTrainCarPos(t,i);spawnCreditFloat(_cfx,_cfy,rev);pendingCreditDeltas.push({timer:30,amount:rev});t.totalRevenue=(t.totalRevenue||0)+rev;financeLedger.push({sd:stardate,revenue:rev,cost:0,cargoType:'hazmat',trainName:t.name,planetId:null,starId:p.starId});if(!t._revLog)t._revLog=[];t._revLog.push({sd:stardate,rev});while(t._revLog.length&&stardate-t._revLog[0].sd>1.0)t._revLog.shift();}
         else if(rev>0&&!t.isPlayer){
           t.totalRevenue=(t.totalRevenue||0)+rev;
@@ -7597,7 +8223,14 @@ function _processCargoQueue(t, p){
           if(!_isHomeTutorialPlanet(p)) pendingFirstDeliveries.push({planetId:p.id, cargo, carType:t.cars[i], sd:stardate});
         }
         const rev=computeCargoRevenue(t.cars[i],cargo,p,src);
-        if(t.isPlayer) credits+=rev; else if(_aiCorp){_aiCorp.credits+=rev;_aiCorp.totalRevenue+=rev;}
+        if(t.isPlayer) credits+=rev; else if(t.isCombine){_combineCredits+=rev;} else if(_aiCorp){_aiCorp.credits+=rev;_aiCorp.totalRevenue+=rev;}
+        // v0.4.7 diplomacy: player deliveries to HIVE worlds soften the
+        // Combine (-0.5 hostility per revenue-positive unload) and count
+        // toward the Armistice ending gate.
+        if(t.isPlayer&&rev>0&&p.type&&p.type.id==='hive'){
+          _combineHostility=Math.max(0,_combineHostility-0.5);
+          _hiveTradeUnits++;
+        }
         if(rev>0&&t.isPlayer){const[_cfx,_cfy]=getTrainCarPos(t,i);spawnCreditFloat(_cfx,_cfy,rev);pendingCreditDeltas.push({timer:30,amount:rev});t.totalRevenue=(t.totalRevenue||0)+rev;financeLedger.push({sd:stardate,revenue:rev,cost:0,cargoType:cargo,trainName:t.name,planetId:p.id,starId:p.starId});if(!t._revLog)t._revLog=[];t._revLog.push({sd:stardate,rev});while(t._revLog.length&&stardate-t._revLog[0].sd>1.0)t._revLog.shift();}
         else if(rev>0&&!t.isPlayer){
           t.totalRevenue=(t.totalRevenue||0)+rev;
@@ -7743,6 +8376,54 @@ function _processCargoQueue(t, p){
           const _jc=p.upgradeData.juicery;
           if(cargo==='fruit') _jc.fruit=Math.min(10,(_jc.fruit||0)+_cUU);
         }
+        // v0.4.7 generic refinery intake — one loop covers every Helios/Zeta
+        // recipe (cap 10 per input bin, mirroring the bespoke intakes above).
+        for(const _rc of V47_RECIPES){
+          if(_rc.inputs.includes(cargo)&&(p.upgrades||[]).includes(_rc.id)){
+            if(!p.upgradeData) p.upgradeData={};
+            if(!p.upgradeData[_rc.id]){ const _nb={progress:0}; for(const _ik of _rc.inputs) _nb[_ik]=0; p.upgradeData[_rc.id]=_nb; }
+            const _rb=p.upgradeData[_rc.id];
+            _rb[cargo]=Math.min(10,(_rb[cargo]||0)+_cUU);
+          }
+        }
+        // Armory intake — component bins (cap 10 each).
+        if((p.upgrades||[]).includes('armory')&&ARMORY_BIN_KEYS.includes(cargo)){
+          if(!p.upgradeData) p.upgradeData={};
+          if(!p.upgradeData.armory){ const _ab={progress:0,building:null}; for(const _ak of ARMORY_BIN_KEYS) _ab[_ak]=0; p.upgradeData.armory=_ab; }
+          const _am=p.upgradeData.armory;
+          _am[cargo]=Math.min(10,(_am[cargo]||0)+_cUU);
+        }
+        // Defense Battery restock — cannon shell deliveries load the station
+        // magazine directly (cap 12 shells).
+        if((p.upgrades||[]).includes('defense_battery')&&cargo==='cannon_shell'){
+          p.defenseShells=Math.min(12,(p.defenseShells||0)+1);
+        }
+        // ── v0.4.7 Helios: component deliveries to a Construction Depot ──
+        if(p.isDysonDepot&&p.dysonNeeds&&p.dysonNeeds[cargo]!=null&&t.isPlayer){
+          if(!p.dysonDelivered) p.dysonDelivered={};
+          const _hNeed=p.dysonNeeds[cargo], _hCur=p.dysonDelivered[cargo]||0;
+          if(_hCur<_hNeed){
+            p.dysonDelivered[cargo]=Math.min(_hNeed,_hCur+_cUU);
+            const _hAll=Object.keys(p.dysonNeeds).every(k=>(p.dysonDelivered[k]||0)>=p.dysonNeeds[k]);
+            if(_hAll&&!p._dysonComplete){
+              p._dysonComplete=true;
+              const _hSite=galaxy.heliosSites&&galaxy.heliosSites.find(h=>h.depotPlanetId===p.id);
+              const _hStar=_hSite?galaxy.stars[_hSite.starId]:null;
+              if(_hStar) _hStar.hasDysonSphere=true;
+              p.demandRate=computeDemandRate(p);
+              _chatMsg((_hStar?_hStar.name.toUpperCase():'HELIOS SITE')+': DYSON SPHERE COMPLETE!','rgba(120,220,255,1)');
+              playSound('construction_complete');
+            }
+          }
+        }
+        // Ground Breaking mission counters: steel/glass delivered to any depot.
+        if(p.isDysonDepot&&t.isPlayer&&(cargo==='steel'||cargo==='glass')){
+          const _gbMx=missions.find(mx=>mx.id==='helios_groundbreak'&&mx.status==='active');
+          if(_gbMx){
+            if(cargo==='steel') _gbMx._depotSteel=(_gbMx._depotSteel||0)+1;
+            else _gbMx._depotGlass=(_gbMx._depotGlass||0)+1;
+          }
+        }
         // Famine mission: count livestock deliveries to the famine planet
         if(cargo==='livestock'){
           const _fmMx=missions.find(mx=>mx.id==='famine'&&mx.status==='active');
@@ -7876,6 +8557,11 @@ function _processCargoQueue(t, p){
       t.carFull[i]=true; if(t.carCargo) t.carCargo[i]=cargo;
       if(t.carCargoSource) t.carCargoSource[i]=t.planetId;
       if(t.carUnitsLoaded) t.carUnitsLoaded[i]=(t.carUnitsLoaded[i]||0)+_cUL;
+      // v0.4.7 military: loading ONE unit of ammo/gel fills the magazine.
+      if(MILITARY_CARS.has(t.cars[i])){
+        if(!t.carAmmo) t.carAmmo=[];
+        t.carAmmo[i]=_WEAPON_STATS[t.cars[i]].mag;
+      }
       // Mission escort tagging: the FIRST car to pick up a story-critical
       // mission cargo from its source planet becomes the glowing, destination-
       // locked escort car. Iterates the unified escort specs so mad_scientist,
@@ -7953,7 +8639,7 @@ function _spawnCargoBeam(train, dt){
   // Color by cargo type
   const isLoading2=isLoading;
   const _ctype=isLoading2?CAR_CARGO_TYPE[train.cars[carIdx]]:(train.carCargo?.[carIdx]||null);
-  const _BEAM_COLS={passengers:{col:'#ffe060',glow:'#ffcc00'},royal:{col:'#dd88ff',glow:'#bb44ee'},livestock:{col:'#cc8844',glow:'#aa6622'},water:{col:'#44ccff',glow:'#22aaff'},mail:{col:'#a8d8ff',glow:'#7ab8f0'},ice:{col:'#aaeeff',glow:'#ddf8ff'},sand:{col:'#e8c96a',glow:'#c8a030'},molten_ore:{col:'#ff6010',glow:'#ff2200'},iron:{col:'#ffcc44',glow:'#ddaa00'},gold:{col:'#ffe030',glow:'#ffbb00'},diamond:{col:'#80c0ff',glow:'#c0e0ff'},hazmat:{col:'#80ff20',glow:'#40cc00'},oil:{col:'#0a0a0a',glow:'#1a1a1a'},battery:{col:'#fff230',glow:'#ffff80'},flowers:{col:'#ff88cc',glow:'#ff44aa'},medical:{col:'#40eeaa',glow:'#00cc88'},grain:{col:'#e8d840',glow:'#c0aa10'},fruit:{col:'#ff8822',glow:'#ff5500'},steel:{col:'#c8d0e0',glow:'#8898b0'},glass:{col:'#a8e6d8',glow:'#60c0a8'},machinery:{col:'#a8a890',glow:'#706a4a'},cargo:{col:'#e8c898',glow:'#a88848'},chemical:{col:'#60d820',glow:'#28980c'}};
+  const _BEAM_COLS={passengers:{col:'#ffe060',glow:'#ffcc00'},royal:{col:'#dd88ff',glow:'#bb44ee'},livestock:{col:'#cc8844',glow:'#aa6622'},water:{col:'#44ccff',glow:'#22aaff'},mail:{col:'#a8d8ff',glow:'#7ab8f0'},ice:{col:'#aaeeff',glow:'#ddf8ff'},sand:{col:'#e8c96a',glow:'#c8a030'},molten_ore:{col:'#ff6010',glow:'#ff2200'},iron:{col:'#ffcc44',glow:'#ddaa00'},gold:{col:'#ffe030',glow:'#ffbb00'},diamond:{col:'#80c0ff',glow:'#c0e0ff'},hazmat:{col:'#80ff20',glow:'#40cc00'},oil:{col:'#0a0a0a',glow:'#1a1a1a'},battery:{col:'#fff230',glow:'#ffff80'},flowers:{col:'#ff88cc',glow:'#ff44aa'},medical:{col:'#40eeaa',glow:'#00cc88'},grain:{col:'#e8d840',glow:'#c0aa10'},fruit:{col:'#ff8822',glow:'#ff5500'},steel:{col:'#c8d0e0',glow:'#8898b0'},glass:{col:'#a8e6d8',glow:'#60c0a8'},machinery:{col:'#a8a890',glow:'#706a4a'},cargo:{col:'#e8c898',glow:'#a88848'},chemical:{col:'#60d820',glow:'#28980c'},uranium:{col:'#aaff00',glow:'#66cc00'},helium3:{col:'#ffbb55',glow:'#dd8820'},solar_panel:{col:'#55b8ff',glow:'#2080dd'},superconductor:{col:'#9070ff',glow:'#6040cc'},truss:{col:'#a8c4dc',glow:'#7090b0'},reactor_core:{col:'#40e0c0',glow:'#10a888'},aetherium:{col:'#ff50e0',glow:'#cc20b0'},titanium:{col:'#70c8e8',glow:'#3898c0'},biomass:{col:'#a8e030',glow:'#78a810'},artifact:{col:'#40ff90',glow:'#10cc60'},titanium_plate:{col:'#b8e0ff',glow:'#80b0e0'},warpsteel:{col:'#b070ff',glow:'#8040dd'},cannon_shell:{col:'#ffb060',glow:'#dd8020'},plasma_cell:{col:'#ff70ff',glow:'#cc30cc'},aegis_gel:{col:'#70ffd8',glow:'#30ccaa'}};
   const {col:pcol,glow:pglow}=_BEAM_COLS[_ctype]||{col:'#88ccff',glow:'#44aaff'};
   // Oil gets a per-particle slick effect: mostly black, with occasional iridescent
   // rainbow sprinkles to evoke the rainbow sheen on real oil.
@@ -8618,6 +9304,12 @@ function generateGalaxy(){
       p.hasDiamond=(!isHome&&_goldBiomes.includes(p.type.id)&&Math.random()<0.02);
       p.diamondRevealed=false;
       p.diamondPatch=p.hasDiamond?{angle:rand(0,Math.PI*2),arcSize:Math.PI*0.22}:null;
+      // Uranium vein (v0.4.7 Project Helios): rocky/lava planets only, rarer
+      // than gold. Hidden until a player train orbits the planet, mirroring
+      // the gold/diamond EUREKA flow. Feeds the Reactor Assembly chain.
+      p.hasUranium=(!isHome&&['rocky','lava'].includes(p.type.id)&&Math.random()<0.05);
+      p.uraniumRevealed=false;
+      p.uraniumPatch=p.hasUranium?{angle:rand(0,Math.PI*2),arcSize:Math.PI*0.22}:null;
       p.devLevelBase=isStarter?3:(isHome?randInt(1,2):randInt(0,3));
       p.devLevel=p.devLevelBase; p.populationBase=p.population; p.devLog=[]; p.passengerDeliveries=[];
       if(p.type.id==='agri'){
@@ -8956,6 +9648,7 @@ function generateGalaxy(){
           // were assigned when this planet was a different biome.
           _victim.hasGold=false; _victim.goldRevealed=false; _victim.goldPatch=null;
           _victim.hasDiamond=false; _victim.diamondRevealed=false; _victim.diamondPatch=null;
+          _victim.hasUranium=false; _victim.uraniumRevealed=false; _victim.uraniumPatch=null;
           // Urban planets shouldn't carry flower fields either.
           _victim.flowerUnlocked=false; _victim.flowerPositions=null; _victim.flowerSeed=null; _victim.isFlowersOrigin=false;
         }
@@ -8993,6 +9686,630 @@ function generateGalaxy(){
     }
   }
   return {stars, planets, homeStarId, origenId, trainPlanetId: origenId, blackHoles: _blackHoles, starProxyMap, colonyTrainDestId:_colonyTrainDestId, faminePlanetId:_faminePlanetId, outbreakPlanetId:_outbreakPlanetId, bhResearchPlanetId:_bhResearchPlanetId, bhResearchPlanetIds:_bhResearchPlanetIds, nebulas:_nebulas, rockyMissionPids:_rockyMissionPids};
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// v0.4.7 — THE ZETA QUADRANT
+// Generated LAZILY at portal ignition (never at new-game), appended to the
+// existing galaxy arrays so every runtime system (orbits, economy, fog,
+// transit, registries) picks the new region up with zero special-casing.
+// While the camera is in Alpha, Zeta planets live in the 10 Hz inactive
+// orbit batch and the economy ignores them (no stations/routes) — dormant
+// cost is effectively zero.
+// ═══════════════════════════════════════════════════════════════════════
+function _ensurePortalProxies(){
+  if(!galaxy||!galaxy.starProxyMap) return;
+  const _mk=(id,x,y,radius,name)=>({
+    id, starId:-1, isStarProxy:true, isPortal:true,
+    x, y, radius,
+    orbitRadius:0, orbitAngle:0, orbitSpeed:0,
+    size:'XL', name, starOrbitR:Math.round(radius*1.6), starOrbitROuter:Math.round(radius*2.4),
+    hasStation:false, isAlienRelic:false, isStarter:false,
+    moons:[], ring:null, clouds:[], cloudAngle:0,
+    hasGold:false, goldRevealed:false, goldPatch:null,
+    hasDiamond:false, diamondRevealed:false, diamondPatch:null,
+    devLevel:0, devLevelBase:0, devLog:[], passengerDeliveries:[],
+    population:0, populationBase:0,
+    supplyRate:{}, demandRate:{}, economicHealth:1,
+    catchphrase:'', type:PTYPES[0], upgrades:[]
+  });
+  const _bh=galaxy.blackHoles&&galaxy.blackHoles[0];
+  if(_bh&&!galaxy.starProxyMap[PORTAL_PROXY_ALPHA])
+    galaxy.starProxyMap[PORTAL_PROXY_ALPHA]=_mk(PORTAL_PROXY_ALPHA,_bh.x,_bh.y,_bh.radius,'The Portal');
+  if(galaxy.zetaPortal&&!galaxy.starProxyMap[PORTAL_PROXY_ZETA])
+    galaxy.starProxyMap[PORTAL_PROXY_ZETA]=_mk(PORTAL_PROXY_ZETA,galaxy.zetaPortal.x,galaxy.zetaPortal.y,galaxy.zetaPortal.radius,'Zeta Portal');
+}
+function generateZetaQuadrant(){
+  if(_zetaGenerated||!galaxy) return;
+  const stars=galaxy.stars, planets=galaxy.planets;
+  const _usedNames=new Set();
+  for(const s of stars) if(s&&s.name) _usedNames.add(s.name);
+  for(const p of planets) if(p&&p.name) _usedNames.add(p.name);
+  const _uniqueFrom=gen=>{
+    for(let _t=0;_t<60;_t++){
+      const _n=gen();
+      if(!_usedNames.has(_n)){ _usedNames.add(_n); return _n; }
+    }
+    let _base=gen(), _sfx=2;
+    while(_usedNames.has(_base+' '+_sfx)) _sfx++;
+    const _final=_base+' '+_sfx;
+    _usedNames.add(_final); return _final;
+  };
+  // ── Stars: rejection-sample ~34 systems inside the Zeta band. The min
+  // spacing (19.5k) already guarantees two 9k-orbit systems can't overlap,
+  // so no push-apart pass is needed.
+  const _zStars=[];
+  for(let attempt=0;attempt<20000&&_zStars.length<34;attempt++){
+    const sz=pickStarSize(), sr=STAR_R[sz];
+    const x=rand(ZETA_X0+9500, ZETA_X1-9500);
+    const y=rand(-WORLD_H+9500, WORLD_H-9500);
+    if(!_zStars.every(s=>Math.hypot(s.x-x,s.y-y)>s.radius+sr+19500)) continue;
+    const cn=pickStarColor(sz);
+    const st={id:stars.length, x, y, size:sz, radius:sr,
+              colorName:cn, color:STAR_COLORS[cn], name:_uniqueFrom(makeStarName), planetIds:[], isZeta:true};
+    stars.push(st); _zStars.push(st);
+  }
+  // ── Planets: mirror generateGalaxy's per-star loop (non-home path) with
+  // the Zeta biome table (crystal / obsidian / fungal + all Alpha biomes).
+  for(const star of _zStars){
+    const np=bellPlanetCount();
+    const orbitCap=9000;
+    const boundLimit=Math.min(star.x-ZETA_X0, ZETA_X1-star.x, WORLD_H-Math.abs(star.y))-400;
+    let orbitR=star.radius*1.8+400;
+    const dominantDir=Math.random()<0.5?1:-1;
+    for(let i=0;i<np;i++){
+      const sz=pickSize(), pr=SIZE_R[sz];
+      orbitR+=pr+rand(300,1200);
+      if(orbitR>orbitCap) break;
+      if(orbitR+pr>boundLimit) break;
+      const angle=rand(0,Math.PI*2);
+      const dir=Math.random()<0.02?-dominantDir:dominantDir;
+      const spd=0.00025*Math.sqrt(800/orbitR)*dir;
+      const p={
+        id:planets.length, starId:star.id,
+        orbitRadius:orbitR, orbitAngle:angle, orbitSpeed:spd,
+        _initialOrbitAngle:angle,
+        x:star.x+orbitR*Math.cos(angle), y:star.y+orbitR*Math.sin(angle),
+        size:sz, radius:pr,
+        type:_pickBiomeWeightedZeta(),
+        name:_uniqueFrom(()=>makeName(i+1)),
+        isStarter:false, isZeta:true
+      };
+      _attachBiome(p);
+      p.moons=generateMoons(p);
+      p.ring=(Math.random()<0.10)?{
+        rot:pick([0,Math.PI/8,Math.PI/4,Math.PI*3/8,Math.PI/2,Math.PI*5/8,Math.PI*3/4,Math.PI*7/8]),
+        outerFrac:rand(2.0,2.9), innerFrac:rand(1.35,1.75),
+        incl:rand(0.15,0.42),
+        rgb:p.type.rim.map(v=>Math.min(255,Math.round(v*0.5+rand(30,70))))
+      }:null;
+      p.catchphrase=generateCatchphrase(p);
+      p.population=generatePopulation(p);
+      p.clouds=generatePlanetClouds(p); p.cloudAngle=Math.random()*Math.PI*2;
+      const _goldBiomes=['rocky','desert','resort','jungle','ocean'];
+      p.hasGold=(_goldBiomes.includes(p.type.id)&&Math.random()<0.05);
+      p.goldRevealed=false;
+      p.goldPatch=p.hasGold?{angle:rand(0,Math.PI*2),arcSize:Math.PI*0.25}:null;
+      p.hasDiamond=(_goldBiomes.includes(p.type.id)&&Math.random()<0.02);
+      p.diamondRevealed=false;
+      p.diamondPatch=p.hasDiamond?{angle:rand(0,Math.PI*2),arcSize:Math.PI*0.22}:null;
+      p.hasUranium=(['rocky','lava'].includes(p.type.id)&&Math.random()<0.05);
+      p.uraniumRevealed=false;
+      p.uraniumPatch=p.hasUranium?{angle:rand(0,Math.PI*2),arcSize:Math.PI*0.22}:null;
+      p.hasArtifact=false; p.artifactRevealed=false; p.artifactPatch=null;
+      p.devLevelBase=randInt(0,3);
+      p.devLevel=p.devLevelBase; p.populationBase=p.population; p.devLog=[]; p.passengerDeliveries=[];
+      if(p.type.id==='agri'){
+        const _aR=Math.random(); p.agriStructAngle=rand(0,Math.PI*2);
+        if(_aR<0.333){p.grainUnlocked=true; p.upgrades=['granary'];}
+        else if(_aR<0.667){p.livestockUnlocked=true; p.upgrades=['farm'];}
+        else{p.fruitUnlocked=true; p.upgrades=['orchard'];}
+      }
+      p.supplyRate=computeSupplyRate(p); p.demandRate=computeDemandRate(p);
+      p.economicHealth=computeEconomicHealth(p); seedCargoPlanet(p);
+      if(p.type.id!=='agri') p.upgrades=UPGRADES.filter(u=>u.preBuiltBiomes.includes(p.type.id)).map(u=>u.id);
+      p.hasStation=false;
+      star.planetIds.push(p.id);
+      planets.push(p);
+      orbitR+=pr+rand(200,800);
+    }
+  }
+  // ── Hive worlds: promote up to 4 M+ planets on DISTINCT stars (preferring
+  // the Zeta interior) to the Combine's teeming hive biome.
+  const _zetaCx=(ZETA_X0+ZETA_X1)/2;
+  const _hiveType=PTYPES.find(t=>t.id==='hive');
+  const _hiveCands=planets.filter(p=>p&&p.isZeta&&['M','L','XL','XXL'].includes(p.size))
+    .sort((a,b)=>Math.hypot(a.x-_zetaCx,a.y)-Math.hypot(b.x-_zetaCx,b.y));
+  const _hiveStars=new Set();
+  const _hivePids=[];
+  for(const p of _hiveCands){
+    if(_hivePids.length>=4) break;
+    if(_hiveStars.has(p.starId)) continue;
+    p.type=_hiveType;
+    p._b=undefined;
+    p.population=Math.round(1e9+Math.random()*2e10);
+    p.populationBase=p.population;
+    p.hasGold=false; p.goldRevealed=false; p.goldPatch=null;
+    p.hasDiamond=false; p.diamondRevealed=false; p.diamondPatch=null;
+    p.hasUranium=false; p.uraniumRevealed=false; p.uraniumPatch=null;
+    p.devLevelBase=randInt(3,5); p.devLevel=p.devLevelBase;
+    p.supplyRate=computeSupplyRate(p); p.demandRate=computeDemandRate(p);
+    p.economicHealth=computeEconomicHealth(p); seedCargoPlanet(p);
+    p.catchphrase='A trillion voices hum in the dark.';
+    _hiveStars.add(p.starId); _hivePids.push(p.id);
+  }
+  galaxy.zetaHivePids=_hivePids;
+  // The Spire — the Combine HQ: the biggest hive world.
+  if(_hivePids.length){
+    let _spire=null;
+    for(const pid of _hivePids){ const q=planets[pid]; if(!_spire||(q.radius||0)>(_spire.radius||0)) _spire=q; }
+    galaxy.zetaSpireId=_spire?_spire.id:null;
+  }
+  // ── Artifact caches: buried near hive systems (revealed by orbiting).
+  for(const p of planets){
+    if(!p||!p.isZeta||p.type.id==='hive'||p.hasArtifact) continue;
+    if(!['rocky','desert','resort','jungle','ocean','ancient','crystal','obsidian','fungal'].includes(p.type.id)) continue;
+    const _nearHive=_hivePids.some(hid=>{const h=planets[hid];return h&&Math.hypot(h.x-p.x,h.y-p.y)<30000;});
+    if(_nearHive&&Math.random()<0.15){
+      p.hasArtifact=true;
+      p.artifactPatch={angle:rand(0,Math.PI*2),arcSize:Math.PI*0.22};
+    }
+  }
+  // ── Exit portal: west-central Zeta, clear of every system.
+  {
+    let _px=ZETA_X0+20000, _py=0;
+    for(let _pa=0;_pa<400;_pa++){
+      const _tx=rand(ZETA_X0+14000,ZETA_X0+34000);
+      const _ty=rand(-WORLD_H*0.4,WORLD_H*0.4);
+      if(_zStars.every(s=>Math.hypot(s.x-_tx,s.y-_ty)>s.radius+16000)){ _px=_tx; _py=_ty; break; }
+    }
+    galaxy.zetaPortal={x:Math.round(_px), y:Math.round(_py), radius:5000};
+  }
+  _zetaGenerated=true;
+  _applyZetaWorldExtent();
+  _ensurePortalProxies();
+}
+// Ignition: flips the black hole into portal mode, births the Zeta Quadrant,
+// and stages the reveal (camera cut + FX + chat + the Threshold mission).
+function _igniteBlackHolePortal(){
+  if(_portalActive) return;
+  _portalActive=true;
+  generateZetaQuadrant();
+  _ignitionFxStartMs=Date.now();
+  const _bh=galaxy&&galaxy.blackHoles&&galaxy.blackHoles[0];
+  if(_bh){
+    sel=null; tracking=false;
+    const _zTarget=Math.exp(Math.log(MIN_SC)+0.55*(Math.log(MAX_SC)-Math.log(MIN_SC)));
+    cam.scale=Math.max(MIN_SC,Math.min(MAX_SC,_zTarget));
+    cam.x=_bh.x+(PANEL_W)/(2*cam.scale); cam.y=_bh.y; clampCamera();
+  }
+  playSound('discovery');
+  _chatMsg('THE BLACK HOLE IGNITES — AN ANCIENT PORTAL TEARS OPEN','rgba(255,120,255,1)');
+  _chatMsg('ROUTE A TRAIN INTO THE PORTAL TO CROSS INTO THE ZETA QUADRANT','rgba(180,235,255,1)');
+  _ga('portal_ignited',{sd:Math.floor(stardate)});
+  if(!_missionPending('zeta_threshold')&&!missions.some(mx=>mx.id==='zeta_threshold')){
+    pendingMissionIntros.push({defId:'zeta_threshold',readySd:stardate});
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// v0.4.7 — THE VERDANT COMBINE (alien rail corporation) + COMBAT
+// The Combine is instantiated only at the player's FIRST Zeta planet visit
+// (abstract until then — zero cost). It is deliberately NOT a second
+// _aiCorp instance: its trains run scripted freight/patrol loops among its
+// own stations, and the interesting behavior (fire-fights, raids, the
+// hostility dial) lives in updateCombat/updateCombine below.
+// ═══════════════════════════════════════════════════════════════════════
+const COMBINE_TRAIN_NAMES=['VRX THORAX','VRX MANDIBLE','VRX CARAPACE','VRX STINGER','VRX CHITIN','VRX SWARMLIGHT','VRX PHEROMONE','VRX DRONE-9','VRX WARDEN','VRX TALON'];
+function _combineAssignLoop(t, stops){
+  const fp=_gp(stops[0]); if(!fp) return;
+  const stopOrbitR=stops.map(id=>{const q=_gp(id);return q?.isStarProxy?q.starOrbitR:(ORBIT_TIERS[q?.size||'M']['LOW']??ORBIT_TIERS.M.LOW);});
+  t.orbitR=fp.isStarProxy?fp.starOrbitR:(ORBIT_TIERS[fp.size]['LOW']||t.orbitR);
+  t.orbitGap=CAR_ORB_GAP/t.orbitR;
+  stopOrbitR[0]=t.orbitR;
+  t.route={stops:stops.slice(), isLoop:true, fromIdx:0, toIdx:Math.min(1,stops.length-1), phase:'orbit',
+    orbitSpun:0, dir:1, minOrbitDone:true, stopOrbitR, _recomputeTimer:0,
+    departAngle:computeDepartAngle(fp,stops[1],t.orbitR,stopOrbitR[1]||t.orbitR)};
+  t._cargoCheckedThisStop=false;
+  _invalidateOccOrbit();
+}
+function _makeCombineTrain(name, planetId, cars){
+  const t=makeGalaxyTrain(name, planetId, 'LOW', cars, false);
+  t.isCombine=true;
+  t.color='#39e060';
+  t.carAmmo=new Array(cars.length).fill(0);
+  t.carDisabled=new Array(cars.length).fill(false);
+  // Combine weapons spawn loaded.
+  for(let i=0;i<cars.length;i++){
+    if(MILITARY_CARS.has(cars[i])){ t.carAmmo[i]=_WEAPON_STATS[cars[i]].mag; t.carFull[i]=true; t.carCargo[i]=CAR_CARGO_TYPE[cars[i]]; }
+  }
+  t._engineFailureSd=Infinity; // Combine drives don't break down
+  trains.push(t);
+  _combineTrainIdxs.push(trains.length-1);
+  return t;
+}
+function _combineStations(){
+  const out=[];
+  if(!galaxy) return out;
+  for(const p of galaxy.planets){ if(p&&p.combineStation) out.push(p); }
+  return out;
+}
+function _foundCombine(){
+  if(_combineFounded||!galaxy||!_zetaGenerated) return;
+  _combineFounded=true;
+  _combineCredits=750000;
+  // Stations: every hive world + up to 5 resource worlds near hives.
+  const _hives=(galaxy.zetaHivePids||[]).map(id=>galaxy.planets[id]).filter(Boolean);
+  const _stationify=(p)=>{
+    if(p.hasStation) { p.combineStation=p.combineStation||!p.playerBuiltStation; return; }
+    p.hasStation=true; p.combineStation=true;
+    p.stationAngle=rand(0,Math.PI*2);
+    const _big=(p.size==='L'||p.size==='XL'||p.size==='XXL');
+    p.stationSpeed=(Math.random()<0.15?-1:1)*Math.PI*2/(_big?rand(4800,14400):rand(2400,7200));
+  };
+  for(const h of _hives) _stationify(h);
+  let _resCount=0;
+  const _resStations=[];
+  for(const p of galaxy.planets){
+    if(_resCount>=5) break;
+    if(!p||!p.isZeta||p.combineStation||p.hasStation) continue;
+    if(!['crystal','obsidian','fungal','ocean','lava'].includes(p.type.id)) continue;
+    if(!_hives.some(h=>Math.hypot(h.x-p.x,h.y-p.y)<28000)) continue;
+    _stationify(p); _resStations.push(p); _resCount++;
+  }
+  const _allSt=_combineStations();
+  // Trains: one freight loop hive↔resource per pair, plus 3 armed patrols.
+  let _nameIdx=0;
+  const _nextName=()=>COMBINE_TRAIN_NAMES[(_nameIdx++)%COMBINE_TRAIN_NAMES.length];
+  for(let i=0;i<_resStations.length&&i<_hives.length;i++){
+    const _cargoCar=({crystal:'car_aetherium',obsidian:'car_titanium',fungal:'car_biomass',ocean:'car_water_tank',lava:'car_ore'})[_resStations[i].type.id]||'car_cargo';
+    const t=_makeCombineTrain(_nextName(),_resStations[i].id,
+      ['engine_galaxy',_cargoCar,_cargoCar,_cargoCar,'car_cannon','car_shield','caboose']);
+    _combineAssignLoop(t,[_resStations[i].id,_hives[i%_hives.length].id]);
+  }
+  for(let i=0;i<3&&_allSt.length>=2;i++){
+    const a=_allSt[i%_allSt.length], b=_allSt[(i+1)%_allSt.length];
+    if(a.id===b.id) continue;
+    const t=_makeCombineTrain(_nextName(),a.id,
+      ['engine_classJ','car_cannon','car_laser','car_shield','car_shield','caboose']);
+    t._isPatrol=true;
+    _combineAssignLoop(t,[a.id,b.id]);
+  }
+  // The Spire flagship exists but stays docked until the campaign finale.
+  _chatMsg('CONTACT: AN ALIEN RAIL NETWORK LIGHTS UP ACROSS THE ZETA QUADRANT','rgba(80,255,140,1)');
+  _chatMsg('THE VERDANT COMBINE HAS NOTICED YOUR ARRIVAL','rgba(80,255,140,1)');
+  playSound('notification');
+  _ga('combine_founded',{sd:Math.floor(stardate)});
+  // First Contact scripted beat + the military arc trigger live in the
+  // zeta_foothold mission completion (see updateMissions).
+}
+// Rebuild _combineTrainIdxs after load (trains carry isCombine).
+function _relinkCombineTrains(){
+  _combineTrainIdxs=[];
+  for(let i=0;i<trains.length;i++) if(trains[i]&&trains[i].isCombine) _combineTrainIdxs.push(i);
+}
+// True when a world point sits inside claimed Combine territory.
+function _inCombineTerritory(x,y){
+  if(!galaxy) return false;
+  for(const pid of (galaxy.zetaHivePids||[])){
+    const h=galaxy.planets[pid];
+    if(h&&Math.hypot(h.x-x,h.y-y)<25000) return true;
+  }
+  for(const p of _combineStations()){
+    if(Math.hypot(p.x-x,p.y-y)<15000) return true;
+  }
+  return false;
+}
+// Light per-frame Combine upkeep: keep parked trains on patrol loops, drift
+// hostility toward its resting level, tick the abstract treasury.
+let _combineUpkeepAcc=0;
+function updateCombine(dtG){
+  if(!_combineFounded) return;
+  _combineUpkeepAcc+=dtG;
+  if(_combineUpkeepAcc<120) return; // ~2 s cadence at 1×
+  _combineUpkeepAcc=0;
+  const _allSt=_combineStations();
+  for(const ti of _combineTrainIdxs){
+    const t=trains[ti];
+    if(!t||t._destroyed) continue;
+    if(!t.route&&_allSt.length>=2){
+      const a=_allSt[Math.floor(Math.random()*_allSt.length)];
+      let b=_allSt[Math.floor(Math.random()*_allSt.length)];
+      if(b.id===a.id) b=_allSt[(_allSt.indexOf(a)+1)%_allSt.length];
+      if(t.planetId!==a.id){
+        // Teleport-free re-anchor: patrol from wherever it is to a station.
+        const cur=_gp(t.planetId);
+        if(cur) _combineAssignLoop(t,[t.planetId,a.id]);
+      } else if(b.id!==a.id){
+        _combineAssignLoop(t,[a.id,b.id]);
+      }
+    }
+  }
+  // Hostility drifts slowly back toward the 25-point resting tension
+  // (war pushes it up, trade pulls it down, time forgives a little).
+  if(!_combineDefeated&&!_combineArmistice){
+    if(_combineHostility>25) _combineHostility=Math.max(25,_combineHostility-dtG*0.0004);
+  }
+  _combineCredits+=Math.round(dtG*2); // abstract hive-economy income
+}
+
+// ── Combat core ─────────────────────────────────────────────────────────
+function _trainAlive(t){ return t&&!t._destroyed; }
+function _trainHasWeapons(t){
+  if(!_trainAlive(t)||t.crippled||!t.carAmmo) return false;
+  for(let i=0;i<t.cars.length;i++){
+    if(WEAPON_CARS.has(t.cars[i])&&!t.carDisabled?.[i]&&(t.carAmmo[i]||0)>0) return true;
+  }
+  return false;
+}
+function _trainShieldCharges(t){
+  if(!t||!t.carAmmo) return 0;
+  let s=0;
+  for(let i=0;i<t.cars.length;i++) if(t.cars[i]==='car_shield'&&!t.carDisabled?.[i]) s+=(t.carAmmo[i]||0);
+  return s;
+}
+function _trainEnginePos(t){
+  const pos=getTrainCarPos(t,0);
+  return pos||[t&&_gp(t.planetId)?_gp(t.planetId).x:0, t&&_gp(t.planetId)?_gp(t.planetId).y:0];
+}
+// Apply one hit to a train. dmg = shield charges consumed / cars threatened.
+function _applyHit(targetTi, dmg, srcIsPlayer){
+  const t=trains[targetTi];
+  if(!_trainAlive(t)) return;
+  // Shields absorb first — drain charges across shield cars.
+  let _absorb=0;
+  for(let i=0;i<t.cars.length&&_absorb<dmg;i++){
+    if(t.cars[i]==='car_shield'&&!t.carDisabled?.[i]&&(t.carAmmo?.[i]||0)>0){
+      const take=Math.min(dmg-_absorb, t.carAmmo[i]);
+      t.carAmmo[i]-=take; _absorb+=take;
+      if(t.carAmmo[i]<=0){ t.carFull[i]=false; t.carCargo[i]=null; }
+    }
+  }
+  if(_absorb>0){
+    t._shieldFlashMs=Date.now();
+    const [ex,ey]=_trainEnginePos(t);
+    _combatFx.push({kind:'shield',x:ex,y:ey,life:18,max:18});
+    if(_absorb>=dmg) return;
+  }
+  // Unshielded hit: disable a random still-enabled mid car.
+  if(!t.carDisabled) t.carDisabled=new Array(t.cars.length).fill(false);
+  const _cands=[];
+  for(let i=1;i<t.cars.length;i++){
+    if(t.cars[i]==='caboose') continue;
+    if(!t.carDisabled[i]) _cands.push(i);
+  }
+  if(_cands.length){
+    const ci=_cands[Math.floor(Math.random()*_cands.length)];
+    t.carDisabled[ci]=true;
+    t.carFull[ci]=false; if(t.carCargo) t.carCargo[ci]=null;
+    if(t.carAmmo) t.carAmmo[ci]=0;
+    const pos=getTrainCarPos(t,ci)||_trainEnginePos(t);
+    _combatFx.push({kind:'hit',x:pos[0],y:pos[1],life:24,max:24});
+    if(t.isPlayer){ _chatMsg(t.name+': CAR HIT — '+(CAR_LABELS[t.cars[ci]]||'CAR')+' DISABLED','rgba(255,90,90,1)'); playSound('breakdown'); }
+    return;
+  }
+  // No cars left — the engine takes it.
+  if(t.isPlayer||t.isAlly){
+    if(!t.crippled){
+      t.crippled=true;
+      _chatMsg(t.name+': ENGINE HIT — TRAIN CRIPPLED (limping to a friendly station)','rgba(255,60,60,1)');
+      playSound('breakdown');
+    }
+  } else if(t.isCombine){
+    _destroyCombineTrain(targetTi, srcIsPlayer);
+  }
+}
+function _destroyCombineTrain(ti, byPlayer){
+  const t=trains[ti];
+  if(!_trainAlive(t)) return;
+  t._destroyed=true;
+  t.route=null; t.queuedRoute=null; t.cargoPhase=null;
+  const [ex,ey]=_trainEnginePos(t);
+  _combatFx.push({kind:'boom',x:ex,y:ey,life:40,max:40});
+  playSound('breakdown');
+  if(byPlayer){
+    const _bounty=15000+Math.floor(Math.random()*10000);
+    credits+=_bounty; pendingCreditDeltas.push({timer:30,amount:_bounty});
+    spawnCreditFloat(ex,ey,_bounty);
+    _combineKills++;
+    _combineHostility=Math.min(100,_combineHostility+8);
+    _chatMsg((t.name||'COMBINE TRAIN')+' DESTROYED — SALVAGE +'+_fmtCr(_bounty)+' cr','rgba(120,255,160,1)');
+    if(t._isFlagship&&!_combineDefeated){ _combineDefeated=true; }
+    _ga('combine_train_destroyed',{sd:Math.floor(stardate), kills:_combineKills});
+  }
+  // Deselect if the player had it selected.
+  if(sel&&sel.type==='car'&&trains[sel.data?.trainIdx]===t){ sel=null; tracking=false; }
+}
+// May this Combine train open fire on that player/ally train?
+function _combineWillAttack(target){
+  if(!_trainAlive(target)||target.crippled) return false;
+  const [tx,ty]=_trainEnginePos(target);
+  if(_regionOfX(tx)!=='zeta'&&_combineHostility<90) return false; // Combine stays in Zeta until all-out war
+  const _armed=_trainHasWeapons(target);
+  if(_combineHostility>=75) return true;
+  if(_combineHostility>=40) return _inCombineTerritory(tx,ty)||_armed;
+  return _armed&&_inCombineTerritory(tx,ty);
+}
+function updateCombat(dtG){
+  if(!_combineFounded&&_combatProjectiles.length===0) return;
+  // ── Advance cooldowns every frame ──
+  for(const t of trains){
+    if(!_trainAlive(t)||!t._carCd) continue;
+    for(let i=0;i<t._carCd.length;i++) if(t._carCd[i]>0) t._carCd[i]-=dtG;
+  }
+  // ── Projectiles (homing cannon shells) ──
+  for(let i=_combatProjectiles.length-1;i>=0;i--){
+    const pr=_combatProjectiles[i];
+    const tgt=trains[pr.targetTi];
+    if(!_trainAlive(tgt)){ _combatProjectiles.splice(i,1); continue; }
+    const [tx,ty]=_trainEnginePos(tgt);
+    const dx=tx-pr.x, dy=ty-pr.y;
+    const d=Math.hypot(dx,dy)||1;
+    const step=pr.speed*dtG;
+    if(d<=step){ _applyHit(pr.targetTi, pr.dmg, pr.srcIsPlayer); _combatProjectiles.splice(i,1); continue; }
+    pr.x+=dx/d*step; pr.y+=dy/d*step;
+    pr.life-=dtG;
+    if(pr.life<=0) _combatProjectiles.splice(i,1);
+  }
+  // ── Beam / FX lifetimes (real-frame-ish decay via dtG) ──
+  for(let i=_combatBeams.length-1;i>=0;i--){ _combatBeams[i].life-=dtG; if(_combatBeams[i].life<=0) _combatBeams.splice(i,1); }
+  for(let i=_combatFx.length-1;i>=0;i--){ _combatFx[i].life-=dtG; if(_combatFx[i].life<=0) _combatFx.splice(i,1); }
+  if(!_combineFounded) return;
+  // ── Targeting scan (throttled) ──
+  _combatScanAcc+=dtG;
+  if(_combatScanAcc<10) return;
+  _combatScanAcc=0;
+  const _playerSide=[], _combineSide=[];
+  for(let ti=0;ti<trains.length;ti++){
+    const t=trains[ti];
+    if(!_trainAlive(t)) continue;
+    if(t.isCombine) _combineSide.push(ti);
+    else if(t.isPlayer||t.isAlly) _playerSide.push(ti);
+  }
+  const _fireFrom=(ti, enemyList, isPlayerSide)=>{
+    const t=trains[ti];
+    if(!_trainHasWeapons(t)) return;
+    if(!t._carCd) t._carCd=new Array(t.cars.length).fill(0);
+    const [sx,sy]=_trainEnginePos(t);
+    // Vex Interceptor: +25% fire rate for the whole train.
+    const _cdMult=t.cars[0]==='engine_vex'?0.75:1.0;
+    for(let ci=0;ci<t.cars.length;ci++){
+      const ct=t.cars[ci];
+      if(!WEAPON_CARS.has(ct)||t.carDisabled?.[ci]) continue;
+      if((t.carAmmo?.[ci]||0)<=0) continue;
+      if((t._carCd[ci]||0)>0) continue;
+      const ws=_WEAPON_STATS[ct];
+      // Nearest living enemy in range
+      let best=-1, bestD=Infinity;
+      for(const ei of enemyList){
+        const et=trains[ei];
+        if(!_trainAlive(et)) continue;
+        if(!isPlayerSide&&!_combineWillAttack(et)) continue;
+        const [ex,ey]=_trainEnginePos(et);
+        const d=Math.hypot(ex-sx,ey-sy);
+        if(d<ws.range&&d<bestD){ best=ei; bestD=d; }
+      }
+      if(best<0) continue;
+      const cpos=getTrainCarPos(t,ci)||[sx,sy];
+      t.carAmmo[ci]--;
+      if(t.carAmmo[ci]<=0){ t.carFull[ci]=false; if(t.carCargo) t.carCargo[ci]=null; }
+      t._carCd[ci]=ws.cdFrames*_cdMult;
+      if(ws.kind==='cannon'){
+        _combatProjectiles.push({x:cpos[0],y:cpos[1],targetTi:best,dmg:ws.dmg,speed:14,life:600,srcIsPlayer:isPlayerSide});
+      } else {
+        const [ex2,ey2]=_trainEnginePos(trains[best]);
+        _combatBeams.push({x1:cpos[0],y1:cpos[1],x2:ex2,y2:ey2,life:14,max:14,player:isPlayerSide});
+        _applyHit(best, ws.dmg, isPlayerSide);
+      }
+      playSound('blip');
+    }
+  };
+  for(const ti of _playerSide) _fireFrom(ti,_combineSide,true);
+  for(const ti of _combineSide) _fireFrom(ti,_playerSide,false);
+  // ── Defense batteries (player stations) fire at Combine trains ──
+  for(const p of _getUpgradePlanets()){
+    if(!(p.upgrades||[]).includes('defense_battery')) continue;
+    if((p.defenseShells||0)<=0) continue;
+    if(p._defCd>0){ p._defCd-=10; continue; }
+    let best=-1,bestD=Infinity;
+    for(const ei of _combineSide){
+      const et=trains[ei];
+      if(!_trainAlive(et)) continue;
+      const [ex,ey]=_trainEnginePos(et);
+      const d=Math.hypot(ex-p.x,ey-p.y);
+      if(d<2500&&d<bestD){best=ei;bestD=d;}
+    }
+    if(best>=0){
+      p.defenseShells--;
+      p._defCd=200;
+      _combatProjectiles.push({x:p.x,y:p.y,targetTi:best,dmg:2,speed:14,life:600,srcIsPlayer:true});
+      playSound('blip');
+    }
+  }
+  // ── Crippled player trains limp + auto-repair at friendly stations ──
+  for(const ti of _playerSide){
+    const t=trains[ti];
+    if(!t.isPlayer) continue;
+    const _hasDisabled=t.carDisabled&&t.carDisabled.some(d=>d);
+    if(!t.crippled&&!_hasDisabled) continue;
+    const p=_gp(t.planetId);
+    const _atFriendly=p&&p.hasStation&&!p.combineStation&&(!t.route||t.route.phase!=='transit');
+    if(!_atFriendly) continue;
+    t._repairAcc=(t._repairAcc||0)+10;
+    if(t._repairAcc>=600){ // ~10 s at 1× per car
+      t._repairAcc=0;
+      let _fixed=false;
+      for(let ci=0;ci<t.cars.length;ci++){
+        if(t.carDisabled?.[ci]){
+          if(credits>=500){ credits-=500; creditDelta-=500; }
+          t.carDisabled[ci]=false;
+          _chatMsg(t.name+': '+(CAR_LABELS[t.cars[ci]]||'CAR')+' REPAIRED (-500 cr)','rgba(120,220,160,1)');
+          _fixed=true; break;
+        }
+      }
+      if(!_fixed&&t.crippled){
+        t.crippled=false;
+        _chatMsg(t.name+': ENGINE REPAIRED — BACK IN SERVICE','rgba(120,220,160,1)');
+      }
+    }
+  }
+}
+// Combat FX rendering (world space) — called from drawGalaxy after trains.
+function _drawCombatFX(){
+  if(!_combatProjectiles.length&&!_combatBeams.length&&!_combatFx.length) return;
+  ctx.save();
+  for(const pr of _combatProjectiles){
+    const [sx,sy]=w2s(pr.x,pr.y);
+    if(sx<-20||sx>W+20||sy<-20||sy>GH+20) continue;
+    const r=Math.max(1.5,3*cam.scale*40);
+    ctx.fillStyle=pr.srcIsPlayer?'rgba(255,190,90,0.95)':'rgba(120,255,140,0.95)';
+    ctx.beginPath(); ctx.arc(sx,sy,Math.min(3.5,r),0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='rgba(255,255,255,0.55)';
+    ctx.beginPath(); ctx.arc(sx,sy,Math.min(1.6,r*0.5),0,Math.PI*2); ctx.fill();
+  }
+  for(const b of _combatBeams){
+    const [x1,y1]=w2s(b.x1,b.y1), [x2,y2]=w2s(b.x2,b.y2);
+    const a=Math.max(0,b.life/b.max);
+    ctx.strokeStyle=b.player?('rgba(255,110,255,'+(0.85*a).toFixed(3)+')'):('rgba(110,255,150,'+(0.85*a).toFixed(3)+')');
+    ctx.lineWidth=2.2;
+    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+    ctx.strokeStyle='rgba(255,255,255,'+(0.45*a).toFixed(3)+')';
+    ctx.lineWidth=0.9;
+    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+  }
+  for(const fx of _combatFx){
+    const [sx,sy]=w2s(fx.x,fx.y);
+    const tt=1-fx.life/fx.max;
+    if(fx.kind==='boom'){
+      ctx.strokeStyle='rgba(255,160,60,'+(0.9*(1-tt)).toFixed(3)+')';
+      ctx.lineWidth=Math.max(1.2,3*(1-tt));
+      ctx.beginPath(); ctx.arc(sx,sy,4+tt*60*Math.max(0.4,cam.scale*20),0,Math.PI*2); ctx.stroke();
+      ctx.fillStyle='rgba(255,230,140,'+(0.55*(1-tt)).toFixed(3)+')';
+      ctx.beginPath(); ctx.arc(sx,sy,Math.max(1.5,6*(1-tt)),0,Math.PI*2); ctx.fill();
+    } else if(fx.kind==='shield'){
+      ctx.strokeStyle='rgba(90,220,255,'+(0.8*(1-tt)).toFixed(3)+')';
+      ctx.lineWidth=1.6;
+      ctx.beginPath(); ctx.arc(sx,sy,10+tt*18,0,Math.PI*2); ctx.stroke();
+    } else { // 'hit'
+      ctx.fillStyle='rgba(255,90,60,'+(0.85*(1-tt)).toFixed(3)+')';
+      ctx.beginPath(); ctx.arc(sx,sy,Math.max(1.5,5*(1-tt)),0,Math.PI*2); ctx.fill();
+    }
+  }
+  // Shield bubbles: any live train with charges shows a faint aura.
+  for(const t of trains){
+    if(!_trainAlive(t)) continue;
+    const _sc=_trainShieldCharges(t);
+    if(_sc<=0) continue;
+    const [ex,ey]=_trainEnginePos(t);
+    const [sx,sy]=w2s(ex,ey);
+    if(sx<-80||sx>W+80||sy<-80||sy>GH+80) continue;
+    const _rad=Math.max(14,(_trainTailLen(t)*0.62+40)*cam.scale);
+    const _flash=t._shieldFlashMs&&(Date.now()-t._shieldFlashMs)<260;
+    ctx.strokeStyle=_flash?'rgba(160,240,255,0.9)':'rgba(80,200,255,0.30)';
+    ctx.lineWidth=_flash?2.0:1.1;
+    ctx.beginPath(); ctx.arc(sx,sy,_rad,0,Math.PI*2); ctx.stroke();
+  }
+  ctx.restore();
 }
 
 // Pre-determined engine lifespan: every newly-installed engine fails some
@@ -9145,6 +10462,7 @@ function _initAICorp(){
     // symmetric and forces both sides to explore outward for deposits.
     _p.hasGold=false; _p.goldRevealed=false; _p.goldPatch=null;
     _p.hasDiamond=false; _p.diamondRevealed=false; _p.diamondPatch=null;
+    _p.hasUranium=false; _p.uraniumRevealed=false; _p.uraniumPatch=null;
   }
   // If the host star started with fewer than 6 planets, append new ones to
   // fill the canonical sequence at outer orbits.
@@ -9212,6 +10530,9 @@ function _initAICorp(){
       _np.hasDiamond=false;
       _np.diamondRevealed=false;
       _np.diamondPatch=null;
+      _np.hasUranium=false;
+      _np.uraniumRevealed=false;
+      _np.uraniumPatch=null;
       _np.devLevelBase=(i===1)?3:randInt(0,2);
       _np.devLevel=_np.devLevelBase;
       _np.devLog=[]; _np.passengerDeliveries=[];
@@ -10908,6 +12229,8 @@ const _AI_CAR_VALS={engine_constellation:10000,engine_galaxy:20000,engine_classJ
 //   • upgradeId !== 'repair_drones' (passive — not an economic priority)
 //   • planet is AI-owned with a station, biome matches eligibleBiomes,
 //     upgrade not already built
+// v0.4.7 upgrades the rival AI never builds (player/Combine story content).
+const _AI_V47_SKIP=new Set(['gas_siphon','panel_fab','cryo_forge','orbital_shipyard','reactor_assembly','titan_mill','munitions_works','plasma_refinery','bioforge','xenoforge','armory','defense_battery']);
 function _aiPickUpgradeTarget(){
   if(!_aiCorp||!galaxy) return null;
   let _fEngine='engine_constellation';
@@ -10921,6 +12244,10 @@ function _aiPickUpgradeTarget(){
   for(const upDef of UPGRADES){
     if(!upDef||upDef.cost<=0) continue;
     if(upDef.id==='repair_drones') continue;
+    // v0.4.7: the rival AI corp stays out of the Helios/Zeta/military
+    // chains entirely — those are the player's (and the Combine's) story
+    // content, and the AI's input/output tables don't model them.
+    if(_AI_V47_SKIP.has(upDef.id)) continue;
     if(_aiCorp.credits<upDef.cost) continue;
     const _inputs=_AI_UPGRADE_INPUTS[upDef.id]||[];
     const _outputCargo=_AI_UPGRADE_OUTPUTS[upDef.id]||null;
@@ -12084,6 +13411,57 @@ function _drawGoldPatch(cx,cy,r,patch,glowR=0){
   ctx.restore();
 }
 
+// v0.4.7: uranium vein — pulsing radioactive-green wedge. Far simpler than
+// the gold/diamond fans; the pulse alone reads as "hazardous deposit".
+function _drawUraniumPatch(cx,cy,r,patch,glowR=0){
+  if(!patch||r<2) return;
+  const a0=patch.angle, arc=patch.arcSize??Math.PI*0.22;
+  const _pulse=0.65+0.35*Math.sin((typeof _drawTs==='number'?_drawTs:0)*0.004);
+  ctx.save();
+  ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.clip();
+  const inner=r*0.55, outer=r*0.98;
+  const _gr=ctx.createRadialGradient(cx,cy,inner,cx,cy,outer);
+  _gr.addColorStop(0,'rgba(170,255,0,0)');
+  _gr.addColorStop(0.35,'rgba(150,240,20,'+(0.55*_pulse)+')');
+  _gr.addColorStop(1,'rgba(80,160,0,'+(0.65*_pulse)+')');
+  ctx.beginPath(); ctx.moveTo(cx,cy); ctx.arc(cx,cy,outer,a0,a0+arc); ctx.closePath();
+  ctx.fillStyle=_gr; ctx.fill();
+  // Hot glint specks
+  const _uc=Math.max(2,Math.round(r*0.14));
+  for(let _ui=0;_ui<_uc;_ui++){
+    const _ua=a0+arc*(_ui+0.5)/_uc;
+    const _ur=inner+((_ui*37)%100)/100*(outer-inner)*0.8;
+    ctx.fillStyle='rgba(220,255,120,'+(0.8*_pulse)+')';
+    ctx.beginPath(); ctx.arc(cx+Math.cos(_ua)*_ur, cy+Math.sin(_ua)*_ur, Math.max(0.6,r*0.03), 0, Math.PI*2); ctx.fill();
+  }
+  ctx.restore();
+}
+// v0.4.7 Zeta: alien artifact cache — teal-green geometric ruin-glyph wedge.
+function _drawArtifactPatch(cx,cy,r,patch,glowR=0){
+  if(!patch||r<2) return;
+  const a0=patch.angle, arc=patch.arcSize??Math.PI*0.22;
+  ctx.save();
+  ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.clip();
+  const inner=r*0.55, outer=r*0.98;
+  const _gr=ctx.createRadialGradient(cx,cy,inner,cx,cy,outer);
+  _gr.addColorStop(0,'rgba(64,255,144,0)');
+  _gr.addColorStop(0.35,'rgba(64,255,144,0.42)');
+  _gr.addColorStop(1,'rgba(20,140,90,0.60)');
+  ctx.beginPath(); ctx.moveTo(cx,cy); ctx.arc(cx,cy,outer,a0,a0+arc); ctx.closePath();
+  ctx.fillStyle=_gr; ctx.fill();
+  // Rectilinear "buried structure" bars
+  ctx.strokeStyle='rgba(160,255,200,0.65)'; ctx.lineWidth=Math.max(0.6,r*0.03);
+  const _bc=Math.max(2,Math.round(r*0.10));
+  for(let _bi=0;_bi<_bc;_bi++){
+    const _ba=a0+arc*(_bi+0.5)/_bc;
+    const _r0=inner+0.15*(outer-inner), _r1=inner+(0.45+0.35*(_bi%2))*(outer-inner);
+    ctx.beginPath();
+    ctx.moveTo(cx+Math.cos(_ba)*_r0, cy+Math.sin(_ba)*_r0);
+    ctx.lineTo(cx+Math.cos(_ba)*_r1, cy+Math.sin(_ba)*_r1);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
 function _drawDiamondPatch(cx,cy,r,patch,glowR=0){
   if(!patch||r<2) return;
   const a0=patch.angle, arc=patch.arcSize??Math.PI*0.22;
@@ -12562,7 +13940,28 @@ function drawStar(cx,cy,r,color,hasDyson){
   // front-facing panels appear over the star. Star light still shines through
   // the gaps between panels because each hex is a separate fill that leaves
   // the star pixels visible in between.
-  if(hasDyson) drawDysonSphere(cx,cy,pr);
+  // v0.4.7: `hasDyson` may also be a NUMBER 0..1 — the construction progress
+  // of a Project Helios site sphere. Partial progress renders a growing
+  // polar cap of panels plus scaffold rings (see drawDysonSphere).
+  if(hasDyson) drawDysonSphere(cx,cy,pr, hasDyson===true?1:Math.max(0.02,Math.min(1,hasDyson)));
+}
+// Resolve the dyson argument for a star: full sphere when constructed,
+// construction progress (0..1) when it's an unfinished Helios site.
+function _starDysonArg(s){
+  if(!s) return false;
+  if(s.hasDysonSphere) return true;
+  if(s._heliosDepotPid!=null&&galaxy){
+    const _dp=galaxy.planets[s._heliosDepotPid];
+    if(_dp&&_dp.dysonNeeds){
+      let _tot=0,_del=0;
+      for(const k in _dp.dysonNeeds){
+        _tot+=_dp.dysonNeeds[k];
+        _del+=Math.min(_dp.dysonNeeds[k], _dp.dysonDelivered?.[k]||0);
+      }
+      if(_tot>0) return Math.max(0.02, Math.min(1, _del/_tot));
+    }
+  }
+  return false;
 }
 
 // ── Dyson sphere overlay ─────────────────────────────────────
@@ -12579,8 +13978,9 @@ function drawStar(cx,cy,r,color,hasDyson){
 // "reflective" look you see in the reference image.
 const _DYSON_PANEL_COUNT = 220;
 const _DYSON_PHI = Math.PI * (3 - Math.sqrt(5)); // golden angle
-function drawDysonSphere(cx, cy, r){
+function drawDysonSphere(cx, cy, r, progress){
   if(r < 4) return; // below this the hexagons are sub-pixel; skip
+  if(progress===undefined) progress=1;
   // Panel shell is offset just inside the train's LOW orbit
   // (`_starOrbitR = star.radius × 1.40`) by 1.5 train-heights, so the
   // train's inner edge clears the sphere's outer edge by exactly one
@@ -12603,8 +14003,13 @@ function drawDysonSphere(cx, cy, r){
   const _cR = Math.cos(_rot), _sR = Math.sin(_rot);
   // Build panel list with rotation applied. Reused arrays would avoid GC
   // but with 220 entries this is sub-ms per star.
+  // Construction progress: only the first progress×220 panels exist. The
+  // index maps to latitude top→bottom, so a partial shell reads as a polar
+  // cap growing downward around the star — a genuine "under construction"
+  // look. Scaffold rings (below) telegraph the final extent.
+  const _panelCnt = Math.max(0, Math.min(_DYSON_PANEL_COUNT, Math.round(_DYSON_PANEL_COUNT*progress)));
   const panels = [];
-  for(let i = 0; i < _DYSON_PANEL_COUNT; i++){
+  for(let i = 0; i < _panelCnt; i++){
     const y0 = 1 - (i / (_DYSON_PANEL_COUNT - 1)) * 2;
     const rd = Math.sqrt(Math.max(0, 1 - y0*y0));
     const theta = _DYSON_PHI * i;
@@ -12615,6 +14020,19 @@ function drawDysonSphere(cx, cy, r){
     const nrx = px*_cR + pz*_sR;
     const nrz = -px*_sR + pz*_cR;
     panels.push({nx: nrx, ny: py, nz: nrz});
+  }
+  // Scaffold rings while under construction: three dashed lattice ellipses
+  // marking the final shell extent, plus a faint equatorial ring.
+  if(progress < 1){
+    ctx.save();
+    ctx.strokeStyle='rgba(150,200,255,0.35)';
+    ctx.lineWidth=Math.max(0.6, sphereR*0.012);
+    ctx.setLineDash([Math.max(2,sphereR*0.06), Math.max(2,sphereR*0.05)]);
+    ctx.beginPath(); ctx.ellipse(cx, cy, sphereR, sphereR*0.32, 0, 0, Math.PI*2); ctx.stroke();
+    ctx.beginPath(); ctx.ellipse(cx, cy, sphereR*0.32, sphereR, 0, 0, Math.PI*2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, cy, sphereR, 0, Math.PI*2); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
   }
   // Painter sort: smallest z first → drawn first → ends up behind larger-z
   panels.sort((a,b) => a.nz - b.nz);
@@ -13216,6 +14634,19 @@ function drawAncientRuins(sx,sy,sr){
 }
 
 // ── foundry building draw ─────────────────────────────────────
+// v0.4.7: first-built new-refinery structure for a planet. Reuses the
+// existing drawFoundryBuilding visual styles (kind) so every new industry
+// gets a surface structure without bespoke art.
+const _V47_STRUCT_KIND={gas_siphon:'factory',panel_fab:'glassworks',cryo_forge:'glassworks',orbital_shipyard:'factory',reactor_assembly:'blast_furnace',titan_mill:'blast_furnace',munitions_works:'factory',plasma_refinery:'glassworks',bioforge:'juicery',xenoforge:'factory',armory:'factory'};
+function _v47FirstStruct(p){
+  const _u=p.upgrades;
+  if(!_u||!_u.length) return null;
+  for(const uid of _u){
+    const kind=_V47_STRUCT_KIND[uid];
+    if(kind) return {uid, kind, active:(p.upgradeData?.[uid]?.progress||0)>0};
+  }
+  return null;
+}
 function drawFoundryBuilding(sx,sy,sr,angle,ssz,smelting=false,kind=''){
   const rx=sx+Math.cos(angle)*sr, ry=sy+Math.sin(angle)*sr;
   ctx.save();
@@ -13988,7 +15419,9 @@ function drawTrainsPanel(){
       else if(p.type.id==='ancient') drawAncientRuins(vizCX,rowMidY,VIZ_R);
       if(p.hasGold&&p.goldRevealed) _drawGoldPatch(vizCX,rowMidY,VIZ_R,p.goldPatch);
       if(p.hasDiamond&&p.diamondRevealed) _drawDiamondPatch(vizCX,rowMidY,VIZ_R,p.diamondPatch);
-      drawPlanetStation(vizCX,rowMidY,VIZ_R,0,VIZ_R,p.isAlienRelic,p.hasLargeStation||false,null,p.hasTerminal||false);
+      if(p.hasUranium&&p.uraniumRevealed) _drawUraniumPatch(vizCX,rowMidY,VIZ_R,p.uraniumPatch);
+      if(p.hasArtifact&&p.artifactRevealed) _drawArtifactPatch(vizCX,rowMidY,VIZ_R,p.artifactPatch);
+      drawPlanetStation(vizCX,rowMidY,VIZ_R,0,VIZ_R,p.isAlienRelic||p.combineStation,p.hasLargeStation||false,null,p.hasTerminal||false);
       // Surface structures (foundry + agri buildings) — drawn just above and
       // below the station so the right-panel viz reflects every upgrade built
       // on the planet (matching what's shown in the main galaxy view and the
@@ -14006,6 +15439,8 @@ function drawTrainsPanel(){
         if(_ups.includes('factory')) _structDraws.push((a)=>drawFoundryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R,(p.upgradeData?.factory?.progress||0)>0,'factory'));
         if(_ups.includes('bakery')) _structDraws.push((a)=>drawFoundryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R,(p.upgradeData?.bakery?.progress||0)>0,'bakery'));
         if(_ups.includes('juicery')) _structDraws.push((a)=>drawFoundryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R,(p.upgradeData?.juicery?.progress||0)>0,'juicery'));
+        { const _v47s=_v47FirstStruct(p);
+          if(_v47s) _structDraws.push((a)=>drawFoundryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R,_v47s.active,_v47s.kind)); }
         if(_ups.includes('granary'))      _structDraws.push((a)=>drawGranaryBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R));
         if(_ups.includes('farm'))         _structDraws.push((a)=>drawFarmBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R));
         if(_ups.includes('orchard'))      _structDraws.push((a)=>drawOrchardBuilding(vizCX,rowMidY,VIZ_R,a,VIZ_R));
@@ -14356,7 +15791,8 @@ function _getUpgradePlanets(){
     const u=p.upgrades;
     if(u && u.length>0 &&
        (u.includes('iron_foundry')||u.includes('blast_furnace')||u.includes('glassworks')
-        ||u.includes('factory')||u.includes('bakery')||u.includes('juicery'))){
+        ||u.includes('factory')||u.includes('bakery')||u.includes('juicery')
+        ||u.includes('armory')||V47_RECIPES.some(_rc=>u.includes(_rc.id)))){
       out.push(p);
     }
   }
@@ -14568,6 +16004,86 @@ function updateFoundries(dtG){
         }
       } else if((_jc.fruit||0)>=1){
         _jc.progress=FOUNDRY_PROD_TIME;
+      }
+    }
+    // ── v0.4.7 generic refinery ticks (Helios + Zeta recipes) ──────────
+    // One loop, driven by V47_RECIPES. Mirrors the bespoke blocks above:
+    // consume 1 unit from each input bin, add 1 output unit to planet
+    // supply + a Delivered-style inventory counter, unlock the matching
+    // car on first PLAYER production.
+    for(const _rc of V47_RECIPES){
+      if(!_pUpg(p,_rc.id)||!p.upgradeData?.[_rc.id]) continue;
+      const _rb=p.upgradeData[_rc.id];
+      if((_rb.progress||0)>0){
+        _rb.progress-=dtG;
+        if(_rb.progress<=0){
+          _rb.progress=0;
+          for(const _ik of _rc.inputs) _rb[_ik]=Math.max(0,(_rb[_ik]||0)-1);
+          p.supply[_rc.out]=Math.min(CARGO_MAX_SUPPLY,(p.supply[_rc.out]||0)+1);
+          if(!p.devLog) p.devLog=[];
+          p.devLog.push({sd:stardate, value:DEV_CARGO_VALUES[_rc.out]||100, cargo:_rc.out});
+          if(_pBuilt(_rc.id)){
+            // Helios chain mission progress counters (H1/H2/H3 sub-goals).
+            if(!p._v47Produced) p._v47Produced={};
+            p._v47Produced[_rc.out]=(p._v47Produced[_rc.out]||0)+1;
+            _v47ProdTotals[_rc.out]=(_v47ProdTotals[_rc.out]||0)+1;
+            if(_rc.car){
+              const _flagMap={car_solar:'_solarCarUnlocked',car_supercon:'_superconCarUnlocked',car_truss:'_trussCarUnlocked',car_reactor:'_reactorCarUnlocked',car_titanplate:'_titanplateCarUnlocked',car_warpsteel:'_warpsteelCarUnlocked'};
+              const _fk=_flagMap[_rc.car];
+              const _isLocked=_fk==='_solarCarUnlocked'?!_solarCarUnlocked:_fk==='_superconCarUnlocked'?!_superconCarUnlocked:_fk==='_trussCarUnlocked'?!_trussCarUnlocked:_fk==='_reactorCarUnlocked'?!_reactorCarUnlocked:_fk==='_titanplateCarUnlocked'?!_titanplateCarUnlocked:!_warpsteelCarUnlocked;
+              if(_isLocked){
+                if(_fk==='_solarCarUnlocked')_solarCarUnlocked=true;
+                else if(_fk==='_superconCarUnlocked')_superconCarUnlocked=true;
+                else if(_fk==='_trussCarUnlocked')_trussCarUnlocked=true;
+                else if(_fk==='_reactorCarUnlocked')_reactorCarUnlocked=true;
+                else if(_fk==='_titanplateCarUnlocked')_titanplateCarUnlocked=true;
+                else _warpsteelCarUnlocked=true;
+                pendingCarUnlocks.push({sprite:_rc.car,displayName:_rc.label,planetId:p.id});
+                _chatMsg((_rc.label||'CAR').toUpperCase()+' UNLOCKED',_rc.chatCol);
+                _ga('car_unlocked',{car_type:_rc.car, cargo:_rc.out, sd:Math.floor(stardate)});
+              }
+            }
+          }
+        }
+      } else {
+        let _ready=true;
+        for(const _ik of _rc.inputs){ if((_rb[_ik]||0)<1){ _ready=false; break; } }
+        if(_ready) _rb.progress=FOUNDRY_PROD_TIME*(_rc.tm||1);
+      }
+    }
+    // ── Armory assembly tick ───────────────────────────────────────────
+    // When idle, pick the FIRST recipe whose component bins are all full
+    // enough; on completion consume the components and push the finished
+    // military car into the trainyard, unlocking it on first assembly.
+    if(_pUpg(p,'armory')&&p.upgradeData?.armory){
+      const _am=p.upgradeData.armory;
+      if((_am.progress||0)>0){
+        _am.progress-=dtG;
+        if(_am.progress<=0){
+          _am.progress=0;
+          const _rec=ARMORY_RECIPES.find(_r=>_r.car===_am.building);
+          _am.building=null;
+          if(_rec){
+            for(const _ck in _rec.comps) _am[_ck]=Math.max(0,(_am[_ck]||0)-_rec.comps[_ck]);
+            _tyPush(_rec.car,{});
+            _chatMsg(p.name+': '+_rec.label.toUpperCase()+' ASSEMBLED — added to trainyard','rgba(255,140,90,1)');
+            playSound('construction_complete');
+            const _mflag={car_cannon:_cannonCarUnlocked,car_laser:_laserCarUnlocked,car_shield:_shieldCarUnlocked}[_rec.car];
+            if(!_mflag){
+              if(_rec.car==='car_cannon')_cannonCarUnlocked=true;
+              else if(_rec.car==='car_laser')_laserCarUnlocked=true;
+              else _shieldCarUnlocked=true;
+              pendingCarUnlocks.push({sprite:_rec.car,displayName:_rec.label,planetId:p.id});
+              _ga('car_unlocked',{car_type:_rec.car, cargo:CAR_CARGO_TYPE[_rec.car], sd:Math.floor(stardate)});
+            }
+          }
+        }
+      } else {
+        for(const _rec of ARMORY_RECIPES){
+          let _ok=true;
+          for(const _ck in _rec.comps){ if((_am[_ck]||0)<_rec.comps[_ck]){ _ok=false; break; } }
+          if(_ok){ _am.building=_rec.car; _am.progress=FOUNDRY_PROD_TIME*1.5; break; }
+        }
       }
     }
   }
@@ -14907,7 +16423,7 @@ function _buildOccOrbitMap(){
   // the same destination can't race in and steal the slot between the claim
   // and the next tangent crossing.
   for(let i=0;i<trains.length;i++){
-    const t=trains[i]; if(!t) continue;
+    const t=trains[i]; if(!t||t._destroyed) continue;
     const _ph=t.route?.phase;
     if(_ph==='transit'){
       const _dest=t.route.stops[t.route.toIdx];
@@ -14928,7 +16444,7 @@ function _buildOccOrbitMap(){
   // is the descent TARGET so the claim sits on the slot the train is
   // committed to).
   for(let i=0;i<trains.length;i++){
-    const t=trains[i]; if(!t) continue;
+    const t=trains[i]; if(!t||t._destroyed) continue;
     const _ph=t.route?.phase;
     if(!t.route||_ph==='orbit'||_ph==='waiting'||_ph==='blocked'||_ph==='queueing'||_ph==='descending'){
       _add(t.planetId,t.orbitTier,t);
@@ -15145,6 +16661,7 @@ function segmentBlockedByStar(ax, ay, bx, by){
 
 // Returns true if the segment is blocked specifically by engine range (not star blocking).
 function _segmentRangeBlocked(fromP, toP, fromOrbitR, toOrbitR, train){
+  if(fromP?.isPortal&&toP?.isPortal) return false; // portal jump — range-exempt
   const lt=computeLiveTangent(fromP,toP,fromOrbitR,toOrbitR);
   return !!lt && lt.tanLen>_engMaxRange(train);
 }
@@ -15154,6 +16671,10 @@ function _segmentRangeBlocked(fromP, toP, fromOrbitR, toOrbitR, train){
 // estFrames is in game-time frame-units; because train speed and orbital speed both scale
 // by the same game-speed multiplier, the multiplier cancels out and is NOT applied here.
 function transitPathBlocked(fromP, toP, fromOrbitR, toOrbitR, train){
+  // v0.4.7 portal jump (portal-proxy → portal-proxy): always clear. The void
+  // band is empty and the crossing is powered by the portal itself, so both
+  // the range gate and star-blocking are skipped.
+  if(fromP?.isPortal&&toP?.isPortal) return false;
   const lt0=computeLiveTangent(fromP,toP,fromOrbitR,toOrbitR);
   if(!lt0) return false;
   // Engine range limit: engine_constellation cannot travel a segment longer than ENGINE_MAX_RANGE
@@ -15242,6 +16763,10 @@ function getTrainCarPos(train, carIdx){
 }
 
 function updateTrain(t, dt){
+  // v0.4.7: destroyed (Combine) trains are tombstones — they stay in the
+  // trains[] array to preserve indices, but never tick, render, or occupy
+  // orbit slots again.
+  if(t._destroyed) return;
   // Hidden engine-lifespan check — fires once per player train when stardate
   // crosses the pre-rolled _engineFailureSd. The engine is the train's first
   // car; for a freshly-purchased train it was rolled by _rollEngineFailureSd
@@ -15796,7 +17321,12 @@ function updateTrain(t, dt){
     const _eTanLen=r._departExtLen!=null?r._departExtLen-_tailLen:lt2.tanLen;
     const extLen=_eTanLen+_tailLen; // = r._departExtLen
     const _maintF=t.maintenance??1;
-    const _accel=_engAccel(t)*(_maintF<=0?0.25:1), _maxSpd=_engMaxSpd(t)*(_maintF<=0?0.10:1);
+    // v0.4.7 portal jump: a leg between the two portal proxies is powered by
+    // the portal — the train streaks across the void at 8× engine speed with
+    // matching acceleration (and no maintenance penalty on the crossing).
+    const _isPortalLeg=!!(_gp(r.stops[r.fromIdx])?.isPortal&&_gp(r.stops[r.toIdx])?.isPortal);
+    const _pB=(_isPortalLeg?8:1)*(t.crippled?0.5:1); // crippled trains limp at half speed
+    const _accel=_engAccel(t)*(_maintF<=0&&!_isPortalLeg?0.25:1)*_pB, _maxSpd=_engMaxSpd(t)*(_maintF<=0&&!_isPortalLeg?0.10:1)*_pB;
     // Two-zone deceleration: train starts braking at 80% of route.
     // Zone 1 (80%→engine at orbit): decel from cruise to 1.2× arrival orbital speed.
     // Zone 2 (engine at orbit→caboose at orbit): decel from 1.2× to 1.0× orbital speed.
@@ -16148,6 +17678,15 @@ function trackVisit(pid){
   if(_tp.hasDiamond&&!_tp.diamondRevealed&&!pendingDiamondDiscoveries.includes(pid)){
     pendingDiamondDiscoveries.push(pid);
   }
+  if(_tp.hasUranium&&!_tp.uraniumRevealed&&!pendingUraniumDiscoveries.includes(pid)){
+    pendingUraniumDiscoveries.push(pid);
+  }
+  if(_tp.hasArtifact&&!_tp.artifactRevealed&&!pendingArtifactDiscoveries.includes(pid)){
+    pendingArtifactDiscoveries.push(pid);
+  }
+  // v0.4.7: the player's first Zeta planet visit instantiates the Combine
+  // (its rail network was "always there" — the sim just didn't need it yet).
+  if(_tp.isZeta&&_zetaGenerated&&!_combineFounded) _foundCombine();
   // First visit of this specific planet — award credits, log message, car unlock
   if(!visitedPlanetIds.has(pid)){
     const _bio=_tp.type.id;
@@ -16354,6 +17893,12 @@ function trackOrbit(t){
   if(_gop?.hasDiamond&&!_gop.diamondRevealed&&!pendingDiamondDiscoveries.includes(pid)){
     pendingDiamondDiscoveries.push(pid);
   }
+  if(_gop?.hasUranium&&!_gop.uraniumRevealed&&!pendingUraniumDiscoveries.includes(pid)){
+    pendingUraniumDiscoveries.push(pid);
+  }
+  if(_gop?.hasArtifact&&!_gop.artifactRevealed&&!pendingArtifactDiscoveries.includes(pid)){
+    pendingArtifactDiscoveries.push(pid);
+  }
 }
 // Note: maintenance repair is now applied immediately on orbit entry in the
 // _cargoCheckedThisStop block, not here in trackOrbit.
@@ -16403,7 +17948,7 @@ function drawFog(){
   fctx.fillRect(0,0,W-PANEL_W,GH);
   fctx.globalCompositeOperation='destination-out';
 
-  const sr=FOG_REVEAL_R*(_sensorUpgradeActive?1.5:1.0)*cam.scale;
+  const sr=FOG_REVEAL_R*(_sensorUpgrade2Active?2.0:(_sensorUpgradeActive?1.5:1.0))*cam.scale;
   const viewMax=Math.max(W-PANEL_W,GH);
 
   if(sr*2>viewMax){
@@ -16676,6 +18221,65 @@ function drawDiamondDiscoveryPopup(){
   ctx.restore();
 }
 
+// v0.4.7: uranium-vein discovery popup — mirrors the gold EUREKA flow with a
+// radioactive-green palette. OK click reveals the vein + seeds supply.
+let _uraniumDiscoveryOkBounds=null;
+function drawUraniumDiscoveryPopup(){
+  if(activePopup!=='uranium_discovery') return;
+  const pw=320, ph=340;
+  const [px,py]=drawPopupBase(pw,ph,'rgba(150,255,40,0.7)');
+  ctx.save();
+  ctx.font='bold 13px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='#c8ff40'; ctx.shadowColor='#88cc00'; ctx.shadowBlur=10;
+  ctx.fillText('GEIGER COUNTERS SINGING!',px+pw/2,py+26);
+  ctx.shadowBlur=0;
+  ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(210,240,200,0.85)';
+  const _lines=["Your train's sensors have detected a rich","uranium vein beneath this planet's surface."];
+  for(let _li=0;_li<_lines.length;_li++) ctx.fillText(_lines[_li],px+pw/2,py+44+_li*14);
+  const _spr=imgs['car_uranium'];
+  if(_spr){
+    const _sw=200, _sh=Math.round(200*_spr.naturalHeight/_spr.naturalWidth);
+    const _sx=px+(pw-_sw)/2, _sy=py+76;
+    ctx.drawImage(_spr,_sx,_sy,_sw,_sh);
+  }
+  const _bw=100, _bh=26, _bx=px+(pw-100)/2, _by=py+ph-40;
+  ctx.fillStyle=_uraniumOkHover?'rgba(120,200,20,0.95)':'rgba(85,150,10,0.85)'; ctx.fillRect(_bx,_by,_bw,_bh);
+  ctx.strokeStyle=_uraniumOkHover?'rgba(210,255,90,0.95)':'rgba(170,255,30,0.8)'; ctx.lineWidth=1.5; ctx.strokeRect(_bx,_by,_bw,_bh);
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='rgba(235,255,190,0.95)'; ctx.fillText('OKAY!',_bx+_bw/2,_by+17);
+  _uraniumDiscoveryOkBounds={x:_bx,y:_by,w:_bw,h:_bh};
+  ctx.restore();
+}
+
+// v0.4.7 Zeta: alien artifact-cache discovery popup — same flow, alien-green.
+let _artifactDiscoveryOkBounds=null;
+function drawArtifactDiscoveryPopup(){
+  if(activePopup!=='artifact_discovery') return;
+  const pw=320, ph=340;
+  const [px,py]=drawPopupBase(pw,ph,'rgba(60,255,150,0.7)');
+  ctx.save();
+  ctx.font='bold 13px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='#60ffb0'; ctx.shadowColor='#10cc70'; ctx.shadowBlur=12;
+  ctx.fillText('XENO-ARCHAEOLOGY!',px+pw/2,py+26);
+  ctx.shadowBlur=0;
+  ctx.font='9px "Exo 2",sans-serif'; ctx.fillStyle='rgba(200,255,225,0.85)';
+  const _alines=["A buried cache of alien artifacts! Collectors","back home will pay a fortune for these."];
+  for(let _li=0;_li<_alines.length;_li++) ctx.fillText(_alines[_li],px+pw/2,py+44+_li*14);
+  const _aspr=imgs['car_artifact'];
+  if(_aspr){
+    const _sw=200, _sh=Math.round(200*_aspr.naturalHeight/_aspr.naturalWidth);
+    const _sx=px+(pw-_sw)/2, _sy=py+76;
+    ctx.drawImage(_aspr,_sx,_sy,_sw,_sh);
+  }
+  const _bw=100, _bh=26, _bx=px+(pw-100)/2, _by=py+ph-40;
+  ctx.fillStyle=popupState.artifactOkHover?'rgba(20,170,90,0.95)':'rgba(10,120,60,0.85)'; ctx.fillRect(_bx,_by,_bw,_bh);
+  ctx.strokeStyle=popupState.artifactOkHover?'rgba(120,255,190,0.95)':'rgba(60,255,150,0.8)'; ctx.lineWidth=1.5; ctx.strokeRect(_bx,_by,_bw,_bh);
+  ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='rgba(200,255,230,0.95)'; ctx.fillText('OKAY!',_bx+_bw/2,_by+17);
+  _artifactDiscoveryOkBounds={x:_bx,y:_by,w:_bw,h:_bh};
+  ctx.restore();
+}
+
 // Accept-the-pending-new-mission helper. Reads its inputs from `state`
 // (either the live `popupState` when the Accept button is clicked, or the
 // stashed `_pendingNewMissionStash` when the safety-net path fires after a
@@ -16779,6 +18383,7 @@ function _acceptNewMissionFromState(state){
     scientistSourceIds:Array.isArray(state.scientistSourceIds)?state.scientistSourceIds.slice():null,
     _scientistsDelivered:def.id==='more_scientists'?[]:undefined,
     _researchStartSd:def.id==='another_dimension'?stardate:undefined,
+    _alignStartSd:def.id==='helios_ignition'?stardate:undefined,
     hazmatIncineratedSnapshot:_totalHazmatIncinerated});
   _recomputeMissionTargets();
   _chatMsg('MISSION STARTED: '+def.name.toUpperCase(),'rgba(255,220,80,1)');
@@ -18995,6 +20600,20 @@ function _drawMissionImage(m,cx,cy,w,h){
         ctx.restore();
       }
       _ry+=_rowH;
+    }
+  } else if(m.imageType==='dyson'){
+    // Partial Dyson sphere around a small amber star (Helios missions)
+    const _dyR=Math.min(w,h)*0.24;
+    const _dyCol={core:'#ffcf70',hi:'#fff3c0',glow:'#ffab30',edge:'#c87818'};
+    drawStar(cx,cy+h*0.04,_dyR,_dyCol,0.45);
+  } else if(m.imageType==='blackhole'){
+    if(typeof drawBlackHole==='function'){
+      drawBlackHole(cx,cy+h*0.02,Math.min(w,h)*0.22,(typeof _drawTs==='number'?_drawTs:0));
+    } else {
+      // Fallback: plain dark disc + amber accretion ellipse
+      ctx.fillStyle='#000'; ctx.beginPath(); ctx.arc(cx,cy,Math.min(w,h)*0.18,0,Math.PI*2); ctx.fill();
+      ctx.strokeStyle='rgba(255,170,60,0.8)'; ctx.lineWidth=3;
+      ctx.beginPath(); ctx.ellipse(cx,cy,Math.min(w,h)*0.30,Math.min(w,h)*0.10,0.3,0,Math.PI*2); ctx.stroke();
     }
   } else if(m.imageType==='foundry'){
     const bw=w*0.60,bh=h*0.48,bx=cx-bw/2,by=cy-bh/2+h*0.08;
@@ -21870,6 +23489,36 @@ function updateMissions(dtSd){
       _anotherDimTimerMs=0;
     }
   }
+  // ── v0.4.7 Project Helios arc entry ──────────────────────────────────
+  // helios_directive: fires 20 real-time seconds after "More scientists
+  // needed!" completes, provided the Ancient Schematics have ALSO been
+  // deciphered (OR 2 SD have passed since more_scientists completed — a
+  // fallback so a player who never stumbled on an ancient world isn't
+  // locked out of the mid-game). Arms/fires like the another_dimension
+  // timer; not persisted (re-arms on load).
+  if(!_heliosArcStarted&&!_missionPending('helios_directive')&&!missions.some(mx=>mx.id==='helios_directive')){
+    const _msDone=missions.find(mx=>mx.id==='more_scientists'&&mx.status==='completed');
+    if(_msDone){
+      const _asDone=missions.some(mx=>mx.id==='ancient_schematics'&&mx.status==='completed');
+      const _sdFallback=(stardate-(_msDone.completedSd||stardate))>=2.0;
+      if(_asDone||_sdFallback){
+        if(_heliosTimerMs===0) _heliosTimerMs=Date.now();
+        else if(Date.now()-_heliosTimerMs>=20000){
+          _heliosArcStarted=true;
+          _initHeliosSites();
+          pendingMissionIntros.push({defId:'helios_directive',readySd:stardate});
+          _heliosTimerMs=0;
+        }
+      }
+    }
+  }
+  // helios_ignition: fires once all three sphere chains are complete.
+  if(_heliosArcStarted&&!_portalActive&&!_missionPending('helios_ignition')&&!missions.some(mx=>mx.id==='helios_ignition')){
+    const _f=missions.some(mx=>mx.id==='helios_frame'&&mx.status==='completed');
+    const _mi=missions.some(mx=>mx.id==='helios_mirror'&&mx.status==='completed');
+    const _h=missions.some(mx=>mx.id==='helios_heart'&&mx.status==='completed');
+    if(_f&&_mi&&_h) pendingMissionIntros.push({defId:'helios_ignition',readySd:stardate});
+  }
   } // end of throttled intro-gate block — active-mission sweep below runs every frame
   if(!missions.length) return;
   for(const m of missions){
@@ -22025,6 +23674,25 @@ function updateMissions(dtSd){
           pendingMissionIntros.push({defId:'more_scientists',readySd:stardate,targetPlanetId:_outpost,scientistSourceIds:_sci});
         }
       }
+      // ── v0.4.7 Project Helios completion effects ─────────────────
+      if(m.id==='helios_frame'&&_heliosEngDiscount===0){
+        _heliosEngDiscount=0.15;
+        _chatMsg('SHIPYARD EFFICIENCY: ENGINE PURCHASE COSTS PERMANENTLY -15%','rgba(100,220,160,1)');
+      }
+      if(m.id==='helios_mirror'&&!_sensorUpgrade2Active){
+        _sensorUpgrade2Active=true;
+        fogStampCanvas=null; // force stamp regeneration at the new radius
+        _chatMsg('SENSOR UPGRADE II ACTIVATED — FOG REVEAL RADIUS ×2','rgba(100,200,255,1)');
+      }
+      if(m.id==='helios_heart'&&!_heliosEngineUnlocked){
+        _heliosEngineUnlocked=true;
+        pendingEngineUnlocks.push({sprite:'engine_helios',displayName:'Helios Engine'});
+        _chatMsg('HELIOS ENGINE UNLOCKED','rgba(255,204,68,1)');
+        _ga('engine_unlocked',{engine:'helios', sd:Math.floor(stardate)});
+      }
+      if(m.id==='helios_ignition'&&!_portalActive){
+        _igniteBlackHolePortal();
+      }
       // Unlock any missions whose prerequisite was this mission
       for(const _pd of MISSION_DEFS){
         if(_pd.prerequisite===m.id&&!_missionPending(_pd.id)){
@@ -22033,6 +23701,14 @@ function updateMissions(dtSd){
           // doesn't preempt the "Add Molten Ore + Water cars" train-builder
           // tutorial step. All other prerequisite chains queue immediately.
           if(_pd.id==='produce_iron'){ if(_produceIronIntroAtMs===0) _produceIronIntroAtMs=Date.now()+15000; continue; }
+          // Helios sphere chains: attach each mission's construction depot as
+          // its targetPlanetId so {TARGET} resolves to the depot planet name.
+          if(_pd.id==='helios_frame'||_pd.id==='helios_mirror'||_pd.id==='helios_heart'){
+            const _hsKey={helios_frame:'frame',helios_mirror:'mirror',helios_heart:'heart'}[_pd.id];
+            const _hsDp=_heliosDepot(_hsKey);
+            pendingMissionIntros.push({defId:_pd.id,readySd:stardate,targetPlanetId:_hsDp?_hsDp.id:null});
+            continue;
+          }
           pendingMissionIntros.push({defId:_pd.id,readySd:stardate});
         }
       }
@@ -22066,6 +23742,26 @@ function _mObjProgress(m,objId){
       return {cur:Math.min(_pn,5), max:5, label:'Profitable trains'};
     }
     if(objId==='deliver_5_chemical')   return {cur:Math.min(m._chemicalDeliveries||0,5), max:5, label:'Chemical delivered'};
+    if(objId==='wait_alignment'){
+      // Hidden 1.0-SD alignment countdown shown only as a % bar.
+      const _asd0=m._alignStartSd!=null?m._alignStartSd:stardate;
+      const _afrac=Math.max(0,Math.min(1,(stardate-_asd0)/1.0));
+      return {cur:Math.floor(_afrac*100), max:100, label:'Beam alignment', pct:true};
+    }
+    if(objId==='survey_sites'){
+      let _sv=0;
+      if(galaxy&&Array.isArray(galaxy.heliosSites)) for(const hs of galaxy.heliosSites){
+        const _st=galaxy.stars[hs.starId];
+        if(_st&&_st.planetIds&&_st.planetIds.some(pid=>visitedPlanetIds.has(pid))) _sv++;
+      }
+      return {cur:_sv, max:3, label:'Sites surveyed'};
+    }
+    if(objId==='depot_steel') return {cur:Math.min(m._depotSteel||0,10), max:10, label:'Steel delivered'};
+    if(objId==='depot_glass') return {cur:Math.min(m._depotGlass||0,10), max:10, label:'Glass delivered'};
+    if(objId==='deliver_trusses'){ const _dp=_heliosDepot('frame');  return {cur:Math.min(_dp?.dysonDelivered?.truss||0,40), max:40, label:'Trusses delivered'}; }
+    if(objId==='deliver_panels'){ const _dp=_heliosDepot('mirror'); return {cur:Math.min(_dp?.dysonDelivered?.solar_panel||0,40), max:40, label:'Panels delivered'}; }
+    if(objId==='deliver_supercon'){ const _dp=_heliosDepot('heart'); return {cur:Math.min(_dp?.dysonDelivered?.superconductor||0,25), max:25, label:'Superconductors'}; }
+    if(objId==='deliver_cores'){ const _dp=_heliosDepot('heart');   return {cur:Math.min(_dp?.dysonDelivered?.reactor_core||0,15), max:15, label:'Reactor cores'}; }
     if(objId==='wait_research'){
       // Hidden 2.0-SD research countdown shown only as a % bar.
       const _sd0=m._researchStartSd!=null?m._researchStartSd:stardate;
@@ -22543,7 +24239,7 @@ function drawStarRegistry(){
     ctx.fillText('#'+(i+1),px+32,ry+ROW/2+4);
     const dr=9;
     if(vis){
-      ctx.save(); drawStar(px+46,ry+ROW/2,dr,s.color,!!s.hasDysonSphere); ctx.restore();
+      ctx.save(); drawStar(px+46,ry+ROW/2,dr,s.color,_starDysonArg(s)); ctx.restore();
     } else {
       ctx.fillStyle='rgba(10,8,4,0.9)';
       ctx.beginPath(); ctx.arc(px+46,ry+ROW/2,dr,0,Math.PI*2); ctx.fill();
@@ -24270,7 +25966,7 @@ function drawStarDetailPopup(){
   const lx=starCX+sDR+8;
   ctx.save();
   ctx.beginPath(); ctx.rect(px,py+46,pw,150); ctx.clip(); // clamp to body section
-  if(vis){ drawStar(starCX,starCY,sDR,s.color,!!s.hasDysonSphere); }
+  if(vis){ drawStar(starCX,starCY,sDR,s.color,_starDysonArg(s)); }
   else {
     // Unvisited: subtle dark orb visible near left edge of clip
     ctx.fillStyle='rgba(8,6,2,0.92)'; ctx.beginPath(); ctx.arc(px+40,starCY,28,0,Math.PI*2); ctx.fill();
@@ -24385,6 +26081,8 @@ function drawStarDetailPopup(){
       else if(p.type.id==='ancient'&&pr>=3) drawAncientRuins(pcx2,stripMidY,pr);
       if(p.hasGold&&p.goldRevealed&&pr>3) _drawGoldPatch(pcx2,stripMidY,pr,p.goldPatch);
       if(p.hasDiamond&&p.diamondRevealed&&pr>3) _drawDiamondPatch(pcx2,stripMidY,pr,p.diamondPatch);
+      if(p.hasUranium&&p.uraniumRevealed&&pr>3) _drawUraniumPatch(pcx2,stripMidY,pr,p.uraniumPatch);
+      if(p.hasArtifact&&p.artifactRevealed&&pr>3) _drawArtifactPatch(pcx2,stripMidY,pr,p.artifactPatch);
       if(p.hasStation){
         const iY=Math.max(py+223,stripMidY-pr-3);
         ctx.fillStyle='rgba(160,220,255,0.85)';
@@ -24464,6 +26162,12 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
     // which the cheat path doesn't satisfy, leaving a permanently greyed
     // button on a visible card.
     if(uId==='glassworks') return !_glassworksUnlocked;
+    // v0.4.7 gates: heavy industry needs a Large Station; the Reactor
+    // Assembly additionally needs a uranium vein discovered somewhere.
+    if(uId==='orbital_shipyard') return !(p.hasLargeStation||p.hasTerminal);
+    if(uId==='armory')           return !(p.hasLargeStation||p.hasTerminal);
+    if(uId==='reactor_assembly') return !(galaxy&&galaxy.planets.some(q=>q.hasUranium&&q.uraniumRevealed));
+    if(uId==='xenoforge')        return !_warpsteelRecipeKnown;
     return false;
   };
   // Station card title reflects the planet's current tier — STATION while
@@ -24548,6 +26252,12 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
       const _cd=!!(galaxy&&galaxy.planets.some(q=>q.type.id==='chemical'&&visitedPlanetIds.has(q.id)));
       return [{ok:_sd,txt:'Sand planet discovered'},{ok:_cd,txt:'Chemical planet discovered'}];
     }
+    if(uId==='orbital_shipyard'||uId==='armory')
+      return [{ok:!!(p.hasLargeStation||p.hasTerminal),txt:'Large Station built here'}];
+    if(uId==='reactor_assembly')
+      return [{ok:!!(galaxy&&galaxy.planets.some(q=>q.hasUranium&&q.uraniumRevealed)),txt:'Uranium vein discovered'}];
+    if(uId==='xenoforge')
+      return [{ok:!!_warpsteelRecipeKnown,txt:'Combine campaign resolved'}];
     return null;
   };
   // Register a hover target + "insufficient credits" tooltip for an upgrade
@@ -25411,13 +27121,53 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
         else _regUnaffordableBtn(u.id,btnX,btnY,btnW,btnH,_uCostRd);
       }
     } else {
-      // Generic upgrade -- built or unbuilt
+      // Generic upgrade -- built or unbuilt. v0.4.7: honors the generic
+      // _isUpgradeGateLocked gate (LOCKED button + ✓/✗ tooltip) so new
+      // upgrades (Orbital Shipyard / Armory / Reactor Assembly / Xenoforge)
+      // don't need bespoke card branches.
       if(isBuilt){
         ctx.font='bold 8px Orbitron,sans-serif'; ctx.textAlign='center';
         ctx.fillStyle='rgba(50,190,80,0.88)';
         ctx.fillText('● BUILT',upX+upW/2,itemY+52);
+        // v0.4.7 refinery bins: show input storage levels for generic
+        // refinery cards (small text rows, keeps the card compact).
+        const _v47rcG=V47_RECIPES.find(_r=>_r.id===u.id);
+        if(_v47rcG&&p.upgradeData?.[u.id]){
+          const _gb=p.upgradeData[u.id];
+          ctx.font='7px "Exo 2",sans-serif'; ctx.textAlign='left';
+          let _gy=itemY+62;
+          for(const _ik of _v47rcG.inputs){
+            ctx.fillStyle='rgba(160,200,230,0.72)';
+            ctx.fillText((CARGO_SHORT[_ik]||_ik.toUpperCase())+' '+Math.floor(_gb[_ik]||0)+'/10',upX+12,_gy);
+            _gy+=9;
+          }
+          if((_gb.progress||0)>0){
+            const _gfrac=1-(_gb.progress||0)/(FOUNDRY_PROD_TIME*(_v47rcG.tm||1));
+            ctx.fillStyle='rgba(255,200,60,0.85)';
+            ctx.fillText('WORKING '+Math.round(_gfrac*100)+'%',upX+12,_gy);
+          }
+        }
+        // Armory: show what it's assembling + component stock.
+        if(u.id==='armory'&&p.upgradeData?.armory){
+          const _ab=p.upgradeData.armory;
+          ctx.font='7px "Exo 2",sans-serif'; ctx.textAlign='left';
+          if(_ab.building&&(_ab.progress||0)>0){
+            ctx.fillStyle='rgba(255,150,90,0.9)';
+            ctx.fillText('ASSEMBLING '+(CAR_LABELS[_ab.building]||_ab.building),upX+12,itemY+62);
+          } else {
+            ctx.fillStyle='rgba(160,200,230,0.72)';
+            ctx.fillText('Awaiting components',upX+12,itemY+62);
+          }
+        }
+        // Defense battery: shell magazine readout.
+        if(u.id==='defense_battery'){
+          ctx.font='7px "Exo 2",sans-serif'; ctx.textAlign='left';
+          ctx.fillStyle='rgba(255,176,96,0.85)';
+          ctx.fillText('SHELLS '+(p.defenseShells||0)+'/12',upX+12,itemY+62);
+        }
       } else {
-        const _uCost=_upgradeBuildCost(u); const canAfford=credits>=_uCost;
+        const _gnLocked=_isUpgradeGateLocked(u.id);
+        const _uCost=_upgradeBuildCost(u); const canAfford=credits>=_uCost&&!_gnLocked;
         const _gnHov=canAfford&&popupState.upgradeBtnHover===u.id;
         const btnW=86, btnH=20, btnX=upX+(upW-btnW)/2, btnY=itemY+ITEM_H-btnH-8;
         ctx.fillStyle=_gnHov?'rgba(45,110,230,0.97)':canAfford?'rgba(20,70,180,0.92)':'rgba(20,20,40,0.70)';
@@ -25426,14 +27176,21 @@ function _drawUpgradesPanel(mainPx,mainPy,mainPh,p){
         ctx.lineWidth=1; ctx.beginPath(); ctx.roundRect(btnX,btnY,btnW,btnH,3); ctx.stroke();
         ctx.font='bold 9px Orbitron,sans-serif'; ctx.textAlign='center';
         ctx.fillStyle=canAfford?'#adf':'rgba(80,80,110,0.7)';
-        ctx.fillText('PURCHASE',btnX+btnW/2,btnY+btnH/2+3.5);
-        {const _cTxt='-'+_fmtCr(_uCost)+' cr'; ctx.font='8px "Exo 2",sans-serif';
+        ctx.fillText(_gnLocked?'LOCKED':'PURCHASE',btnX+btnW/2,btnY+btnH/2+3.5);
+        if(!_gnLocked){const _cTxt='-'+_fmtCr(_uCost)+' cr'; ctx.font='8px "Exo 2",sans-serif';
         const _cPW=ctx.measureText(_cTxt).width+10, _cPH=13;
         const _cPX=btnX+(btnW-_cPW)/2, _cPY=btnY-_cPH/2-3;
         ctx.fillStyle='rgba(110,18,18,0.92)'; ctx.beginPath(); ctx.roundRect(_cPX,_cPY,_cPW,_cPH,4); ctx.fill();
         ctx.fillStyle='rgba(255,255,255,0.97)'; ctx.textAlign='center'; ctx.textBaseline='middle';
         ctx.fillText(_cTxt,_cPX+_cPW/2,_cPY+_cPH/2); ctx.textBaseline='alphabetic';}
-        if(canAfford) popupState.upgradeBuildBounds.push({x:btnX,y:btnY,w:btnW,h:btnH,upgradeId:u.id});
+        if(_gnLocked){
+          const _hidG='__locked_'+u.id+'__';
+          popupState._upgradeBtnLockedBounds.push({x:btnX,y:btnY,w:btnW,h:btnH,hoverId:_hidG});
+          if(popupState.upgradeBtnHover===_hidG){
+            const _reqsG=_upLockReqs(u.id);
+            if(_reqsG) popupState._upUnlockTooltip={by:btnY,upX,upW,label:u.label,reqs:_reqsG};
+          }
+        } else if(canAfford) popupState.upgradeBuildBounds.push({x:btnX,y:btnY,w:btnW,h:btnH,upgradeId:u.id});
         else _regUnaffordableBtn(u.id,btnX,btnY,btnW,btnH,_uCost);
       }
     }
@@ -25599,13 +27356,19 @@ function drawPlanetDetailPopup(){
     else if(p.type.id==='ancient') drawAncientRuins(pcx,pcy,pr);
     if(p.hasGold&&p.goldRevealed) _drawGoldPatch(pcx,pcy,pr,p.goldPatch);
     if(p.hasDiamond&&p.diamondRevealed) _drawDiamondPatch(pcx,pcy,pr,p.diamondPatch);
-    if(p.hasStation) drawPlanetStation(pcx,pcy,pr,p.stationAngle||0,pr,p.isAlienRelic,p.hasLargeStation||false,null,p.hasTerminal||false);
+    if(p.hasUranium&&p.uraniumRevealed) _drawUraniumPatch(pcx,pcy,pr,p.uraniumPatch);
+    if(p.hasArtifact&&p.artifactRevealed) _drawArtifactPatch(pcx,pcy,pr,p.artifactPatch);
+    if(p.hasStation) drawPlanetStation(pcx,pcy,pr,p.stationAngle||0,pr,p.isAlienRelic||p.combineStation,p.hasLargeStation||false,null,p.hasTerminal||false);
     if(_pUpg(p,'iron_foundry')) drawFoundryBuilding(pcx,pcy,pr,p.foundryAngle||Math.PI*0.75,pr,(p.upgradeData?.iron_foundry?.progress||0)>0,'iron_foundry');
     if(_pUpg(p,'blast_furnace')) drawFoundryBuilding(pcx,pcy,pr,p.blastFurnaceAngle||Math.PI*1.4,pr,(p.upgradeData?.blast_furnace?.progress||0)>0,'blast_furnace');
     if(_pUpg(p,'glassworks')) drawFoundryBuilding(pcx,pcy,pr,p.glassworksAngle||Math.PI*1.6,pr,(p.upgradeData?.glassworks?.progress||0)>0,'glassworks');
     if(_pUpg(p,'factory')) drawFoundryBuilding(pcx,pcy,pr,p.factoryAngle||Math.PI*0.55,pr,(p.upgradeData?.factory?.progress||0)>0,'factory');
     if(_pUpg(p,'bakery')) drawFoundryBuilding(pcx,pcy,pr,p.bakeryAngle||Math.PI*0.95,pr,(p.upgradeData?.bakery?.progress||0)>0,'bakery');
     if(_pUpg(p,'juicery')) drawFoundryBuilding(pcx,pcy,pr,p.juiceryAngle||Math.PI*0.95,pr,(p.upgradeData?.juicery?.progress||0)>0,'juicery');
+    { // v0.4.7 refineries: draw ONE structure for the first-built new upgrade
+      const _v47s=_v47FirstStruct(p);
+      if(_v47s) drawFoundryBuilding(pcx,pcy,pr,p.v47StructAngle||Math.PI*1.15,pr,_v47s.active,_v47s.kind);
+    }
     {const _hasGr=_pUpg(p,'granary'),_hasFm=_pUpg(p,'farm'),_hasOr=_pUpg(p,'orchard');
     const _ba=p.agriStructAngle||Math.PI*0.95;
     const _structs=[_hasGr&&'granary',_hasFm&&'farm',_hasOr&&'orchard'].filter(Boolean);
@@ -27091,8 +28854,11 @@ function drawTrainBuilderPopup(){
   ctx.beginPath(); ctx.moveTo(px,py+26); ctx.lineTo(px+pw,py+26); ctx.stroke();
 
   const BTN_W=76, BTN_H=60;
-  const ENGINE_TYPES=['engine_constellation','engine_galaxy','engine_classJ','engine_classR','engine_N700'];
-  const ALL_MID_CARS=['car_passenger','car_mail','car_water_tank','car_ore','car_livestock','car_grain','car_fruit','car_cargo','car_royal','car_sand','car_chemical','car_oil','car_battery','car_ice','car_iron','car_steel','car_glass','car_machinery','car_gold','car_diamond','car_hazmat','car_medical','car_flowers'];
+  const ENGINE_TYPES=ENGINE_TYPES_ALL;
+  const ALL_MID_CARS=['car_passenger','car_mail','car_water_tank','car_ore','car_livestock','car_grain','car_fruit','car_cargo','car_royal','car_sand','car_chemical','car_oil','car_battery','car_ice','car_iron','car_steel','car_glass','car_machinery','car_gold','car_diamond','car_hazmat','car_medical','car_flowers',
+    'car_uranium','car_helium3','car_solar','car_supercon','car_truss','car_reactor',
+    'car_aetherium','car_titanium','car_biomass','car_artifact','car_titanplate','car_warpsteel',
+    'car_cannon','car_laser','car_shield'];
   const CARS_PER_ROW=6;
   const _goldUnlocked=galaxy&&galaxy.planets.some(p=>p.hasGold&&p.goldRevealed);
   const _diamondUnlocked=galaxy&&galaxy.planets.some(p=>p.hasDiamond&&p.diamondRevealed);
@@ -27131,6 +28897,25 @@ function drawTrainBuilderPopup(){
     if(t==='car_grain')    return !_grainCarUnlocked;
     if(t==='car_fruit')    return !_fruitCarUnlocked;
     if(t==='car_cargo')    return !_cargoCarUnlocked;
+    if(t==='car_uranium')  return !(galaxy&&galaxy.planets.some(p=>p.hasUranium&&p.uraniumRevealed));
+    if(t==='car_helium3')  return !_heliumCarUnlocked;
+    if(t==='car_solar')    return !_solarCarUnlocked;
+    if(t==='car_supercon') return !_superconCarUnlocked;
+    if(t==='car_truss')    return !_trussCarUnlocked;
+    if(t==='car_reactor')  return !_reactorCarUnlocked;
+    if(t==='car_aetherium')return !(galaxy&&galaxy.planets.some(p=>p.type.id==='crystal'&&visitedPlanetIds.has(p.id)));
+    if(t==='car_titanium') return !(galaxy&&galaxy.planets.some(p=>p.type.id==='obsidian'&&visitedPlanetIds.has(p.id)));
+    if(t==='car_biomass')  return !(galaxy&&galaxy.planets.some(p=>p.type.id==='fungal'&&visitedPlanetIds.has(p.id)));
+    if(t==='car_artifact') return !(galaxy&&galaxy.planets.some(p=>p.hasArtifact&&p.artifactRevealed));
+    if(t==='car_titanplate') return !_titanplateCarUnlocked;
+    if(t==='car_warpsteel')  return !_warpsteelCarUnlocked;
+    // Military cars can't be BOUGHT at all — they're assembled at an Armory
+    // into the trainyard. They show unlocked once assembled at least once;
+    // the click handler additionally refuses to add one with no trainyard
+    // stock (see the military-stock gate in the builder click handler).
+    if(t==='car_cannon')   return !_cannonCarUnlocked;
+    if(t==='car_laser')    return !_laserCarUnlocked;
+    if(t==='car_shield')   return !_shieldCarUnlocked;
     return false;
   };
   // Stable sort: unlocked cars first, locked cars at end, preserving original order within each group
@@ -27147,28 +28932,37 @@ function drawTrainBuilderPopup(){
   // locked, the button is rendered greyed with a "LOCKED" overlay (matching
   // the car-button locked treatment) and the click handler refuses to select.
   const _engLocked=(t)=>{
+    if(_cheatUnlockAllCars) return false;
     if(t==='engine_classJ') return !_classJEngineUnlocked;
     if(t==='engine_classR') return !_classREngineUnlocked;
     if(t==='engine_N700')   return !_N700EngineUnlocked;
+    if(t==='engine_helios') return !_heliosEngineUnlocked;
+    if(t==='engine_vex')    return !_vexEngineUnlocked;
+    if(t==='engine_singularity') return !_singularityEngineUnlocked;
     return false;
   };
+  // Engine button width shrinks so the whole roster (now 8 engines) fits in
+  // the row between the left edge and the caboose block. Width available =
+  // caboose left edge − divider margin − left pad.
+  const _engAvailW=(pw-12-BTN_W)-30-12;
+  const ENG_BTN_W=Math.min(BTN_W, Math.floor((_engAvailW-(ENGINE_TYPES.length-1)*ENG_GAP)/ENGINE_TYPES.length));
   s.engineBtnBounds=[];
   for(let i=0;i<ENGINE_TYPES.length;i++){
-    const bx=px+12+i*(BTN_W+ENG_GAP), by=py+53;
+    const bx=px+12+i*(ENG_BTN_W+ENG_GAP), by=py+53;
     const _et=ENGINE_TYPES[i];
     const _eLocked=_engLocked(_et);
-    s.engineBtnBounds.push({x:bx,y:by,w:BTN_W,h:BTN_H,type:_et,locked:_eLocked});
-    _drawCarBtn(bx,by,BTN_W,BTN_H,_et,s.engine===_et,_eLocked,_effTY(_et),!_eLocked&&s.hoverEngineType===_et&&s.engine!==_et);
+    s.engineBtnBounds.push({x:bx,y:by,w:ENG_BTN_W,h:BTN_H,type:_et,locked:_eLocked});
+    _drawCarBtn(bx,by,ENG_BTN_W,BTN_H,_et,s.engine===_et,_eLocked,_effTY(_et),!_eLocked&&s.hoverEngineType===_et&&s.engine!==_et);
     if(_eLocked){
       ctx.save();
       ctx.font='bold 7px Orbitron,sans-serif'; ctx.textAlign='center';
       ctx.fillStyle='rgba(170,175,185,0.80)';
-      ctx.fillText('LOCKED',bx+BTN_W/2,by+BTN_H*0.54);
+      ctx.fillText('LOCKED',bx+ENG_BTN_W/2,by+BTN_H*0.54);
       ctx.restore();
     }
   }
   // Vertical divider between engine block and caboose
-  const _engBlockEnd=px+12+ENGINE_TYPES.length*(BTN_W+ENG_GAP)-ENG_GAP;
+  const _engBlockEnd=px+12+ENGINE_TYPES.length*(ENG_BTN_W+ENG_GAP)-ENG_GAP;
   ctx.save(); ctx.strokeStyle='rgba(55,85,140,0.35)'; ctx.lineWidth=1; ctx.setLineDash([3,4]);
   ctx.beginPath(); ctx.moveTo(_engBlockEnd+18,py+43); ctx.lineTo(_engBlockEnd+18,py+112); ctx.stroke();
   ctx.setLineDash([]); ctx.restore();
@@ -27633,7 +29427,9 @@ function drawStationsPopup(){
     if(p.type.id==='urban') drawCityscape(_vCx,_vCy,_vR); else if(p.type.id==='ancient') drawAncientRuins(_vCx,_vCy,_vR);
     if(p.hasGold&&p.goldRevealed) _drawGoldPatch(_vCx,_vCy,_vR,p.goldPatch);
     if(p.hasDiamond&&p.diamondRevealed) _drawDiamondPatch(_vCx,_vCy,_vR,p.diamondPatch);
-    drawPlanetStation(_vCx,_vCy,_vR,0,_vR,p.isAlienRelic,p.hasLargeStation||false,null,p.hasTerminal||false);
+    if(p.hasUranium&&p.uraniumRevealed) _drawUraniumPatch(_vCx,_vCy,_vR,p.uraniumPatch);
+    if(p.hasArtifact&&p.artifactRevealed) _drawArtifactPatch(_vCx,_vCy,_vR,p.artifactPatch);
+    drawPlanetStation(_vCx,_vCy,_vR,0,_vR,p.isAlienRelic||p.combineStation,p.hasLargeStation||false,null,p.hasTerminal||false);
     { // surface structures (mirrors the right Stations pane)
       const _ups=p.upgrades||[], _sd=[];
       if(_ups.includes('iron_foundry')) _sd.push(a=>drawFoundryBuilding(_vCx,_vCy,_vR,a,_vR,(p.upgradeData?.iron_foundry?.progress||0)>0,'iron_foundry'));
@@ -29003,6 +30799,30 @@ function drawTopBar(){
   ctx.restore();
 }
 
+// v0.4.7: portal swirl ring — two counter-rotating dashed rings + a soft
+// glow. Overlaid on the ignited black hole (magenta) and drawn standalone
+// at the Zeta exit portal (cyan).
+function _drawPortalRing(cx,cy,r,ts,col){
+  if(r<2) return;
+  ctx.save();
+  const _t=(typeof ts==='number'?ts:0)*0.0012;
+  const _g=ctx.createRadialGradient(cx,cy,r*0.4,cx,cy,r*1.5);
+  _g.addColorStop(0,'rgba(0,0,0,0)');
+  _g.addColorStop(0.6,hex2rgba(col,0.10));
+  _g.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=_g;
+  ctx.beginPath(); ctx.arc(cx,cy,r*1.5,0,Math.PI*2); ctx.fill();
+  ctx.lineWidth=Math.max(1,r*0.05);
+  ctx.setLineDash([Math.max(3,r*0.18),Math.max(3,r*0.13)]);
+  ctx.strokeStyle=hex2rgba(col,0.85);
+  ctx.lineDashOffset=-_t*r;
+  ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke();
+  ctx.strokeStyle=hex2rgba(col,0.45);
+  ctx.lineDashOffset=_t*r*0.7;
+  ctx.beginPath(); ctx.arc(cx,cy,r*1.22,0,Math.PI*2); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+}
 function drawBlackHole(cx,cy,sr,ts){
   if(sr<0.5) return;
   const diskOuter=sr*1.58, diskInner=sr*1.08, diskTilt=0.30, diskRot=0.22;
@@ -29112,7 +30932,7 @@ function drawGalaxy(ts,dt){
     const sr=s.radius*cam.scale;
     const glowR=Math.max(sr*2.8,8);
     if(sx+glowR<0||sx-glowR>W||sy+glowR<0||sy-glowR>GH) continue;
-    drawStar(sx,sy,sr,s.color,!!s.hasDysonSphere);
+    drawStar(sx,sy,sr,s.color,_starDysonArg(s));
     // High orbit ring (HazMat disposal zone)
     const _horR=sr*1.6;
     if(_horR>4){
@@ -29137,12 +30957,46 @@ function drawGalaxy(ts,dt){
   }
 
   // Black holes (4 total — one per quadrant)
-  for(const _bh of (galaxy.blackHoles||[])){
+  for(let _bhi=0;_bhi<(galaxy.blackHoles||[]).length;_bhi++){
+    const _bh=galaxy.blackHoles[_bhi];
     const [_bhsx,_bhsy]=w2s(_bh.x,_bh.y);
     const _bhsr=_bh.radius*cam.scale;
     const _bhGlowR=_bhsr*4.2;
     if(!(_bhsx+_bhGlowR<0||_bhsx-_bhGlowR>W||_bhsy+_bhGlowR<0||_bhsy-_bhGlowR>GH)){
       drawBlackHole(_bhsx,_bhsy,_bhsr,ts);
+      // v0.4.7: blackHoles[0] is the ignited portal — draw its swirl ring.
+      if(_bhi===0&&_portalActive) _drawPortalRing(_bhsx,_bhsy,_bhsr*1.6,ts,'#ff70ff');
+    }
+  }
+  // v0.4.7: the Zeta-side exit portal (a free-floating swirl ring).
+  if(_portalActive&&galaxy.zetaPortal){
+    const [_zpx,_zpy]=w2s(galaxy.zetaPortal.x,galaxy.zetaPortal.y);
+    const _zpr=galaxy.zetaPortal.radius*cam.scale;
+    if(!(_zpx+_zpr*3<0||_zpx-_zpr*3>W||_zpy+_zpr*3<0||_zpy-_zpr*3>GH)){
+      _drawPortalRing(_zpx,_zpy,_zpr*1.6,ts,'#70e0ff');
+    }
+  }
+  // v0.4.7: one-shot ignition FX — expanding rings + white flash at the
+  // portal black hole for ~4 s after ignition.
+  if(_ignitionFxStartMs>0&&galaxy.blackHoles&&galaxy.blackHoles[0]){
+    const _ifxT=(Date.now()-_ignitionFxStartMs)/4000;
+    if(_ifxT>=1){ _ignitionFxStartMs=0; }
+    else {
+      const _ib=galaxy.blackHoles[0];
+      const [_ix,_iy]=w2s(_ib.x,_ib.y);
+      ctx.save();
+      for(let _ri=0;_ri<3;_ri++){
+        const _rt=Math.max(0,Math.min(1,_ifxT*1.4-_ri*0.18));
+        if(_rt<=0||_rt>=1) continue;
+        ctx.strokeStyle='rgba(255,'+(120+_ri*40)+',255,'+(0.75*(1-_rt)).toFixed(3)+')';
+        ctx.lineWidth=Math.max(1,4*(1-_rt));
+        ctx.beginPath(); ctx.arc(_ix,_iy,_ib.radius*cam.scale*(0.5+_rt*8),0,Math.PI*2); ctx.stroke();
+      }
+      if(_ifxT<0.25){
+        ctx.fillStyle='rgba(255,255,255,'+(0.55*(1-_ifxT/0.25)).toFixed(3)+')';
+        ctx.fillRect(0,0,W,GH);
+      }
+      ctx.restore();
     }
   }
 
@@ -29280,6 +31134,8 @@ function drawGalaxy(ts,dt){
     else if(p.type.id==='ancient'&&sr>2) drawAncientRuins(sx,sy,sr);
     if(p.hasGold&&p.goldRevealed&&sr>3) _drawGoldPatch(sx,sy,sr,p.goldPatch,ORBIT_TIERS[p.size]['LOW']*cam.scale*0.88);
     if(p.hasDiamond&&p.diamondRevealed&&sr>3) _drawDiamondPatch(sx,sy,sr,p.diamondPatch,ORBIT_TIERS[p.size]['LOW']*cam.scale*0.88);
+    if(p.hasUranium&&p.uraniumRevealed&&sr>3) _drawUraniumPatch(sx,sy,sr,p.uraniumPatch,ORBIT_TIERS[p.size]['LOW']*cam.scale*0.88);
+    if(p.hasArtifact&&p.artifactRevealed&&sr>3) _drawArtifactPatch(sx,sy,sr,p.artifactPatch,ORBIT_TIERS[p.size]['LOW']*cam.scale*0.88);
     // Cloud-skip threshold raised from sr>4 to sr>8: at sub-8-px screen
     // radius, cloud bands are at most a couple pixels wide and read as
     // visual noise rather than weather. Drops drawPlanetClouds's call
@@ -29288,7 +31144,7 @@ function drawGalaxy(ts,dt){
     if(p.clouds&&sr>8) drawPlanetClouds(sx,sy,sr,p);
     if(p.hasStation) drawPlanetStation(
       sx,sy,sr,p.stationAngle||0,SIZE_R['M']*cam.scale,
-      p.isAlienRelic,
+      p.isAlienRelic||p.combineStation,
       p.hasLargeStation||false,
       (p.hasLargeStation||p.hasTerminal)?ORBIT_TIERS[p.size]['MED']*cam.scale:null,
       p.hasTerminal||false,
@@ -29673,6 +31529,7 @@ function drawGalaxy(ts,dt){
   // _orbCullM / _orbVMin* / _orbVMax* are computed once near the top of this
   // function (the correct viewport-corner AABB) and reused here.
   for(const train of trains){
+    if(train._destroyed) continue; // v0.4.7: combat wrecks never render
     // Show departure-planet orbit dash (always visible; trailing cars may still orbit it during transit)
     const showOrbitDash=!train.route||train.route.phase==='orbit'||train.route.phase==='waiting'||train.route.phase==='transit';
     if(showOrbitDash){
@@ -29759,7 +31616,10 @@ function drawGalaxy(ts,dt){
         trainGalaxyBounds.push({x:sx,y:sy,r:_nearPlanet?_r0*0.5:_r0,trainIdx:ti});
       }
       const _styp=train.cars[i];
-      const _esn=getCarSprite(_styp,train.carFull?.[i]??false);
+      let _esn=getCarSprite(_styp,train.carFull?.[i]??false);
+      // v0.4.7: Combine trains render every sprite through the green-washed
+      // 'zx_' variant (lazily baked + mip-cached like any other sprite).
+      if(train.isCombine) _esn=_zxName(_esn);
       const _ebp=SPRITE_BOT[_esn]||SPRITE_BOT[_styp]||0; // transparent bottom fraction
       // Unified sizing: EVERY sprite — engine, car, and caboose — renders
       // at its TRUE source content aspect (box aspect = source file aspect,
@@ -29804,6 +31664,8 @@ function drawGalaxy(ts,dt){
       const _bodyCx=_ssD?(_ssD[0]+_ssD[1]/2):80;        // solid body centre in bundle px
       const _drawX=-(_bodyCx/160)*_wcw;                 // so body centre maps to x=0
       ctx.save(); ctx.translate(sx,sy); ctx.rotate(rot); ctx.scale(-1,1);
+      // v0.4.7: combat-disabled cars render ghosted (dim + desaturated read).
+      if(train.carDisabled?.[i]) ctx.globalAlpha=0.40;
       if(imgs[_esn]&&_galCarsAsSprites) ctx.drawImage(_sprForSize(_esn,_wcw,_ech),_drawX,-_ech*(1-_ebp),_wcw,_ech);
       else{ ctx.fillStyle=i===0?'#4af':i===train.cars.length-1?'#f84':'#ccc'; ctx.fillRect(_drawX,-_ech*(1-_ebp),_wcw,_ech*(1-_ebp)); }
       ctx.restore();
@@ -29858,6 +31720,7 @@ function drawGalaxy(ts,dt){
     }
   }
   _drawCargoParticles();
+  _drawCombatFX();          // v0.4.7: projectiles / lasers / shields / explosions
   _drawCreditFloats();      // world-space (cargo revenue at planets)
   _drawCreditFloats(true);  // screen-space (UI refunds etc.) — drawn here so
                             // BOTH variants sit UNDER any open popup window.
@@ -30230,7 +32093,7 @@ function drawGalaxy(ts,dt){
     ctx.save();
     ctx.beginPath(); ctx.rect(0,GH,W-PANEL_W,BAR_H); ctx.clip();
     if(_ibSVis){
-      drawStar(0,GH+BAR_H/2,sDR,s.color,!!s.hasDysonSphere);
+      drawStar(0,GH+BAR_H/2,sDR,s.color,_starDysonArg(s));
     } else {
       ctx.fillStyle='rgba(4,6,16,0.97)';
       ctx.beginPath(); ctx.arc(0,GH+BAR_H/2,sDR,0,Math.PI*2); ctx.fill();
@@ -30298,6 +32161,8 @@ function drawGalaxy(ts,dt){
         else if(p.type.id==='ancient'&&pr>=3) drawAncientRuins(cx,barCY,pr);
         if(p.hasGold&&p.goldRevealed&&pr>3) _drawGoldPatch(cx,barCY,pr,p.goldPatch);
         if(p.hasDiamond&&p.diamondRevealed&&pr>3) _drawDiamondPatch(cx,barCY,pr,p.diamondPatch);
+        if(p.hasUranium&&p.uraniumRevealed&&pr>3) _drawUraniumPatch(cx,barCY,pr,p.uraniumPatch);
+        if(p.hasArtifact&&p.artifactRevealed&&pr>3) _drawArtifactPatch(cx,barCY,pr,p.artifactPatch);
         if(p.hasStation){
           const iY=Math.max(GH+7,barCY-pr-3);
           ctx.fillStyle='rgba(160,220,255,0.85)';
@@ -30384,7 +32249,9 @@ function drawGalaxy(ts,dt){
       else if(p.type.id==='ancient') drawAncientRuins(0,_pCy,pDR);
       if(p.hasGold&&p.goldRevealed) _drawGoldPatch(0,_pCy,pDR,p.goldPatch);
       if(p.hasDiamond&&p.diamondRevealed) _drawDiamondPatch(0,_pCy,pDR,p.diamondPatch);
-      if(p.hasStation) drawPlanetStation(0,_pCy,pDR,0,pDR,p.isAlienRelic,p.hasLargeStation||false,null,p.hasTerminal||false);
+      if(p.hasUranium&&p.uraniumRevealed) _drawUraniumPatch(0,_pCy,pDR,p.uraniumPatch);
+      if(p.hasArtifact&&p.artifactRevealed) _drawArtifactPatch(0,_pCy,pDR,p.artifactPatch);
+      if(p.hasStation) drawPlanetStation(0,_pCy,pDR,0,pDR,p.isAlienRelic||p.combineStation,p.hasLargeStation||false,null,p.hasTerminal||false);
       if(_bras) drawPlanetRing(0,_pCy,pDR,p.ring,true);
     } else {
       // Blacked-out disc
@@ -30953,6 +32820,8 @@ function drawGalaxy(ts,dt){
   drawNewMissionPopup();
   drawGoldDiscoveryPopup();
   drawDiamondDiscoveryPopup();
+  drawUraniumDiscoveryPopup();
+  drawArtifactDiscoveryPopup();
   drawCarUnlockPopup();
   drawEngineUnlockPopup();
   drawUpgradeUnlockPopup();
@@ -31555,6 +33424,24 @@ function findMultiHopPath(sourcePlanetId, destPlanetId, train){
     if(!_cp || _cp.length<2) return _cp;        // null / single-node — trust as-is
     if(_edgeOk(_cp[0],_cp[1],0)) return _cp;     // first hop still traversable → reuse
     // else: stale first hop — fall through and recompute
+  }
+  // ── v0.4.7 cross-region routing: through the ignited portal pair ──────
+  // If source and destination lie in different regions, the ONLY crossing is
+  // the black-hole↔zeta portal pair: plan each side independently and splice
+  // the two portal proxies in as adjacent stops. The pA→pB hop itself is the
+  // portal transit (range-exempt — see transitPathBlocked).
+  {
+    const _sp0=_gp(sourcePlanetId);
+    if(_sp0&&dp&&_regionOfX(_sp0.x)!==_regionOfX(dp.x)){
+      if(!_portalActive||!galaxy.starProxyMap[PORTAL_PROXY_ALPHA]||!galaxy.starProxyMap[PORTAL_PROXY_ZETA]) return null;
+      const _srcZeta=_regionOfX(_sp0.x)==='zeta';
+      const _pAid=_srcZeta?PORTAL_PROXY_ZETA:PORTAL_PROXY_ALPHA;
+      const _pBid=_srcZeta?PORTAL_PROXY_ALPHA:PORTAL_PROXY_ZETA;
+      const _leg1=sourcePlanetId===_pAid?[_pAid]:findMultiHopPath(sourcePlanetId,_pAid,train);
+      const _leg2=destPlanetId===_pBid?[_pBid]:findMultiHopPath(_pBid,destPlanetId,train);
+      if(_leg1&&_leg2) return _store(_leg1.concat(_leg2));
+      return null;
+    }
   }
   // Direct hop at time 0
   if(_edgeOk(sourcePlanetId,destPlanetId,0)) return _store([sourcePlanetId,destPlanetId]);
@@ -32311,6 +34198,8 @@ canvas.addEventListener('mousemove',e=>{
   // Hover tracking for discovery + quit confirm popup buttons
   _goldOkHover=!!(activePopup==='gold_discovery'&&_goldDiscoveryOkBounds&&cp.x>=_goldDiscoveryOkBounds.x&&cp.x<=_goldDiscoveryOkBounds.x+_goldDiscoveryOkBounds.w&&cp.y>=_goldDiscoveryOkBounds.y&&cp.y<=_goldDiscoveryOkBounds.y+_goldDiscoveryOkBounds.h);
   _diamondOkHover=!!(activePopup==='diamond_discovery'&&_diamondDiscoveryOkBounds&&cp.x>=_diamondDiscoveryOkBounds.x&&cp.x<=_diamondDiscoveryOkBounds.x+_diamondDiscoveryOkBounds.w&&cp.y>=_diamondDiscoveryOkBounds.y&&cp.y<=_diamondDiscoveryOkBounds.y+_diamondDiscoveryOkBounds.h);
+  _uraniumOkHover=!!(activePopup==='uranium_discovery'&&_uraniumDiscoveryOkBounds&&cp.x>=_uraniumDiscoveryOkBounds.x&&cp.x<=_uraniumDiscoveryOkBounds.x+_uraniumDiscoveryOkBounds.w&&cp.y>=_uraniumDiscoveryOkBounds.y&&cp.y<=_uraniumDiscoveryOkBounds.y+_uraniumDiscoveryOkBounds.h);
+  if(activePopup==='artifact_discovery'&&_artifactDiscoveryOkBounds){const b=_artifactDiscoveryOkBounds; popupState.artifactOkHover=cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h; if(popupState.artifactOkHover) canvas.style.cursor='pointer';}
   _carUnlockOkHover=!!(activePopup==='car_unlock'&&_carUnlockOkBounds&&cp.x>=_carUnlockOkBounds.x&&cp.x<=_carUnlockOkBounds.x+_carUnlockOkBounds.w&&cp.y>=_carUnlockOkBounds.y&&cp.y<=_carUnlockOkBounds.y+_carUnlockOkBounds.h);
   _engineUnlockOkHover=!!(activePopup==='engine_unlock'&&_engineUnlockOkBounds&&cp.x>=_engineUnlockOkBounds.x&&cp.x<=_engineUnlockOkBounds.x+_engineUnlockOkBounds.w&&cp.y>=_engineUnlockOkBounds.y&&cp.y<=_engineUnlockOkBounds.y+_engineUnlockOkBounds.h);
   _upgradeUnlockOkHover=!!(activePopup==='upgrade_unlock'&&_upgradeUnlockOkBounds&&cp.x>=_upgradeUnlockOkBounds.x&&cp.x<=_upgradeUnlockOkBounds.x+_upgradeUnlockOkBounds.w&&cp.y>=_upgradeUnlockOkBounds.y&&cp.y<=_upgradeUnlockOkBounds.y+_upgradeUnlockOkBounds.h);
@@ -33142,6 +35031,44 @@ canvas.addEventListener('mouseup',e=>{
         }}
         return;
       }
+      // Uranium vein discovery (v0.4.7)
+      if(activePopup==='uranium_discovery'){
+        if(_uraniumDiscoveryOkBounds){const b=_uraniumDiscoveryOkBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+          const _pid=popupState.uraniumPlanetId;
+          if(_pid!=null&&galaxy?.planets[_pid]){
+            const _hadUranium=galaxy.planets.some(p=>p.uraniumRevealed);
+            const _up2=galaxy.planets[_pid];
+            _up2.uraniumRevealed=true;
+            _up2.supply=_up2.supply||{};
+            _up2.supply.uranium=(_up2.devLevel||0)+1;
+            _up2.supplyRate=computeSupplyRate(_up2);
+            if(!_hadUranium){ _chatMsg('URANIUM CAR UNLOCKED','rgba(170,255,0,1)'); pendingCarUnlocks.push({sprite:'car_uranium',displayName:'Uranium Car',planetId:_pid}); }
+          }
+          pendingUraniumDiscoveries.shift();
+          activePopup=null; popupState={};
+          return;
+        }}
+        return;
+      }
+      // Alien artifact cache discovery (v0.4.7 Zeta)
+      if(activePopup==='artifact_discovery'){
+        if(_artifactDiscoveryOkBounds){const b=_artifactDiscoveryOkBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
+          const _pid=popupState.artifactPlanetId;
+          if(_pid!=null&&galaxy?.planets[_pid]){
+            const _hadArtifact=galaxy.planets.some(p=>p.artifactRevealed);
+            const _ap2=galaxy.planets[_pid];
+            _ap2.artifactRevealed=true;
+            _ap2.supply=_ap2.supply||{};
+            _ap2.supply.artifact=(_ap2.devLevel||0)+1;
+            _ap2.supplyRate=computeSupplyRate(_ap2);
+            if(!_hadArtifact){ _chatMsg('ARTIFACT CAR UNLOCKED','rgba(64,255,144,1)'); pendingCarUnlocks.push({sprite:'car_artifact',displayName:'Artifact Car',planetId:_pid}); }
+          }
+          pendingArtifactDiscoveries.shift();
+          activePopup=null; popupState={};
+          return;
+        }}
+        return;
+      }
       // Rival corp founded popup
       if(activePopup==='rival_founded'){
         if(_rivalFoundedOkBounds){const b=_rivalFoundedOkBounds; if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
@@ -33277,16 +35204,21 @@ canvas.addEventListener('mouseup',e=>{
         const b=popupState.unlockAllBtnBounds;
         if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
           _classJEngineUnlocked=true; _classREngineUnlocked=true; _N700EngineUnlocked=true;
+          _heliosEngineUnlocked=true; _vexEngineUnlocked=true; _singularityEngineUnlocked=true;
           _ironCarUnlocked=true; _steelCarUnlocked=true; _glassCarUnlocked=true;
           _machineryCarUnlocked=true; _cargoCarUnlocked=true; _hazmatCarUnlocked=true;
           _royalCarUnlocked=true; _flowersCarUnlocked=true; _medicalCarUnlocked=true;
           _grainCarUnlocked=true; _livestockCarUnlocked=true; _fruitCarUnlocked=true;
+          _heliumCarUnlocked=true; _solarCarUnlocked=true; _superconCarUnlocked=true;
+          _trussCarUnlocked=true; _reactorCarUnlocked=true; _titanplateCarUnlocked=true;
+          _warpsteelCarUnlocked=true; _cannonCarUnlocked=true; _laserCarUnlocked=true; _shieldCarUnlocked=true;
           // The remaining 7 cars (gold, diamond, oil, battery, chemical, sand,
           // ice) gate on planet visits/discoveries, not flags — this catch-all
           // unlocks them too.
           _cheatUnlockAllCars=true;
           // Also reveal the event-locked planet upgrades (no popups for the cheat).
           _foundryUnlocked=true; _largeStationUnlocked=true; _terminalUnlocked=true; _bakeryUnlocked=true; _glassworksUnlocked=true;
+          _heliosArcStarted=true; _militaryArcStarted=true; _warpsteelRecipeKnown=true;
           _chatMsg('ALL ENGINES & TRAIN CARS UNLOCKED','rgba(180,235,255,1)');
           return;
         }
@@ -33716,6 +35648,27 @@ canvas.addEventListener('mouseup',e=>{
               if(u.id==='granary'||u.id==='farm'||u.id==='orchard'){
                 if(p.agriStructAngle===undefined) p.agriStructAngle=(p.stationAngle||0)+Math.PI*0.95;
               }
+              // ── v0.4.7 new-upgrade purchase effects ──────────────────
+              {
+                const _v47rcP=V47_RECIPES.find(_r=>_r.id===u.id);
+                if(_v47rcP){
+                  if(!p.upgradeData) p.upgradeData={};
+                  if(!p.upgradeData[u.id]){ const _nb={progress:0}; for(const _ik of _v47rcP.inputs) _nb[_ik]=0; p.upgradeData[u.id]=_nb; }
+                  if(p.v47StructAngle===undefined) p.v47StructAngle=(p.stationAngle||0)+Math.PI*1.15;
+                }
+                if(u.id==='gas_siphon'){
+                  if(!_heliumCarUnlocked){ _heliumCarUnlocked=true; pendingCarUnlocks.push({sprite:'car_helium3',displayName:'Helium-3 Tanker',planetId:p.id}); _chatMsg('HELIUM-3 TANKER UNLOCKED','rgba(255,187,85,1)'); }
+                }
+                if(u.id==='armory'){
+                  if(!p.upgradeData) p.upgradeData={};
+                  if(!p.upgradeData.armory){ const _ab={progress:0,building:null}; for(const _ak of ARMORY_BIN_KEYS) _ab[_ak]=0; p.upgradeData.armory=_ab; }
+                }
+                if(u.id==='defense_battery'){ p.defenseShells=p.defenseShells||0; }
+                if(_v47rcP||u.id==='gas_siphon'||u.id==='armory'||u.id==='defense_battery'){
+                  // New chains change this planet's supply/demand profile.
+                  p.supplyRate=computeSupplyRate(p); p.demandRate=computeDemandRate(p);
+                }
+              }
               playSound('construction_complete');
             } return;
           }
@@ -33962,6 +35915,15 @@ canvas.addEventListener('mouseup',e=>{
           if(cp.x>=b.x&&cp.x<=b.x+b.w&&cp.y>=b.y&&cp.y<=b.y+b.h){
             // Reject if outside the visible clip area
             if(_caSbb&&(cp.y<_caSbb.y||cp.y>_caSbb.y+_caSbb.h)) continue;
+            // Military cars are ASSEMBLED at an Armory, never purchased —
+            // only trainyard stock can be attached. Count how many are
+            // already placed in this session vs. what the yard (plus any
+            // released originals in edit mode) can cover.
+            if(MILITARY_CARS.has(b.type)){
+              const _placed=s.cars.filter(c=>c===b.type).length;
+              const _orig=(s.editTrainIdx!=null&&s.originalComposition)?(s.originalComposition[b.type]||0):0;
+              if(_placed>=(_tyCount(b.type)+_orig)){ playSound('blip'); return; }
+            }
             if(s.cars.length<_engMaxCars(s.engine) && !b.locked) s.cars.push(b.type);
             return;
           }
@@ -34718,6 +36680,22 @@ document.addEventListener('keydown',e=>{
       if(activePopup==='missions') popupState={mScroll:0};
       return;
     }
+    // v0.4.7: [Z] jumps the camera between the Alpha galaxy and the Zeta
+    // Quadrant once the portal has ignited. Each side remembers where you
+    // last were; the first Zeta jump lands on the exit portal.
+    if((e.key==='z'||e.key==='Z')&&_portalActive&&galaxy&&galaxy.zetaPortal){
+      const _inZeta=_regionOfX(cam.x)==='zeta';
+      if(_inZeta){
+        _zetaCamMem={x:cam.x,y:cam.y,scale:cam.scale};
+        const _back=_alphaCamMem||(galaxy.origenId!=null?{x:galaxy.planets[galaxy.origenId].x,y:galaxy.planets[galaxy.origenId].y,scale:cam.scale}:null);
+        if(_back){ tracking=false; cam.x=_back.x; cam.y=_back.y; cam.scale=_back.scale; clampCamera(); }
+      } else {
+        _alphaCamMem={x:cam.x,y:cam.y,scale:cam.scale};
+        const _dest=_zetaCamMem||{x:galaxy.zetaPortal.x,y:galaxy.zetaPortal.y,scale:Math.exp(Math.log(MIN_SC)+0.45*(Math.log(MAX_SC)-Math.log(MIN_SC)))};
+        tracking=false; cam.x=_dest.x; cam.y=_dest.y; cam.scale=Math.max(MIN_SC,Math.min(MAX_SC,_dest.scale)); clampCamera();
+      }
+      return;
+    }
     if(e.key==='l'||e.key==='L'){
       activePopup=activePopup==='leaderboard'?null:'leaderboard';
       if(activePopup==='leaderboard'){ popupState={}; _lbFetchTop(_lbMetric||'corp_value'); }
@@ -34837,6 +36815,11 @@ function _buildSaveObject(){
     _detourPermanentRoute:t._detourPermanentRoute||null,
     preDepartureRules:t.preDepartureRules||null,
     _ord:(typeof t._ord==='number'?t._ord:null), // user-defined display order
+    // v0.4.7 Combine + combat state
+    isCombine:t.isCombine||false, isAlly:t.isAlly||false,
+    _isPatrol:t._isPatrol||false, _isFlagship:t._isFlagship||false,
+    _destroyed:t._destroyed||false, crippled:t.crippled||false,
+    carAmmo:t.carAmmo||null, carDisabled:t.carDisabled||null,
   }));
   // ── Ledger + newspaper trimming ─────────────────────────────
   // financeLedger and _newspaperArchive both grow linearly with stardates
@@ -34919,15 +36902,22 @@ function _buildSaveObject(){
     _grainCarUnlocked, _livestockCarUnlocked, _fruitCarUnlocked, _cargoCarUnlocked,
     _cheatUnlockAllCars,
     _classJEngineUnlocked, _classREngineUnlocked, _N700EngineUnlocked,
+    _heliosEngineUnlocked, _vexEngineUnlocked, _singularityEngineUnlocked,
+    _heliumCarUnlocked, _solarCarUnlocked, _superconCarUnlocked, _trussCarUnlocked, _reactorCarUnlocked,
+    _titanplateCarUnlocked, _warpsteelCarUnlocked, _cannonCarUnlocked, _laserCarUnlocked, _shieldCarUnlocked,
+    _heliosArcStarted, _militaryArcStarted, _warpsteelRecipeKnown, _v47ProdTotals,
     _steelProdLog,
-    _sensorUpgradeActive, _stationCostDiscount, _sandstormCheckSd, _playerDeliveryCount, _foundryCalloutShown,
+    _sensorUpgradeActive, _sensorUpgrade2Active, _heliosEngDiscount, _portalActive, _zetaGenerated,
+    _combineFounded, _combineHostility, _combineCredits, _hiveTradeUnits, _combineKills,
+    _combineDefeated, _combineArmistice,
+    _stationCostDiscount, _sandstormCheckSd, _playerDeliveryCount, _foundryCalloutShown,
     _foundryConstructedPopupShown, _ironDeliveredToNonDesert,
     _foundryUnlocked, _largeStationUnlocked, _terminalUnlocked, _bakeryUnlocked, _glassworksUnlocked,
     _totalPassengersDelivered, _totalHazmatIncinerated, _anyCargoProduced,
     _firstStarBlockShown, _firstRangeBlockShown,
     trainyard, financeLedger:_trimmedFinance, _ledgerSummary:_builtLedgerSummary, purchaseLedger, corpValueHistory, corpStatsHistory, aiCorpStatsHistory, _corp, _ceoHireCandidates,
     creditSnapshots, lastCreditSnapshotSd,
-    galaxy:{homeStarId:galaxy.homeStarId, origenId:galaxy.origenId, blackHoles:galaxy.blackHoles, colonyTrainDestId:galaxy.colonyTrainDestId??null, faminePlanetId:galaxy.faminePlanetId??null, outbreakPlanetId:galaxy.outbreakPlanetId??null, bhResearchPlanetId:galaxy.bhResearchPlanetId??null, bhResearchPlanetIds:galaxy.bhResearchPlanetIds??[], stars:saveStars, planets:savePlanets, nebulas:(galaxy.nebulas||[]).map(n=>({x:_r5(n.x),y:_r5(n.y),rx:n.rx,ry:n.ry,rot:_r5(n.rot),colorIdx:n.colorIdx,secondaryColorIdx:n.secondaryColorIdx,seed:n.seed,name:n.name}))},
+    galaxy:{homeStarId:galaxy.homeStarId, origenId:galaxy.origenId, blackHoles:galaxy.blackHoles, colonyTrainDestId:galaxy.colonyTrainDestId??null, faminePlanetId:galaxy.faminePlanetId??null, outbreakPlanetId:galaxy.outbreakPlanetId??null, bhResearchPlanetId:galaxy.bhResearchPlanetId??null, bhResearchPlanetIds:galaxy.bhResearchPlanetIds??[], heliosSites:galaxy.heliosSites??[], zetaPortal:galaxy.zetaPortal??null, zetaSpireId:galaxy.zetaSpireId??null, stars:saveStars, planets:savePlanets, nebulas:(galaxy.nebulas||[]).map(n=>({x:_r5(n.x),y:_r5(n.y),rx:n.rx,ry:n.ry,rot:_r5(n.rot),colorIdx:n.colorIdx,secondaryColorIdx:n.secondaryColorIdx,seed:n.seed,name:n.name}))},
     trains:saveTrains,
     visitedPlanetIds:[...visitedPlanetIds],
     discoveredPlanetIds:[...discoveredPlanetIds],
@@ -34940,6 +36930,8 @@ function _buildSaveObject(){
     pendingMissionIntros,
     pendingGoldDiscoveries,
     pendingDiamondDiscoveries,
+    pendingUraniumDiscoveries,
+    pendingArtifactDiscoveries,
     _ancientTranslatedWords:[..._ancientTranslatedWords],
     _tutorialPhase, _tutorialLavaPlanetId,
     routeStops:routeStops.map(p=>({id:p.id,isStarProxy:!!p.isStarProxy})),
@@ -35024,11 +37016,16 @@ function _restoreFromSave(save){
   }
   galaxy={stars, planets, homeStarId:sg.homeStarId, origenId:sg.origenId,
           trainPlanetId:sg.origenId, blackHoles:sg.blackHoles??[], starProxyMap, colonyTrainDestId:sg.colonyTrainDestId??null, faminePlanetId:sg.faminePlanetId??null, outbreakPlanetId:sg.outbreakPlanetId??null, bhResearchPlanetId:sg.bhResearchPlanetId??null, bhResearchPlanetIds:sg.bhResearchPlanetIds??[], rockyMissionPids:sg.rockyMissionPids??[],
+          heliosSites:sg.heliosSites??[], zetaPortal:sg.zetaPortal??null, zetaSpireId:sg.zetaSpireId??null,
           nebulas:(sg.nebulas||[]).map(n=>({...n, _canvas:null,
             // Backfill name for pre-name-feature saves — pick a deterministic
             // entry from the pool keyed by seed so it stays stable forever.
             name:n.name||NEBULA_NAME_POOL[(n.seed||0)%NEBULA_NAME_POOL.length]}))};
   makeGStars();
+  // v0.4.7: rebuild the star→helios-depot runtime links. (The Zeta world
+  // extent + portal proxies are re-applied AFTER the flat-state restore
+  // below, once _zetaGenerated/_portalActive are known.)
+  _linkHeliosSites();
   // Restore flat state
   _invalidateUpgradePlanetCache();
   stardate=save.stardate; credits=save.credits; corpName=save.corpName||'Space Tycoon Corporation';
@@ -35062,9 +37059,27 @@ function _restoreFromSave(save){
   _grainCarUnlocked=!!save._grainCarUnlocked; _livestockCarUnlocked=!!save._livestockCarUnlocked; _fruitCarUnlocked=!!save._fruitCarUnlocked; _cargoCarUnlocked=!!save._cargoCarUnlocked;
   _cheatUnlockAllCars=!!save._cheatUnlockAllCars;
   _classJEngineUnlocked=!!save._classJEngineUnlocked; _classREngineUnlocked=!!save._classREngineUnlocked; _N700EngineUnlocked=!!save._N700EngineUnlocked;
+  // v0.4.7 unlock + arc flags (older saves simply default everything false)
+  _heliosEngineUnlocked=!!save._heliosEngineUnlocked; _vexEngineUnlocked=!!save._vexEngineUnlocked; _singularityEngineUnlocked=!!save._singularityEngineUnlocked;
+  _heliumCarUnlocked=!!save._heliumCarUnlocked; _solarCarUnlocked=!!save._solarCarUnlocked; _superconCarUnlocked=!!save._superconCarUnlocked; _trussCarUnlocked=!!save._trussCarUnlocked; _reactorCarUnlocked=!!save._reactorCarUnlocked;
+  _titanplateCarUnlocked=!!save._titanplateCarUnlocked; _warpsteelCarUnlocked=!!save._warpsteelCarUnlocked; _cannonCarUnlocked=!!save._cannonCarUnlocked; _laserCarUnlocked=!!save._laserCarUnlocked; _shieldCarUnlocked=!!save._shieldCarUnlocked;
+  _heliosArcStarted=!!save._heliosArcStarted; _militaryArcStarted=!!save._militaryArcStarted; _warpsteelRecipeKnown=!!save._warpsteelRecipeKnown;
+  _v47ProdTotals=(save._v47ProdTotals&&typeof save._v47ProdTotals==='object')?save._v47ProdTotals:{};
   _steelProdLog=Array.isArray(save._steelProdLog)?save._steelProdLog:[];
   _steelMissionTimerMs=0; // re-armed by updateMissions() if the design_better_train intro hasn't fired yet
   _sensorUpgradeActive=!!save._sensorUpgradeActive; _stationCostDiscount=save._stationCostDiscount||0;
+  _sensorUpgrade2Active=!!save._sensorUpgrade2Active; _heliosEngDiscount=save._heliosEngDiscount||0;
+  _portalActive=!!save._portalActive; _zetaGenerated=!!save._zetaGenerated;
+  if(_zetaGenerated) _applyZetaWorldExtent(); else WORLD_E_X=WORLD_W;
+  if(_portalActive) _ensurePortalProxies();
+  _combineFounded=!!save._combineFounded;
+  _combineHostility=typeof save._combineHostility==='number'?save._combineHostility:25;
+  _combineCredits=typeof save._combineCredits==='number'?save._combineCredits:0;
+  _hiveTradeUnits=typeof save._hiveTradeUnits==='number'?save._hiveTradeUnits:0;
+  _combineKills=typeof save._combineKills==='number'?save._combineKills:0;
+  _combineDefeated=!!save._combineDefeated; _combineArmistice=!!save._combineArmistice;
+  _combatProjectiles=[]; _combatBeams=[]; _combatFx=[]; _combatScanAcc=99;
+  _heliosTimerMs=0; // intro timer re-arms post-load if conditions still hold
   _playerDeliveryCount=typeof save._playerDeliveryCount==='number'?save._playerDeliveryCount:0;
   _galaxyCensusTimerMs=0; // timer resets on load; updateMissions() will re-arm if needed
   // Ancient Schematics trigger is transient — the saved missions array (gated
@@ -35215,6 +37230,8 @@ function _restoreFromSave(save){
   pendingMissionIntros=save.pendingMissionIntros||[];
   pendingGoldDiscoveries=save.pendingGoldDiscoveries||[];
   pendingDiamondDiscoveries=save.pendingDiamondDiscoveries||[];
+  pendingUraniumDiscoveries=save.pendingUraniumDiscoveries||[];
+  pendingArtifactDiscoveries=save.pendingArtifactDiscoveries||[];
   pendingCarUnlocks=[];
   pendingEngineUnlocks=[];
   pendingAncientPopups=[]; // queue is transient — never restored from save
@@ -35270,6 +37287,8 @@ function _restoreFromSave(save){
     if(_t.routeCounts){ for(const _k in _t.routeCounts) _sc+=_t.routeCounts[_k]||0; }
     _t._segmentCount=_sc;
   }
+  // v0.4.7: rebuild the Combine train index list from the isCombine flags.
+  _relinkCombineTrains();
   // Restore routeStops (UI route selection)
   routeStops=(save.routeStops||[]).map(r=>_gp(r.id)).filter(Boolean);
   // Restore selection from the saved id-based encoding. Falls back to the
@@ -35753,6 +37772,8 @@ function startGame(){
   cargoParticles=[]; creditFloats=[]; pendingCreditDeltas=[]; trainyard={}; zoomReturnPos=null; zoomReturnTimer=0;
   pendingGoldDiscoveries=[];
   pendingDiamondDiscoveries=[];
+  pendingUraniumDiscoveries=[];
+  pendingArtifactDiscoveries=[];
   pendingCarUnlocks=[];
   pendingEngineUnlocks=[];
   pendingMissionRewards=[]; pendingFirstDeliveries=[];
@@ -35760,10 +37781,19 @@ function startGame(){
   pendingMissionIntros=[];
   pendingAncientPopups=[]; _ancientTranslatedWords=new Set();
   _ironCarUnlocked=false; _steelCarUnlocked=false; _glassCarUnlocked=false; _machineryCarUnlocked=false; _hazmatCarUnlocked=false; _royalCarUnlocked=false; _flowersCarUnlocked=false; _medicalCarUnlocked=false; _grainCarUnlocked=false; _livestockCarUnlocked=false; _fruitCarUnlocked=false; _cargoCarUnlocked=false; _cheatUnlockAllCars=false; _totalPassengersDelivered=0; _totalHazmatIncinerated=0; _anyCargoProduced=false;
+  _heliosEngineUnlocked=false; _vexEngineUnlocked=false; _singularityEngineUnlocked=false;
+  _heliumCarUnlocked=false; _solarCarUnlocked=false; _superconCarUnlocked=false; _trussCarUnlocked=false; _reactorCarUnlocked=false;
+  _titanplateCarUnlocked=false; _warpsteelCarUnlocked=false; _cannonCarUnlocked=false; _laserCarUnlocked=false; _shieldCarUnlocked=false;
+  _heliosArcStarted=false; _militaryArcStarted=false; _warpsteelRecipeKnown=false; _v47ProdTotals={};
   _firstStarBlockShown=false; _firstRangeBlockShown=false; _blockEduStartMs=0; _blockEduPopupShown=false; _blockEduTrainIdx=-1; _blockEduReason='';
   _classJEngineUnlocked=false; _classREngineUnlocked=false; _N700EngineUnlocked=false;
   _steelProdLog=[]; _steelMissionTimerMs=0; _produceIronIntroAtMs=0;
   _sensorUpgradeActive=false; _stationCostDiscount=0; _galaxyCensusTimerMs=0; _sandstormCheckSd=0; _bhResearchTimerMs=0; _madScientistTimerMs=0; _anotherDimTimerMs=0;
+  _sensorUpgrade2Active=false; _heliosEngDiscount=0; _portalActive=false; _zetaGenerated=false; _heliosTimerMs=0; _ignitionFxStartMs=0;
+  WORLD_E_X=WORLD_W; // camera bound retracts to the Alpha galaxy on new game
+  _combineFounded=false; _combineHostility=25; _combineCredits=0; _combineTrainIdxs=[]; _combatProjectiles=[];
+  _combatBeams=[]; _combatFx=[]; _combatScanAcc=99; _hiveTradeUnits=0; _combineKills=0;
+  _combineDefeated=false; _combineArmistice=false; _alphaCamMem=null; _zetaCamMem=null;
   _playerDeliveryCount=0; // new game starts with zero successful deliveries logged
   missions=[]; _recomputeMissionTargets();
   _gameStartSd=stardate;
@@ -36611,6 +38641,10 @@ function _drawNewspaper(){
 // ── init + loop ───────────────────────────────────────────────
 function init(){
   testOrbits();
+  // Bake the tinted derived sprites (new v0.4.7 cars/engines) before anything
+  // renders — all source images are loaded by the time init() runs (onLoad
+  // counter gates it), so every derived canvas registers synchronously.
+  _registerDerivedSprites();
   buildNebula(); makeStars(); makeTitlePlanets(); makeTrain();
   // Bake the per-scheme nebula sheet tiles once at init — the cloud
   // pattern is shared across all four schemes so blending stays seamless.
@@ -36761,6 +38795,8 @@ function loop(ts){
   } else if(gs==='fadein'){
     _invalidateOccOrbit(); for(const t of trains) updateTrain(t,dtG);
     updateAICorp(dtG);
+    updateCombine(dtG);
+    updateCombat(dtG);
     updatePlanetOrbits(dtG,dt);
     updateFog(_dtSd);
     _updateCargoParticles(dtG);
@@ -36821,6 +38857,8 @@ function loop(ts){
   } else if(gs==='galaxy'){
     _invalidateOccOrbit(); for(const t of trains) updateTrain(t,dtG);
     updateAICorp(dtG);
+    updateCombine(dtG);
+    updateCombat(dtG);
     updatePlanetOrbits(dtG,dt);
     updateFog(_dtSd);
     _updateCargoParticles(dtG);
@@ -37090,6 +39128,36 @@ function loop(ts){
         cam.scale=Math.max(MIN_SC,Math.min(MAX_SC,_zTarget));
         cam.x=_ddP.x+(PANEL_W)/(2*cam.scale); cam.y=_ddP.y; clampCamera();
         tracking=true; trackingOffset={x:cam.x-_ddP.x,y:cam.y-_ddP.y};
+      }
+    }
+    // Uranium vein discovery popup (v0.4.7) — same flow as gold/diamond
+    if(pendingUraniumDiscoveries.length>0&&!activePopup){
+      playSound('discovery');
+      gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='uranium_discovery';
+      const _udPid=pendingUraniumDiscoveries[0];
+      popupState={uraniumPlanetId:_udPid};
+      const _udP=galaxy?.planets[_udPid];
+      if(_udP){
+        sel={type:'planet',data:_udP}; routeStops=[_udP];
+        const _zTarget=Math.exp(Math.log(MIN_SC)+0.80*(Math.log(MAX_SC)-Math.log(MIN_SC)));
+        cam.scale=Math.max(MIN_SC,Math.min(MAX_SC,_zTarget));
+        cam.x=_udP.x+(PANEL_W)/(2*cam.scale); cam.y=_udP.y; clampCamera();
+        tracking=true; trackingOffset={x:cam.x-_udP.x,y:cam.y-_udP.y};
+      }
+    }
+    // Alien artifact-cache discovery popup (v0.4.7 Zeta)
+    if(pendingArtifactDiscoveries.length>0&&!activePopup){
+      playSound('discovery');
+      gameSpeedIdx=SPEED_DEFAULT_IDX; activePopup='artifact_discovery';
+      const _adPid=pendingArtifactDiscoveries[0];
+      popupState={artifactPlanetId:_adPid};
+      const _adP=galaxy?.planets[_adPid];
+      if(_adP){
+        sel={type:'planet',data:_adP}; routeStops=[_adP];
+        const _zTarget=Math.exp(Math.log(MIN_SC)+0.80*(Math.log(MAX_SC)-Math.log(MIN_SC)));
+        cam.scale=Math.max(MIN_SC,Math.min(MAX_SC,_zTarget));
+        cam.x=_adP.x+(PANEL_W)/(2*cam.scale); cam.y=_adP.y; clampCamera();
+        tracking=true; trackingOffset={x:cam.x-_adP.x,y:cam.y-_adP.y};
       }
     }
     // Pre-founding countdown: one red chat-log message per tenth of a
